@@ -1,0 +1,32 @@
+{
+  "workspace_name": "Example Artist",
+  "cities": [
+    {
+      "slug": "example-city",
+      "name": "Example City",
+      "country": "US",
+      "region": "Example Region",
+      "lat": null,
+      "lng": null
+    }
+  ],
+  "campaigns": [
+    {
+      "name": "Launch",
+      "active": true,
+      "smart_links": [
+        {
+          "slug": "join",
+          "destination_url": "https://app.example.com/join",
+          "active": true
+        }
+      ]
+    }
+  ],
+  "webhook_endpoints": [],
+  "reward_rules": [],
+  "events": [],
+  "admission_pools": [],
+  "event_sources": [],
+  "reward_draws": []
+}

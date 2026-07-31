@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LOCAL_CONFIG="${CROWDRELAY_LOCAL_CONFIG:-${ROOT_DIR}/.crowdrelay.local.sh}"
+
+CROWDRELAY_IMAGE_SHA="${CROWDRELAY_IMAGE_SHA:-}"
+CROWDRELAY_COMPOSE_FILE="${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}"
+CROWDRELAY_ENV_FILE="${CROWDRELAY_ENV_FILE:-deploy/.env.production}"
+CROWDRELAY_BOOTSTRAP_FILE="${CROWDRELAY_BOOTSTRAP_FILE:-deploy/bootstrap.production.json}"
+CROWDRELAY_WEBHOOK_SECRETS_FILE="${CROWDRELAY_WEBHOOK_SECRETS_FILE:-deploy/webhook-secrets.production.json}"
+CROWDRELAY_DOCKER_NETWORK="${CROWDRELAY_DOCKER_NETWORK:-crowdrelay}"
+CROWDRELAY_CREATE_NETWORK="${CROWDRELAY_CREATE_NETWORK:-false}"
+CROWDRELAY_PUBLIC_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-}"
+CROWDRELAY_BACKUP_BEFORE_DEPLOY="${CROWDRELAY_BACKUP_BEFORE_DEPLOY:-false}"
+CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS="${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}"
+CROWDRELAY_SSH_TARGET="${CROWDRELAY_SSH_TARGET:-}"
+CROWDRELAY_REMOTE_INSTALL_DIR="${CROWDRELAY_REMOTE_INSTALL_DIR:-/srv/crowdrelay}"
+CROWDRELAY_REMOTE_ARCHIVE="${CROWDRELAY_REMOTE_ARCHIVE:-/tmp/crowdrelay-deploy.tar.gz}"
+
+if [[ -f "$LOCAL_CONFIG" ]]; then
+  [[ ! -L "$LOCAL_CONFIG" ]] || {
+    echo "Refusing to source symlinked local config: $LOCAL_CONFIG" >&2
+    exit 1
+  }
+  # shellcheck source=/dev/null
+  source "$LOCAL_CONFIG"
+fi
+
+cd "$ROOT_DIR"
+
+usage() {
+  cat <<'USAGE'
+Usage: ./crowdrelayctl <command> [args]
+
+  init                 Create ignored local config and production files
+  doctor               Validate local configuration and Compose
+  pin <full-sha>       Save the immutable image revision locally
+  status               Show Compose service status
+  deploy               Pull, run setup, start API/worker, verify
+  verify               Check local and optional public health endpoints
+  logs [service]       Follow logs for all services or one service
+  backup               Run crowdrelay_backup hook from local config
+  package [path]       Build a private deployment archive
+  ship                 Package, upload and deploy over SSH
+  rollback <full-sha>  Pin an older revision and deploy it
+USAGE
+}
+
+absolute_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$ROOT_DIR" "$path"
+  fi
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Missing required command: $1" >&2
+    exit 1
+  }
+}
+
+require_regular_file() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || {
+    echo "Missing or unsafe file: $path" >&2
+    exit 1
+  }
+}
+
+validate_sha() {
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "Expected a full lowercase 40-character Git commit SHA." >&2
+    exit 2
+  }
+}
+
+run_hook() {
+  local hook="$1"
+  shift
+  if declare -F "$hook" >/dev/null 2>&1; then
+    "$hook" "$@"
+  fi
+}
+
+compose() {
+  local env_file compose_file
+  env_file="$(absolute_path "$CROWDRELAY_ENV_FILE")"
+  compose_file="$(absolute_path "$CROWDRELAY_COMPOSE_FILE")"
+  export CROWDRELAY_ENV_FILE="$env_file"
+  export CROWDRELAY_BOOTSTRAP_HOST_FILE="$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
+  export CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+  export CROWDRELAY_DOCKER_NETWORK
+  export CROWDRELAY_IMAGE_TAG="sha-${CROWDRELAY_IMAGE_SHA}"
+  docker compose --env-file "$env_file" --file "$compose_file" "$@"
+}
+
+init_files() {
+  if [[ ! -e "$LOCAL_CONFIG" ]]; then
+    cp .crowdrelay.local.sh.example "$LOCAL_CONFIG"
+    chmod 600 "$LOCAL_CONFIG"
+    echo "Created $LOCAL_CONFIG"
+  fi
+
+  local env_file bootstrap_file secrets_file
+  env_file="$(absolute_path "$CROWDRELAY_ENV_FILE")"
+  bootstrap_file="$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
+  secrets_file="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+  mkdir -p "$(dirname "$env_file")" "$(dirname "$bootstrap_file")" "$(dirname "$secrets_file")"
+
+  if [[ ! -e "$env_file" ]]; then
+    cp deploy/env.production.example "$env_file"
+    chmod 600 "$env_file"
+    echo "Created $env_file"
+  fi
+  if [[ ! -e "$bootstrap_file" ]]; then
+    cp deploy/bootstrap.example.json "$bootstrap_file"
+    chmod 600 "$bootstrap_file"
+    echo "Created $bootstrap_file"
+  fi
+  if [[ ! -e "$secrets_file" ]]; then
+    cp deploy/webhook-secrets.example.json "$secrets_file"
+    chmod 600 "$secrets_file"
+    echo "Created $secrets_file"
+  fi
+}
+
+doctor() {
+  require_command docker
+  docker compose version >/dev/null
+  validate_sha "$CROWDRELAY_IMAGE_SHA"
+  require_regular_file "$(absolute_path "$CROWDRELAY_COMPOSE_FILE")"
+  require_regular_file "$(absolute_path "$CROWDRELAY_ENV_FILE")"
+  require_regular_file "$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
+  require_regular_file "$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+  compose config --quiet
+  echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
+}
+
+pin_sha() {
+  local sha="$1"
+  validate_sha "$sha"
+  [[ -f "$LOCAL_CONFIG" ]] || init_files
+  require_command python3
+  python3 - "$LOCAL_CONFIG" "$sha" <<'PY'
+from pathlib import Path
+import re
+import sys
+path = Path(sys.argv[1])
+sha = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+line = f'CROWDRELAY_IMAGE_SHA="{sha}"'
+if re.search(r'^CROWDRELAY_IMAGE_SHA=.*$', text, flags=re.MULTILINE):
+    text = re.sub(r'^CROWDRELAY_IMAGE_SHA=.*$', line, text, count=1, flags=re.MULTILINE)
+else:
+    text = line + "\n" + text
+path.write_text(text, encoding="utf-8")
+PY
+  chmod 600 "$LOCAL_CONFIG"
+  CROWDRELAY_IMAGE_SHA="$sha"
+  echo "Pinned sha-${sha}."
+}
+
+verify() {
+  require_command docker
+  compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    http://127.0.0.1:8080/v1/health/live >/dev/null
+  compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    http://127.0.0.1:8080/v1/health/ready >/dev/null
+
+  if [[ -n "$CROWDRELAY_PUBLIC_BASE_URL" ]]; then
+    require_command curl
+    local base="${CROWDRELAY_PUBLIC_BASE_URL%/}"
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 15 "$base/v1/health/live" >/dev/null
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 15 "$base/v1/health/ready" >/dev/null
+  fi
+  run_hook crowdrelay_after_verify
+  echo "CrowdRelay is healthy."
+}
+
+deploy() {
+  doctor
+  if ! docker network inspect "$CROWDRELAY_DOCKER_NETWORK" >/dev/null 2>&1; then
+    if [[ "$CROWDRELAY_CREATE_NETWORK" == "true" ]]; then
+      docker network create "$CROWDRELAY_DOCKER_NETWORK" >/dev/null
+    else
+      echo "Missing Docker network: $CROWDRELAY_DOCKER_NETWORK" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ "$CROWDRELAY_BACKUP_BEFORE_DEPLOY" == "true" ]]; then
+    if declare -F crowdrelay_backup >/dev/null 2>&1; then
+      crowdrelay_backup
+    else
+      echo "CROWDRELAY_BACKUP_BEFORE_DEPLOY=true but crowdrelay_backup() is not defined." >&2
+      exit 1
+    fi
+  fi
+  [[ "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS must be a positive integer." >&2
+    exit 1
+  }
+  run_hook crowdrelay_before_deploy
+  compose pull
+  compose run --rm setup
+  compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans api worker
+  run_hook crowdrelay_before_verify
+  verify
+  run_hook crowdrelay_after_deploy
+  run_hook crowdrelay_notify "CrowdRelay deployed: sha-${CROWDRELAY_IMAGE_SHA}"
+}
+
+package_deploy() (
+  set -euo pipefail
+  local output="${1:-${ROOT_DIR}/.crowdrelay-artifacts/crowdrelay-${CROWDRELAY_IMAGE_SHA}.tar.gz}"
+  doctor >&2
+  require_command tar
+  local staging
+  staging="$(mktemp -d)"
+  trap 'rm -rf -- "$staging"' EXIT
+  mkdir -p "$staging/deploy"
+  cp crowdrelayctl "$staging/crowdrelayctl"
+  cp "$(absolute_path "$CROWDRELAY_COMPOSE_FILE")" "$staging/compose.production.yaml"
+  cp "$LOCAL_CONFIG" "$staging/.crowdrelay.local.sh"
+  cp "$(absolute_path "$CROWDRELAY_ENV_FILE")" "$staging/deploy/.env.production"
+  cp "$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")" "$staging/deploy/bootstrap.production.json"
+  cp "$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")" "$staging/deploy/webhook-secrets.production.json"
+  chmod 700 "$staging/crowdrelayctl"
+  chmod 600 "$staging/.crowdrelay.local.sh" "$staging/deploy/"*
+  mkdir -p "$(dirname "$output")"
+  tar -C "$staging" -czf "$output" .
+  chmod 600 "$output"
+  run_hook crowdrelay_after_package "$output" >&2
+  printf '%s\n' "$output"
+)
+
+ship() {
+  [[ -n "$CROWDRELAY_SSH_TARGET" ]] || {
+    echo "Set CROWDRELAY_SSH_TARGET in $LOCAL_CONFIG" >&2
+    exit 1
+  }
+  require_command scp
+  require_command ssh
+  local archive
+  archive="$(package_deploy)"
+  scp "$archive" "${CROWDRELAY_SSH_TARGET}:${CROWDRELAY_REMOTE_ARCHIVE}"
+  ssh "$CROWDRELAY_SSH_TARGET" bash -s -- \
+    "$CROWDRELAY_REMOTE_INSTALL_DIR" "$CROWDRELAY_REMOTE_ARCHIVE" <<'REMOTE'
+set -euo pipefail
+install_dir="$1"
+archive="$2"
+mkdir -p "$install_dir"
+tar -xzf "$archive" -C "$install_dir"
+rm -f -- "$archive"
+cd "$install_dir"
+chmod 700 crowdrelayctl
+chmod 600 .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json deploy/webhook-secrets.production.json
+./crowdrelayctl deploy
+REMOTE
+}
+
+command="${1:-}"
+case "$command" in
+  init)
+    init_files
+    ;;
+  doctor)
+    doctor
+    ;;
+  pin)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    pin_sha "$2"
+    ;;
+  status)
+    doctor
+    compose ps
+    ;;
+  deploy)
+    deploy
+    ;;
+  verify)
+    doctor
+    verify
+    ;;
+  logs)
+    doctor
+    if [[ $# -eq 2 ]]; then
+      compose logs --follow --tail=200 "$2"
+    else
+      compose logs --follow --tail=200
+    fi
+    ;;
+  backup)
+    if declare -F crowdrelay_backup >/dev/null 2>&1; then
+      crowdrelay_backup
+    else
+      echo "Define crowdrelay_backup() in $LOCAL_CONFIG." >&2
+      exit 1
+    fi
+    ;;
+  package)
+    package_deploy "${2:-}"
+    ;;
+  ship)
+    ship
+    ;;
+  rollback)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    pin_sha "$2"
+    deploy
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

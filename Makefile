@@ -1,0 +1,62 @@
+CARGO ?= cargo
+COMPOSE ?= docker compose
+API_BASE_URL ?= http://127.0.0.1:8080/v1
+
+.PHONY: fmt lint test check validate-contract-assets ci env db-up migrate bootstrap setup build-images build-arm64 up down logs ps health
+
+fmt:
+	$(CARGO) fmt --all --check
+
+lint:
+	$(CARGO) clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+test:
+	$(CARGO) test --locked --workspace --all-targets --all-features
+
+check: fmt lint test
+
+validate-contract-assets:
+	node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
+
+ci: check validate-contract-assets
+
+env:
+	@test -f .env || cp .env.example .env
+	@echo "Using .env (development defaults are copied only when it is missing)."
+
+db-up: env
+	$(COMPOSE) up --detach --wait postgres
+
+migrate: db-up
+	$(COMPOSE) run --rm --build migrate migrate
+
+bootstrap: db-up
+	$(COMPOSE) run --rm --build migrate bootstrap
+
+setup: db-up
+	$(COMPOSE) run --rm --build migrate setup
+
+build-images:
+	docker buildx bake --load
+
+build-arm64:
+	API_IMAGE=crowdrelay-api:arm64 WORKER_IMAGE=crowdrelay-worker:arm64 \
+		docker buildx bake --set '*.platform=linux/arm64' --load
+
+up: env
+	$(COMPOSE) up --build --detach
+
+health:
+	curl --fail --silent --show-error "$(API_BASE_URL)/health/live"
+	@echo
+	curl --fail --silent --show-error "$(API_BASE_URL)/health/ready"
+	@echo
+
+down:
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs --follow --tail=200
+
+ps:
+	$(COMPOSE) ps

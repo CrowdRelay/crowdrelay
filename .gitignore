@@ -1,0 +1,28 @@
+target/
+.env
+*.log
+*.dump
+*.dump.*
+*.age
+.DS_Store
+.idea/
+.vscode/
+coverage/
+
+# Local operator state. Deployment-specific filenames belong in
+# .git/info/exclude so they are never documented by the public repository.
+.crowdrelay.local.sh
+.crowdrelay-artifacts/
+.crowdrelay-maintenance.lock
+deploy/.env.*
+!deploy/env.production.example
+deploy/*.production.json
+deploy/backups/
+backups/
+
+# n8n is private by default. Only provider-neutral documentation and examples
+# are part of the public repository.
+n8n/*
+!n8n/README.md
+!n8n/examples/
+!n8n/examples/**

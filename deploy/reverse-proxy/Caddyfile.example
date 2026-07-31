@@ -1,0 +1,4 @@
+api.example.com {
+  encode zstd gzip
+  reverse_proxy crowdrelay-api:8080
+}

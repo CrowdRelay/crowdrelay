@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a scoped product or engineering change
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the operator or fan problem before proposing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: flow
+    attributes:
+      label: Expected flow
+      description: Include the state transition, API surface and failure behaviour.
+    validations:
+      required: true
+  - type: textarea
+    id: guarantees
+    attributes:
+      label: Required guarantees
+      description: Consider idempotency, workspace isolation, retries, privacy and auditability.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

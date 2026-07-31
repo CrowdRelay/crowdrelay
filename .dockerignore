@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.crowdrelay.local.sh
+.crowdrelay-artifacts
+target
+coverage
+*.log
+*.dump
+*.dump.*
+deploy/.env.*
+deploy/bootstrap.production.json
+deploy/webhook-secrets.production.json
+deploy/backups
+backups
+.operator
+deploy/*.production.json

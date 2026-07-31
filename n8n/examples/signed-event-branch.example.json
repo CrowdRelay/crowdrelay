@@ -1,0 +1,78 @@
+{
+  "name": "CrowdRelay — example signed event branch",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const envelope = $json;\nif (!envelope || envelope.type !== 'example.delivery_requested' || envelope.version !== 1) {\n  throw new Error('Unsupported CrowdRelay event');\n}\nconst data = envelope.data ?? {};\nif (!data.recipient || !data.template) {\n  throw new Error('Missing required event fields');\n}\nreturn [{ json: {\n  event_id: envelope.id,\n  action: {\n    recipient: data.recipient,\n    template: data.template,\n    variables: data.variables ?? {},\n    idempotency_key: envelope.id\n  }\n} }];"
+      },
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Validate and build generic action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_EXAMPLE_DELIVERY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_EXAMPLE_DELIVERY_TOKEN }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.event_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.action) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "33333333-3333-4333-8333-333333333333",
+      "name": "Deliver through configured adapter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, 0]
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [[{
+        "node": "Validate and build generic action",
+        "type": "main",
+        "index": 0
+      }]]
+    },
+    "Validate and build generic action": {
+      "main": [[{
+        "node": "Deliver through configured adapter",
+        "type": "main",
+        "index": 0
+      }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "tags": []
+}

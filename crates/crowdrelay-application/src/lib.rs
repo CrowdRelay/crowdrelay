@@ -1,0 +1,56 @@
+#![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::string_slice,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used,
+    )
+)]
+#![deny(clippy::dbg_macro)]
+
+//! CrowdRelay use cases and infrastructure ports.
+//!
+//! This crate orchestrates domain logic through use-case structs that depend
+//! on repository trait ports. Infrastructure crates implement these ports
+//! against PostgreSQL or other backends. Thread-safe immutable caches power
+//! the redirect and event-discovery fast paths.
+
+pub mod admission;
+pub mod cache;
+pub mod events;
+pub mod fan_lifecycle;
+pub mod ports;
+pub mod referrals;
+pub mod use_cases;
+
+pub use admission::{
+    AdmissionRepository, AdmissionUseCaseError, ClaimAdmissionPass, ClaimAdmissionPassCommand,
+    IssueAdmissionPass, IssueAdmissionPassCommand, LoadAdmissionPass, RedeemAdmissionPass,
+    RedeemAdmissionPassCommand, RevokeAdmissionPass, RevokeAdmissionPassCommand,
+};
+pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
+pub use events::{
+    EventCache, EventCacheError, EventRepository, EventSnapshot, ListFanEventInterests, LoadEvents,
+    LoadEventsError, MAX_PUBLIC_EVENT_LIMIT, RegisterEventInterest, RegisterEventInterestCommand,
+    RegisterEventInterestCommandArgs, RegisterEventInterestCommandError,
+};
+pub use fan_lifecycle::{
+    ConfirmFan, ConfirmFanCommand, FanLifecycleError, FanLifecycleRepository, UnsubscribeFan,
+};
+pub use ports::{
+    AcquisitionRepository, IdempotencyKey, RepositoryError, RequestId, SignupFanCommand,
+    TextKeyError,
+};
+pub use referrals::{
+    LoadReferralProgress, RedeemCoupon, RedeemCouponCommand, RedeemCouponCommandError,
+    ReferralRepository, ResolveReferralCode,
+};
+pub use use_cases::{
+    ListCities, ListCitiesError, LoadSmartLinks, LoadSmartLinksError, SignupFan, SignupFanError,
+};

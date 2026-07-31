@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible CrowdRelay defect
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets, personal data, production URLs or one-time tokens.
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behaviour
+      description: What happened? Include the endpoint or component and a bounded error response.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest local sequence that reproduces the issue.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Commit or release
+      placeholder: Full commit SHA or tag
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Security, migration or operational impact
+      description: State none when not applicable. Use the private security route for vulnerabilities.
+    validations:
+      required: true
