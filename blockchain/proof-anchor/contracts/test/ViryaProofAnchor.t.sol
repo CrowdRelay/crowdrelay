@@ -53,18 +53,29 @@ contract ViryaProofAnchorTest is Test {
     }
 
     function testRejectsRootMutationAndUnauthorizedCaller() public {
+        // vm.prank affects the next external call only. SHA-256 is an EVM
+        // precompile call, so calculate every digest before arming the prank.
         bytes32 batch = keccak256("batch");
+        bytes32 rootA = sha256(bytes("root-a"));
+        bytes32 rootB = sha256(bytes("root-b"));
+        bytes32 schema = keccak256("schema");
+        bytes32 otherBatch = keccak256("other");
+        bytes32 otherRoot = sha256(bytes("root"));
+
         vm.prank(signer);
-        anchorContract.anchor(batch, sha256(bytes("root-a")), 1, keccak256("schema"));
+        anchorContract.anchor(batch, rootA, 1, schema);
+
         vm.expectRevert(ViryaProofAnchor.BatchCommitmentConflict.selector);
         vm.prank(signer);
-        anchorContract.anchor(batch, sha256(bytes("root-b")), 1, keccak256("schema"));
+        anchorContract.anchor(batch, rootB, 1, schema);
+
         vm.expectRevert(ViryaProofAnchor.BatchCommitmentConflict.selector);
         vm.prank(signer);
-        anchorContract.anchor(batch, sha256(bytes("root-a")), 2, keccak256("schema"));
+        anchorContract.anchor(batch, rootA, 2, schema);
+
         vm.expectRevert(ViryaProofAnchor.UnauthorizedAnchorSigner.selector);
         vm.prank(outsider);
-        anchorContract.anchor(keccak256("other"), sha256(bytes("root")), 1, keccak256("schema"));
+        anchorContract.anchor(otherBatch, otherRoot, 1, schema);
     }
 
     function testRejectsOversizedBatch() public {
