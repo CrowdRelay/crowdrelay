@@ -32,7 +32,7 @@ use axum::{
             InvalidHeaderValue,
         },
     },
-    middleware::{Next, from_fn, from_fn_with_state},
+    middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -51,9 +51,12 @@ mod accounting;
 mod acquisition;
 mod admission;
 mod concert_qr;
+mod ecosystem;
 mod event_copy;
 mod events;
 mod fan_lifecycle;
+mod ops;
+mod proofs;
 mod referrals;
 mod releases;
 mod security;
@@ -70,10 +73,13 @@ pub use events::{
     EventActionMetricsReader, EventActionMetricsSnapshot, EventActionSubmitter, EventState,
 };
 pub use fan_lifecycle::FanLifecycleState;
+pub use ops::OpsState;
 pub use referrals::ReferralState;
 pub use ticketing::TicketingState;
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+const X_CROWDRELAY_CORRELATION_ID: HeaderName =
+    HeaderName::from_static("x-crowdrelay-correlation-id");
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 const MAX_PUBLIC_BODY_BYTES: usize = 16 * 1024;
 
@@ -89,6 +95,7 @@ pub struct AppState {
     pub(crate) concert_qr: ConcertQrState,
     pub(crate) fan_lifecycle: FanLifecycleState,
     pub(crate) ticketing: TicketingState,
+    pub(crate) ops: OpsState,
 }
 
 impl AppState {
@@ -105,6 +112,7 @@ impl AppState {
         concert_qr: ConcertQrState,
         fan_lifecycle: FanLifecycleState,
         ticketing: TicketingState,
+        ops: OpsState,
     ) -> Self {
         Self {
             database,
@@ -116,6 +124,7 @@ impl AppState {
             concert_qr,
             fan_lifecycle,
             ticketing,
+            ops,
         }
     }
 }
@@ -155,11 +164,12 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             IDEMPOTENCY_KEY,
             IF_NONE_MATCH,
             X_REQUEST_ID,
+            X_CROWDRELAY_CORRELATION_ID,
         ])
         .expose_headers([CACHE_CONTROL, ETAG, X_REQUEST_ID]);
 
     let middleware = ServiceBuilder::new()
-        .layer(from_fn(replace_untrusted_request_id))
+        .layer(from_fn_with_state(state.clone(), normalize_request_id))
         .layer(SetRequestIdLayer::new(
             X_REQUEST_ID.clone(),
             MakeRequestUuid,
@@ -197,6 +207,18 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
         .route("/v1/public/cities", get(acquisition::list_cities))
         .route("/v1/public/events", get(events::list_events))
+        .route(
+            "/v1/public/proofs/batches/{batch_id}",
+            get(proofs::public_batch),
+        )
+        .route(
+            "/v1/public/proofs/batches/{batch_id}/{source_kind}/{source_id}",
+            get(proofs::public_inclusion),
+        )
+        .route(
+            "/v1/public/proofs/draws/{draw_slug}",
+            get(proofs::public_draw),
+        )
         .route("/v1/public/events/{slug}", get(events::get_event))
         .route(
             "/v1/public/events/{slug}/tickets",
@@ -273,6 +295,19 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             "/v1/internal/releases/announce",
             post(releases::announce_release),
         )
+        .route("/v1/internal/proofs/claim", post(proofs::internal_claim))
+        .route(
+            "/v1/internal/proofs/{batch_id}/confirm",
+            post(proofs::internal_confirm),
+        )
+        .route(
+            "/v1/internal/proofs/{batch_id}/fail",
+            post(proofs::internal_fail),
+        )
+        .route(
+            "/v1/internal/proofs/audit-batches",
+            post(proofs::admin_create_audit_batch),
+        )
         .route(
             "/v1/admin/accounting/profile",
             get(accounting::get_profile).post(accounting::configure_profile),
@@ -292,6 +327,53 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route(
             "/v1/admin/accounting/documents/{document_id}/csv",
             get(accounting::download_accounting_csv),
+        )
+        .route("/v1/admin/ecosystem/overview", get(ecosystem::overview))
+        .route("/v1/admin/ecosystem/flags", get(ecosystem::list_flags))
+        .route(
+            "/v1/admin/ecosystem/flags/{key}",
+            post(ecosystem::update_flag),
+        )
+        .route("/v1/admin/ecosystem/reconcile", post(ecosystem::reconcile))
+        .route(
+            "/v1/admin/ecosystem/reconciliation",
+            get(ecosystem::list_findings),
+        )
+        .route(
+            "/v1/admin/ecosystem/checklists/{event_slug}",
+            get(ecosystem::show_checklist),
+        )
+        .route(
+            "/v1/admin/ecosystem/checklists/{event_slug}/{item_key}",
+            post(ecosystem::update_checklist),
+        )
+        .route(
+            "/v1/admin/ecosystem/checklists/emit-due",
+            post(ecosystem::emit_due_checklists),
+        )
+        .route(
+            "/v1/staff/ops/show-snapshot/{event_slug}",
+            get(ecosystem::show_snapshot),
+        )
+        .route("/v1/admin/proofs/batches", get(proofs::admin_list_batches))
+        .route(
+            "/v1/admin/proofs/audit-batches",
+            post(proofs::admin_create_audit_batch),
+        )
+        .route("/v1/admin/ops/summary", get(ops::summary))
+        .route("/v1/admin/ops/outbox", get(ops::list_outbox))
+        .route("/v1/admin/ops/deliveries", get(ops::list_deliveries))
+        .route(
+            "/v1/admin/ops/deliveries/{delivery_id}",
+            get(ops::delivery_details),
+        )
+        .route(
+            "/v1/admin/ops/outbox/{event_id}/retry",
+            post(ops::retry_outbox),
+        )
+        .route(
+            "/v1/admin/ops/deliveries/{delivery_id}/retry",
+            post(ops::retry_delivery),
         )
         .route("/v1/admin/admission/passes", post(admission::issue_pass))
         .route(
@@ -350,11 +432,45 @@ async fn enforce_privileged_namespace(
     next.run(request).await
 }
 
-async fn replace_untrusted_request_id(mut request: Request<Body>, next: Next) -> Response {
-    // Public clients must not control correlation identifiers used in logs,
-    // audit metadata, or downstream events. A future trusted-proxy integration
-    // can use a separate internal header.
+async fn normalize_request_id(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
     request.headers_mut().remove(&X_REQUEST_ID);
+    let path = request.uri().path();
+    let privileged = path.starts_with("/v1/admin/")
+        || path.starts_with("/v1/staff/")
+        || path.starts_with("/v1/internal/")
+        || path.starts_with("/v1/commerce/");
+    let authorized = if path.starts_with("/v1/admin/") {
+        state.ticketing.admin_authorized(request.headers())
+    } else if path.starts_with("/v1/staff/") {
+        state.ticketing.operator_authorized(request.headers())
+    } else if path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/") {
+        state.ticketing.commerce_authorized(request.headers())
+    } else {
+        false
+    };
+    if privileged && authorized {
+        let correlation = request
+            .headers()
+            .get(&X_CROWDRELAY_CORRELATION_ID)
+            .cloned()
+            .filter(|value| {
+                value.to_str().is_ok_and(|value| {
+                    let value = value.trim();
+                    (8..=128).contains(&value.len())
+                        && value.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
+                })
+            });
+        if let Some(correlation) = correlation {
+            request
+                .headers_mut()
+                .insert(X_REQUEST_ID.clone(), correlation);
+        }
+    }
+    request.headers_mut().remove(&X_CROWDRELAY_CORRELATION_ID);
     next.run(request).await
 }
 
@@ -381,6 +497,7 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn metrics(State(state): State<AppState>) -> Response {
     let snapshot = state.acquisition.click_metrics_snapshot();
     let event_snapshot = state.events.metrics_snapshot();
+    let ops_snapshot = state.ops.metrics_snapshot().await.unwrap_or_default();
     let body = format!(
         concat!(
             "# HELP crowdrelay_click_events_queued_total Click events accepted by the bounded buffer.\n",
@@ -407,6 +524,30 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_event_actions_persistence_failed_total Event conversion actions lost after bounded persistence failure.\n",
             "# TYPE crowdrelay_event_actions_persistence_failed_total counter\n",
             "crowdrelay_event_actions_persistence_failed_total {}\n",
+            "# HELP crowdrelay_outbox_pending Current pending outbox events.\n",
+            "# TYPE crowdrelay_outbox_pending gauge\n",
+            "crowdrelay_outbox_pending {}\n",
+            "# HELP crowdrelay_outbox_processing Current processing outbox events.\n",
+            "# TYPE crowdrelay_outbox_processing gauge\n",
+            "crowdrelay_outbox_processing {}\n",
+            "# HELP crowdrelay_outbox_dead Current dead outbox events.\n",
+            "# TYPE crowdrelay_outbox_dead gauge\n",
+            "crowdrelay_outbox_dead {}\n",
+            "# HELP crowdrelay_outbox_oldest_pending_seconds Age of the oldest ready pending outbox event.\n",
+            "# TYPE crowdrelay_outbox_oldest_pending_seconds gauge\n",
+            "crowdrelay_outbox_oldest_pending_seconds {}\n",
+            "# HELP crowdrelay_webhook_delivery_pending Current pending webhook deliveries.\n",
+            "# TYPE crowdrelay_webhook_delivery_pending gauge\n",
+            "crowdrelay_webhook_delivery_pending {}\n",
+            "# HELP crowdrelay_webhook_delivery_processing Current processing webhook deliveries.\n",
+            "# TYPE crowdrelay_webhook_delivery_processing gauge\n",
+            "crowdrelay_webhook_delivery_processing {}\n",
+            "# HELP crowdrelay_webhook_delivery_dead Current dead webhook deliveries.\n",
+            "# TYPE crowdrelay_webhook_delivery_dead gauge\n",
+            "crowdrelay_webhook_delivery_dead {}\n",
+            "# HELP crowdrelay_webhook_delivery_oldest_pending_seconds Age of the oldest ready pending webhook delivery.\n",
+            "# TYPE crowdrelay_webhook_delivery_oldest_pending_seconds gauge\n",
+            "crowdrelay_webhook_delivery_oldest_pending_seconds {}\n",
         ),
         snapshot.queued,
         snapshot.persisted,
@@ -416,6 +557,14 @@ async fn metrics(State(state): State<AppState>) -> Response {
         event_snapshot.persisted,
         event_snapshot.dropped,
         event_snapshot.persistence_failed,
+        ops_snapshot.outbox_pending,
+        ops_snapshot.outbox_processing,
+        ops_snapshot.outbox_dead,
+        ops_snapshot.outbox_oldest_pending_seconds,
+        ops_snapshot.delivery_pending,
+        ops_snapshot.delivery_processing,
+        ops_snapshot.delivery_dead,
+        ops_snapshot.delivery_oldest_pending_seconds,
     );
 
     (
@@ -610,8 +759,8 @@ mod tests {
 
     use super::{
         AcquisitionState, AdmissionState, AppState, ClickSubmitter, ConcertQrState,
-        EventActionMetricsSnapshot, EventState, FanLifecycleState, HttpConfig, ReferralState,
-        TicketingState, X_REQUEST_ID, router,
+        EventActionMetricsSnapshot, EventState, FanLifecycleState, HttpConfig, OpsState,
+        ReferralState, TicketingState, X_REQUEST_ID, router,
     };
 
     struct TestRepository {
@@ -926,6 +1075,7 @@ mod tests {
             Some(sha2::Sha256::digest(b"test-commerce-api-key-1234567890").into()),
             Some([7_u8; 32]),
         );
+        let ops = OpsState::new(workspace_id, database.clone(), Duration::from_millis(50));
         Ok(AppState::new(
             database,
             Duration::from_millis(50),
@@ -936,6 +1086,7 @@ mod tests {
             concert_qr,
             fan_lifecycle_state(workspace_id)?,
             ticketing,
+            ops,
         ))
     }
 
@@ -1236,6 +1387,7 @@ mod tests {
         let app = test_router()?;
         for (uri, token) in [
             ("/v1/admin/events/test-show/ticketing", STAFF_KEY),
+            ("/v1/admin/ops/summary", STAFF_KEY),
             ("/v1/staff/events/test-show/ticketing", COMMERCE_KEY),
         ] {
             let response = app
@@ -1265,6 +1417,7 @@ mod tests {
 
         for (uri, token) in [
             ("/v1/admin/events/test-show/ticketing", ADMIN_KEY),
+            ("/v1/admin/ops/summary", ADMIN_KEY),
             ("/v1/staff/events/test-show/ticketing", STAFF_KEY),
         ] {
             let response = app

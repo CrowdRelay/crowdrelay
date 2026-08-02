@@ -51,9 +51,10 @@ The operator owns the data. Public requests never send emails or call external p
 | Admin QR         | `GET /v1/admin/event-qr/overview`, `GET/POST /v1/admin/event-qr/campaigns`, `POST .../{id}/revoke`                                                |
 | Admission Passes | admin issue/revoke, fan claim/status/QR, and staff redemption under `/v1/admin/admission`, `/v1/passes`, `/v1/me/pass`, and `/v1/staff/admission` |
 | Ticketing        | public sale/reservation/status, admin configuration/overview, and authenticated Stripe reconciliation under `/v1/public`, `/v1/admin`, and `/v1/internal` |
+| Operations       | admin queue summary, dead-item inspection, delivery attempt history, and audited manual retry under `/v1/admin/ops`                                    |
 | Commerce         | `POST /v1/commerce/coupons/redeem`                                                                                                                |
 
-Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin and staff credentials cannot call service routes, while service credentials cannot call operator routes. Exact schemas and error codes are documented in the OpenAPI contract. First-party ticketing invariants and deployment order are documented in [`docs/TICKETING.md`](docs/TICKETING.md). The cross-product event, Signal, AREA, ticket, accounting and n8n boundaries are summarized in [`docs/VIRYA_ECOSYSTEM.md`](docs/VIRYA_ECOSYSTEM.md).
+Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin and staff credentials cannot call service routes, while service credentials cannot call operator routes. Exact schemas and error codes are documented in the OpenAPI contract. First-party ticketing invariants and deployment order are documented in [`docs/TICKETING.md`](docs/TICKETING.md). Operations endpoints and their staged rollout are documented in [`docs/OPS_CONTROL_PLANE.md`](docs/OPS_CONTROL_PLANE.md). The cross-product event, Signal, AREA, ticket, accounting and n8n boundaries are summarized in [`docs/VIRYA_ECOSYSTEM.md`](docs/VIRYA_ECOSYSTEM.md).
 
 ### Local Development
 
@@ -83,3 +84,18 @@ The reverse proxy must join the same Docker network and route traffic to `crowdr
 Apache-2.0. See `LICENSE`.
 
 Mobile operator API: [`docs/MOBILE_APP.md`](docs/MOBILE_APP.md).
+
+
+## Ecosystem max control plane
+
+The private control plane includes auditable feature flags, reconciliation,
+show checklists, a signed offline gate snapshot, correlation propagation and
+restore/load/contract tooling. See `docs/ECOSYSTEM_MAX.md`.
+
+
+## Optional external proofs
+
+CrowdRelay can create public SHA-256 draw receipts and Merkle commitments for
+append-only audit records, then optionally anchor roots through an isolated EVM
+relayer. PostgreSQL remains authoritative and chain availability never enters a
+critical path. See `docs/EXTERNAL_PROOFS.md`.

@@ -99,6 +99,10 @@ impl TicketingState {
         self.lock_timeout
     }
 
+    pub(crate) fn checkout_token_key(&self) -> Option<[u8; 32]> {
+        self.checkout_token_key
+    }
+
     pub(crate) fn commerce_authorized(&self, headers: &HeaderMap) -> bool {
         bearer_sha256_matches(headers, self.commerce_api_key_sha256)
     }
@@ -612,6 +616,14 @@ pub async fn public_sale(
     Path(event_slug): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    if !matches!(
+        crate::ecosystem::feature_enabled(&state, "ticket_sales_enabled").await,
+        Ok(true)
+    ) {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    }
     let request_id_value = request_id(&headers);
     let event_slug = match EventSlug::parse(event_slug) {
         Ok(value) => value,
@@ -723,6 +735,14 @@ pub async fn reserve_order(
     headers: HeaderMap,
     payload: Result<Json<ReserveTicketOrderRequest>, JsonRejection>,
 ) -> Response {
+    if !matches!(
+        crate::ecosystem::feature_enabled(&state, "ticket_sales_enabled").await,
+        Ok(true)
+    ) {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    }
     let request_id_value = request_id(&headers);
     let Some(idempotency_key) = idempotency_key(&headers) else {
         return Problem::bad_request(request_id_value)
@@ -834,6 +854,14 @@ pub async fn request_delivery(
     Path(order_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    if !matches!(
+        crate::ecosystem::feature_enabled(&state, "ticket_delivery_enabled").await,
+        Ok(true)
+    ) {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    }
     let request_id_value = request_id(&headers);
     let order_id = match Uuid::parse_str(&order_id) {
         Ok(value) => value,

@@ -365,6 +365,19 @@ async fn execute_draw(
     .await
     .map_err(DrawWorkerError::sqlx)?;
 
+    persist_external_draw_proof(
+        transaction,
+        draw,
+        run_id,
+        &candidates,
+        &seed_hash,
+        &revealed_seed,
+        eligible_count,
+        total_entries,
+        selected_winners,
+    )
+    .await?;
+
     append_outbox(
         transaction,
         draw.workspace_id,
@@ -408,6 +421,213 @@ async fn execute_draw(
         total_entries,
         selected_winners,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_external_draw_proof(
+    transaction: &mut Transaction<'_, Postgres>,
+    draw: &DrawRow,
+    run_id: Uuid,
+    candidates: &[RankedCandidate],
+    seed_hash: &[u8],
+    revealed_seed: &str,
+    eligible_count: i32,
+    total_entries: i64,
+    selected_winners: i32,
+) -> Result<(), DrawWorkerError> {
+    let enabled = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT COALESCE(
+            bool_or(enabled) FILTER (WHERE key = 'draw_proofs_enabled'),
+            true
+        )
+        FROM ecosystem_feature_flags
+        WHERE workspace_id = $1 AND key = 'draw_proofs_enabled'
+        "#,
+    )
+    .bind(draw.workspace_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(DrawWorkerError::sqlx)?;
+    if !enabled {
+        return Ok(());
+    }
+
+    let candidate_digest = candidate_snapshot_digest(run_id, candidates);
+    let winner_digest =
+        winner_snapshot_digest(transaction, draw.workspace_id, run_id, selected_winners).await?;
+    let receipt = draw_receipt_digest(
+        run_id,
+        ALGORITHM_VERSION,
+        seed_hash,
+        revealed_seed,
+        eligible_count,
+        total_entries,
+        draw.winner_count,
+        selected_winners,
+        candidate_digest,
+        winner_digest,
+    )?;
+    let batch_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO external_proof_batches (
+            id, workspace_id, proof_kind, schema_version, tree_algorithm,
+            root_sha256, leaf_count, request_id
+        ) VALUES ($1, $2, 'draw_receipt', 1, 'single-leaf-v1', $3, 1, $4)
+        "#,
+    )
+    .bind(batch_id)
+    .bind(draw.workspace_id)
+    .bind(receipt.to_vec())
+    .bind(format!("draw:{run_id}:proof"))
+    .execute(&mut **transaction)
+    .await
+    .map_err(DrawWorkerError::sqlx)?;
+    sqlx::query(
+        r#"
+        INSERT INTO external_proof_items (
+            workspace_id, batch_id, sequence, source_kind,
+            source_id, leaf_sha256, occurred_at
+        ) VALUES ($1, $2, 0, 'reward_draw_run', $3, $4, now())
+        "#,
+    )
+    .bind(draw.workspace_id)
+    .bind(batch_id)
+    .bind(run_id)
+    .bind(receipt.to_vec())
+    .execute(&mut **transaction)
+    .await
+    .map_err(DrawWorkerError::sqlx)?;
+    sqlx::query(
+        r#"
+        INSERT INTO reward_draw_proofs (
+            workspace_id, run_id, draw_id, anchor_batch_id,
+            receipt_sha256, candidate_snapshot_sha256,
+            winner_snapshot_sha256, eligible_count, selected_winners
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(draw.workspace_id)
+    .bind(run_id)
+    .bind(draw.id)
+    .bind(batch_id)
+    .bind(receipt.to_vec())
+    .bind(candidate_digest.to_vec())
+    .bind(winner_digest.to_vec())
+    .bind(eligible_count)
+    .bind(selected_winners)
+    .execute(&mut **transaction)
+    .await
+    .map_err(DrawWorkerError::sqlx)?;
+
+    Ok(())
+}
+
+fn candidate_snapshot_digest(run_id: Uuid, candidates: &[RankedCandidate]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"crowdrelay/draw-candidates/v1\0");
+    hasher.update((candidates.len() as u64).to_be_bytes());
+    for candidate in candidates {
+        hasher.update(candidate_alias(run_id, candidate.fan_id));
+        hasher.update(candidate.qualified_referrals.to_be_bytes());
+        hasher.update(candidate.concert_checkins.to_be_bytes());
+        hasher.update(candidate.checkin_entries.to_be_bytes());
+        hasher.update(candidate.entry_count.to_be_bytes());
+        hasher.update(candidate.selection_score.to_bits().to_be_bytes());
+    }
+    hasher.finalize().into()
+}
+
+async fn winner_snapshot_digest(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    expected_count: i32,
+) -> Result<[u8; 32], DrawWorkerError> {
+    let winners = sqlx::query_as::<_, (i32, Uuid, i32, f64)>(
+        r#"
+        SELECT winner.winner_rank, candidate.fan_id,
+               candidate.entry_count, candidate.selection_score
+        FROM reward_draw_winners AS winner
+        JOIN reward_draw_candidates AS candidate
+          ON candidate.workspace_id = winner.workspace_id
+         AND candidate.run_id = winner.run_id
+         AND candidate.fan_id = winner.fan_id
+        WHERE winner.workspace_id = $1 AND winner.run_id = $2
+        ORDER BY winner.winner_rank
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(DrawWorkerError::sqlx)?;
+    let actual_count = i32::try_from(winners.len()).map_err(|_| DrawWorkerError::Arithmetic)?;
+    if actual_count != expected_count {
+        return Err(DrawWorkerError::InvalidDraw);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"crowdrelay/draw-winners/v1\0");
+    hasher.update((winners.len() as u64).to_be_bytes());
+    for (index, (winner_rank, fan_id, entry_count, selection_score)) in
+        winners.into_iter().enumerate()
+    {
+        let expected_rank = i32::try_from(index + 1).map_err(|_| DrawWorkerError::Arithmetic)?;
+        if winner_rank != expected_rank {
+            return Err(DrawWorkerError::InvalidDraw);
+        }
+        hasher.update((winner_rank as u64).to_be_bytes());
+        hasher.update(candidate_alias(run_id, fan_id));
+        hasher.update(entry_count.to_be_bytes());
+        hasher.update(selection_score.to_bits().to_be_bytes());
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn candidate_alias(run_id: Uuid, fan_id: Uuid) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"crowdrelay/draw-candidate-alias/v1\0");
+    hasher.update(run_id.as_bytes());
+    hasher.update(fan_id.as_bytes());
+    hasher.finalize().into()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_receipt_digest(
+    run_id: Uuid,
+    algorithm_version: &str,
+    seed_hash: &[u8],
+    revealed_seed: &str,
+    eligible_count: i32,
+    total_entries: i64,
+    requested_winners: i32,
+    selected_winners: i32,
+    candidate_digest: [u8; 32],
+    winner_digest: [u8; 32],
+) -> Result<[u8; 32], DrawWorkerError> {
+    if seed_hash.len() != 32 {
+        return Err(DrawWorkerError::InvalidDraw);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"crowdrelay/draw-receipt/v1\0");
+    hasher.update(run_id.as_bytes());
+    update_proof_field(&mut hasher, algorithm_version.as_bytes());
+    hasher.update(seed_hash);
+    update_proof_field(&mut hasher, revealed_seed.as_bytes());
+    hasher.update(eligible_count.to_be_bytes());
+    hasher.update(total_entries.to_be_bytes());
+    hasher.update(requested_winners.to_be_bytes());
+    hasher.update(selected_winners.to_be_bytes());
+    hasher.update(candidate_digest);
+    hasher.update(winner_digest);
+    Ok(hasher.finalize().into())
+}
+
+fn update_proof_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 fn validate_draw(draw: &DrawRow) -> Result<(), DrawWorkerError> {

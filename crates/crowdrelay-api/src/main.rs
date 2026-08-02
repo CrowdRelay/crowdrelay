@@ -21,7 +21,7 @@ use crowdrelay_api::{
     AcquisitionState, AcquisitionStateArgs, AdmissionState, AdmissionStateArgs, AppState,
     ClickMetricsReader, ClickMetricsSnapshot, ClickSubmitter, ConcertQrState,
     EventActionMetricsReader, EventActionMetricsSnapshot, EventActionSubmitter, EventState,
-    FanLifecycleState, HttpConfig, ReferralState, TicketingState,
+    FanLifecycleState, HttpConfig, OpsState, ReferralState, TicketingState,
 };
 use crowdrelay_application::{
     AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, EventCache,
@@ -232,6 +232,11 @@ async fn main() -> Result<()> {
         config.public_site_base_url.clone(),
         config.environment.is_production(),
     );
+    let ops = OpsState::new(
+        workspace_id,
+        database.clone(),
+        config.database.operation_timeout,
+    );
     let http_config = HttpConfig::new(config.allowed_origins.clone())
         .context("configured CORS origin is not a valid HTTP header value")?;
     let app = crowdrelay_api::router(
@@ -245,6 +250,7 @@ async fn main() -> Result<()> {
             concert_qr,
             fan_lifecycle,
             ticketing,
+            ops,
         ),
         http_config,
     );

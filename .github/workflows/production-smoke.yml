@@ -1,0 +1,93 @@
+name: Production smoke
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: External ecosystem smoke
+    if: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL != '' && vars.VIRYA_PRODUCTION_BASE_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CROWDRELAY_BASE_URL: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL }}
+      VIRYA_BASE_URL: ${{ vars.VIRYA_PRODUCTION_BASE_URL }}
+      N8N_INGRESS_URL: ${{ vars.N8N_PRODUCTION_INGRESS_URL }}
+      ALERT_WEBHOOK_URL: ${{ secrets.PRODUCTION_DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Probe CrowdRelay, Virya, and signed ingress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          request_status() {
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --max-time 15 \
+              --retry 2 \
+              --retry-all-errors \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "$@"
+          }
+
+          require_200() {
+            local label="$1"
+            local url="$2"
+            local status
+            status="$(request_status "$url")"
+            if [[ "$status" != "200" ]]; then
+              printf '%s returned HTTP %s\n' "$label" "$status" >&2
+              return 1
+            fi
+            printf '%s=ok\n' "$label"
+          }
+
+          require_200 crowdrelay_live "${CROWDRELAY_BASE_URL%/}/v1/health/live"
+          require_200 crowdrelay_ready "${CROWDRELAY_BASE_URL%/}/v1/health/ready"
+          require_200 crowdrelay_metrics "${CROWDRELAY_BASE_URL%/}/metrics"
+          require_200 virya_home "${VIRYA_BASE_URL%/}/"
+
+          if [[ -n "${N8N_INGRESS_URL:-}" ]]; then
+            status="$(request_status \
+              --request POST \
+              --header 'content-type: application/json' \
+              --data '{"external_smoke":true}' \
+              "$N8N_INGRESS_URL")"
+            if [[ "$status" != "400" && "$status" != "401" ]]; then
+              printf 'n8n signed ingress returned HTTP %s, expected 400 or 401\n' "$status" >&2
+              exit 1
+            fi
+            printf 'n8n_signed_ingress=ok_rejected_unsigned\n'
+          fi
+
+      - name: Alert Discord on failure
+        if: ${{ failure() && env.ALERT_WEBHOOK_URL != '' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          payload="$(jq -n \
+            --arg content "🚨 Virya production smoke failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{content: $content}')"
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --max-time 15 \
+            --retry 2 \
+            --retry-all-errors \
+            --header 'content-type: application/json' \
+            --data "$payload" \
+            "$ALERT_WEBHOOK_URL"

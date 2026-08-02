@@ -738,6 +738,149 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/summary:
+    get:
+      operationId: getOperationsSummary
+      summary: Aggregate durable outbox and webhook delivery health
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Operations queue summary without event payloads or provider secrets.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsSummary'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/outbox:
+    get:
+      operationId: listOperationsOutbox
+      summary: List outbox metadata for operator diagnostics
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/OpsStatus'
+      - $ref: '#/components/parameters/OpsLimit'
+      responses:
+        '200':
+          description: Outbox metadata. Event payloads are never returned.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OpsOutboxItem'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/deliveries:
+    get:
+      operationId: listOperationsDeliveries
+      summary: List webhook delivery metadata for operator diagnostics
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/OpsStatus'
+      - $ref: '#/components/parameters/OpsLimit'
+      responses:
+        '200':
+          description: Delivery metadata without endpoint URLs or request payloads.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OpsDeliveryItem'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/deliveries/{delivery_id}:
+    get:
+      operationId: getOperationsDelivery
+      summary: Inspect one delivery and its bounded attempt history
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/DeliveryId'
+      responses:
+        '200':
+          description: Delivery metadata and at most 100 most recent attempts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsDeliveryDetails'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/outbox/{event_id}/retry:
+    post:
+      operationId: retryDeadOutboxEvent
+      summary: Return one dead outbox event to the durable queue
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/OutboxEventId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Retry was scheduled or an identical request was replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsRetryResult'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/deliveries/{delivery_id}/retry:
+    post:
+      operationId: retryDeadWebhookDelivery
+      summary: Return one dead delivery on an active endpoint to the queue
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/DeliveryId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Retry was scheduled or an identical request was replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsRetryResult'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /internal/ticket-orders/{order_id}/stripe-checkout:
     post:
       operationId: bindTicketOrderStripeCheckout
@@ -1624,6 +1767,106 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '500':
           $ref: '#/components/responses/PrivateProblem'
+  /public/proofs/batches/{batch_id}:
+    get:
+      operationId: getExternalProofBatch
+      summary: Read a public SHA-256 proof batch
+      parameters:
+      - in: path
+        name: batch_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Public proof metadata. }
+        '404': { $ref: '#/components/responses/Problem' }
+  /public/proofs/batches/{batch_id}/{source_kind}/{source_id}:
+    get:
+      operationId: getExternalProofInclusion
+      summary: Build and verify a Merkle inclusion path
+      parameters:
+      - in: path
+        name: batch_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: source_kind
+        required: true
+        schema: { type: string, enum: [audit_event, operator_action, reward_draw_run] }
+      - in: path
+        name: source_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Merkle path and local verification result. }
+        '404': { $ref: '#/components/responses/Problem' }
+  /public/proofs/draws/{draw_slug}:
+    get:
+      operationId: getPublicDrawProof
+      summary: Read a reproducible draw receipt and optional chain anchor
+      parameters:
+      - in: path
+        name: draw_slug
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        '200': { description: Public draw receipt. }
+        '404': { $ref: '#/components/responses/Problem' }
+  /admin/proofs/batches:
+    get:
+      operationId: listExternalProofBatches
+      summary: List private proof queue state
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Proof batches. }
+  /admin/proofs/audit-batches:
+    post:
+      operationId: createAuditProofBatch
+      summary: Commit the next append-only audit ledger slice to a Merkle root
+      security: [{ bearerAuth: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Created or replayed audit proof batch. }
+  /internal/proofs/audit-batches:
+    post:
+      operationId: createInternalAuditProofBatch
+      summary: Idempotently build the next bounded audit Merkle batch
+      security: [{ bearerAuth: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { description: Created, replayed or empty audit batch. }
+  /internal/proofs/claim:
+    post:
+      operationId: claimExternalProofBatches
+      summary: Lease up to sixteen proof roots to the isolated relayer
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Bounded batch lease. }
+  /internal/proofs/{batch_id}/confirm:
+    post:
+      operationId: confirmExternalProofBatch
+      summary: Record an externally confirmed transaction receipt
+      security: [{ bearerAuth: [] }]
+      parameters:
+      - in: path
+        name: batch_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Confirmed proof batch. }
+  /internal/proofs/{batch_id}/fail:
+    post:
+      operationId: failExternalProofBatch
+      summary: Release a failed proof lease with bounded backoff
+      security: [{ bearerAuth: [] }]
+      parameters:
+      - in: path
+        name: batch_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Updated retry state. }
 components:
   headers:
     RequestId:
@@ -1745,6 +1988,36 @@ components:
       description: ETag received with a previous city-aggregate representation.
       schema:
         type: string
+    OpsStatus:
+      in: query
+      name: status
+      required: false
+      schema:
+        type: string
+        enum: [pending, processing, delivered, dead]
+    OpsLimit:
+      in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    DeliveryId:
+      in: path
+      name: delivery_id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OutboxEventId:
+      in: path
+      name: event_id
+      required: true
+      schema:
+        type: string
+        format: uuid
   responses:
     Problem:
       description: RFC 9457 Problem Details response.
@@ -1779,6 +2052,92 @@ components:
           enum:
           - ok
           - ready
+    OpsQueueSummary:
+      type: object
+      additionalProperties: false
+      required: [pending, processing, delivered_24h, dead, oldest_pending_seconds]
+      properties:
+        pending: { type: integer, format: int64, minimum: 0 }
+        processing: { type: integer, format: int64, minimum: 0 }
+        delivered_24h: { type: integer, format: int64, minimum: 0 }
+        dead: { type: integer, format: int64, minimum: 0 }
+        oldest_pending_seconds: { type: integer, format: int64, minimum: 0 }
+    OpsSummary:
+      type: object
+      additionalProperties: false
+      required: [outbox, deliveries]
+      properties:
+        outbox: { $ref: '#/components/schemas/OpsQueueSummary' }
+        deliveries: { $ref: '#/components/schemas/OpsQueueSummary' }
+    OpsOutboxItem:
+      type: object
+      additionalProperties: false
+      required: [id, event_type, event_version, status, attempts, max_attempts, available_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        event_type: { type: string }
+        event_version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [pending, processing, delivered, dead] }
+        attempts: { type: integer, minimum: 0 }
+        max_attempts: { type: integer, minimum: 1 }
+        available_at: { type: string, format: date-time }
+        last_error_kind: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
+        dead_at: { type: [string, 'null'], format: date-time }
+    OpsDeliveryItem:
+      type: object
+      additionalProperties: false
+      required: [id, outbox_event_id, event_type, endpoint_name, endpoint_active, status, attempt_count, max_attempts, available_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        outbox_event_id: { type: string, format: uuid }
+        event_type: { type: string }
+        endpoint_name: { type: string }
+        endpoint_active: { type: boolean }
+        status: { type: string, enum: [pending, processing, delivered, dead] }
+        attempt_count: { type: integer, minimum: 0 }
+        max_attempts: { type: integer, minimum: 1 }
+        available_at: { type: string, format: date-time }
+        last_response_status: { type: [integer, 'null'], minimum: 100, maximum: 599 }
+        last_error_kind: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
+        dead_at: { type: [string, 'null'], format: date-time }
+    OpsDeliveryAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempt_number, started_at, finished_at, outcome, duration_ms]
+      properties:
+        attempt_number: { type: integer, minimum: 1 }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        outcome: { type: string, enum: [delivered, retry, dead] }
+        response_status: { type: [integer, 'null'], minimum: 100, maximum: 599 }
+        error_kind: { type: [string, 'null'] }
+        duration_ms: { type: integer, minimum: 0 }
+    OpsDeliveryDetails:
+      type: object
+      additionalProperties: false
+      required: [delivery, attempts]
+      properties:
+        delivery: { $ref: '#/components/schemas/OpsDeliveryItem' }
+        attempts:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/OpsDeliveryAttempt' }
+    OpsRetryResult:
+      type: object
+      additionalProperties: false
+      required: [operation_id, target_type, target_id, status, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        target_type: { type: string, enum: [outbox, delivery] }
+        target_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending] }
+        replayed: { type: boolean }
     FanSignupRequest:
       type: object
       additionalProperties: false

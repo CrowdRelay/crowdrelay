@@ -356,6 +356,14 @@ pub async fn redeem_pass(
     headers: HeaderMap,
     payload: Result<Json<RedeemPassRequest>, JsonRejection>,
 ) -> Response {
+    if !matches!(
+        crate::ecosystem::feature_enabled(&state, "gate_redemption_enabled").await,
+        Ok(true)
+    ) {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    }
     let request_id_value = request_id(&headers);
     if !(bearer_sha256_matches(&headers, state.admission.staff_api_key_sha256)
         || bearer_sha256_matches(&headers, state.admission.admin_api_key_sha256))
