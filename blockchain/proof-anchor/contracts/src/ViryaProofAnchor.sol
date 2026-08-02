@@ -14,11 +14,7 @@ contract ViryaProofAnchor is Ownable2Step {
     error InvalidAnchorSigner();
     error InvalidProof();
     error InvalidBatchLength();
-    error BatchCommitmentConflict(
-        bytes32 batchKey,
-        bytes32 existingCommitment,
-        bytes32 suppliedCommitment
-    );
+    error BatchCommitmentConflict(bytes32 batchKey, bytes32 existingCommitment, bytes32 suppliedCommitment);
 
     address public anchorSigner;
     // One storage word binds root, leaf count and proof schema together.
@@ -26,10 +22,7 @@ contract ViryaProofAnchor is Ownable2Step {
 
     event AnchorSignerChanged(address indexed previousSigner, address indexed newSigner);
     event ProofAnchored(
-        bytes32 indexed batchKey,
-        bytes32 indexed root,
-        uint32 leafCount,
-        bytes32 indexed schemaHash
+        bytes32 indexed batchKey, bytes32 indexed root, uint32 leafCount, bytes32 indexed schemaHash
     );
     event ProofReaffirmed(bytes32 indexed batchKey, bytes32 indexed commitment);
 
@@ -52,12 +45,10 @@ contract ViryaProofAnchor is Ownable2Step {
     }
 
     /// @notice Anchors one CrowdRelay proof idempotently.
-    function anchor(
-        bytes32 batchKey,
-        bytes32 root,
-        uint32 leafCount,
-        bytes32 schemaHash
-    ) external onlyAnchorSigner {
+    function anchor(bytes32 batchKey, bytes32 root, uint32 leafCount, bytes32 schemaHash)
+        external
+        onlyAnchorSigner
+    {
         _anchor(batchKey, root, leafCount, schemaHash);
     }
 
@@ -71,11 +62,8 @@ contract ViryaProofAnchor is Ownable2Step {
     ) external onlyAnchorSigner {
         uint256 length = batchKeys.length;
         if (
-            length == 0 ||
-            length > MAX_BATCH_SIZE ||
-            roots.length != length ||
-            leafCounts.length != length ||
-            schemaHashes.length != length
+            length == 0 || length > MAX_BATCH_SIZE || roots.length != length || leafCounts.length != length
+                || schemaHashes.length != length
         ) revert InvalidBatchLength();
 
         for (uint256 index; index < length;) {
@@ -87,33 +75,23 @@ contract ViryaProofAnchor is Ownable2Step {
     }
 
     /// @notice Computes the exact single-word value stored for a proof.
-    function commitmentFor(
-        bytes32 root,
-        uint32 leafCount,
-        bytes32 schemaHash
-    ) public pure returns (bytes32) {
+    function commitmentFor(bytes32 root, uint32 leafCount, bytes32 schemaHash) public pure returns (bytes32) {
         if (root == bytes32(0) || leafCount == 0 || schemaHash == bytes32(0)) {
             revert InvalidProof();
         }
         return keccak256(abi.encodePacked(root, leafCount, schemaHash));
     }
 
-    function verify(
-        bytes32 batchKey,
-        bytes32 root,
-        uint32 leafCount,
-        bytes32 schemaHash
-    ) external view returns (bool) {
+    function verify(bytes32 batchKey, bytes32 root, uint32 leafCount, bytes32 schemaHash)
+        external
+        view
+        returns (bool)
+    {
         if (batchKey == bytes32(0)) return false;
         return batchCommitments[batchKey] == commitmentFor(root, leafCount, schemaHash);
     }
 
-    function _anchor(
-        bytes32 batchKey,
-        bytes32 root,
-        uint32 leafCount,
-        bytes32 schemaHash
-    ) private {
+    function _anchor(bytes32 batchKey, bytes32 root, uint32 leafCount, bytes32 schemaHash) private {
         if (batchKey == bytes32(0)) revert InvalidProof();
         bytes32 supplied = commitmentFor(root, leafCount, schemaHash);
         bytes32 existing = batchCommitments[batchKey];
