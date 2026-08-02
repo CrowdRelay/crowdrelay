@@ -61,15 +61,32 @@ contract ViryaProofAnchorTest is Test {
         bytes32 schema = keccak256("schema");
         bytes32 otherBatch = keccak256("other");
         bytes32 otherRoot = sha256(bytes("root"));
+        bytes32 commitmentA = anchorContract.commitmentFor(rootA, 1, schema);
+        bytes32 commitmentRootB = anchorContract.commitmentFor(rootB, 1, schema);
+        bytes32 commitmentCount2 = anchorContract.commitmentFor(rootA, 2, schema);
 
         vm.prank(signer);
         anchorContract.anchor(batch, rootA, 1, schema);
 
-        vm.expectRevert(ViryaProofAnchor.BatchCommitmentConflict.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ViryaProofAnchor.BatchCommitmentConflict.selector,
+                batch,
+                commitmentA,
+                commitmentRootB
+            )
+        );
         vm.prank(signer);
         anchorContract.anchor(batch, rootB, 1, schema);
 
-        vm.expectRevert(ViryaProofAnchor.BatchCommitmentConflict.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ViryaProofAnchor.BatchCommitmentConflict.selector,
+                batch,
+                commitmentA,
+                commitmentCount2
+            )
+        );
         vm.prank(signer);
         anchorContract.anchor(batch, rootA, 2, schema);
 
