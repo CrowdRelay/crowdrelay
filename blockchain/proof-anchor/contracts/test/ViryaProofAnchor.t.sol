@@ -69,23 +69,13 @@ contract ViryaProofAnchorTest is Test {
         anchorContract.anchor(batch, rootA, 1, schema);
 
         vm.expectRevert(
-            abi.encodeWithSelector(
-                ViryaProofAnchor.BatchCommitmentConflict.selector,
-                batch,
-                commitmentA,
-                commitmentRootB
-            )
+            abi.encodeWithSelector(ViryaProofAnchor.BatchCommitmentConflict.selector, batch, commitmentA, commitmentRootB)
         );
         vm.prank(signer);
         anchorContract.anchor(batch, rootB, 1, schema);
 
         vm.expectRevert(
-            abi.encodeWithSelector(
-                ViryaProofAnchor.BatchCommitmentConflict.selector,
-                batch,
-                commitmentA,
-                commitmentCount2
-            )
+            abi.encodeWithSelector(ViryaProofAnchor.BatchCommitmentConflict.selector, batch, commitmentA, commitmentCount2)
         );
         vm.prank(signer);
         anchorContract.anchor(batch, rootA, 2, schema);

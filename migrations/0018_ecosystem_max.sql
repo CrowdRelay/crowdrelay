@@ -42,6 +42,7 @@ CREATE TABLE reconciliation_runs (
     finding_count integer NOT NULL DEFAULT 0 CHECK (finding_count >= 0),
     started_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz,
+    UNIQUE (workspace_id, id),
     CHECK ((status = 'running') = (finished_at IS NULL))
 );
 
