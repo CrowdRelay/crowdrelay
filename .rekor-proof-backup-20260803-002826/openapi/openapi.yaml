@@ -1839,14 +1839,14 @@ paths:
   /internal/proofs/claim:
     post:
       operationId: claimExternalProofBatches
-      summary: Lease up to sixteen proof roots to the isolated Rekor anchor
+      summary: Lease up to sixteen proof roots to the isolated relayer
       security: [{ bearerAuth: [] }]
       responses:
         '200': { description: Bounded batch lease. }
   /internal/proofs/{batch_id}/confirm:
     post:
       operationId: confirmExternalProofBatch
-      summary: Record a confirmed Rekor transparency receipt
+      summary: Record an externally confirmed transaction receipt
       security: [{ bearerAuth: [] }]
       parameters:
       - in: path

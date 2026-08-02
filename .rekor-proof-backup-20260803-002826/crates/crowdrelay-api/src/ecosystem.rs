@@ -41,7 +41,7 @@ const FLAG_KEYS: [(&str, bool); 10] = [
     ("n8n_ingress_enabled", true),
     ("automatic_retry_enabled", true),
     ("draw_proofs_enabled", true),
-    ("external_proof_anchoring_enabled", false),
+    ("blockchain_anchoring_enabled", false),
 ];
 
 #[derive(Clone, Copy)]
@@ -445,7 +445,7 @@ async fn ensure_default_flags(state: &crate::AppState) -> Result<(), EcosystemEr
             ('n8n_ingress_enabled', true),
             ('automatic_retry_enabled', true),
             ('draw_proofs_enabled', true),
-            ('external_proof_anchoring_enabled', false)
+            ('blockchain_anchoring_enabled', false)
         ) AS defaults(key, enabled)
         ON CONFLICT (workspace_id, key) DO NOTHING
         "#,

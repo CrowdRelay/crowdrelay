@@ -3,24 +3,20 @@ name: External proofs
 on:
   pull_request:
     paths:
-      - "proofs/rekor-anchor/**"
+      - "blockchain/proof-anchor/**"
       - "crates/crowdrelay-api/src/proofs.rs"
       - "crates/crowdrelay-worker/src/draws.rs"
       - "migrations/0020_external_proofs.sql"
-      - "migrations/0021_rekor_proof_anchor.sql"
       - "scripts/verify-external-proof.py"
-      - "scripts/verify-rekor-proof.mjs"
       - ".github/workflows/external-proofs.yml"
   push:
     branches: [main]
     paths:
-      - "proofs/rekor-anchor/**"
+      - "blockchain/proof-anchor/**"
       - "crates/crowdrelay-api/src/proofs.rs"
       - "crates/crowdrelay-worker/src/draws.rs"
       - "migrations/0020_external_proofs.sql"
-      - "migrations/0021_rekor_proof_anchor.sql"
       - "scripts/verify-external-proof.py"
-      - "scripts/verify-rekor-proof.mjs"
       - ".github/workflows/external-proofs.yml"
 
 concurrency:
@@ -31,7 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  local-proof-verifier:
+  verifier:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,21 +37,11 @@ jobs:
       - run: python3 -m py_compile scripts/verify-external-proof.py
       - run: python3 scripts/verify-external-proof.py self-test
 
-  rekor-verifier:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - run: node --check scripts/verify-rekor-proof.mjs
-      - run: node scripts/verify-rekor-proof.mjs self-test
-
-  rekor-anchor:
+  relayer:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: proofs/rekor-anchor/relayer
+        working-directory: blockchain/proof-anchor/relayer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -63,4 +49,17 @@ jobs:
           node-version: "22"
       - run: node --check index.mjs && node --check proof-utils.mjs
       - run: node --test proof-utils.test.mjs
-      - run: docker build --tag virya-rekor-proof-anchor:test .
+      - run: docker build --tag virya-proof-anchor-relayer:test .
+
+  contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: blockchain/proof-anchor/contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge install OpenZeppelin/openzeppelin-contracts@v5.6.1 --no-git
+      - run: forge install foundry-rs/forge-std --no-git
+      - run: forge fmt --check
+      - run: forge test -vv

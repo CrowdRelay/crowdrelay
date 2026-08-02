@@ -1,0 +1,35 @@
+services:
+  rekor-proof-anchor:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    environment:
+      CROWDRELAY_INTERNAL_URL: ${CROWDRELAY_INTERNAL_URL}
+      REKOR_URL: ${REKOR_URL:-https://rekor.sigstore.dev}
+      ANCHOR_WORKER_ID: ${ANCHOR_WORKER_ID:-virya-rekor-anchor-01}
+      ANCHOR_PENDING_FILE: /data/pending-confirmation.json
+    secrets:
+      - crowdrelay_commerce_api_key
+      - rekor_signing_key
+    volumes:
+      - rekor-anchor-state:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+secrets:
+  crowdrelay_commerce_api_key:
+    file: ./secrets/crowdrelay_commerce_api_key
+  rekor_signing_key:
+    file: ./secrets/rekor_signing_key.pem
+
+volumes:
+  rekor-anchor-state:

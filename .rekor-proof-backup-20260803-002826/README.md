@@ -96,6 +96,6 @@ restore/load/contract tooling. See `docs/ECOSYSTEM_MAX.md`.
 ## Optional external proofs
 
 CrowdRelay can create public SHA-256 draw receipts and Merkle commitments for
-append-only audit records, then optionally publish signed commitments to the
-Sigstore Rekor transparency log. PostgreSQL remains authoritative and Rekor
-availability never enters a critical path. See `docs/EXTERNAL_PROOFS.md`.
+append-only audit records, then optionally anchor roots through an isolated EVM
+relayer. PostgreSQL remains authoritative and chain availability never enters a
+critical path. See `docs/EXTERNAL_PROOFS.md`.

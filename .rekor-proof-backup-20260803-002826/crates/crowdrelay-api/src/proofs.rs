@@ -1,8 +1,8 @@
 //! Optional externally anchored proofs for draws and append-only audit ledgers.
 //!
 //! PostgreSQL remains authoritative. This module only commits deterministic
-//! SHA-256 roots to an asynchronous queue. No external log request or signing
-//! operation is performed by the API, and a disabled/unavailable anchor never blocks normal
+//! SHA-256 roots to an asynchronous queue. No chain RPC or signing operation is
+//! performed by the API, and a disabled/unavailable relayer never blocks normal
 //! CrowdRelay traffic.
 
 use std::future::Future;
@@ -13,7 +13,6 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -45,15 +44,13 @@ struct BatchRow {
     attempts: i32,
     max_attempts: i32,
     available_at: OffsetDateTime,
-    anchor_kind: Option<String>,
-    anchor_url: Option<String>,
-    anchor_entry_id: Option<String>,
-    anchor_sequence: Option<i64>,
-    anchor_integrated_at: Option<OffsetDateTime>,
-    anchor_log_id: Option<String>,
-    anchor_receipt: Option<Value>,
-    signer_fingerprint: Option<String>,
-    signed_payload_sha256: Option<Vec<u8>>,
+    chain_namespace: Option<String>,
+    chain_id: Option<i64>,
+    contract_address: Option<String>,
+    transaction_hash: Option<String>,
+    block_number: Option<i64>,
+    transaction_batch_index: Option<i32>,
+    block_hash: Option<String>,
     last_error_kind: Option<String>,
     lock_owner: Option<String>,
     created_at: OffsetDateTime,
@@ -74,15 +71,13 @@ pub struct ProofBatchView {
     attempts: i32,
     max_attempts: i32,
     available_at: OffsetDateTime,
-    anchor_kind: Option<String>,
-    anchor_url: Option<String>,
-    anchor_entry_id: Option<String>,
-    anchor_sequence: Option<i64>,
-    anchor_integrated_at: Option<OffsetDateTime>,
-    anchor_log_id: Option<String>,
-    anchor_receipt: Option<Value>,
-    signer_fingerprint: Option<String>,
-    signed_payload_sha256: Option<String>,
+    chain_namespace: Option<String>,
+    chain_id: Option<i64>,
+    contract_address: Option<String>,
+    transaction_hash: Option<String>,
+    block_number: Option<i64>,
+    transaction_batch_index: Option<i32>,
+    block_hash: Option<String>,
     last_error_kind: Option<String>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
@@ -105,19 +100,13 @@ impl TryFrom<BatchRow> for ProofBatchView {
             attempts: row.attempts,
             max_attempts: row.max_attempts,
             available_at: row.available_at,
-            anchor_kind: row.anchor_kind,
-            anchor_url: row.anchor_url,
-            anchor_entry_id: row.anchor_entry_id,
-            anchor_sequence: row.anchor_sequence,
-            anchor_integrated_at: row.anchor_integrated_at,
-            anchor_log_id: row.anchor_log_id,
-            anchor_receipt: row.anchor_receipt,
-            signer_fingerprint: row.signer_fingerprint,
-            signed_payload_sha256: row
-                .signed_payload_sha256
-                .as_deref()
-                .map(encode_hash)
-                .transpose()?,
+            chain_namespace: row.chain_namespace,
+            chain_id: row.chain_id,
+            contract_address: row.contract_address,
+            transaction_hash: row.transaction_hash,
+            block_number: row.block_number,
+            transaction_batch_index: row.transaction_batch_index,
+            block_hash: row.block_hash,
             last_error_kind: row.last_error_kind,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -194,15 +183,13 @@ struct DrawProofRow {
     winner_snapshot_sha256: Vec<u8>,
     batch_id: Uuid,
     batch_status: String,
-    anchor_kind: Option<String>,
-    anchor_url: Option<String>,
-    anchor_entry_id: Option<String>,
-    anchor_sequence: Option<i64>,
-    anchor_integrated_at: Option<OffsetDateTime>,
-    anchor_log_id: Option<String>,
-    anchor_receipt: Option<Value>,
-    signer_fingerprint: Option<String>,
-    signed_payload_sha256: Option<Vec<u8>>,
+    chain_namespace: Option<String>,
+    chain_id: Option<i64>,
+    contract_address: Option<String>,
+    transaction_hash: Option<String>,
+    block_number: Option<i64>,
+    transaction_batch_index: Option<i32>,
+    block_hash: Option<String>,
     confirmed_at: Option<OffsetDateTime>,
     completed_at: OffsetDateTime,
 }
@@ -232,15 +219,13 @@ pub struct PublicDrawProof {
 pub struct PublicAnchor {
     batch_id: Uuid,
     status: String,
-    anchor_kind: Option<String>,
-    anchor_url: Option<String>,
-    entry_id: Option<String>,
-    sequence: Option<i64>,
-    integrated_at: Option<OffsetDateTime>,
-    log_id: Option<String>,
-    receipt: Option<Value>,
-    signer_fingerprint: Option<String>,
-    signed_payload_sha256: Option<String>,
+    chain_namespace: Option<String>,
+    chain_id: Option<i64>,
+    contract_address: Option<String>,
+    transaction_hash: Option<String>,
+    block_number: Option<i64>,
+    transaction_batch_index: Option<i32>,
+    block_hash: Option<String>,
     confirmed_at: Option<OffsetDateTime>,
 }
 
@@ -273,19 +258,13 @@ pub struct RelayerBatch {
 #[serde(deny_unknown_fields)]
 pub struct ConfirmRequest {
     worker_id: String,
-    anchor_kind: String,
-    anchor_url: String,
-    entry_uuid: String,
-    log_index: i64,
-    integrated_time: i64,
-    log_id: String,
-    canonicalized_body: String,
-    signed_entry_timestamp: String,
-    inclusion_proof: Value,
-    signer_fingerprint: String,
-    signature_base64: String,
-    public_key_pem: String,
-    payload_sha256: String,
+    chain_namespace: String,
+    chain_id: i64,
+    contract_address: String,
+    transaction_hash: String,
+    block_number: i64,
+    block_hash: String,
+    transaction_batch_index: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,9 +304,9 @@ pub async fn admin_list_batches(
                 r#"
                 SELECT id, proof_kind, schema_version, hash_algorithm, tree_algorithm,
                        root_sha256, leaf_count, status, attempts, max_attempts,
-                       available_at, anchor_kind, anchor_url, anchor_entry_id,
-                       anchor_sequence, anchor_integrated_at, anchor_log_id, anchor_receipt,
-                       signer_fingerprint, signed_payload_sha256, last_error_kind, lock_owner, created_at, updated_at, confirmed_at
+                       available_at, chain_namespace, chain_id, contract_address,
+                       transaction_hash, block_number, transaction_batch_index, block_hash,
+                       last_error_kind, lock_owner, created_at, updated_at, confirmed_at
                 FROM external_proof_batches
                 WHERE workspace_id = $1 AND status = $2
                 ORDER BY created_at DESC, id DESC
@@ -345,9 +324,9 @@ pub async fn admin_list_batches(
                 r#"
                 SELECT id, proof_kind, schema_version, hash_algorithm, tree_algorithm,
                        root_sha256, leaf_count, status, attempts, max_attempts,
-                       available_at, anchor_kind, anchor_url, anchor_entry_id,
-                       anchor_sequence, anchor_integrated_at, anchor_log_id, anchor_receipt,
-                       signer_fingerprint, signed_payload_sha256, last_error_kind, lock_owner, created_at, updated_at, confirmed_at
+                       available_at, chain_namespace, chain_id, contract_address,
+                       transaction_hash, block_number, transaction_batch_index, block_hash,
+                       last_error_kind, lock_owner, created_at, updated_at, confirmed_at
                 FROM external_proof_batches
                 WHERE workspace_id = $1
                 ORDER BY created_at DESC, id DESC
@@ -715,9 +694,8 @@ async fn load_batch_row(state: &crate::AppState, batch_id: Uuid) -> Result<Batch
         r#"
         SELECT id, proof_kind, schema_version, hash_algorithm, tree_algorithm,
                root_sha256, leaf_count, status, attempts, max_attempts,
-               available_at, anchor_kind, anchor_url, anchor_entry_id,
-                       anchor_sequence, anchor_integrated_at, anchor_log_id, anchor_receipt,
-                       signer_fingerprint, signed_payload_sha256, last_error_kind, lock_owner,
+               available_at, chain_namespace, chain_id, contract_address,
+               transaction_hash, block_number, transaction_batch_index, block_hash, last_error_kind, lock_owner,
                created_at, updated_at, confirmed_at
         FROM external_proof_batches
         WHERE workspace_id = $1 AND id = $2
@@ -740,9 +718,8 @@ async fn load_batch_tx(
         r#"
         SELECT id, proof_kind, schema_version, hash_algorithm, tree_algorithm,
                root_sha256, leaf_count, status, attempts, max_attempts,
-               available_at, anchor_kind, anchor_url, anchor_entry_id,
-                       anchor_sequence, anchor_integrated_at, anchor_log_id, anchor_receipt,
-                       signer_fingerprint, signed_payload_sha256, last_error_kind, lock_owner,
+               available_at, chain_namespace, chain_id, contract_address,
+               transaction_hash, block_number, transaction_batch_index, block_hash, last_error_kind, lock_owner,
                created_at, updated_at, confirmed_at
         FROM external_proof_batches
         WHERE workspace_id = $1 AND id = $2
@@ -832,15 +809,13 @@ async fn load_draw_proof(
                proof.winner_snapshot_sha256,
                batch.id AS batch_id,
                batch.status AS batch_status,
-               batch.anchor_kind,
-               batch.anchor_url,
-               batch.anchor_entry_id,
-               batch.anchor_sequence,
-               batch.anchor_integrated_at,
-               batch.anchor_log_id,
-               batch.anchor_receipt,
-               batch.signer_fingerprint,
-               batch.signed_payload_sha256,
+               batch.chain_namespace,
+               batch.chain_id,
+               batch.contract_address,
+               batch.transaction_hash,
+               batch.block_number,
+               batch.transaction_batch_index,
+               batch.block_hash,
                batch.confirmed_at,
                run.completed_at
         FROM reward_draws AS draw
@@ -895,19 +870,13 @@ async fn load_draw_proof(
         anchor: PublicAnchor {
             batch_id: row.batch_id,
             status: row.batch_status,
-            anchor_kind: row.anchor_kind,
-            anchor_url: row.anchor_url,
-            entry_id: row.anchor_entry_id,
-            sequence: row.anchor_sequence,
-            integrated_at: row.anchor_integrated_at,
-            log_id: row.anchor_log_id,
-            receipt: row.anchor_receipt,
-            signer_fingerprint: row.signer_fingerprint,
-            signed_payload_sha256: row
-                .signed_payload_sha256
-                .as_deref()
-                .map(encode_hash)
-                .transpose()?,
+            chain_namespace: row.chain_namespace,
+            chain_id: row.chain_id,
+            contract_address: row.contract_address,
+            transaction_hash: row.transaction_hash,
+            block_number: row.block_number,
+            transaction_batch_index: row.transaction_batch_index,
+            block_hash: row.block_hash,
             confirmed_at: row.confirmed_at,
         },
         completed_at: row.completed_at,
@@ -921,7 +890,7 @@ async fn claim_batches(
     limit: i64,
 ) -> Result<ClaimResponse, ProofError> {
     if !matches!(
-        ecosystem::feature_enabled(state, "external_proof_anchoring_enabled").await,
+        ecosystem::feature_enabled(state, "blockchain_anchoring_enabled").await,
         Ok(true)
     ) {
         return Ok(ClaimResponse {
@@ -1038,21 +1007,6 @@ async fn confirm_batch(
     request_id_value: Option<&str>,
 ) -> Result<ProofBatchView, ProofError> {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let entry_id = payload.entry_uuid.to_ascii_lowercase();
-    let log_id = payload.log_id.to_ascii_lowercase();
-    let signer_fingerprint = payload.signer_fingerprint.to_ascii_lowercase();
-    let signed_payload =
-        hex::decode(&payload.payload_sha256).map_err(|_| ProofError::BadRequest)?;
-    let integrated_at = OffsetDateTime::from_unix_timestamp(payload.integrated_time)
-        .map_err(|_| ProofError::BadRequest)?;
-    let receipt = json!({
-        "canonicalized_body": &payload.canonicalized_body,
-        "signed_entry_timestamp": &payload.signed_entry_timestamp,
-        "inclusion_proof": &payload.inclusion_proof,
-        "signature_base64": &payload.signature_base64,
-        "public_key_pem": &payload.public_key_pem,
-    });
-
     let mut tx = state
         .ticketing
         .pool()
@@ -1064,9 +1018,8 @@ async fn confirm_batch(
         r#"
         SELECT id, proof_kind, schema_version, hash_algorithm, tree_algorithm,
                root_sha256, leaf_count, status, attempts, max_attempts,
-               available_at, anchor_kind, anchor_url, anchor_entry_id,
-               anchor_sequence, anchor_integrated_at, anchor_log_id, anchor_receipt,
-               signer_fingerprint, signed_payload_sha256, last_error_kind, lock_owner,
+               available_at, chain_namespace, chain_id, contract_address,
+               transaction_hash, block_number, transaction_batch_index, block_hash, last_error_kind, lock_owner,
                created_at, updated_at, confirmed_at
         FROM external_proof_batches
         WHERE workspace_id = $1 AND id = $2
@@ -1079,24 +1032,17 @@ async fn confirm_batch(
     .await
     .map_err(ProofError::sqlx)?
     .ok_or(ProofError::NotFound)?;
-
-    let expected_payload = proof_anchor_payload(&existing)?;
-    let expected_signed_payload: [u8; 32] = Sha256::digest(expected_payload.as_bytes()).into();
-    if signed_payload.as_slice() != expected_signed_payload.as_ref() {
-        return Err(ProofError::Conflict);
-    }
-    validate_rekor_receipt(&payload, expected_payload.as_bytes())?;
-
     if existing.status == "confirmed" {
-        if existing.anchor_kind.as_deref() != Some(payload.anchor_kind.as_str())
-            || existing.anchor_url.as_deref() != Some(payload.anchor_url.as_str())
-            || existing.anchor_entry_id.as_deref() != Some(entry_id.as_str())
-            || existing.anchor_sequence != Some(payload.log_index)
-            || existing.anchor_integrated_at != Some(integrated_at)
-            || existing.anchor_log_id.as_deref() != Some(log_id.as_str())
-            || existing.anchor_receipt.as_ref() != Some(&receipt)
-            || existing.signer_fingerprint.as_deref() != Some(signer_fingerprint.as_str())
-            || existing.signed_payload_sha256.as_deref() != Some(signed_payload.as_slice())
+        let transaction_hash = payload.transaction_hash.to_ascii_lowercase();
+        let contract_address = payload.contract_address.to_ascii_lowercase();
+        let block_hash = payload.block_hash.to_ascii_lowercase();
+        if existing.chain_namespace.as_deref() != Some(payload.chain_namespace.as_str())
+            || existing.transaction_hash.as_deref() != Some(transaction_hash.as_str())
+            || existing.chain_id != Some(payload.chain_id)
+            || existing.contract_address.as_deref() != Some(contract_address.as_str())
+            || existing.block_number != Some(payload.block_number)
+            || existing.transaction_batch_index != Some(payload.transaction_batch_index)
+            || existing.block_hash.as_deref() != Some(block_hash.as_str())
         {
             return Err(ProofError::Conflict);
         }
@@ -1104,7 +1050,7 @@ async fn confirm_batch(
         return ProofBatchView::try_from(existing);
     }
     if existing.status != "processing"
-        || existing.anchor_kind.is_some()
+        || existing.chain_namespace.is_some()
         || existing.lock_owner.as_deref() != Some(payload.worker_id.as_str())
     {
         return Err(ProofError::Conflict);
@@ -1114,30 +1060,26 @@ async fn confirm_batch(
         r#"
         UPDATE external_proof_batches
         SET status = 'confirmed', locked_at = NULL, lock_owner = NULL,
-            lease_expires_at = NULL,
-            anchor_kind = $3, anchor_url = $4, anchor_entry_id = $5,
-            anchor_sequence = $6, anchor_integrated_at = $7, anchor_log_id = $8,
-            anchor_receipt = $9, signer_fingerprint = $10,
-            signed_payload_sha256 = $11, confirmed_at = now(),
+            lease_expires_at = NULL, chain_namespace = $3, chain_id = $4,
+            contract_address = lower($5), transaction_hash = lower($6),
+            block_number = $7, transaction_batch_index = $8,
+            block_hash = lower($9), confirmed_at = now(),
             last_error_kind = NULL
         WHERE workspace_id = $1 AND id = $2
         "#,
     )
     .bind(workspace_id)
     .bind(batch_id)
-    .bind(&payload.anchor_kind)
-    .bind(&payload.anchor_url)
-    .bind(&entry_id)
-    .bind(payload.log_index)
-    .bind(integrated_at)
-    .bind(&log_id)
-    .bind(&receipt)
-    .bind(&signer_fingerprint)
-    .bind(&signed_payload)
+    .bind(&payload.chain_namespace)
+    .bind(payload.chain_id)
+    .bind(&payload.contract_address)
+    .bind(&payload.transaction_hash)
+    .bind(payload.block_number)
+    .bind(payload.transaction_batch_index)
+    .bind(&payload.block_hash)
     .execute(&mut *tx)
     .await
     .map_err(ProofError::sqlx)?;
-
     append_audit(
         &mut tx,
         workspace_id,
@@ -1145,34 +1087,33 @@ async fn confirm_batch(
         batch_id,
         request_id_value,
         json!({
-            "anchor_kind": &payload.anchor_kind,
-            "anchor_url": &payload.anchor_url,
-            "entry_id": &entry_id,
-            "sequence": payload.log_index,
-            "integrated_time": payload.integrated_time,
-            "log_id": &log_id,
-            "signer_fingerprint": &signer_fingerprint,
-            "signed_payload_sha256": &payload.payload_sha256,
+            "chain_namespace": &payload.chain_namespace,
+            "chain_id": payload.chain_id,
+            "contract_address": payload.contract_address.to_ascii_lowercase(),
+            "transaction_hash": payload.transaction_hash.to_ascii_lowercase(),
+            "block_number": payload.block_number,
+            "transaction_batch_index": payload.transaction_batch_index,
+            "block_hash": payload.block_hash.to_ascii_lowercase()
         }),
     )
     .await?;
     append_outbox(
         &mut tx,
         workspace_id,
-        "proof.anchor.confirmed",
+        "blockchain.proof.confirmed",
         batch_id,
         request_id_value,
         json!({
             "batch_id": batch_id,
             "proof_kind": existing.proof_kind,
             "root_sha256": encode_hash(&existing.root_sha256)?,
-            "anchor_kind": &payload.anchor_kind,
-            "anchor_url": &payload.anchor_url,
-            "entry_id": &entry_id,
-            "sequence": payload.log_index,
-            "integrated_time": payload.integrated_time,
-            "log_id": &log_id,
-            "signer_fingerprint": &signer_fingerprint,
+            "chain_namespace": &payload.chain_namespace,
+            "chain_id": payload.chain_id,
+            "contract_address": payload.contract_address.to_ascii_lowercase(),
+            "transaction_hash": payload.transaction_hash.to_ascii_lowercase(),
+            "block_number": payload.block_number,
+            "transaction_batch_index": payload.transaction_batch_index,
+            "block_hash": payload.block_hash.to_ascii_lowercase()
         }),
     )
     .await?;
@@ -1253,7 +1194,7 @@ async fn fail_batch(
         append_outbox(
             &mut tx,
             workspace_id,
-            "proof.anchor.dead",
+            "blockchain.proof.dead",
             batch_id,
             request_id_value,
             json!({
@@ -1271,114 +1212,25 @@ async fn fail_batch(
     Ok(batch)
 }
 
-fn proof_anchor_payload(batch: &BatchRow) -> Result<String, ProofError> {
-    let proof_kind =
-        serde_json::to_string(&batch.proof_kind).map_err(|_| ProofError::Unexpected)?;
-    let tree_algorithm =
-        serde_json::to_string(&batch.tree_algorithm).map_err(|_| ProofError::Unexpected)?;
-    let root_sha256 = encode_hash(&batch.root_sha256)?;
-    Ok(format!(
-        concat!(
-            r#"{{"batch_id":"{}","hash_algorithm":"sha256","leaf_count":{},"proof_kind":{},"#,
-            r#""root_sha256":"{}","schema":"crowdrelay/proof-anchor/v1","schema_version":{},"#,
-            r#""tree_algorithm":{}}}"#
-        ),
-        batch.id, batch.leaf_count, proof_kind, root_sha256, batch.schema_version, tree_algorithm,
-    ))
-}
-
-fn validate_rekor_receipt(
-    payload: &ConfirmRequest,
-    expected_payload: &[u8],
-) -> Result<(), ProofError> {
-    let body_bytes = BASE64_STANDARD
-        .decode(&payload.canonicalized_body)
-        .map_err(|_| ProofError::BadRequest)?;
-    let body: Value = serde_json::from_slice(&body_bytes).map_err(|_| ProofError::BadRequest)?;
-    let embedded_payload = body
-        .pointer("/spec/data/content")
-        .and_then(Value::as_str)
-        .ok_or(ProofError::BadRequest)
-        .and_then(|value| {
-            BASE64_STANDARD
-                .decode(value)
-                .map_err(|_| ProofError::BadRequest)
-        })?;
-    let embedded_signature = body
-        .pointer("/spec/signature/content")
-        .and_then(Value::as_str)
-        .ok_or(ProofError::BadRequest)?;
-    let embedded_key = body
-        .pointer("/spec/signature/publicKey/content")
-        .and_then(Value::as_str)
-        .ok_or(ProofError::BadRequest)?;
-    let expected_key = BASE64_STANDARD.encode(payload.public_key_pem.as_bytes());
-    if body.get("apiVersion").and_then(Value::as_str) != Some("0.0.1")
-        || body.get("kind").and_then(Value::as_str) != Some("rekord")
-        || body
-            .pointer("/spec/signature/format")
-            .and_then(Value::as_str)
-            != Some("x509")
-        || embedded_payload.as_slice() != expected_payload
-        || embedded_signature != payload.signature_base64
-        || embedded_key != expected_key.as_str()
-    {
-        return Err(ProofError::Conflict);
-    }
-    Ok(())
-}
-
 fn valid_confirm(payload: &ConfirmRequest) -> bool {
     valid_worker_id(&payload.worker_id)
-        && payload.anchor_kind == "sigstore.rekor.v1"
-        && payload.anchor_url.starts_with("https://")
-        && payload.anchor_url.len() <= 512
-        && !payload
-            .anchor_url
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace())
-        && (64..=128).contains(&payload.entry_uuid.len())
-        && is_lower_hex(&payload.entry_uuid)
-        && payload.log_index >= 0
-        && payload.integrated_time > 0
-        && payload.log_id.len() == 64
-        && is_lower_hex(&payload.log_id)
-        && payload.canonicalized_body.len() <= 200_000
-        && is_base64_value(&payload.canonicalized_body)
-        && payload.signed_entry_timestamp.len() <= 16_384
-        && is_base64_value(&payload.signed_entry_timestamp)
-        && payload.inclusion_proof.is_object()
-        && serde_json::to_vec(&payload.inclusion_proof).is_ok_and(|encoded| encoded.len() <= 65_536)
-        && payload
-            .signer_fingerprint
-            .strip_prefix("sha256:")
-            .is_some_and(|hash| hash.len() == 64 && is_lower_hex(hash))
-        && payload.signature_base64.len() <= 16_384
-        && is_base64_value(&payload.signature_base64)
-        && payload.public_key_pem.len() <= 16_384
-        && payload
-            .public_key_pem
-            .starts_with("-----BEGIN PUBLIC KEY-----")
-        && payload
-            .public_key_pem
-            .trim_end()
-            .ends_with("-----END PUBLIC KEY-----")
-        && payload.payload_sha256.len() == 64
-        && is_lower_hex(&payload.payload_sha256)
+        && payload.chain_namespace.len() >= 2
+        && payload.chain_namespace.len() <= 32
+        && payload.chain_namespace.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && payload.chain_id > 0
+        && payload.block_number >= 0
+        && payload.transaction_batch_index >= 0
+        && valid_hex(&payload.contract_address, 40)
+        && valid_hex(&payload.transaction_hash, 64)
+        && valid_hex(&payload.block_hash, 64)
 }
 
-fn is_lower_hex(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn is_base64_value(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+fn valid_hex(value: &str, digits: usize) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == digits && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn valid_worker_id(value: &str) -> bool {
@@ -1764,12 +1616,10 @@ mod tests {
     }
 
     #[test]
-    fn anchor_input_validation_is_strict() {
-        assert!(valid_worker_id("virya-rekor-anchor-01"));
+    fn relayer_input_validation_is_strict() {
+        assert!(valid_worker_id("virya-anchor-01"));
         assert!(!valid_worker_id("bad worker"));
-        assert!(is_lower_hex(&"ab".repeat(32)));
-        assert!(!is_lower_hex("ABCD"));
-        assert!(is_base64_value("dGVzdA=="));
-        assert!(!is_base64_value("not base64!"));
+        assert!(valid_hex(&format!("0x{}", "ab".repeat(20)), 40));
+        assert!(!valid_hex("0x1234", 40));
     }
 }

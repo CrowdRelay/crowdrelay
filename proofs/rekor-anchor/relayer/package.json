@@ -1,0 +1,11 @@
+{
+  "name": "@virya/rekor-proof-anchor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "check": "node --check index.mjs && node --check proof-utils.mjs",
+    "test": "node --test proof-utils.test.mjs"
+  }
+}
