@@ -738,6 +738,31 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+
+  /admin/signal/overview:
+    get:
+      operationId: getSignalOverview
+      summary: Aggregate Virya Signal growth, consent and engagement health
+      description: >
+        Owner-only aggregate snapshot. The response never contains fan identifiers,
+        e-mail addresses, display names, consent history, or event payloads.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Aggregate-only Signal control-plane snapshot.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalOverview'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+
   /admin/ops/summary:
     get:
       operationId: getOperationsSummary
@@ -2138,6 +2163,147 @@ components:
         target_id: { type: string, format: uuid }
         status: { type: string, enum: [pending] }
         replayed: { type: boolean }
+
+    SignalOverview:
+      type: object
+      additionalProperties: false
+      required:
+      - generated_at
+      - summary
+      - activity
+      - top_cities
+      - unavailable_sources
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        summary:
+          $ref: '#/components/schemas/SignalFanSummary'
+        activity:
+          $ref: '#/components/schemas/SignalActivitySummary'
+        top_cities:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/SignalCitySummary'
+        unavailable_sources:
+          type: array
+          maxItems: 8
+          items:
+            type: string
+            enum:
+            - top_cities
+    SignalFanSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - total_fans
+      - active_fans
+      - pending_fans
+      - unsubscribed_fans
+      - suppressed_fans
+      - marketing_opted_in
+      - nearby_enabled
+      properties:
+        total_fans:
+          type: integer
+          format: int64
+          minimum: 0
+        active_fans:
+          type: integer
+          format: int64
+          minimum: 0
+        pending_fans:
+          type: integer
+          format: int64
+          minimum: 0
+        unsubscribed_fans:
+          type: integer
+          format: int64
+          minimum: 0
+        suppressed_fans:
+          type: integer
+          format: int64
+          minimum: 0
+        marketing_opted_in:
+          type: integer
+          format: int64
+          minimum: 0
+        nearby_enabled:
+          type: integer
+          format: int64
+          minimum: 0
+    SignalActivitySummary:
+      type: object
+      additionalProperties: false
+      required:
+      - new_fans_7d
+      - new_fans_30d
+      - referral_attributions_total
+      - referral_attributions_30d
+      - event_interests_total
+      - event_interests_30d
+      - nearby_notifications_30d
+      - pending_city_requests
+      properties:
+        new_fans_7d:
+          type: integer
+          format: int64
+          minimum: 0
+        new_fans_30d:
+          type: integer
+          format: int64
+          minimum: 0
+        referral_attributions_total:
+          type: integer
+          format: int64
+          minimum: 0
+        referral_attributions_30d:
+          type: integer
+          format: int64
+          minimum: 0
+        event_interests_total:
+          type: integer
+          format: int64
+          minimum: 0
+        event_interests_30d:
+          type: integer
+          format: int64
+          minimum: 0
+        nearby_notifications_30d:
+          type: integer
+          format: int64
+          minimum: 0
+        pending_city_requests:
+          type: integer
+          format: int64
+          minimum: 0
+    SignalCitySummary:
+      type: object
+      additionalProperties: false
+      required:
+      - slug
+      - name
+      - country_code
+      - active_fans
+      properties:
+        slug:
+          type: string
+          minLength: 1
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        country_code:
+          type: string
+          minLength: 2
+          maxLength: 2
+        active_fans:
+          type: integer
+          format: int64
+          minimum: 0
+
     FanSignupRequest:
       type: object
       additionalProperties: false

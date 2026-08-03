@@ -370,6 +370,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             "/v1/admin/proofs/audit-batches",
             post(proofs::admin_create_audit_batch),
         )
+        .route("/v1/admin/signal/overview", get(ops::signal_overview))
         .route("/v1/admin/ops/summary", get(ops::summary))
         .route("/v1/admin/ops/outbox", get(ops::list_outbox))
         .route("/v1/admin/ops/deliveries", get(ops::list_deliveries))

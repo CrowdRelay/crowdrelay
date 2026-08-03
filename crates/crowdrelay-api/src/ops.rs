@@ -190,6 +190,70 @@ pub struct RetryResult {
     replayed: bool,
 }
 
+/// Aggregate-only owner view of Virya Signal health and growth.
+///
+/// The response intentionally contains no e-mail addresses, display names,
+/// fan identifiers, consent history, or raw event payloads.
+#[derive(Debug, Serialize)]
+pub struct SignalOverview {
+    #[serde(with = "time::serde::rfc3339")]
+    generated_at: OffsetDateTime,
+    summary: SignalFanSummary,
+    activity: SignalActivitySummary,
+    top_cities: Vec<SignalCitySummary>,
+    unavailable_sources: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SignalFanSummary {
+    total_fans: i64,
+    active_fans: i64,
+    pending_fans: i64,
+    unsubscribed_fans: i64,
+    suppressed_fans: i64,
+    marketing_opted_in: i64,
+    nearby_enabled: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SignalActivitySummary {
+    new_fans_7d: i64,
+    new_fans_30d: i64,
+    referral_attributions_total: i64,
+    referral_attributions_30d: i64,
+    event_interests_total: i64,
+    event_interests_30d: i64,
+    nearby_notifications_30d: i64,
+    pending_city_requests: i64,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct SignalCitySummary {
+    slug: String,
+    name: String,
+    country_code: String,
+    active_fans: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct SignalSummaryRow {
+    total_fans: i64,
+    active_fans: i64,
+    pending_fans: i64,
+    unsubscribed_fans: i64,
+    suppressed_fans: i64,
+    marketing_opted_in: i64,
+    nearby_enabled: i64,
+    new_fans_7d: i64,
+    new_fans_30d: i64,
+    referral_attributions_total: i64,
+    referral_attributions_30d: i64,
+    event_interests_total: i64,
+    event_interests_30d: i64,
+    nearby_notifications_30d: i64,
+    pending_city_requests: i64,
+}
+
 #[derive(Debug, FromRow)]
 struct ExistingAction {
     id: Uuid,
@@ -203,6 +267,44 @@ pub async fn summary(State(state): State<crate::AppState>, headers: HeaderMap) -
         Ok(summary) => private_json(StatusCode::OK, summary),
         Err(error) => error.into_response(request_id(&headers)),
     }
+}
+
+/// Returns an aggregate-only owner dashboard for Virya Signal.
+///
+/// The core summary is required. Top-city aggregation is deliberately treated
+/// as an optional source so a secondary analytics query cannot take down the
+/// whole control plane.
+pub async fn signal_overview(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let summary_future =
+        run_with_timeout(state.ops.operation_timeout, load_signal_summary(&state.ops));
+    let cities_future = run_with_timeout(
+        state.ops.operation_timeout,
+        load_signal_top_cities(&state.ops),
+    );
+    let (summary_result, cities_result) = tokio::join!(summary_future, cities_future);
+
+    let summary = match summary_result {
+        Ok(summary) => summary,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+
+    let mut unavailable_sources = Vec::new();
+    let top_cities = match cities_result {
+        Ok(cities) => cities,
+        Err(error) => {
+            tracing::warn!(
+                error_kind = ?error,
+                "signal top-city aggregation is unavailable"
+            );
+            unavailable_sources.push("top_cities");
+            Vec::new()
+        }
+    };
+
+    private_json(
+        StatusCode::OK,
+        signal_overview_from_row(summary, top_cities, unavailable_sources),
+    )
 }
 
 pub async fn list_outbox(
@@ -590,6 +692,176 @@ async fn load_existing_action(
     .map_err(OpsError::sqlx)
 }
 
+fn signal_overview_from_row(
+    row: SignalSummaryRow,
+    top_cities: Vec<SignalCitySummary>,
+    unavailable_sources: Vec<&'static str>,
+) -> SignalOverview {
+    SignalOverview {
+        generated_at: OffsetDateTime::now_utc(),
+        summary: SignalFanSummary {
+            total_fans: row.total_fans,
+            active_fans: row.active_fans,
+            pending_fans: row.pending_fans,
+            unsubscribed_fans: row.unsubscribed_fans,
+            suppressed_fans: row.suppressed_fans,
+            marketing_opted_in: row.marketing_opted_in,
+            nearby_enabled: row.nearby_enabled,
+        },
+        activity: SignalActivitySummary {
+            new_fans_7d: row.new_fans_7d,
+            new_fans_30d: row.new_fans_30d,
+            referral_attributions_total: row.referral_attributions_total,
+            referral_attributions_30d: row.referral_attributions_30d,
+            event_interests_total: row.event_interests_total,
+            event_interests_30d: row.event_interests_30d,
+            nearby_notifications_30d: row.nearby_notifications_30d,
+            pending_city_requests: row.pending_city_requests,
+        },
+        top_cities,
+        unavailable_sources,
+    }
+}
+
+async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsError> {
+    sqlx::query_as::<_, SignalSummaryRow>(
+        r#"
+        WITH latest_marketing AS (
+            SELECT DISTINCT ON (fan_id)
+                   fan_id, granted
+            FROM fan_consents
+            WHERE workspace_id = $1
+              AND purpose = 'marketing'
+            ORDER BY fan_id, recorded_at DESC, id DESC
+        ),
+        fan_summary AS (
+            SELECT
+                count(*) AS total_fans,
+                count(*) FILTER (WHERE status = 'active') AS active_fans,
+                count(*) FILTER (WHERE status = 'pending') AS pending_fans,
+                count(*) FILTER (WHERE status = 'unsubscribed') AS unsubscribed_fans,
+                count(*) FILTER (WHERE status = 'suppressed') AS suppressed_fans,
+                count(*) FILTER (
+                    WHERE status = 'active'
+                      AND created_at >= now() - interval '7 days'
+                ) AS new_fans_7d,
+                count(*) FILTER (
+                    WHERE status = 'active'
+                      AND created_at >= now() - interval '30 days'
+                ) AS new_fans_30d
+            FROM fans
+            WHERE workspace_id = $1
+        ),
+        consent_summary AS (
+            SELECT count(*) FILTER (
+                WHERE consent.granted
+                  AND fan.status = 'active'
+            ) AS marketing_opted_in
+            FROM latest_marketing AS consent
+            JOIN fans AS fan
+              ON fan.workspace_id = $1
+             AND fan.id = consent.fan_id
+        ),
+        location_summary AS (
+            SELECT
+                count(*) FILTER (
+                    WHERE preference.nearby_gigs_enabled
+                      AND fan.status = 'active'
+                ) AS nearby_enabled,
+                count(DISTINCT preference.city_id) FILTER (
+                    WHERE city.moderation_status = 'pending'
+                      AND fan.status = 'active'
+                ) AS pending_city_requests
+            FROM fan_location_preferences AS preference
+            JOIN fans AS fan
+              ON fan.workspace_id = preference.workspace_id
+             AND fan.id = preference.fan_id
+            JOIN cities AS city
+              ON city.id = preference.city_id
+            WHERE preference.workspace_id = $1
+        ),
+        referral_summary AS (
+            SELECT
+                count(*) AS referral_attributions_total,
+                count(*) FILTER (
+                    WHERE accepted_at >= now() - interval '30 days'
+                ) AS referral_attributions_30d
+            FROM referral_attributions
+            WHERE workspace_id = $1
+        ),
+        interest_summary AS (
+            SELECT
+                count(*) AS event_interests_total,
+                count(*) FILTER (
+                    WHERE created_at >= now() - interval '30 days'
+                ) AS event_interests_30d
+            FROM event_interests
+            WHERE workspace_id = $1
+        ),
+        notification_summary AS (
+            SELECT count(*) FILTER (
+                WHERE created_at >= now() - interval '30 days'
+            ) AS nearby_notifications_30d
+            FROM nearby_gig_notifications
+            WHERE workspace_id = $1
+        )
+        SELECT
+            fan_summary.total_fans,
+            fan_summary.active_fans,
+            fan_summary.pending_fans,
+            fan_summary.unsubscribed_fans,
+            fan_summary.suppressed_fans,
+            consent_summary.marketing_opted_in,
+            location_summary.nearby_enabled,
+            fan_summary.new_fans_7d,
+            fan_summary.new_fans_30d,
+            referral_summary.referral_attributions_total,
+            referral_summary.referral_attributions_30d,
+            interest_summary.event_interests_total,
+            interest_summary.event_interests_30d,
+            notification_summary.nearby_notifications_30d,
+            location_summary.pending_city_requests
+        FROM fan_summary
+        CROSS JOIN consent_summary
+        CROSS JOIN location_summary
+        CROSS JOIN referral_summary
+        CROSS JOIN interest_summary
+        CROSS JOIN notification_summary
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_one(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
+}
+
+async fn load_signal_top_cities(state: &OpsState) -> Result<Vec<SignalCitySummary>, OpsError> {
+    sqlx::query_as::<_, SignalCitySummary>(
+        r#"
+        SELECT
+            city.slug,
+            city.name,
+            city.country_code::text AS country_code,
+            count(DISTINCT fan.id) AS active_fans
+        FROM fan_city_interests AS interest
+        JOIN fans AS fan
+          ON fan.workspace_id = interest.workspace_id
+         AND fan.id = interest.fan_id
+        JOIN cities AS city
+          ON city.id = interest.city_id
+        WHERE interest.workspace_id = $1
+          AND fan.status = 'active'
+        GROUP BY city.slug, city.name, city.country_code
+        ORDER BY active_fans DESC, city.name ASC, city.slug ASC
+        LIMIT 10
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
+}
+
 async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
     let row = sqlx::query_as::<_, OpsSummaryRow>(
         r#"
@@ -837,6 +1109,51 @@ impl OpsError {
 impl From<sqlx::Error> for OpsError {
     fn from(error: sqlx::Error) -> Self {
         Self::sqlx(error)
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::{SignalCitySummary, SignalSummaryRow, signal_overview_from_row};
+
+    #[test]
+    fn signal_overview_payload_is_aggregate_only() {
+        let overview = signal_overview_from_row(
+            SignalSummaryRow {
+                total_fans: 14,
+                active_fans: 10,
+                pending_fans: 2,
+                unsubscribed_fans: 1,
+                suppressed_fans: 1,
+                marketing_opted_in: 9,
+                nearby_enabled: 8,
+                new_fans_7d: 3,
+                new_fans_30d: 6,
+                referral_attributions_total: 11,
+                referral_attributions_30d: 4,
+                event_interests_total: 20,
+                event_interests_30d: 7,
+                nearby_notifications_30d: 5,
+                pending_city_requests: 1,
+            },
+            vec![SignalCitySummary {
+                slug: "wroclaw".to_owned(),
+                name: "Wrocław".to_owned(),
+                country_code: "PL".to_owned(),
+                active_fans: 8,
+            }],
+            Vec::new(),
+        );
+
+        let json = match serde_json::to_string(&overview) {
+            Ok(json) => json,
+            Err(error) => panic!("signal overview serialization failed: {error}"),
+        };
+        assert!(json.contains("\"active_fans\":10"));
+        assert!(json.contains("\"top_cities\""));
+        assert!(!json.contains("email"));
+        assert!(!json.contains("display_name"));
+        assert!(!json.contains("fan_id"));
     }
 }
 
