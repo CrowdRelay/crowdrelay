@@ -289,6 +289,7 @@ impl PostgresAcquisitionRepository {
                 ON cities.id = city_aggregates.city_id
             WHERE city_aggregates.workspace_id = $1
                 AND cities.country_code = $2
+                AND cities.moderation_status = 'approved'
             ORDER BY
                 city_aggregates.confirmed_fan_count DESC,
                 cities.name,

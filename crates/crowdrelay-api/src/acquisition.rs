@@ -185,6 +185,34 @@ pub struct FanSignupRequest {
     referral_code: Option<String>,
     campaign_id: Option<CampaignId>,
     consent: ConsentRequest,
+    #[serde(default)]
+    nearby_gigs: NearbyGigsRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NearbyGigsRequest {
+    #[serde(default = "default_nearby_enabled")]
+    enabled: bool,
+    #[serde(default = "default_nearby_radius")]
+    radius_km: i32,
+}
+
+impl Default for NearbyGigsRequest {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            radius_km: 150,
+        }
+    }
+}
+
+const fn default_nearby_enabled() -> bool {
+    true
+}
+
+const fn default_nearby_radius() -> i32 {
+    150
 }
 
 #[derive(Deserialize)]
@@ -249,6 +277,14 @@ pub async fn signup_fan(
         return Problem::internal(None).private().into_response();
     };
 
+    let nearby_enabled = payload.nearby_gigs.enabled;
+    let nearby_radius_km = payload.nearby_gigs.radius_km;
+    let requested_city_slug = payload.city_slug.clone();
+    if !(25..=500).contains(&nearby_radius_km) {
+        return Problem::unprocessable(request_id_value)
+            .private()
+            .into_response();
+    }
     let signup = match build_signup(
         state.acquisition.workspace_id,
         attribution_visitor(&headers),
@@ -268,6 +304,35 @@ pub async fn signup_fan(
         Ok(result) => result,
         Err(error) => return signup_error(error, request_id_value).into_response(),
     };
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO fan_location_preferences (
+            workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km
+        )
+        SELECT $1, $2, cities.id, $4, $5
+        FROM cities
+        WHERE cities.slug = $3
+        ON CONFLICT (workspace_id, fan_id) DO UPDATE
+        SET city_id = EXCLUDED.city_id,
+            nearby_gigs_enabled = EXCLUDED.nearby_gigs_enabled,
+            radius_km = EXCLUDED.radius_km
+        "#,
+    )
+    .bind(state.acquisition.workspace_id.into_uuid())
+    .bind(result.fan_id.into_uuid())
+    .bind(&requested_city_slug)
+    .bind(nearby_enabled)
+    .bind(nearby_radius_km)
+    .execute(state.ticketing.pool())
+    .await
+    {
+        tracing::warn!(
+            %error,
+            fan_id = %result.fan_id,
+            "fan signup completed but nearby preference could not be persisted"
+        );
+    }
+
     let status = if result.confirmation_required {
         StatusCode::ACCEPTED
     } else if result.created {

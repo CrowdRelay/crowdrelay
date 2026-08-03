@@ -55,6 +55,7 @@ mod ecosystem;
 mod event_copy;
 mod events;
 mod fan_lifecycle;
+mod mobile_fan;
 mod ops;
 mod proofs;
 mod referrals;
@@ -206,6 +207,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/fans/confirm", post(fan_lifecycle::confirm_fan))
         .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
         .route("/v1/public/cities", get(acquisition::list_cities))
+        .route("/v1/public/cities/requests", post(mobile_fan::request_city))
         .route("/v1/public/events", get(events::list_events))
         .route(
             "/v1/public/proofs/batches/{batch_id}",
@@ -294,6 +296,14 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route(
             "/v1/internal/releases/announce",
             post(releases::announce_release),
+        )
+        .route(
+            "/v1/internal/cities/{city_id}/geocode",
+            post(mobile_fan::geocode_city),
+        )
+        .route(
+            "/v1/internal/nearby-gigs/emit-due",
+            post(mobile_fan::emit_due_nearby_gigs),
         )
         .route("/v1/internal/proofs/claim", post(proofs::internal_claim))
         .route(
