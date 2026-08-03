@@ -1631,7 +1631,7 @@ mod tests {
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(
             first.headers()["cache-control"],
-            "public, max-age=60, stale-while-revalidate=600"
+            "public, max-age=60, stale-while-revalidate=600, stale-if-error=86400"
         );
         let etag = first.headers()[ETAG].clone();
         let body = to_bytes(first.into_body(), 16 * 1024).await?;

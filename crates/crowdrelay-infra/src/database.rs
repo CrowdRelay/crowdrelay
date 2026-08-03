@@ -116,9 +116,11 @@ pub async fn migrate(pool: &PgPool) -> Result<(), DatabaseError> {
 
 fn pool_options(config: &DatabaseConfig) -> PgPoolOptions {
     PgPoolOptions::new()
-        .min_connections(0)
+        .min_connections(1)
         .max_connections(config.max_connections)
         .acquire_timeout(config.connect_timeout)
+        .idle_timeout(Some(Duration::from_secs(5 * 60)))
+        .max_lifetime(Some(Duration::from_secs(30 * 60)))
 }
 
 /// Error returned when database pool creation, readiness, or migration fails.

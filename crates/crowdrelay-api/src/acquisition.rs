@@ -1,6 +1,11 @@
 //! HTTP transport for public acquisition endpoints.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use tokio::sync::{Mutex, RwLock};
 
 use axum::{
     Json,
@@ -39,7 +44,10 @@ const FAN_SESSION_COOKIE: &str = "crowdrelay_fan";
 const ATTRIBUTION_COOKIE_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
 const FAN_SESSION_COOKIE_MAX_AGE_SECONDS: u32 = 90 * 24 * 60 * 60;
 const PRIVATE_NO_STORE: &str = "private, no-store";
-const PUBLIC_CITY_CACHE: &str = "public, max-age=60, stale-while-revalidate=600";
+const PUBLIC_CITY_CACHE: &str =
+    "public, max-age=60, stale-while-revalidate=600, stale-if-error=86400";
+const CITY_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+const MAX_CITY_SNAPSHOT_LIMIT: u32 = 100;
 const DEFAULT_CITY_LIMIT: u32 = 20;
 
 /// Closure that accepts a click event for asynchronous batched persistence.
@@ -58,6 +66,12 @@ pub struct ClickMetricsSnapshot {
     pub dropped: u64,
     /// Total click events lost after a bounded persistence failure.
     pub persistence_failed: u64,
+}
+
+#[derive(Debug, Default)]
+struct CitySnapshot {
+    items: Arc<Vec<crowdrelay_domain::CitySignal>>,
+    refreshed_at: Option<Instant>,
 }
 
 /// Construction parameters for acquisition HTTP state.
@@ -79,6 +93,8 @@ pub struct AcquisitionState {
     redirect_cache: Arc<RedirectCache>,
     signup_fan: SignupFan,
     list_cities: ListCities,
+    city_snapshot: Arc<RwLock<CitySnapshot>>,
+    city_refresh: Arc<Mutex<()>>,
     click_submitter: ClickSubmitter,
     click_metrics_reader: ClickMetricsReader,
     public_site_base_url: Url,
@@ -94,6 +110,8 @@ impl AcquisitionState {
             redirect_cache: args.redirect_cache,
             signup_fan: args.signup_fan,
             list_cities: args.list_cities,
+            city_snapshot: Arc::new(RwLock::new(CitySnapshot::default())),
+            city_refresh: Arc::new(Mutex::new(())),
             click_submitter: args.click_submitter,
             click_metrics_reader: args.click_metrics_reader,
             public_site_base_url: args.public_site_base_url,
@@ -103,6 +121,70 @@ impl AcquisitionState {
 
     pub(crate) fn click_metrics_snapshot(&self) -> ClickMetricsSnapshot {
         (self.click_metrics_reader)()
+    }
+
+    async fn cached_cities(
+        &self,
+        limit: u32,
+        max_age: Option<Duration>,
+    ) -> Option<Vec<crowdrelay_domain::CitySignal>> {
+        let snapshot = self.city_snapshot.read().await;
+        let refreshed_at = snapshot.refreshed_at?;
+        if max_age.is_some_and(|age| refreshed_at.elapsed() > age) {
+            return None;
+        }
+        Some(
+            snapshot
+                .items
+                .iter()
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    async fn resilient_cities(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crowdrelay_domain::CitySignal>, ListCitiesError> {
+        if !(1..=MAX_CITY_SNAPSHOT_LIMIT).contains(&limit) {
+            return Err(ListCitiesError::InvalidLimit {
+                max: MAX_CITY_SNAPSHOT_LIMIT,
+            });
+        }
+        if let Some(cities) = self.cached_cities(limit, Some(CITY_SNAPSHOT_MAX_AGE)).await {
+            return Ok(cities);
+        }
+
+        let _refresh = self.city_refresh.lock().await;
+        if let Some(cities) = self.cached_cities(limit, Some(CITY_SNAPSHOT_MAX_AGE)).await {
+            return Ok(cities);
+        }
+        let stale = self.cached_cities(limit, None).await;
+        match self
+            .list_cities
+            .execute(self.workspace_id, MAX_CITY_SNAPSHOT_LIMIT)
+            .await
+        {
+            Ok(cities) => {
+                let result = cities
+                    .iter()
+                    .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                    .cloned()
+                    .collect();
+                let mut snapshot = self.city_snapshot.write().await;
+                snapshot.items = Arc::new(cities);
+                snapshot.refreshed_at = Some(Instant::now());
+                Ok(result)
+            }
+            Err(error) => match stale {
+                Some(cities) => {
+                    tracing::warn!(%error, "city refresh failed; serving previous snapshot");
+                    Ok(cities)
+                }
+                None => Err(error),
+            },
+        }
     }
 }
 
@@ -476,11 +558,7 @@ pub async fn list_cities(
 
     let cities = match state
         .acquisition
-        .list_cities
-        .execute(
-            state.acquisition.workspace_id,
-            query.limit.unwrap_or(DEFAULT_CITY_LIMIT),
-        )
+        .resilient_cities(query.limit.unwrap_or(DEFAULT_CITY_LIMIT))
         .await
     {
         Ok(cities) => cities,

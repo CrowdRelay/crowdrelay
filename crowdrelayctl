@@ -167,16 +167,22 @@ PY
 
 verify() {
   require_command docker
-  compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+  compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
     http://127.0.0.1:8080/v1/health/live >/dev/null
-  compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+  compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
     http://127.0.0.1:8080/v1/health/ready >/dev/null
+  compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
+    'http://127.0.0.1:8080/v1/public/cities?limit=100' >/dev/null
+  compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
+    'http://127.0.0.1:8080/v1/public/events?limit=50' >/dev/null
 
   if [[ -n "$CROWDRELAY_PUBLIC_BASE_URL" ]]; then
     require_command curl
     local base="${CROWDRELAY_PUBLIC_BASE_URL%/}"
-    curl --fail --silent --show-error --connect-timeout 3 --max-time 15 "$base/v1/health/live" >/dev/null
-    curl --fail --silent --show-error --connect-timeout 3 --max-time 15 "$base/v1/health/ready" >/dev/null
+    curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 3 --max-time 15 "$base/v1/health/live" >/dev/null
+    curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 3 --max-time 15 "$base/v1/health/ready" >/dev/null
+    curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 3 --max-time 15 "$base/v1/public/cities?limit=100" >/dev/null
+    curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 3 --max-time 15 "$base/v1/public/events?limit=50" >/dev/null
   fi
   run_hook crowdrelay_after_verify
   echo "CrowdRelay is healthy."

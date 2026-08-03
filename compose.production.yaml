@@ -26,11 +26,11 @@ services:
         condition: service_completed_successfully
     expose: ["8080"]
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/v1/health/ready"]
-      interval: 10s
-      timeout: 3s
-      retries: 8
-      start_period: 20s
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/v1/health/live"]
+      interval: 20s
+      timeout: 2s
+      retries: 5
+      start_period: 15s
     init: true
     read_only: true
     tmpfs:
@@ -38,7 +38,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: ${CROWDRELAY_API_MEMORY:-256m}
-    cpus: ${CROWDRELAY_API_CPUS:-0.50}
+    cpus: ${CROWDRELAY_API_CPUS:-0.75}
     stop_grace_period: 25s
     restart: unless-stopped
     logging:
@@ -73,7 +73,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: ${CROWDRELAY_WORKER_MEMORY:-256m}
-    cpus: ${CROWDRELAY_WORKER_CPUS:-0.50}
+    cpus: ${CROWDRELAY_WORKER_CPUS:-0.35}
     stop_grace_period: 30s
     restart: unless-stopped
     logging:
