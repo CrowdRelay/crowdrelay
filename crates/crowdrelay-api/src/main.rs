@@ -53,6 +53,7 @@ use tokio::{
 async fn main() -> Result<()> {
     let config = Config::from_env().context("invalid CrowdRelay configuration")?;
     observability::init("crowdrelay-api").context("failed to initialize structured tracing")?;
+    observability::install_panic_hook("crowdrelay-api");
 
     let database = database::connect(&config.database)
         .await

@@ -99,3 +99,7 @@ CrowdRelay can create public SHA-256 draw receipts and Merkle commitments for
 append-only audit records, then optionally publish signed commitments to the
 Sigstore Rekor transparency log. PostgreSQL remains authoritative and Rekor
 availability never enters a critical path. See `docs/EXTERNAL_PROOFS.md`.
+
+## Engineering documentation
+
+Architecture and reliability: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/RELIABILITY.md`](docs/RELIABILITY.md).

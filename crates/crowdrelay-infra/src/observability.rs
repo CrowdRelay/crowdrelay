@@ -39,6 +39,56 @@ pub fn init(service_name: &str) -> Result<(), ObservabilityError> {
     Ok(())
 }
 
+const MAX_PANIC_MESSAGE_CHARS: usize = 1_024;
+
+/// Installs a bounded structured panic report for the current process.
+///
+/// The hook deliberately omits backtraces and arbitrary debug payloads so a
+/// panic cannot copy secrets or an unbounded value into production logs.
+pub fn install_panic_hook(service_name: &'static str) {
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let message = panic_message(panic_info);
+        let location = panic_info.location();
+        let file = location
+            .map(std::panic::Location::file)
+            .unwrap_or("unknown");
+        let line = location.map(std::panic::Location::line).unwrap_or(0);
+        let column = location.map(std::panic::Location::column).unwrap_or(0);
+        tracing::error!(
+            service.name = service_name,
+            panic.message = %message,
+            panic.file = file,
+            panic.line = line,
+            panic.column = column,
+            "process panic"
+        );
+    }));
+}
+
+fn panic_message(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
+    let raw = panic_info
+        .payload()
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            panic_info
+                .payload()
+                .downcast_ref::<String>()
+                .map(String::as_str)
+        })
+        .unwrap_or("non-string panic payload");
+    raw.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_PANIC_MESSAGE_CHARS)
+        .collect()
+}
+
 fn filter_from_env() -> Result<EnvFilter, ObservabilityError> {
     match env::var("RUST_LOG") {
         Ok(value) => EnvFilter::try_new(value).map_err(ObservabilityError::InvalidFilter),
