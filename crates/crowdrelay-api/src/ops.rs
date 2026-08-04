@@ -61,6 +61,7 @@ pub struct QueueSummary {
     processing: i64,
     delivered_24h: i64,
     dead: i64,
+    cancelled: i64,
     oldest_pending_seconds: i64,
 }
 
@@ -75,6 +76,7 @@ struct OpsSummaryRow {
     delivery_processing: i64,
     delivery_delivered_24h: i64,
     delivery_dead: i64,
+    delivery_cancelled: i64,
     delivery_oldest_pending_seconds: i64,
 }
 
@@ -87,6 +89,7 @@ pub(crate) struct OpsMetricsSnapshot {
     pub(crate) delivery_pending: i64,
     pub(crate) delivery_processing: i64,
     pub(crate) delivery_dead: i64,
+    pub(crate) delivery_cancelled: i64,
     pub(crate) delivery_oldest_pending_seconds: i64,
 }
 
@@ -99,6 +102,7 @@ struct OpsMetricsRow {
     delivery_pending: i64,
     delivery_processing: i64,
     delivery_dead: i64,
+    delivery_cancelled: i64,
     delivery_oldest_pending_seconds: i64,
 }
 
@@ -116,6 +120,7 @@ enum QueueStatus {
     Processing,
     Delivered,
     Dead,
+    Cancelled,
 }
 
 impl QueueStatus {
@@ -125,6 +130,7 @@ impl QueueStatus {
             Self::Processing => "processing",
             Self::Delivered => "delivered",
             Self::Dead => "dead",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -889,6 +895,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
                       AND delivered_at >= now() - interval '24 hours'
                 )::bigint AS delivered_24h,
                 count(*) FILTER (WHERE status = 'dead')::bigint AS dead,
+                count(*) FILTER (WHERE status = 'cancelled')::bigint AS cancelled,
                 COALESCE(EXTRACT(EPOCH FROM (now() - min(available_at) FILTER (
                     WHERE status = 'pending' AND available_at <= now()
                 )))::bigint, 0) AS oldest_pending_seconds
@@ -905,6 +912,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             deliveries.processing AS delivery_processing,
             deliveries.delivered_24h AS delivery_delivered_24h,
             deliveries.dead AS delivery_dead,
+            deliveries.cancelled AS delivery_cancelled,
             deliveries.oldest_pending_seconds AS delivery_oldest_pending_seconds
         FROM outbox CROSS JOIN deliveries
         "#,
@@ -920,6 +928,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             processing: row.outbox_processing,
             delivered_24h: row.outbox_delivered_24h,
             dead: row.outbox_dead,
+            cancelled: 0,
             oldest_pending_seconds: row.outbox_oldest_pending_seconds,
         },
         deliveries: QueueSummary {
@@ -927,6 +936,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             processing: row.delivery_processing,
             delivered_24h: row.delivery_delivered_24h,
             dead: row.delivery_dead,
+            cancelled: row.delivery_cancelled,
             oldest_pending_seconds: row.delivery_oldest_pending_seconds,
         },
     })
@@ -953,6 +963,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 count(*) FILTER (WHERE status = 'pending')::bigint AS pending,
                 count(*) FILTER (WHERE status = 'processing')::bigint AS processing,
                 count(*) FILTER (WHERE status = 'dead')::bigint AS dead,
+                count(*) FILTER (WHERE status = 'cancelled')::bigint AS cancelled,
                 COALESCE(EXTRACT(EPOCH FROM (now() - min(available_at) FILTER (
                     WHERE status = 'pending' AND available_at <= now()
                 )))::bigint, 0) AS oldest_pending_seconds
@@ -967,6 +978,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             deliveries.pending AS delivery_pending,
             deliveries.processing AS delivery_processing,
             deliveries.dead AS delivery_dead,
+            deliveries.cancelled AS delivery_cancelled,
             deliveries.oldest_pending_seconds AS delivery_oldest_pending_seconds
         FROM outbox CROSS JOIN deliveries
         "#,
@@ -984,6 +996,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         delivery_pending: row.delivery_pending,
         delivery_processing: row.delivery_processing,
         delivery_dead: row.delivery_dead,
+        delivery_cancelled: row.delivery_cancelled,
         delivery_oldest_pending_seconds: row.delivery_oldest_pending_seconds,
     })
 }

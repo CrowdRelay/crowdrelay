@@ -557,6 +557,9 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_webhook_delivery_dead Current dead webhook deliveries.\n",
             "# TYPE crowdrelay_webhook_delivery_dead gauge\n",
             "crowdrelay_webhook_delivery_dead {}\n",
+            "# HELP crowdrelay_webhook_delivery_cancelled Current cancelled webhook deliveries (endpoint deactivated).\n",
+            "# TYPE crowdrelay_webhook_delivery_cancelled gauge\n",
+            "crowdrelay_webhook_delivery_cancelled {}\n",
             "# HELP crowdrelay_webhook_delivery_oldest_pending_seconds Age of the oldest ready pending webhook delivery.\n",
             "# TYPE crowdrelay_webhook_delivery_oldest_pending_seconds gauge\n",
             "crowdrelay_webhook_delivery_oldest_pending_seconds {}\n",
@@ -576,6 +579,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
         ops_snapshot.delivery_pending,
         ops_snapshot.delivery_processing,
         ops_snapshot.delivery_dead,
+        ops_snapshot.delivery_cancelled,
         ops_snapshot.delivery_oldest_pending_seconds,
     );
 
