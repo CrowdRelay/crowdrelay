@@ -726,8 +726,8 @@ mod tests {
     }
 
     #[test]
-    fn fan_signup_result_keeps_backward_compatible_email_defaults(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn fan_signup_result_keeps_backward_compatible_email_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
         let original = FanSignupResult {
             fan_id: FanId::new(),
             status: FanStatus::Pending,

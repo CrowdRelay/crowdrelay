@@ -39,9 +39,9 @@ pub mod referrals;
 pub mod values;
 
 pub use acquisition::{
-    CitySignal, CitySignalError, ClickEvent, ClickEventError, FanSignup, FanSignupError,
-    FanSignupInput, FanSignupResult, FanStatus, MarketingConsent, MarketingConsentError,
-    ResolvedSmartLink, ResolvedSmartLinkError,
+    CitySignal, CitySignalError, ClickEvent, ClickEventError, FanSignup, FanSignupEmailKind,
+    FanSignupError, FanSignupInput, FanSignupResult, FanStatus, MarketingConsent,
+    MarketingConsentError, ResolvedSmartLink, ResolvedSmartLinkError,
 };
 pub use admission::{
     AdmissionPassClaimed, AdmissionPassIssued, AdmissionPassStatus, AdmissionPassView,

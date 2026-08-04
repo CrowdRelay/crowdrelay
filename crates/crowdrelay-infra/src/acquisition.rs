@@ -15,8 +15,7 @@ use crowdrelay_application::{AcquisitionRepository, RepositoryError, SignupFanCo
 use crowdrelay_domain::{
     CampaignId, CityId, CitySignal, CitySlug, ClickEvent, CountryCode, DestinationUrl,
     FanActionToken, FanId, FanSignup, FanSignupEmailKind, FanSignupResult, FanStatus, ReferralCode,
-    ResolvedSmartLink,
-    SmartLinkId, SmartLinkSlug, WorkspaceId, WorkspaceSlug,
+    ResolvedSmartLink, SmartLinkId, SmartLinkSlug, WorkspaceId, WorkspaceSlug,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -526,13 +525,8 @@ impl PostgresAcquisitionRepository {
         .await
         .map_err(map_referral_error)?;
 
-        let (
-            referral_code,
-            fan_session_token,
-            confirmation_required,
-            email_kind,
-            email_queued,
-        ) = if fan_upsert.fan.status == FanStatus::Active {
+        let (referral_code, fan_session_token, confirmation_required, email_kind, email_queued) =
+            if fan_upsert.fan.status == FanStatus::Active {
                 qualify_signup_referral_and_rewards(
                     &mut transaction,
                     workspace_id,

@@ -29,8 +29,8 @@ use crowdrelay_application::{
 };
 use crowdrelay_domain::{
     CampaignId, CitySlug, ClickEvent, FanSessionToken, FanSignup, FanSignupEmailKind,
-    FanSignupInput, FanStatus,
-    MarketingConsent, NormalizedEmail, ReferralCode, SmartLinkSlug, VisitorId, WorkspaceId,
+    FanSignupInput, FanStatus, MarketingConsent, NormalizedEmail, ReferralCode, SmartLinkSlug,
+    VisitorId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
