@@ -147,6 +147,10 @@ export interface FanSignupResult {
   retry_after_seconds: number | null;
 }
 
+export interface FanAccessRequestResult {
+  accepted: true
+}
+
 export interface FanConfirmationResult {
   fan_id: string;
   status: "active";
@@ -427,6 +431,18 @@ export class CrowdRelayClient {
     });
   }
 
+
+  public requestFanAccess(
+    email: string,
+    locale = "pl",
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<FanAccessRequestResult> {
+    return this.request("/fans/access", {
+      method: "POST",
+      body: { email, locale },
+      idempotencyKey,
+    })
+  }
 
   public confirmFan(
     token: string,

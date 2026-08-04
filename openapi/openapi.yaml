@@ -143,13 +143,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/FanSignupResponse'
+  /fans/access:
+    post:
+      operationId: requestFanAccess
+      summary: Request a fresh sign-in or pending-confirmation link
+      description: Always returns a neutral accepted response so account existence is not disclosed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FanAccessRequest'
+      responses:
+        '202':
+          description: Request accepted. If the address belongs to an eligible fan, a fresh access email is queued.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FanAccessResponse'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '422':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+        '500':
+          $ref: '#/components/responses/PrivateProblem'
   /fans/confirm:
     post:
       operationId: confirmFan
-      summary: Confirm inbox ownership and activate a pending fan
-      description: Idempotently exchanges the one-time token. Retry with the same key after a timeout or lost response.
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
+      summary: Confirm inbox ownership or recover an active fan session
+      description: The server derives idempotency from the action token, so clicking, scanning or pasting the same link safely replays the successful session exchange.
       requestBody:
         required: true
         content:
@@ -3843,6 +3874,30 @@ components:
         interested_at:
           type: string
           format: date-time
+    FanAccessRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - email
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        locale:
+          type:
+          - string
+          - 'null'
+          maxLength: 35
+    FanAccessResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - accepted
+      properties:
+        accepted:
+          type: boolean
+          const: true
     FanActionRequest:
       type: object
       additionalProperties: false

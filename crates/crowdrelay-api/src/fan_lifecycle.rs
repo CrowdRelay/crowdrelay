@@ -12,15 +12,18 @@ use axum::{
 use crowdrelay_application::{
     ConfirmFan, ConfirmFanCommand, FanLifecycleError, IdempotencyKey, RequestId, UnsubscribeFan,
 };
-use crowdrelay_domain::{FanActionToken, FanStatus, WorkspaceId};
+use crowdrelay_domain::{FanActionToken, FanStatus, NormalizedEmail, WorkspaceId};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::{IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id};
+use crate::{Problem, X_REQUEST_ID, request_id};
 
 const FAN_SESSION_COOKIE: &str = "crowdrelay_fan";
 const FAN_SESSION_COOKIE_MAX_AGE_SECONDS: u32 = 90 * 24 * 60 * 60;
 const PRIVATE_NO_STORE: &str = "private, no-store";
+const ACCESS_RESEND_COOLDOWN_SECONDS: i64 = 60;
+const ACCESS_TOKEN_TTL_DAYS: i64 = 2;
 
 /// Dependencies for fan confirmation and unsubscribe routes.
 #[derive(Clone)]
@@ -67,6 +70,19 @@ struct FanConfirmationResponse {
     fan_session_token: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FanAccessRequest {
+    email: String,
+    #[serde(default)]
+    locale: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FanAccessResponse {
+    accepted: bool,
+}
+
 #[derive(Serialize)]
 struct FanUnsubscribeResponse {
     fan_id: crowdrelay_domain::FanId,
@@ -78,11 +94,9 @@ fn normalize_fan_action_token(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-
     if FanActionToken::parse(trimmed).is_ok() {
         return Some(trimmed.to_ascii_lowercase());
     }
-
     let url = Url::parse(trimmed).ok()?;
     let candidate = url
         .query_pairs()
@@ -95,10 +109,287 @@ fn normalize_fan_action_token(raw: &str) -> Option<String> {
                     .map(|(_, token)| token.into_owned())
             })
         })?;
-
     FanActionToken::parse(&candidate)
         .ok()
         .map(|token| token.as_str().to_owned())
+}
+
+/// Requests a fresh inbox link for an existing fan without exposing account existence.
+pub async fn request_fan_access(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<FanAccessRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => {
+            return Problem::bad_request(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let email = match NormalizedEmail::parse(payload.email) {
+        Ok(email) => email,
+        Err(_) => {
+            return Problem::unprocessable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let locale = payload
+        .locale
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if locale.as_ref().is_some_and(|value| {
+        value.len() > 35
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return Problem::unprocessable(request_id_value)
+            .private()
+            .into_response();
+    }
+    let Some(raw_request_id) = headers
+        .get(&X_REQUEST_ID)
+        .and_then(|value| value.to_str().ok())
+    else {
+        tracing::error!("server request ID middleware did not populate the request");
+        return Problem::internal(None).private().into_response();
+    };
+
+    let mut transaction = match state.database.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(%error, "could not start fan access transaction");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let row = sqlx::query_as::<_, (uuid::Uuid, String, Option<String>, Option<String>)>(
+        r#"
+        SELECT id, status, display_name, locale
+        FROM fans
+        WHERE workspace_id = $1 AND normalized_email = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(state.fan_lifecycle.workspace_id.into_uuid())
+    .bind(email.as_str())
+    .fetch_optional(&mut *transaction)
+    .await;
+    let row = match row {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%error, "could not load fan for access request");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+
+    let Some((fan_id, status, display_name, stored_locale)) = row else {
+        if let Err(error) = transaction.commit().await {
+            tracing::warn!(%error, "could not finish neutral fan access request");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+        return (
+            StatusCode::ACCEPTED,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(FanAccessResponse { accepted: true }),
+        )
+            .into_response();
+    };
+
+    let (purpose, event_type, token_field) = match status.as_str() {
+        "active" => ("session", "fan.session_requested", "session_recovery_token"),
+        "pending" => (
+            "confirm",
+            "fan.confirmation_requested",
+            "confirmation_token",
+        ),
+        "unsubscribed" | "suppressed" => {
+            if let Err(error) = transaction.commit().await {
+                tracing::warn!(%error, "could not finish neutral fan access request");
+                return Problem::service_unavailable(request_id_value)
+                    .private()
+                    .into_response();
+            }
+            return (
+                StatusCode::ACCEPTED,
+                [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+                Json(FanAccessResponse { accepted: true }),
+            )
+                .into_response();
+        }
+        _ => {
+            tracing::error!(status, "unexpected fan status during access request");
+            return Problem::internal(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+
+    let in_cooldown = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM fan_action_tokens
+            WHERE workspace_id = $1
+              AND fan_id = $2
+              AND purpose = $3
+              AND consumed_at IS NULL
+              AND expires_at > now()
+              AND created_at > now() - ($4::bigint * interval '1 second')
+        )
+        "#,
+    )
+    .bind(state.fan_lifecycle.workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(purpose)
+    .bind(ACCESS_RESEND_COOLDOWN_SECONDS)
+    .fetch_one(&mut *transaction)
+    .await;
+    let in_cooldown = match in_cooldown {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "could not check fan access cooldown");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+
+    if !in_cooldown {
+        if let Err(error) = sqlx::query(
+            r#"
+            UPDATE fan_action_tokens
+            SET consumed_at = COALESCE(consumed_at, now())
+            WHERE workspace_id = $1
+              AND fan_id = $2
+              AND purpose = $3
+              AND consumed_at IS NULL
+            "#,
+        )
+        .bind(state.fan_lifecycle.workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(purpose)
+        .execute(&mut *transaction)
+        .await
+        {
+            tracing::warn!(%error, "could not rotate fan access token");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+
+        let raw_token = sqlx::query_scalar::<_, String>(
+            r#"
+            WITH material AS (
+                SELECT encode(gen_random_bytes(32), 'hex') AS token
+            ), inserted AS (
+                INSERT INTO fan_action_tokens (
+                    workspace_id, fan_id, purpose, token_hash, expires_at
+                )
+                SELECT $1, $2, $3, digest(material.token, 'sha256'),
+                    now() + ($4::bigint * interval '1 day')
+                FROM material
+                RETURNING id
+            )
+            SELECT material.token
+            FROM material, inserted
+            "#,
+        )
+        .bind(state.fan_lifecycle.workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(purpose)
+        .bind(ACCESS_TOKEN_TTL_DAYS)
+        .fetch_one(&mut *transaction)
+        .await;
+        let raw_token = match raw_token {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!(%error, "could not issue fan access token");
+                return Problem::service_unavailable(request_id_value)
+                    .private()
+                    .into_response();
+            }
+        };
+        let effective_locale = locale.or(stored_locale);
+        let policy_version = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT policy_version
+            FROM fan_consents
+            WHERE workspace_id = $1 AND fan_id = $2
+              AND purpose = 'marketing' AND granted
+            ORDER BY recorded_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(state.fan_lifecycle.workspace_id.into_uuid())
+        .bind(fan_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .ok()
+        .flatten();
+        let mut event_payload = serde_json::json!({
+            "workspace_id": state.fan_lifecycle.workspace_id,
+            "fan_id": fan_id,
+            "email": email.as_str(),
+            "display_name": display_name,
+            "locale": effective_locale,
+        });
+        if let Some(object) = event_payload.as_object_mut() {
+            object.insert(token_field.to_owned(), serde_json::Value::String(raw_token));
+            if let Some(policy_version) = policy_version {
+                object.insert(
+                    "policy_version".to_owned(),
+                    serde_json::Value::String(policy_version),
+                );
+            }
+        }
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO outbox_events (
+                workspace_id, event_type, event_version, payload, request_id
+            ) VALUES ($1, $2, 1, $3, $4)
+            "#,
+        )
+        .bind(state.fan_lifecycle.workspace_id.into_uuid())
+        .bind(event_type)
+        .bind(event_payload)
+        .bind(raw_request_id)
+        .execute(&mut *transaction)
+        .await
+        {
+            tracing::warn!(%error, "could not enqueue fan access email");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    }
+
+    if let Err(error) = transaction.commit().await {
+        tracing::warn!(%error, "could not commit fan access request");
+        return Problem::service_unavailable(request_id_value)
+            .private()
+            .into_response();
+    }
+    (
+        StatusCode::ACCEPTED,
+        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        Json(FanAccessResponse { accepted: true }),
+    )
+        .into_response()
+}
+
+fn confirmation_idempotency_key(token: &FanActionToken) -> Result<IdempotencyKey, ()> {
+    let token_digest = Sha256::digest(token.as_str().as_bytes());
+    IdempotencyKey::parse(format!("fan-confirm-{}", hex::encode(token_digest))).map_err(|_| ())
 }
 
 /// Confirms ownership of a fan email address and creates a browser session.
@@ -126,14 +417,14 @@ pub async fn confirm_fan(
                 .into_response();
         }
     };
-    let idempotency_key = match headers
-        .get(&IDEMPOTENCY_KEY)
-        .and_then(|value| value.to_str().ok())
-        .map(IdempotencyKey::parse)
-    {
-        Some(Ok(key)) => key,
-        _ => {
-            return Problem::bad_request(request_id_value)
+    // The token itself is the stable operation identity. This lets a browser
+    // click, QR scan and native paste safely replay the same successful exchange
+    // instead of turning the second device into a misleading conflict.
+    let idempotency_key = match confirmation_idempotency_key(&token) {
+        Ok(key) => key,
+        Err(()) => {
+            tracing::error!("server-derived fan confirmation key was invalid");
+            return Problem::internal(request_id_value)
                 .private()
                 .into_response();
         }
@@ -216,9 +507,11 @@ pub async fn unsubscribe_fan(
                 .into_response();
         }
     };
-    let token = match FanActionToken::parse(payload.token) {
-        Ok(token) => token,
-        Err(_) => {
+    let token = match normalize_fan_action_token(&payload.token)
+        .and_then(|value| FanActionToken::parse(value).ok())
+    {
+        Some(token) => token,
+        None => {
             return Problem::unprocessable(request_id_value)
                 .private()
                 .into_response();
@@ -303,28 +596,28 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_input_accepts_raw_token_and_supported_urls() {
-        let token = "A".repeat(64);
-        let normalized = token.to_ascii_lowercase();
-        assert_eq!(normalize_fan_action_token(&token), Some(normalized.clone()));
+    fn confirmation_key_is_stable_for_the_same_token() {
+        let token = FanActionToken::parse("a".repeat(64)).expect("valid token fixture");
+        let first = confirmation_idempotency_key(&token).expect("derived key");
+        let second = confirmation_idempotency_key(&token).expect("derived key");
+        assert_eq!(first.as_str(), second.as_str());
+        assert!(first.as_str().starts_with("fan-confirm-"));
+    }
+
+    #[test]
+    fn confirmation_normalizer_accepts_query_and_fragment_links() {
+        let token = "b".repeat(64);
+        assert_eq!(
+            normalize_fan_action_token(&format!(
+                "https://virya.music/signal/confirm?token={token}"
+            )),
+            Some(token.clone())
+        );
         assert_eq!(
             normalize_fan_action_token(&format!(
                 "https://virya.music/signal/confirm#token={token}"
             )),
-            Some(normalized.clone())
-        );
-        assert_eq!(
-            normalize_fan_action_token(&format!("virya-signal://fan/confirm?token={token}")),
-            Some(normalized)
-        );
-    }
-
-    #[test]
-    fn confirmation_input_rejects_malformed_values() {
-        assert_eq!(normalize_fan_action_token("not-a-token"), None);
-        assert_eq!(
-            normalize_fan_action_token("https://virya.music/signal/confirm"),
-            None
+            Some(token)
         );
     }
 }

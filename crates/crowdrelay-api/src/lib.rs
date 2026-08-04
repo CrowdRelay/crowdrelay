@@ -204,6 +204,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/health/ready", get(ready))
         .route("/v1/go/{slug}", get(acquisition::redirect_smart_link))
         .route("/v1/fans", post(acquisition::signup_fan))
+        .route("/v1/fans/access", post(fan_lifecycle::request_fan_access))
         .route("/v1/fans/confirm", post(fan_lifecycle::confirm_fan))
         .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
         .route("/v1/public/cities", get(acquisition::list_cities))

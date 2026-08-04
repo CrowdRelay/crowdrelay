@@ -43,8 +43,8 @@ const ENCRYPTED_JSON_CONTENT_TYPE: &str = "application/vnd.crowdrelay.encrypted+
 const IDEMPOTENCY_RETENTION_MILLISECONDS: i64 = 86_400_000;
 const MAX_CLICK_BATCH_ROWS: usize = 1_000;
 const MAX_CITY_SIGNAL_ROWS: u32 = 1_000;
-const CONFIRMATION_RESEND_COOLDOWN_MINUTES: i64 = 15;
-const CONFIRMATION_RESEND_COOLDOWN_SECONDS: u32 = 15 * 60;
+const CONFIRMATION_RESEND_COOLDOWN_MINUTES: i64 = 1;
+const CONFIRMATION_RESEND_COOLDOWN_SECONDS: u32 = 60;
 
 /// Tenant-scoped PostgreSQL implementation of the acquisition repository.
 ///
