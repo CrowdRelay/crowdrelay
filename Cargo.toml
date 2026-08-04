@@ -41,7 +41,7 @@ uuid = { version = "1", features = ["serde", "v7"] }
 zeroize = "1"
 
 [profile.release]
-lto = "thin"
-codegen-units = 8
+lto = true
+codegen-units = 1
 strip = "symbols"
 panic = "unwind"
