@@ -41,11 +41,11 @@ pub struct GeocodeCity {
 }
 
 fn clean(value: &str, max_chars: usize) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()
-        && value.chars().count() <= max_chars
-        && !value.chars().any(char::is_control))
-    .then(|| value.to_owned())
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!value.is_empty() && value.chars().count() <= max_chars).then_some(value)
 }
 
 fn requested_slug(name: &str, country: &str) -> String {
@@ -120,6 +120,57 @@ pub async fn request_city(
                 .into_response();
         }
     };
+
+    let approved = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT slug, name
+        FROM cities
+        WHERE country_code = $1
+          AND moderation_status = 'approved'
+          AND lower(btrim(name)) = lower($2)
+        ORDER BY
+            CASE
+                WHEN $3::text IS NOT NULL
+                 AND region IS NOT NULL
+                 AND lower(btrim(region)) = lower($3)
+                THEN 0
+                ELSE 1
+            END,
+            id
+        LIMIT 1
+        "#,
+    )
+    .bind(&country)
+    .bind(&name)
+    .bind(region.as_deref())
+    .fetch_optional(&mut *transaction)
+    .await;
+    match approved {
+        Ok(Some((city_slug, display_name))) => {
+            if transaction.commit().await.is_err() {
+                return Problem::service_unavailable(request_id_value)
+                    .private()
+                    .into_response();
+            }
+            return (
+                StatusCode::OK,
+                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+                Json(RequestedCity {
+                    city_slug,
+                    display_name,
+                    status: "approved",
+                }),
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    }
+
     let row = sqlx::query_as::<_, (Uuid, String, String, i32)>(
         r#"
         INSERT INTO cities (
@@ -137,7 +188,7 @@ pub async fn request_city(
     .bind(&slug)
     .bind(&name)
     .bind(&country)
-    .bind(region)
+    .bind(region.as_deref())
     .fetch_one(&mut *transaction)
     .await;
     let Ok((city_id, city_slug, display_name, request_count)) = row else {
@@ -395,8 +446,12 @@ mod tests {
     }
 
     #[test]
-    fn city_text_rejects_control_characters() {
+    fn city_text_is_trimmed_and_rejects_control_characters() {
         assert_eq!(clean(" Bielawa ", 120), Some("Bielawa".to_owned()));
+        assert_eq!(
+            clean("  Wrocław   dolnośląskie  ", 120),
+            Some("Wrocław dolnośląskie".to_owned())
+        );
         assert_eq!(clean("Bielawa\nInjected", 120), None);
     }
 }

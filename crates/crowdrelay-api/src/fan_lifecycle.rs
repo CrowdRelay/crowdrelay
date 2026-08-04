@@ -64,12 +64,41 @@ struct FanConfirmationResponse {
     fan_id: crowdrelay_domain::FanId,
     status: FanStatus,
     referral_url: String,
+    fan_session_token: String,
 }
 
 #[derive(Serialize)]
 struct FanUnsubscribeResponse {
     fan_id: crowdrelay_domain::FanId,
     status: FanStatus,
+}
+
+fn normalize_fan_action_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if FanActionToken::parse(trimmed).is_ok() {
+        return Some(trimmed.to_ascii_lowercase());
+    }
+
+    let url = Url::parse(trimmed).ok()?;
+    let candidate = url
+        .query_pairs()
+        .find(|(name, _)| name == "token")
+        .map(|(_, token)| token.into_owned())
+        .or_else(|| {
+            url.fragment().and_then(|fragment| {
+                url::form_urlencoded::parse(fragment.as_bytes())
+                    .find(|(name, _)| name == "token")
+                    .map(|(_, token)| token.into_owned())
+            })
+        })?;
+
+    FanActionToken::parse(&candidate)
+        .ok()
+        .map(|token| token.as_str().to_owned())
 }
 
 /// Confirms ownership of a fan email address and creates a browser session.
@@ -87,9 +116,11 @@ pub async fn confirm_fan(
                 .into_response();
         }
     };
-    let token = match FanActionToken::parse(payload.token) {
-        Ok(token) => token,
-        Err(_) => {
+    let token = match normalize_fan_action_token(&payload.token)
+        .and_then(|value| FanActionToken::parse(value).ok())
+    {
+        Some(token) => token,
+        None => {
             return Problem::unprocessable(request_id_value)
                 .private()
                 .into_response();
@@ -164,6 +195,7 @@ pub async fn confirm_fan(
             fan_id: result.fan_id,
             status: result.status,
             referral_url,
+            fan_session_token: result.fan_session_token.as_str().to_owned(),
         }),
     )
         .into_response()
@@ -268,5 +300,31 @@ mod tests {
         assert!(cookie.contains("Secure"));
         assert!(clear_fan_session_cookie(true).contains("Secure"));
         assert!(!clear_fan_session_cookie(false).contains("; Secure"));
+    }
+
+    #[test]
+    fn confirmation_input_accepts_raw_token_and_supported_urls() {
+        let token = "A".repeat(64);
+        let normalized = token.to_ascii_lowercase();
+        assert_eq!(normalize_fan_action_token(&token), Some(normalized.clone()));
+        assert_eq!(
+            normalize_fan_action_token(&format!(
+                "https://virya.music/signal/confirm#token={token}"
+            )),
+            Some(normalized.clone())
+        );
+        assert_eq!(
+            normalize_fan_action_token(&format!("virya-signal://fan/confirm?token={token}")),
+            Some(normalized)
+        );
+    }
+
+    #[test]
+    fn confirmation_input_rejects_malformed_values() {
+        assert_eq!(normalize_fan_action_token("not-a-token"), None);
+        assert_eq!(
+            normalize_fan_action_token("https://virya.music/signal/confirm"),
+            None
+        );
     }
 }

@@ -3830,9 +3830,9 @@ components:
       properties:
         token:
           type: string
-          minLength: 64
-          maxLength: 64
-          pattern: ^[A-Fa-f0-9]{64}$
+          minLength: 1
+          maxLength: 4096
+          description: Raw 64-character action token or a confirmation URL containing token in its query string or fragment.
     FanConfirmationResponse:
       type: object
       additionalProperties: false
@@ -3840,6 +3840,7 @@ components:
       - fan_id
       - status
       - referral_url
+      - fan_session_token
       properties:
         fan_id:
           type: string
@@ -3850,6 +3851,11 @@ components:
         referral_url:
           type: string
           format: uri
+        fan_session_token:
+          type: string
+          minLength: 24
+          maxLength: 4096
+          description: Opaque native-client session credential. Browser clients should continue using the HttpOnly cookie.
     FanUnsubscribeResponse:
       type: object
       additionalProperties: false
