@@ -59,10 +59,6 @@ BEGIN
     WHERE country_code = 'PL'
       AND lower(regexp_replace(btrim(name), '\s+', ' ', 'g')) = 'wrocław';
 
-    IF candidate_count = 0 THEN
-        RAISE EXCEPTION 'No Wrocław city row found';
-    END IF;
-
     SELECT id
     INTO canonical_id
     FROM cities
