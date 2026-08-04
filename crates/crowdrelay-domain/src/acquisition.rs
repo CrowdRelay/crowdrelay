@@ -496,6 +496,16 @@ pub enum FanStatus {
     Suppressed,
 }
 
+/// Email action associated with a fan signup response.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FanSignupEmailKind {
+    /// A double-opt-in confirmation message.
+    Confirmation,
+    /// A one-time session recovery message for an already active fan.
+    SessionRecovery,
+}
+
 /// Result returned after a fan signup operation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FanSignupResult {
@@ -505,6 +515,15 @@ pub struct FanSignupResult {
     pub fan_session_token: Option<FanSessionToken>,
     pub confirmation_required: bool,
     pub created: bool,
+    /// The kind of email the caller should expect, if any.
+    #[serde(default)]
+    pub email_kind: Option<FanSignupEmailKind>,
+    /// True only when this request created a fresh durable email event.
+    #[serde(default)]
+    pub email_queued: bool,
+    /// Conservative delay before another email request is eligible.
+    #[serde(default)]
+    pub retry_after_seconds: Option<u32>,
 }
 
 /// Anonymous city demand signal derived from fan signups.
@@ -704,5 +723,34 @@ mod tests {
     fn consent_metadata_rejects_control_characters() {
         assert!(MarketingConsent::new(true, "privacy\nv1", "join").is_err());
         assert!(MarketingConsent::new(true, "privacy-v1", "join\tform").is_err());
+    }
+
+    #[test]
+    fn fan_signup_result_keeps_backward_compatible_email_defaults(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let original = FanSignupResult {
+            fan_id: FanId::new(),
+            status: FanStatus::Pending,
+            referral_code: None,
+            fan_session_token: None,
+            confirmation_required: true,
+            created: false,
+            email_kind: Some(FanSignupEmailKind::Confirmation),
+            email_queued: true,
+            retry_after_seconds: None,
+        };
+        let mut encoded = serde_json::to_value(&original)?;
+        let object = encoded
+            .as_object_mut()
+            .ok_or("serialized signup result must be an object")?;
+        object.remove("email_kind");
+        object.remove("email_queued");
+        object.remove("retry_after_seconds");
+
+        let decoded: FanSignupResult = serde_json::from_value(encoded)?;
+        assert_eq!(decoded.email_kind, None);
+        assert!(!decoded.email_queued);
+        assert_eq!(decoded.retry_after_seconds, None);
+        Ok(())
     }
 }

@@ -800,6 +800,9 @@ mod tests {
                     )?),
                     confirmation_required: false,
                     created: true,
+                    email_kind: None,
+                    email_queued: false,
+                    retry_after_seconds: None,
                 }),
                 cities_result: Ok(vec![CitySignal::new(
                     CityId::new(),

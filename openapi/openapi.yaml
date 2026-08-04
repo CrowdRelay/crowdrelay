@@ -2360,6 +2360,9 @@ components:
       - status
       - referral_url
       - confirmation_required
+      - email_kind
+      - email_queued
+      - retry_after_seconds
       properties:
         fan_id:
           type: string
@@ -2376,6 +2379,24 @@ components:
           format: uri
         confirmation_required:
           type: boolean
+        email_kind:
+          type:
+          - string
+          - 'null'
+          enum:
+          - confirmation
+          - session_recovery
+          - null
+          description: Transactional email action associated with this request, if any.
+        email_queued:
+          type: boolean
+          description: True only when this request created a fresh durable email event.
+        retry_after_seconds:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          description: Conservative delay before another email request is eligible.
     CitySignal:
       type: object
       required:

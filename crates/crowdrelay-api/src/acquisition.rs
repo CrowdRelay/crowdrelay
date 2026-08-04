@@ -28,7 +28,8 @@ use crowdrelay_application::{
     SignupFan, SignupFanCommand, SignupFanError,
 };
 use crowdrelay_domain::{
-    CampaignId, CitySlug, ClickEvent, FanSessionToken, FanSignup, FanSignupInput, FanStatus,
+    CampaignId, CitySlug, ClickEvent, FanSessionToken, FanSignup, FanSignupEmailKind,
+    FanSignupInput, FanStatus,
     MarketingConsent, NormalizedEmail, ReferralCode, SmartLinkSlug, VisitorId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
@@ -310,6 +311,9 @@ struct FanSignupResponse {
     status: FanStatus,
     referral_url: Option<String>,
     confirmation_required: bool,
+    email_kind: Option<FanSignupEmailKind>,
+    email_queued: bool,
+    retry_after_seconds: Option<u32>,
 }
 
 /// Creates or updates a consented fan signup using an idempotent durable write.
@@ -443,6 +447,9 @@ pub async fn signup_fan(
             status: result.status,
             referral_url,
             confirmation_required: result.confirmation_required,
+            email_kind: result.email_kind,
+            email_queued: result.email_queued,
+            retry_after_seconds: result.retry_after_seconds,
         }),
     )
         .into_response();

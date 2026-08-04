@@ -616,7 +616,7 @@ async fn retry_dead_delivery(
         SET status = 'pending', available_at = now(), max_attempts = attempt_count + 1,
             locked_at = NULL, lock_owner = NULL, lease_expires_at = NULL,
             last_response_status = NULL, last_error_kind = NULL,
-            delivered_at = NULL, dead_at = NULL
+            delivered_at = NULL, dead_at = NULL, cancelled_at = NULL
         FROM webhook_endpoints AS endpoint
         WHERE delivery.workspace_id = $1 AND delivery.id = $2
           AND delivery.status = 'dead'

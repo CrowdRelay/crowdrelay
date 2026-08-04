@@ -208,8 +208,8 @@ impl PgOutboxStore {
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
 
         record_expired_delivery_attempts(&mut transaction).await?;
+        cancel_inactive_endpoint_deliveries(&mut transaction).await?;
         mark_exhausted_delivery_leases_dead(&mut transaction).await?;
-        mark_inactive_endpoint_deliveries_dead(&mut transaction).await?;
 
         let claims = sqlx::query_as::<_, DeliveryClaim>(
             r#"
@@ -245,7 +245,8 @@ impl PgOutboxStore {
                     lease_expires_at = now() + ($3 * INTERVAL '1 millisecond'),
                     last_response_status = NULL,
                     last_error_kind = NULL,
-                    dead_at = NULL
+                    dead_at = NULL,
+                    cancelled_at = NULL
                 FROM candidates
                 WHERE delivery.id = candidates.id
                 RETURNING delivery.*
@@ -378,7 +379,8 @@ impl PgOutboxStore {
                 last_response_status = $8,
                 last_error_kind = $9,
                 delivered_at = CASE WHEN $6 = 'delivered' THEN now() ELSE NULL END,
-                dead_at = CASE WHEN $6 = 'dead' THEN now() ELSE NULL END
+                dead_at = CASE WHEN $6 = 'dead' THEN now() ELSE NULL END,
+                cancelled_at = NULL
             WHERE workspace_id = $1
               AND id = $2
               AND status = 'processing'
@@ -476,7 +478,8 @@ async fn mark_exhausted_delivery_leases_dead(
             lease_expires_at = NULL,
             last_error_kind = 'lease_expired_after_max_attempts',
             delivered_at = NULL,
-            dead_at = now()
+            dead_at = now(),
+            cancelled_at = NULL
         WHERE status = 'processing'
           AND lease_expires_at <= now()
           AND attempt_count >= max_attempts
@@ -511,9 +514,8 @@ async fn record_expired_delivery_attempts(
             delivery.locked_at,
             delivery.lease_expires_at,
             CASE
-                WHEN delivery.attempt_count >= delivery.max_attempts
-                    OR NOT endpoint.active
-                    THEN 'dead'
+                WHEN NOT endpoint.active THEN 'cancelled'
+                WHEN delivery.attempt_count >= delivery.max_attempts THEN 'dead'
                 ELSE 'retry'
             END,
             NULL,
@@ -546,20 +548,21 @@ async fn record_expired_delivery_attempts(
     Ok(())
 }
 
-async fn mark_inactive_endpoint_deliveries_dead(
+async fn cancel_inactive_endpoint_deliveries(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), StoreError> {
     sqlx::query(
         r#"
         UPDATE webhook_deliveries AS delivery
         SET
-            status = 'dead',
+            status = 'cancelled',
             locked_at = NULL,
             lock_owner = NULL,
             lease_expires_at = NULL,
             last_error_kind = 'endpoint_inactive',
             delivered_at = NULL,
-            dead_at = now()
+            dead_at = NULL,
+            cancelled_at = now()
         FROM webhook_endpoints AS endpoint
         WHERE endpoint.workspace_id = delivery.workspace_id
           AND endpoint.id = delivery.endpoint_id

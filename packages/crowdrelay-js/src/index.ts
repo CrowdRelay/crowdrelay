@@ -142,6 +142,9 @@ export interface FanSignupResult {
   status: "pending" | "active";
   referral_url: string | null;
   confirmation_required: boolean;
+  email_kind: "confirmation" | "session_recovery" | null;
+  email_queued: boolean;
+  retry_after_seconds: number | null;
 }
 
 export interface FanConfirmationResult {

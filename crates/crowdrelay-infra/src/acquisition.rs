@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use crowdrelay_application::{AcquisitionRepository, RepositoryError, SignupFanCommand};
 use crowdrelay_domain::{
     CampaignId, CityId, CitySignal, CitySlug, ClickEvent, CountryCode, DestinationUrl,
-    FanActionToken, FanId, FanSignup, FanSignupResult, FanStatus, ReferralCode, ResolvedSmartLink,
+    FanActionToken, FanId, FanSignup, FanSignupEmailKind, FanSignupResult, FanStatus, ReferralCode,
+    ResolvedSmartLink,
     SmartLinkId, SmartLinkSlug, WorkspaceId, WorkspaceSlug,
 };
 use serde_json::json;
@@ -44,6 +45,7 @@ const IDEMPOTENCY_RETENTION_MILLISECONDS: i64 = 86_400_000;
 const MAX_CLICK_BATCH_ROWS: usize = 1_000;
 const MAX_CITY_SIGNAL_ROWS: u32 = 1_000;
 const CONFIRMATION_RESEND_COOLDOWN_MINUTES: i64 = 15;
+const CONFIRMATION_RESEND_COOLDOWN_SECONDS: u32 = 15 * 60;
 
 /// Tenant-scoped PostgreSQL implementation of the acquisition repository.
 ///
@@ -417,6 +419,10 @@ impl PostgresAcquisitionRepository {
                 fan_session_token: None,
                 confirmation_required: true,
                 created: false,
+                email_kind: Some(FanSignupEmailKind::SessionRecovery),
+                email_queued: !resend_is_too_soon,
+                retry_after_seconds: resend_is_too_soon
+                    .then_some(CONFIRMATION_RESEND_COOLDOWN_SECONDS),
             };
             self.complete_idempotency(
                 &mut transaction,
@@ -459,6 +465,10 @@ impl PostgresAcquisitionRepository {
                 fan_session_token: None,
                 confirmation_required: true,
                 created: false,
+                email_kind: Some(FanSignupEmailKind::Confirmation),
+                email_queued: !resend_is_too_soon,
+                retry_after_seconds: resend_is_too_soon
+                    .then_some(CONFIRMATION_RESEND_COOLDOWN_SECONDS),
             };
             self.complete_idempotency(
                 &mut transaction,
@@ -516,8 +526,13 @@ impl PostgresAcquisitionRepository {
         .await
         .map_err(map_referral_error)?;
 
-        let (referral_code, fan_session_token, confirmation_required) =
-            if fan_upsert.fan.status == FanStatus::Active {
+        let (
+            referral_code,
+            fan_session_token,
+            confirmation_required,
+            email_kind,
+            email_queued,
+        ) = if fan_upsert.fan.status == FanStatus::Active {
                 qualify_signup_referral_and_rewards(
                     &mut transaction,
                     workspace_id,
@@ -558,7 +573,13 @@ impl PostgresAcquisitionRepository {
                     )
                     .await?;
                 }
-                (Some(referral_code), Some(fan_session_token), false)
+                (
+                    Some(referral_code),
+                    Some(fan_session_token),
+                    false,
+                    None,
+                    false,
+                )
             } else {
                 let confirmation_token =
                     issue_confirmation_token(&mut transaction, workspace_id, fan_upsert.fan.id)
@@ -572,7 +593,13 @@ impl PostgresAcquisitionRepository {
                     &confirmation_token,
                 )
                 .await?;
-                (None, None, true)
+                (
+                    None,
+                    None,
+                    true,
+                    Some(FanSignupEmailKind::Confirmation),
+                    true,
+                )
             };
 
         let result = FanSignupResult {
@@ -582,6 +609,9 @@ impl PostgresAcquisitionRepository {
             fan_session_token,
             confirmation_required,
             created: fan_upsert.created,
+            email_kind,
+            email_queued,
+            retry_after_seconds: None,
         };
         self.complete_idempotency(
             &mut transaction,
