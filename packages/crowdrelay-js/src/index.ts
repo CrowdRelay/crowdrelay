@@ -437,7 +437,7 @@ export class CrowdRelayClient {
     locale = "pl",
     idempotencyKey = crypto.randomUUID(),
   ): Promise<FanAccessRequestResult> {
-    return this.request("/fans/access", {
+    return this.#request("fans/access", {
       method: "POST",
       body: { email, locale },
       idempotencyKey,
