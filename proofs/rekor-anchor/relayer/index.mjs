@@ -107,6 +107,20 @@ async function ensureDependenciesReady(force = false) {
       method: "GET",
       headers: { accept: "application/json" },
     })
+
+    // Probe the exact privileged namespace without claiming data. Middleware
+    // authenticates first; the intentionally incomplete JSON must then reach
+    // the handler and return 400. A stale commerce key returns 401 here.
+    await requestJsonResponse(`${crowdrelayUrl}/v1/internal/proofs/claim`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${apiToken}`,
+        "content-type": "application/json",
+      },
+      body: "{}",
+    }, new Set([400]))
+
     next.crowdrelay.ready = true
   } catch (error) {
     next.crowdrelay.error = safeMessage(error)

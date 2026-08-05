@@ -57,7 +57,11 @@ test("parses and binds Rekor response", () => {
   const payload = buildProofPayload(batch)
   const signature = signPayload(payload, signer)
   const entry = buildRekorEntry(payload, signature, signer.publicKeyPem)
-  const body = Buffer.from(JSON.stringify(entry)).toString("base64")
+  const canonicalEntry = structuredClone(entry)
+  canonicalEntry.spec.data = {
+    hash: { algorithm: "sha256", value: sha256Hex(payload) },
+  }
+  const body = Buffer.from(JSON.stringify(canonicalEntry)).toString("base64")
   const expected = {
     anchorUrl: "https://rekor.sigstore.dev",
     payloadBase64: payload.toString("base64"),
@@ -89,6 +93,57 @@ test("parses and binds Rekor response", () => {
   const corrupted = structuredClone(response)
   corrupted[uuid].verification.inclusionProof.rootHash = "c".repeat(64)
   assert.throws(() => parseRekorCreateResponse(corrupted, expected), /rekor\.inclusion_invalid/)
+})
+
+test("accepts legacy content bodies and rejects mismatched canonical hashes", () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+  const signer = loadSigner(privateKey.export({ type: "pkcs8", format: "pem" }))
+  const payload = buildProofPayload(batch)
+  const signature = signPayload(payload, signer)
+  const entry = buildRekorEntry(payload, signature, signer.publicKeyPem)
+  const expected = {
+    anchorUrl: "https://rekor.sigstore.dev",
+    payloadBase64: payload.toString("base64"),
+    payloadSha256: sha256Hex(payload),
+    signatureBase64: signature.toString("base64"),
+    publicKeyBase64: Buffer.from(signer.publicKeyPem).toString("base64"),
+    publicKeyPem: signer.publicKeyPem,
+    signerFingerprint: signer.fingerprint,
+  }
+  const uuid = "c".repeat(64)
+  const legacyBody = Buffer.from(JSON.stringify(entry)).toString("base64")
+  const legacyRoot = createHash("sha256")
+    .update(Buffer.concat([Buffer.from([0]), Buffer.from(legacyBody, "base64")]))
+    .digest("hex")
+  const legacyResponse = {
+    [uuid]: {
+      body: legacyBody,
+      integratedTime: 1_700_000_000,
+      logID: "d".repeat(64),
+      logIndex: 0,
+      verification: {
+        inclusionProof: {
+          hashes: [],
+          logIndex: 0,
+          rootHash: legacyRoot,
+          treeSize: 1,
+          checkpoint: "test checkpoint data",
+        },
+        signedEntryTimestamp: "dGVzdC1zaWduZWQtZW50cnktdGltZXN0YW1w",
+      },
+    },
+  }
+  assert.equal(parseRekorCreateResponse(legacyResponse, expected).entry_uuid, uuid)
+
+  const mismatched = structuredClone(legacyResponse)
+  const canonicalEntry = structuredClone(entry)
+  canonicalEntry.spec.data = { hash: { algorithm: "sha256", value: "e".repeat(64) } }
+  mismatched[uuid].body = Buffer.from(JSON.stringify(canonicalEntry)).toString("base64")
+  const mismatchedRoot = createHash("sha256")
+    .update(Buffer.concat([Buffer.from([0]), Buffer.from(mismatched[uuid].body, "base64")]))
+    .digest("hex")
+  mismatched[uuid].verification.inclusionProof.rootHash = mismatchedRoot
+  assert.throws(() => parseRekorCreateResponse(mismatched, expected), /rekor\.body_payload/)
 })
 
 test("rejects malformed batches and classifies errors", () => {

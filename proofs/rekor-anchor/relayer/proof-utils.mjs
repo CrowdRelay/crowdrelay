@@ -125,7 +125,12 @@ export function parseRekorCreateResponse(responseJson, expected) {
   const canonicalBody = JSON.parse(Buffer.from(record.body, "base64").toString("utf8"))
   if (canonicalBody.kind !== "rekord" || canonicalBody.apiVersion !== "0.0.1") throw new Error("rekor.body_kind")
   const spec = canonicalBody.spec
-  if (!spec || spec.data?.content !== expected.payloadBase64) throw new Error("rekor.body_payload")
+  if (!spec) throw new Error("rekor.body_payload")
+  const payloadContentMatches = spec.data?.content === expected.payloadBase64
+  const payloadHashMatches = spec.data?.hash?.algorithm === "sha256"
+    && typeof spec.data.hash.value === "string"
+    && spec.data.hash.value.toLowerCase() === expected.payloadSha256.toLowerCase()
+  if (!payloadContentMatches && !payloadHashMatches) throw new Error("rekor.body_payload")
   if (spec.signature?.content !== expected.signatureBase64) throw new Error("rekor.body_signature")
   if (spec.signature?.format !== "x509") throw new Error("rekor.body_format")
   if (spec.signature?.publicKey?.content !== expected.publicKeyBase64) throw new Error("rekor.body_public_key")

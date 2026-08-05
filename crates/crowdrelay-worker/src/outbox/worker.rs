@@ -435,7 +435,7 @@ impl Default for OutboxWorkerConfig {
             poll_interval: Duration::from_millis(250),
             outbox_batch_size: 100,
             max_concurrent_deliveries: 8,
-            lease_duration: Duration::from_secs(90),
+            lease_duration: Duration::from_secs(180),
             database_operation_timeout: Duration::from_secs(10),
             secret_resolution_timeout: Duration::from_secs(5),
             http_connect_timeout: Duration::from_secs(5),
@@ -601,6 +601,17 @@ mod tests {
     #[test]
     fn default_configuration_is_valid() -> Result<(), Box<dyn std::error::Error>> {
         OutboxWorkerConfig::default().validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn default_lease_has_headroom_for_maximum_database_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = OutboxWorkerConfig {
+            database_operation_timeout: Duration::from_secs(60),
+            ..OutboxWorkerConfig::default()
+        };
+        config.validate()?;
         Ok(())
     }
 

@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         "--admin-key-file",
         default=os.getenv("CROWDRELAY_ADMIN_API_KEY_FILE", "deploy/secrets/crowdrelay_admin_api_key"),
     )
-    parser.add_argument("--timeout-seconds", type=int, default=180)
+    parser.add_argument("--timeout-seconds", type=int, default=420)
     parser.add_argument("--poll-seconds", type=float, default=3.0)
     parser.add_argument("--batch-limit", type=int, default=64)
     return parser.parse_args()
@@ -146,10 +146,26 @@ def main() -> int:
             raise RuntimeError("canary did not create a proof batch")
         batch_id = batch["id"]
         deadline = time.monotonic() + args.timeout_seconds
+        last_observation: tuple[Any, ...] | None = None
 
         while time.monotonic() < deadline:
             current = client.json(f"/v1/public/proofs/batches/{urllib.parse.quote(batch_id)}")
             status = current.get("status") if isinstance(current, dict) else None
+            observation = (
+                status,
+                current.get("attempts") if isinstance(current, dict) else None,
+                current.get("max_attempts") if isinstance(current, dict) else None,
+                current.get("last_error_kind") if isinstance(current, dict) else None,
+                current.get("available_at") if isinstance(current, dict) else None,
+            )
+            if observation != last_observation:
+                print(
+                    "Rekor canary progress: "
+                    f"status={observation[0]} attempts={observation[1]}/{observation[2]} "
+                    f"error={observation[3]} available_at={observation[4]}",
+                    file=sys.stderr,
+                )
+                last_observation = observation
             if status == "confirmed":
                 if current.get("anchor_kind") != "sigstore.rekor.v1":
                     raise RuntimeError("confirmed batch has an unexpected anchor kind")
@@ -173,7 +189,10 @@ def main() -> int:
             if status == "dead":
                 raise RuntimeError(f"proof batch entered dead state: {current.get('last_error_kind')}")
             time.sleep(args.poll_seconds)
-        raise RuntimeError("timed out waiting for Rekor confirmation")
+        raise RuntimeError(
+            "timed out waiting for Rekor confirmation; "
+            f"last_observation={last_observation}"
+        )
     except Exception as error:
         if enabled:
             try:

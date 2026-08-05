@@ -61,11 +61,21 @@ services:
       setup:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      # `init: true` may make PID 1 a root-owned init process while the
+      # healthcheck runs as the unprivileged CrowdRelay user. Verify the
+      # actual worker executable instead of probing PID 1.
+      test:
+        - CMD-SHELL
+        - >-
+          for executable in /proc/[0-9]*/exe; do
+            target=$$(readlink "$$executable" 2>/dev/null || true);
+            [ "$$target" = /usr/local/bin/crowdrelay-worker ] && exit 0;
+          done;
+          exit 1
       interval: 15s
       timeout: 3s
-      retries: 5
-      start_period: 15s
+      retries: 8
+      start_period: 20s
     init: true
     read_only: true
     tmpfs:
