@@ -86,9 +86,6 @@ The reverse proxy must join the same Docker network and route traffic to `crowdr
 
 Apache-2.0. See `LICENSE`.
 
-Mobile operator API: [`docs/MOBILE_APP.md`](docs/MOBILE_APP.md).
-
-
 ## Ecosystem max control plane
 
 The private control plane includes auditable feature flags, reconciliation,
