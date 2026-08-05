@@ -265,7 +265,9 @@ tar -xzf "$archive" -C "$install_dir"
 rm -f -- "$archive"
 cd "$install_dir"
 chmod 700 crowdrelayctl
-chmod 600 .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json deploy/webhook-secrets.production.json
+chmod 600 .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json
+sudo chown 10001:10001 deploy/webhook-secrets.production.json
+sudo chmod 0400 deploy/webhook-secrets.production.json
 ./crowdrelayctl deploy
 REMOTE
 }
