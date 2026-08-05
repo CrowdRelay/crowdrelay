@@ -5,8 +5,8 @@
 -- through feature flags until catalog and stock have been verified.
 
 INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
-SELECT workspace_id, flag.key, false, 'staged rollout'
-FROM workspaces
+SELECT workspace.id, flag.key, false, 'staged rollout'
+FROM workspaces AS workspace
 CROSS JOIN (
     VALUES
         ('merch_inventory_enabled'),
