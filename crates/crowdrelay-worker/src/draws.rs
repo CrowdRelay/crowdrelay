@@ -953,7 +953,7 @@ async fn issue_admission_winners(
 
         selected = selected.saturating_add(1);
         let winner_rank = i32::try_from(selected).map_err(|_| DrawWorkerError::Arithmetic)?;
-        record_winner(
+        let _winner_id = record_winner(
             transaction,
             draw,
             run_id,
@@ -1089,7 +1089,7 @@ async fn issue_physical_winners(
 
         selected = selected.saturating_add(1);
         let winner_rank = i32::try_from(selected).map_err(|_| DrawWorkerError::Arithmetic)?;
-        record_winner(
+        let winner_id = record_winner(
             transaction,
             draw,
             run_id,
@@ -1099,6 +1099,28 @@ async fn issue_physical_winners(
             Some(grant_id),
         )
         .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO reward_draw_fulfillments (
+                workspace_id, draw_id, winner_id, reward_grant_id,
+                variant_id, quantity, status
+            )
+            SELECT
+                allocation.workspace_id, allocation.draw_id, $3, $4,
+                allocation.variant_id, allocation.units_per_winner, 'pending'
+            FROM reward_draw_inventory_allocations AS allocation
+            WHERE allocation.workspace_id = $1 AND allocation.draw_id = $2
+            ON CONFLICT (workspace_id, winner_id) DO NOTHING
+            "#,
+        )
+        .bind(draw.workspace_id)
+        .bind(draw.id)
+        .bind(winner_id)
+        .bind(grant_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(DrawWorkerError::sqlx)?;
 
         append_outbox(
             transaction,
@@ -1125,7 +1147,78 @@ async fn issue_physical_winners(
         )
         .await?;
     }
+    reconcile_physical_inventory_reservation(transaction, draw, selected).await?;
     Ok(selected)
+}
+
+async fn reconcile_physical_inventory_reservation(
+    transaction: &mut Transaction<'_, Postgres>,
+    draw: &DrawRow,
+    selected: usize,
+) -> Result<(), DrawWorkerError> {
+    let selected = i32::try_from(selected).map_err(|_| DrawWorkerError::Arithmetic)?;
+    let allocation = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
+        r#"
+        SELECT reservation_id, variant_id, units_per_winner
+        FROM reward_draw_inventory_allocations
+        WHERE workspace_id = $1 AND draw_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(draw.workspace_id)
+    .bind(draw.id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(DrawWorkerError::sqlx)?;
+    let Some((reservation_id, variant_id, units_per_winner)) = allocation else {
+        return Ok(());
+    };
+    let required = selected
+        .checked_mul(units_per_winner)
+        .ok_or(DrawWorkerError::Arithmetic)?;
+    if required == 0 {
+        sqlx::query(
+            r#"
+            DELETE FROM inventory_reservation_items
+            WHERE workspace_id = $1 AND reservation_id = $2 AND variant_id = $3
+            "#,
+        )
+        .bind(draw.workspace_id)
+        .bind(reservation_id)
+        .bind(variant_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(DrawWorkerError::sqlx)?;
+        sqlx::query(
+            r#"
+            UPDATE inventory_reservations
+            SET status = 'released', released_at = now(),
+                release_reason = 'draw completed without winners'
+            WHERE workspace_id = $1 AND id = $2 AND status = 'active'
+            "#,
+        )
+        .bind(draw.workspace_id)
+        .bind(reservation_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(DrawWorkerError::sqlx)?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE inventory_reservation_items
+            SET quantity = LEAST(quantity, $4)
+            WHERE workspace_id = $1 AND reservation_id = $2 AND variant_id = $3
+            "#,
+        )
+        .bind(draw.workspace_id)
+        .bind(reservation_id)
+        .bind(variant_id)
+        .bind(required)
+        .execute(&mut **transaction)
+        .await
+        .map_err(DrawWorkerError::sqlx)?;
+    }
+    Ok(())
 }
 
 async fn record_winner(
@@ -1136,16 +1229,18 @@ async fn record_winner(
     winner_rank: i32,
     admission_pass_id: Option<Uuid>,
     reward_grant_id: Option<Uuid>,
-) -> Result<(), DrawWorkerError> {
+) -> Result<Uuid, DrawWorkerError> {
+    let winner_id = Uuid::now_v7();
     sqlx::query(
         r#"
         INSERT INTO reward_draw_winners (
-            workspace_id, draw_id, run_id, fan_id, winner_rank,
+            id, workspace_id, draw_id, run_id, fan_id, winner_rank,
             admission_pass_id, reward_grant_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
+    .bind(winner_id)
     .bind(draw.workspace_id)
     .bind(draw.id)
     .bind(run_id)
@@ -1195,7 +1290,8 @@ async fn record_winner(
             "reward_grant_id": reward_grant_id,
         }),
     )
-    .await
+    .await?;
+    Ok(winner_id)
 }
 
 async fn append_outbox(

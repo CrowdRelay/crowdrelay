@@ -31,7 +31,7 @@ const SHOW_SNAPSHOT_SCHEMA: u32 = 1;
 const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
-const FLAG_KEYS: [(&str, bool); 10] = [
+const FLAG_KEYS: [(&str, bool); 13] = [
     ("ticket_sales_enabled", true),
     ("ticket_delivery_enabled", true),
     ("gate_redemption_enabled", true),
@@ -42,6 +42,9 @@ const FLAG_KEYS: [(&str, bool); 10] = [
     ("automatic_retry_enabled", true),
     ("draw_proofs_enabled", true),
     ("external_proof_anchoring_enabled", false),
+    ("merch_inventory_enabled", false),
+    ("reward_campaigns_enabled", false),
+    ("merch_inventory_writes_enabled", false),
 ];
 
 #[derive(Clone, Copy)]
@@ -445,7 +448,10 @@ async fn ensure_default_flags(state: &crate::AppState) -> Result<(), EcosystemEr
             ('n8n_ingress_enabled', true),
             ('automatic_retry_enabled', true),
             ('draw_proofs_enabled', true),
-            ('external_proof_anchoring_enabled', false)
+            ('external_proof_anchoring_enabled', false),
+            ('merch_inventory_enabled', false),
+            ('reward_campaigns_enabled', false),
+            ('merch_inventory_writes_enabled', false)
         ) AS defaults(key, enabled)
         ON CONFLICT (workspace_id, key) DO NOTHING
         "#,
@@ -1576,6 +1582,9 @@ mod basic_tests {
     #[test]
     fn only_known_feature_flags_are_addressable() {
         assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
+        assert_eq!(flag_default("merch_inventory_enabled"), Some(false));
+        assert_eq!(flag_default("reward_campaigns_enabled"), Some(false));
+        assert_eq!(flag_default("merch_inventory_writes_enabled"), Some(false));
         assert_eq!(flag_default("unknown"), None);
     }
 }
@@ -1662,7 +1671,7 @@ mod tests {
 
     #[test]
     fn all_expected_feature_flags_have_safe_defaults() {
-        assert_eq!(FLAG_KEYS.len(), 10);
+        assert_eq!(FLAG_KEYS.len(), 13);
         assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
         assert_eq!(flag_default("unknown"), None);
     }

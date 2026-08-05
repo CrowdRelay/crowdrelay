@@ -1,0 +1,292 @@
+{
+  "products": [
+    {
+      "slug": "echoes",
+      "name": "Echoes Of The Modern Mind",
+      "description": "Nasz debiutancki album — 11 utworów przez szeroki umysł współczesnego człowieka. Każdy egzemplarz sygnowany przez zespół.",
+      "image_url": "https://virya.music/images/merch/echoes.webp",
+      "currency": "PLN",
+      "price_gross_minor": 4000,
+      "active": true,
+      "public": true,
+      "variants": [
+        {
+          "sku": "VIRYA-CD-ECHOES",
+          "label": "Standard",
+          "attributes": {},
+          "active": true,
+          "low_stock_threshold": 3,
+          "sell_without_stock": false
+        }
+      ]
+    },
+    {
+      "slug": "ashes-color",
+      "name": "From The Ashes — Koszulka Kolorowa",
+      "description": "Nadruk all-over. Feniks powstaje w pełnym kolorze.",
+      "image_url": "https://virya.music/images/merch/Ashes%20Color%20Front.webp",
+      "currency": "PLN",
+      "price_gross_minor": 5600,
+      "active": true,
+      "public": true,
+      "variants": [
+        {
+          "sku": "VIRYA-TEE-ASHES-COLOR-S",
+          "label": "S",
+          "attributes": {
+            "size": "S"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-COLOR-M",
+          "label": "M",
+          "attributes": {
+            "size": "M"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-COLOR-L",
+          "label": "L",
+          "attributes": {
+            "size": "L"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-COLOR-XL",
+          "label": "XL",
+          "attributes": {
+            "size": "XL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-COLOR-XXL",
+          "label": "XXL",
+          "attributes": {
+            "size": "XXL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        }
+      ]
+    },
+    {
+      "slug": "ashes-bw",
+      "name": "From The Ashes — Koszulka monochrom",
+      "description": "Nadruk all-over. Feniks w monochromatycznej odsłonie.",
+      "image_url": "https://virya.music/images/merch/Ashes%20BW%20Front.webp",
+      "currency": "PLN",
+      "price_gross_minor": 5600,
+      "active": true,
+      "public": true,
+      "variants": [
+        {
+          "sku": "VIRYA-TEE-ASHES-MONO-S",
+          "label": "S",
+          "attributes": {
+            "size": "S"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-MONO-M",
+          "label": "M",
+          "attributes": {
+            "size": "M"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-MONO-L",
+          "label": "L",
+          "attributes": {
+            "size": "L"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-MONO-XL",
+          "label": "XL",
+          "attributes": {
+            "size": "XL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-ASHES-MONO-XXL",
+          "label": "XXL",
+          "attributes": {
+            "size": "XXL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        }
+      ]
+    },
+    {
+      "slug": "wave",
+      "name": "Fala Niepewności — Koszulka",
+      "description": "Nadruk all-over. Płyń na fali niepewności.",
+      "image_url": "https://virya.music/images/merch/Wave%20Front.webp",
+      "currency": "PLN",
+      "price_gross_minor": 5600,
+      "active": true,
+      "public": true,
+      "variants": [
+        {
+          "sku": "VIRYA-TEE-WAVE-S",
+          "label": "S",
+          "attributes": {
+            "size": "S"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-WAVE-M",
+          "label": "M",
+          "attributes": {
+            "size": "M"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-WAVE-L",
+          "label": "L",
+          "attributes": {
+            "size": "L"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-WAVE-XL",
+          "label": "XL",
+          "attributes": {
+            "size": "XL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-WAVE-XXL",
+          "label": "XXL",
+          "attributes": {
+            "size": "XXL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        }
+      ]
+    },
+    {
+      "slug": "virya-logo",
+      "name": "Koszulka z Logo Viryi",
+      "description": "Czysty srebrny herb z przodu, złoty emblemat z tyłu.",
+      "image_url": "https://virya.music/images/merch/virya.webp",
+      "currency": "PLN",
+      "price_gross_minor": 4800,
+      "active": true,
+      "public": true,
+      "variants": [
+        {
+          "sku": "VIRYA-TEE-LOGO-S",
+          "label": "S",
+          "attributes": {
+            "size": "S"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-LOGO-M",
+          "label": "M",
+          "attributes": {
+            "size": "M"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-LOGO-L",
+          "label": "L",
+          "attributes": {
+            "size": "L"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-LOGO-XL",
+          "label": "XL",
+          "attributes": {
+            "size": "XL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        },
+        {
+          "sku": "VIRYA-TEE-LOGO-XXL",
+          "label": "XXL",
+          "attributes": {
+            "size": "XXL"
+          },
+          "active": true,
+          "low_stock_threshold": 2,
+          "sell_without_stock": false
+        }
+      ]
+    },
+    {
+      "slug": "bag",
+      "name": "Torba Viryi",
+      "description": "Wytrzymała torba z herbem Viryi. Noś katharsis ze sobą.",
+      "image_url": "https://virya.music/images/merch/bag1.webp",
+      "currency": "PLN",
+      "price_gross_minor": 4000,
+      "active": true,
+      "public": true,
+      "variants": [
+        {
+          "sku": "VIRYA-BAG-CREST",
+          "label": "Standard",
+          "attributes": {},
+          "active": true,
+          "low_stock_threshold": 3,
+          "sell_without_stock": false
+        }
+      ]
+    }
+  ]
+}

@@ -50,6 +50,7 @@ use tracing::{Level, info_span};
 mod accounting;
 mod acquisition;
 mod admission;
+mod commerce;
 mod concert_qr;
 mod ecosystem;
 mod event_copy;
@@ -210,6 +211,68 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/public/cities", get(acquisition::list_cities))
         .route("/v1/public/cities/requests", post(mobile_fan::request_city))
         .route("/v1/public/events", get(events::list_events))
+        .route("/v1/public/merch/catalog", get(commerce::public_catalog))
+        .route(
+            "/v1/internal/merch/reservations",
+            post(commerce::reserve_inventory),
+        )
+        .route(
+            "/v1/internal/merch/reservations/{reservation_id}/commit",
+            post(commerce::commit_inventory),
+        )
+        .route(
+            "/v1/internal/merch/reservations/{reservation_id}/release",
+            post(commerce::release_inventory),
+        )
+        .route(
+            "/v1/admin/merch/catalog",
+            get(commerce::admin_catalog).post(commerce::upsert_catalog),
+        )
+        .route("/v1/staff/merch/catalog", get(commerce::admin_catalog))
+        .route(
+            "/v1/admin/merch/inventory/adjustments",
+            post(commerce::adjust_inventory),
+        )
+        .route(
+            "/v1/admin/merch/promotion-recommendations",
+            get(commerce::promotion_recommendations),
+        )
+        .route(
+            "/v1/staff/merch/promotion-recommendations",
+            get(commerce::promotion_recommendations),
+        )
+        .route(
+            "/v1/admin/reward-campaigns",
+            get(commerce::list_reward_campaigns).post(commerce::create_reward_campaign),
+        )
+        .route(
+            "/v1/staff/reward-campaigns",
+            get(commerce::list_reward_campaigns),
+        )
+        .route(
+            "/v1/admin/reward-campaigns/{draw_id}/cancel",
+            post(commerce::cancel_reward_campaign),
+        )
+        .route(
+            "/v1/admin/reward-campaigns/{draw_id}/schedule",
+            post(commerce::schedule_reward_campaign),
+        )
+        .route(
+            "/v1/admin/reward-fulfillments",
+            get(commerce::list_reward_fulfillments),
+        )
+        .route(
+            "/v1/staff/reward-fulfillments",
+            get(commerce::list_reward_fulfillments),
+        )
+        .route(
+            "/v1/admin/reward-fulfillments/{winner_id}",
+            post(commerce::fulfill_reward),
+        )
+        .route(
+            "/v1/staff/reward-fulfillments/{winner_id}",
+            post(commerce::fulfill_reward),
+        )
         .route(
             "/v1/public/proofs/batches/{batch_id}",
             get(proofs::public_batch),

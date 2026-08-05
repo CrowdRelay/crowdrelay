@@ -23,33 +23,64 @@ The split is intentionally layered. New vertical slices should keep policy in do
 - Public reads may use bounded caches; private capability and operator reads are `no-store`.
 - n8n, email and external proof systems never participate in a public transaction commit.
 
-## Main event path
+## Reward campaigns
 
-```text
-HTTP command
-  -> authorization and bounded input validation
-  -> application use case
-  -> PostgreSQL transaction
-       business rows
-       idempotency result
-       outbox event
-  -> response
-  -> worker lease
-  -> signed webhook delivery
-  -> retry / delivered / dead state
-```
+A physical reward campaign reuses the existing weighted draw and existing
+`physical_reward.granted` outbox contract. A new allocation links one draw to a
+SKU, reserves `winner_count × units_per_winner`, and creates fulfillment rows
+only for actual selected winners. If fewer winners qualify, unused reservation
+quantity is released inside the draw transaction.
 
-## Authorization boundaries
+Campaign states remain the established draw states: draft, scheduled, running,
+completed and cancelled. Scheduling is separately gated. Cancellation is only
+allowed before running and releases the allocation.
 
-`/public`, `/me`, `/admin`, `/staff`, `/commerce` and `/internal` are separate capabilities. A credential valid for one boundary is not treated as a general system credential.
+## Public site failure isolation
 
-## Scaling boundaries
+Static product cards render immediately. Only the small availability indicator
+calls `/api/merch/inventory`, with bounded upstream and browser timeouts. A
+CrowdRelay outage produces an error/retry state rather than blocking or removing
+the page.
 
-The API is stateless apart from process-local read caches. Workers coordinate through PostgreSQL leases. Horizontal scale therefore depends on database contention, endpoint fairness and bounded concurrency rather than process affinity.
+## Mobile payment boundary
 
-## Deliberate trade-offs
+Virya Signal reads the coarse public catalog and links products to the existing
+Virya store. Concert cards continue to use `PublicEvent.ticket_url` and open the
+system browser. Both tickets and merch therefore use hosted Stripe Checkout;
+the mobile app never embeds card collection or stores payment credentials.
 
-- PostgreSQL is preferred over an additional broker while throughput and retention remain within measured limits.
-- The transactional outbox is more operationally involved than direct webhooks, but prevents a committed business operation from losing its delivery intent.
-- External Rekor proofs are optional evidence, not consensus and not an authority for business state.
-- Partitioning and additional infrastructure are deferred until production measurements justify them.
+## n8n and mail boundary
+
+No workflow JSON was modified. The existing mail paths continue to consume the
+same events. The protected `physical_reward.granted` outbox block and the Stripe
+mail/shipment block are covered by exact SHA-256 source guards.
+
+# Store
+
+## Source of truth
+
+CrowdRelay owns products, SKU variants, inventory movements, reservations,
+physical reward allocations and fulfillment. The stock value is derived from
+an append-only ledger; active reservations are subtracted separately.
+
+`available = sum(inventory_ledger.delta) - active_reservations`
+
+The ledger records receipts, initial counts, sales, refunds, manual adjustments,
+promotional issues, damage and staff issues. Every mutation is workspace-scoped
+and the externally retried operations use stable idempotency keys.
+
+## Stripe order lifecycle
+
+1. Virya validates the cart and expands bundles to physical SKU quantities.
+2. With the site write switch enabled, CrowdRelay creates an expiring order
+   reservation before Stripe Checkout is created.
+3. The checkout request identity is a fingerprint of the complete cart,
+   customer, parcel-locker, language and reward payload. An unchanged retry
+   reuses the same Stripe idempotency key.
+4. Ambiguous Stripe failures do not release stock immediately. The reservation
+   expires naturally, or the exact checkout retries safely.
+5. Signed Stripe payment events run the established mail and InPost checkpoints
+   first. Inventory commit is appended afterwards.
+6. CrowdRelay commit is idempotent. A paid event may also commit an expired or
+   released reservation when Stripe events arrived out of order; preserving a
+   paid order takes precedence over hiding a temporary negative correction.

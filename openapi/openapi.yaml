@@ -1923,6 +1923,420 @@ paths:
         schema: { type: string, format: uuid }
       responses:
         '200': { description: Updated retry state. }
+  /public/merch/catalog:
+    get:
+      operationId: getPublicMerchCatalog
+      summary: Read the public merch catalog and coarse availability
+      responses:
+        '200':
+          description: Public merch catalog. Exact quantities are intentionally omitted.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: public, max-age=15, stale-while-revalidate=60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchCatalog'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /internal/merch/reservations:
+    post:
+      operationId: reserveMerchInventory
+      summary: Reserve physical merch for one checkout
+      security:
+      - commerceBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryReservationRequest'
+      responses:
+        '201':
+          description: Inventory reserved idempotently by external_reference.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryReservation'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /internal/merch/reservations/{reservation_id}/commit:
+    post:
+      operationId: commitMerchInventoryReservation
+      summary: Commit a paid Stripe reservation as a sale
+      security:
+      - commerceBearer: []
+      parameters:
+      - $ref: '#/components/parameters/ReservationId'
+      responses:
+        '200':
+          description: Reservation committed or already committed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryReservation'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /internal/merch/reservations/{reservation_id}/release:
+    post:
+      operationId: releaseMerchInventoryReservation
+      summary: Release an unpaid or failed checkout reservation
+      security:
+      - commerceBearer: []
+      parameters:
+      - $ref: '#/components/parameters/ReservationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryReleaseRequest'
+      responses:
+        '200':
+          description: Reservation released or already released.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryReservation'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/catalog:
+    get:
+      operationId: getAdminMerchCatalog
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Catalog with exact stock and reservation counters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchCatalog'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: upsertAdminMerchCatalog
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MerchCatalogUpsert'
+      responses:
+        '200':
+          description: Catalog upserted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchCatalog'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/merch/catalog:
+    get:
+      operationId: getStaffMerchCatalog
+      security:
+      - staffBearer: []
+      responses:
+        '200':
+          description: Catalog with exact stock and reservation counters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchCatalog'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/inventory/adjustments:
+    post:
+      operationId: adjustAdminMerchInventory
+      security:
+      - adminBearer: []
+      parameters:
+      - in: header
+        name: Idempotency-Key
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryAdjustmentRequest'
+      responses:
+        '200':
+          description: Inventory ledger adjustment recorded once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryAdjustment'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/promotion-recommendations:
+    get:
+      operationId: getAdminMerchPromotionRecommendations
+      summary: Calculate conservative giveaway recommendations from live inventory and sales history
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Per-variant promotion recommendations. Low-history results are deliberately capped.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PromotionRecommendation'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/merch/promotion-recommendations:
+    get:
+      operationId: getStaffMerchPromotionRecommendations
+      security:
+      - staffBearer: []
+      responses:
+        '200':
+          description: Per-variant promotion recommendations.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PromotionRecommendation'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/reward-campaigns:
+    get:
+      operationId: getAdminRewardCampaigns
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Inventory-backed reward campaigns.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RewardCampaign'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: createAdminRewardCampaign
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RewardCampaignCreate'
+      responses:
+        '201':
+          description: Campaign created and its prize stock reserved atomically.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RewardCampaign'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/reward-campaigns:
+    get:
+      operationId: getStaffRewardCampaigns
+      security:
+      - staffBearer: []
+      responses:
+        '200':
+          description: Inventory-backed reward campaigns.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RewardCampaign'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/reward-campaigns/{draw_id}/schedule:
+    post:
+      operationId: scheduleAdminRewardCampaign
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/DrawId'
+      responses:
+        '200':
+          description: Draft campaign scheduled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RewardCampaign'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/reward-campaigns/{draw_id}/cancel:
+    post:
+      operationId: cancelAdminRewardCampaign
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/DrawId'
+      responses:
+        '200':
+          description: Campaign cancelled and undelivered stock released.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RewardCampaign'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/reward-fulfillments:
+    get:
+      operationId: getAdminRewardFulfillments
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Physical reward fulfillment queue.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RewardFulfillment'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/reward-fulfillments:
+    get:
+      operationId: getStaffRewardFulfillments
+      security:
+      - staffBearer: []
+      responses:
+        '200':
+          description: Physical reward fulfillment queue.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RewardFulfillment'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/reward-fulfillments/{winner_id}:
+    post:
+      operationId: updateAdminRewardFulfillment
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/WinnerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RewardFulfillmentUpdate'
+      responses:
+        '200':
+          description: Fulfillment status updated idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RewardFulfillment'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/reward-fulfillments/{winner_id}:
+    post:
+      operationId: updateStaffRewardFulfillment
+      security:
+      - staffBearer: []
+      parameters:
+      - $ref: '#/components/parameters/WinnerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RewardFulfillmentUpdate'
+      responses:
+        '200':
+          description: Fulfillment status updated idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RewardFulfillment'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
 components:
   headers:
     RequestId:
@@ -1985,6 +2399,28 @@ components:
       schema:
         type: string
         example: crowdrelay_pass_session=opaque; Max-Age=1209600; Path=/; Secure; HttpOnly; SameSite=Lax
+  parameters:
+    ReservationId:
+      in: path
+      name: reservation_id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DrawId:
+      in: path
+      name: draw_id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WinnerId:
+      in: path
+      name: winner_id
+      required: true
+      schema:
+        type: string
+        format: uuid
   securitySchemes:
     fanSession:
       type: apiKey
@@ -2098,6 +2534,260 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    MerchCatalog:
+      type: object
+      additionalProperties: false
+      required: [generated_at, products]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        products:
+          type: array
+          items:
+            $ref: '#/components/schemas/MerchProduct'
+    MerchProduct:
+      type: object
+      additionalProperties: false
+      required: [id, slug, name, currency, price_gross_minor, active, public, variants]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9_-]*$' }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        image_url: { type: [string, 'null'], format: uri }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        price_gross_minor: { type: integer, format: int64, minimum: 0 }
+        active: { type: boolean }
+        public: { type: boolean }
+        variants:
+          type: array
+          items:
+            $ref: '#/components/schemas/MerchVariant'
+    MerchVariant:
+      type: object
+      additionalProperties: false
+      required: [id, sku, label, attributes, active, low_stock_threshold, sell_without_stock, available, availability]
+      properties:
+        id: { type: string, format: uuid }
+        sku: { type: string }
+        label: { type: string }
+        attributes: { type: object, additionalProperties: true }
+        active: { type: boolean }
+        low_stock_threshold: { type: integer, minimum: 0 }
+        sell_without_stock: { type: boolean }
+        available: { type: boolean }
+        on_hand: { type: integer, format: int64 }
+        reserved: { type: integer, format: int64, minimum: 0 }
+        available_quantity: { type: integer, format: int64 }
+        availability:
+          type: string
+          enum: [in_stock, low_stock, out_of_stock, preorder]
+    MerchCatalogUpsert:
+      type: object
+      additionalProperties: false
+      required: [products]
+      properties:
+        products:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/MerchProductUpsert'
+    MerchProductUpsert:
+      type: object
+      additionalProperties: false
+      required: [slug, name, currency, price_gross_minor, active, public, variants]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9_-]*$' }
+        name: { type: string, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        image_url: { type: [string, 'null'], format: uri }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        price_gross_minor: { type: integer, format: int64, minimum: 0 }
+        active: { type: boolean }
+        public: { type: boolean }
+        variants:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/MerchVariantUpsert'
+    MerchVariantUpsert:
+      type: object
+      additionalProperties: false
+      required: [sku, label, attributes, active, low_stock_threshold, sell_without_stock]
+      properties:
+        sku: { type: string, maxLength: 128 }
+        label: { type: string, maxLength: 160 }
+        attributes: { type: object, additionalProperties: true }
+        active: { type: boolean }
+        low_stock_threshold: { type: integer, minimum: 0 }
+        sell_without_stock: { type: boolean }
+    InventoryReservationRequest:
+      type: object
+      additionalProperties: false
+      required: [external_reference, expires_at, items]
+      properties:
+        external_reference: { type: string, maxLength: 200 }
+        expires_at: { type: string, format: date-time }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/InventoryReservationItemRequest'
+    InventoryReservationItemRequest:
+      type: object
+      additionalProperties: false
+      required: [sku, quantity]
+      properties:
+        sku: { type: string, maxLength: 128 }
+        quantity: { type: integer, minimum: 1, maximum: 100 }
+    InventoryReservation:
+      type: object
+      additionalProperties: false
+      required: [id, external_reference, status, items]
+      properties:
+        id: { type: string, format: uuid }
+        external_reference: { type: string }
+        status: { type: string, enum: [active, committed, released, expired] }
+        expires_at: { type: [string, 'null'], format: date-time }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InventoryReservationItem'
+    InventoryReservationItem:
+      type: object
+      additionalProperties: false
+      required: [sku, label, quantity]
+      properties:
+        sku: { type: string }
+        label: { type: string }
+        quantity: { type: integer, minimum: 1 }
+    InventoryReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, maxLength: 240 }
+    InventoryAdjustmentRequest:
+      type: object
+      additionalProperties: false
+      required: [sku, delta, movement_kind]
+      properties:
+        sku: { type: string, maxLength: 128 }
+        delta: { type: integer, not: { const: 0 } }
+        movement_kind:
+          type: string
+          enum: [initial, receipt, refund, adjustment, damage, staff_issue]
+        actor_id: { type: [string, 'null'], maxLength: 200 }
+        reason: { type: [string, 'null'], maxLength: 500 }
+    InventoryAdjustment:
+      type: object
+      additionalProperties: false
+      required: [sku, delta, movement_kind, on_hand, reserved, available_quantity]
+      properties:
+        sku: { type: string }
+        delta: { type: integer }
+        movement_kind: { type: string }
+        on_hand: { type: integer, format: int64 }
+        reserved: { type: integer, format: int64 }
+        available_quantity: { type: integer, format: int64 }
+    PromotionRecommendation:
+      type: object
+      additionalProperties: false
+      required: [sku, product_name, variant_label, on_hand, reserved, available_quantity, sold_7d, sold_30d, sold_90d, promotional_issued_90d, upcoming_events_60d, history_days, safety_stock, recommended_max_giveaway, recommendation, confidence, reason]
+      properties:
+        sku: { type: string }
+        product_name: { type: string }
+        variant_label: { type: string }
+        on_hand: { type: integer, format: int64 }
+        reserved: { type: integer, format: int64, minimum: 0 }
+        available_quantity: { type: integer, format: int64, minimum: 0 }
+        sold_7d: { type: integer, format: int64, minimum: 0 }
+        sold_30d: { type: integer, format: int64, minimum: 0 }
+        sold_90d: { type: integer, format: int64, minimum: 0 }
+        promotional_issued_90d: { type: integer, format: int64, minimum: 0 }
+        upcoming_events_60d: { type: integer, format: int64, minimum: 0 }
+        history_days: { type: integer, minimum: 0 }
+        safety_stock: { type: integer, format: int64, minimum: 0 }
+        recommended_max_giveaway: { type: integer, format: int64, minimum: 0 }
+        recommendation: { type: string, enum: [hold, limited, candidate] }
+        confidence: { type: string, enum: [low, medium, high] }
+        reason: { type: string }
+    RewardCampaignCreate:
+      type: object
+      additionalProperties: false
+      required: [slug, name, prize_sku, winner_count, opens_at, closes_at, draw_at, status]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9][a-z0-9_-]*$' }
+        name: { type: string, maxLength: 200 }
+        prize_sku: { type: string, maxLength: 128 }
+        winner_count: { type: integer, minimum: 1, maximum: 10000 }
+        units_per_winner: { type: integer, minimum: 1, maximum: 100, default: 1 }
+        eligibility_kind: { type: string, enum: [all_active, event_interest], default: all_active }
+        event_slug: { type: [string, 'null'] }
+        base_entries: { type: integer, minimum: 1, default: 1 }
+        entries_per_referral: { type: integer, minimum: 0, default: 1 }
+        entries_per_checkin: { type: integer, minimum: 0, default: 0 }
+        max_entries: { type: integer, minimum: 1, default: 1000 }
+        claim_expires_hours: { type: integer, minimum: 1, maximum: 8760, default: 168 }
+        opens_at: { type: string, format: date-time }
+        closes_at: { type: string, format: date-time }
+        draw_at: { type: string, format: date-time }
+        status: { type: string, enum: [draft, scheduled] }
+    RewardCampaign:
+      type: object
+      additionalProperties: false
+      required: [id, slug, name, status, eligibility_kind, winner_count, selected_winners, prize_sku, prize_name, prize_variant, units_per_winner, reserved_quantity, pending_fulfillments, delivered_fulfillments, opens_at, closes_at, draw_at]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [draft, scheduled, running, completed, cancelled] }
+        eligibility_kind: { type: string, enum: [all_active, event_interest] }
+        event_slug: { type: [string, 'null'] }
+        winner_count: { type: integer }
+        selected_winners: { type: integer, format: int64 }
+        prize_sku: { type: string }
+        prize_name: { type: string }
+        prize_variant: { type: string }
+        units_per_winner: { type: integer }
+        reserved_quantity: { type: integer }
+        pending_fulfillments: { type: integer, format: int64 }
+        delivered_fulfillments: { type: integer, format: int64 }
+        opens_at: { type: string, format: date-time }
+        closes_at: { type: string, format: date-time }
+        draw_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+    RewardFulfillment:
+      type: object
+      additionalProperties: false
+      required: [id, winner_id, draw_id, draw_slug, winner_rank, fan_email_masked, prize_sku, prize_name, prize_variant, quantity, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        winner_id: { type: string, format: uuid }
+        draw_id: { type: string, format: uuid }
+        draw_slug: { type: string }
+        winner_rank: { type: integer }
+        fan_display_name: { type: [string, 'null'] }
+        fan_email_masked: { type: string }
+        prize_sku: { type: string }
+        prize_name: { type: string }
+        prize_variant: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        status: { type: string, enum: [pending, prepared, delivered, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RewardFulfillmentUpdate:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [prepared, delivered, cancelled] }
+        actor_id: { type: [string, 'null'], maxLength: 200 }
+        note: { type: [string, 'null'], maxLength: 500 }
     Health:
       type: object
       required:
