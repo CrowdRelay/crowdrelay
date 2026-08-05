@@ -1,0 +1,145 @@
+name: crowdrelay
+
+services:
+  setup:
+    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/wojciechbator/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set one immutable sha-* tag for setup, API, and worker}
+    command: ["setup"]
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-deploy/.env.oracle}
+    volumes:
+      - ./deploy/bootstrap.production.json:/run/crowdrelay/bootstrap.json:ro
+      - ./deploy/webhook-secrets.production.json:/run/secrets/crowdrelay-webhooks.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    networks: [virya]
+
+  api:
+    image: ${CROWDRELAY_API_IMAGE:-ghcr.io/wojciechbator/crowdrelay-api}:${CROWDRELAY_IMAGE_TAG:?Set one immutable sha-* tag for setup, API, and worker}
+    container_name: crowdrelay-api
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-deploy/.env.oracle}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/v1/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+      start_period: 20s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${CROWDRELAY_API_MEMORY:-128m}
+    cpus: ${CROWDRELAY_API_CPUS:-0.35}
+    stop_grace_period: 25s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks: [virya]
+
+  worker:
+    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/wojciechbator/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set one immutable sha-* tag for setup, API, and worker}
+    container_name: crowdrelay-worker
+    command: ["run"]
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-deploy/.env.oracle}
+    volumes:
+      - ./deploy/webhook-secrets.production.json:/run/secrets/crowdrelay-webhooks.json:ro
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${CROWDRELAY_WORKER_MEMORY:-128m}
+    cpus: ${CROWDRELAY_WORKER_CPUS:-0.35}
+    stop_grace_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks: [virya]
+
+  rekor-proof-anchor:
+    image: ${CROWDRELAY_REKOR_IMAGE:-ghcr.io/wojciechbator/crowdrelay-rekor-proof-anchor}:${CROWDRELAY_IMAGE_TAG:?Set one immutable sha-* tag for setup, API, worker, and Rekor anchor}
+    container_name: crowdrelay-rekor-proof-anchor
+    env_file:
+      - ${CROWDRELAY_REKOR_ENV_FILE:-deploy/rekor-anchor.env}
+    environment:
+      CROWDRELAY_COMMERCE_API_KEY_FILE: /run/secrets/crowdrelay_commerce_api_key
+      REKOR_SIGNING_KEY_FILE: /run/secrets/rekor_signing_key
+      ANCHOR_PENDING_FILE: /data/pending-confirmation.json
+    secrets:
+      - crowdrelay_commerce_api_key
+      - rekor_signing_key
+    volumes:
+      - rekor-anchor-state:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    expose:
+      - "8081"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${CROWDRELAY_REKOR_MEMORY:-96m}
+    cpus: ${CROWDRELAY_REKOR_CPUS:-0.20}
+    stop_grace_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks: [virya]
+
+secrets:
+  crowdrelay_commerce_api_key:
+    file: ./deploy/secrets/crowdrelay_commerce_api_key
+  rekor_signing_key:
+    file: ./deploy/secrets/rekor_signing_key.pem
+
+volumes:
+  rekor-anchor-state:
+
+networks:
+  virya:
+    external: true
+    name: ${VIRYA_DOCKER_NETWORK:-virya-n8n-cloud_default}
