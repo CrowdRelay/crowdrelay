@@ -1295,15 +1295,25 @@ fn validate_rekor_receipt(
         .decode(&payload.canonicalized_body)
         .map_err(|_| ProofError::BadRequest)?;
     let body: Value = serde_json::from_slice(&body_bytes).map_err(|_| ProofError::BadRequest)?;
-    let embedded_payload = body
-        .pointer("/spec/data/content")
-        .and_then(Value::as_str)
-        .ok_or(ProofError::BadRequest)
-        .and_then(|value| {
-            BASE64_STANDARD
+    let embedded_payload_matches = match body.pointer("/spec/data/content").and_then(Value::as_str)
+    {
+        Some(value) => {
+            let decoded = BASE64_STANDARD
                 .decode(value)
-                .map_err(|_| ProofError::BadRequest)
-        })?;
+                .map_err(|_| ProofError::BadRequest)?;
+            decoded.as_slice() == expected_payload
+        }
+        None => false,
+    };
+    let expected_payload_hash = hex::encode(Sha256::digest(expected_payload));
+    let embedded_hash_matches = body
+        .pointer("/spec/data/hash/algorithm")
+        .and_then(Value::as_str)
+        == Some("sha256")
+        && body
+            .pointer("/spec/data/hash/value")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case(&expected_payload_hash));
     let embedded_signature = body
         .pointer("/spec/signature/content")
         .and_then(Value::as_str)
@@ -1319,7 +1329,7 @@ fn validate_rekor_receipt(
             .pointer("/spec/signature/format")
             .and_then(Value::as_str)
             != Some("x509")
-        || embedded_payload.as_slice() != expected_payload
+        || (!embedded_payload_matches && !embedded_hash_matches)
         || embedded_signature != payload.signature_base64
         || embedded_key != expected_key.as_str()
     {
@@ -1771,5 +1781,88 @@ mod tests {
         assert!(!is_lower_hex("ABCD"));
         assert!(is_base64_value("dGVzdA=="));
         assert!(!is_base64_value("not base64!"));
+    }
+
+    fn receipt_request(expected_payload: &[u8], data: Value) -> ConfirmRequest {
+        let signature_base64 = BASE64_STANDARD.encode(b"rekor-test-signature");
+        let public_key_pem = concat!(
+            "-----BEGIN PUBLIC KEY-----\n",
+            "rekor-test-public-key\n",
+            "-----END PUBLIC KEY-----\n"
+        )
+        .to_owned();
+        let canonical_body = json!({
+            "apiVersion": "0.0.1",
+            "kind": "rekord",
+            "spec": {
+                "data": data,
+                "signature": {
+                    "content": &signature_base64,
+                    "format": "x509",
+                    "publicKey": {
+                        "content": BASE64_STANDARD.encode(public_key_pem.as_bytes())
+                    }
+                }
+            }
+        });
+        ConfirmRequest {
+            worker_id: "virya-rekor-anchor-01".to_owned(),
+            anchor_kind: "sigstore.rekor.v1".to_owned(),
+            anchor_url: "https://rekor.sigstore.dev".to_owned(),
+            entry_uuid: "a".repeat(64),
+            log_index: 1,
+            integrated_time: 1_700_000_000,
+            log_id: "b".repeat(64),
+            canonicalized_body: BASE64_STANDARD.encode(
+                serde_json::to_vec(&canonical_body)
+                    .expect("canonical Rekor test body must serialize"),
+            ),
+            signed_entry_timestamp: BASE64_STANDARD.encode(b"rekor-test-set-value"),
+            inclusion_proof: json!({"treeSize": 1, "logIndex": 0, "hashes": []}),
+            signer_fingerprint: format!("sha256:{}", "c".repeat(64)),
+            signature_base64,
+            public_key_pem,
+            payload_sha256: hex::encode(Sha256::digest(expected_payload)),
+        }
+    }
+
+    #[test]
+    fn rekor_receipt_accepts_canonical_sha256_hash() {
+        let expected = b"crowdrelay canonical proof payload";
+        let request = receipt_request(
+            expected,
+            json!({
+                "hash": {
+                    "algorithm": "sha256",
+                    "value": hex::encode(Sha256::digest(expected))
+                }
+            }),
+        );
+        assert!(validate_rekor_receipt(&request, expected).is_ok());
+    }
+
+    #[test]
+    fn rekor_receipt_retains_legacy_content_compatibility() {
+        let expected = b"crowdrelay legacy proof payload";
+        let request = receipt_request(
+            expected,
+            json!({"content": BASE64_STANDARD.encode(expected)}),
+        );
+        assert!(validate_rekor_receipt(&request, expected).is_ok());
+    }
+
+    #[test]
+    fn rekor_receipt_rejects_wrong_canonical_hash() {
+        let expected = b"crowdrelay canonical proof payload";
+        let request = receipt_request(
+            expected,
+            json!({
+                "hash": {
+                    "algorithm": "sha256",
+                    "value": "d".repeat(64)
+                }
+            }),
+        );
+        assert!(validate_rekor_receipt(&request, expected).is_err());
     }
 }

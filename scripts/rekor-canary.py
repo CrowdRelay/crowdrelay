@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-seconds", type=int, default=420)
     parser.add_argument("--poll-seconds", type=float, default=3.0)
+    parser.add_argument("--stalled-seconds", type=int, default=120)
     parser.add_argument("--batch-limit", type=int, default=64)
     return parser.parse_args()
 
@@ -118,6 +119,8 @@ def main() -> int:
     args = parse_args()
     if not 15 <= args.timeout_seconds <= 900:
         raise ValueError("timeout must be between 15 and 900 seconds")
+    if not 30 <= args.stalled_seconds <= 600:
+        raise ValueError("stalled timeout must be between 30 and 600 seconds")
     if not 1 <= args.batch_limit <= 10_000:
         raise ValueError("batch limit outside supported range")
     base = normalize_base(args.base_url)
@@ -147,6 +150,7 @@ def main() -> int:
         batch_id = batch["id"]
         deadline = time.monotonic() + args.timeout_seconds
         last_observation: tuple[Any, ...] | None = None
+        last_progress_at = time.monotonic()
 
         while time.monotonic() < deadline:
             current = client.json(f"/v1/public/proofs/batches/{urllib.parse.quote(batch_id)}")
@@ -166,6 +170,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 last_observation = observation
+                last_progress_at = time.monotonic()
             if status == "confirmed":
                 if current.get("anchor_kind") != "sigstore.rekor.v1":
                     raise RuntimeError("confirmed batch has an unexpected anchor kind")
@@ -186,19 +191,33 @@ def main() -> int:
                     "flag_enabled": True,
                 }, ensure_ascii=False, indent=2))
                 return 0
+            if status == "failed":
+                raise RuntimeError(
+                    "proof batch entered failed state: "
+                    f"attempts={current.get('attempts')}/{current.get('max_attempts')} "
+                    f"error={current.get('last_error_kind')}"
+                )
             if status == "dead":
                 raise RuntimeError(f"proof batch entered dead state: {current.get('last_error_kind')}")
+            if status == "processing" and time.monotonic() - last_progress_at >= args.stalled_seconds:
+                raise RuntimeError(
+                    "proof batch stalled in processing; "
+                    f"last_observation={last_observation}"
+                )
             time.sleep(args.poll_seconds)
         raise RuntimeError(
             "timed out waiting for Rekor confirmation; "
             f"last_observation={last_observation}"
         )
-    except Exception as error:
+    except BaseException as error:
         if enabled:
             try:
                 set_flag(client, False, f"Automatic rollback after failed Rekor canary: {type(error).__name__}", run_id)
             except Exception as rollback_error:
                 print(f"CRITICAL: failed to disable {FLAG}: {rollback_error}", file=sys.stderr)
+        if isinstance(error, KeyboardInterrupt):
+            print("Rekor canary interrupted; feature flag rolled back", file=sys.stderr)
+            return 130
         print(f"Rekor canary failed; feature flag rolled back: {error}", file=sys.stderr)
         return 1
 

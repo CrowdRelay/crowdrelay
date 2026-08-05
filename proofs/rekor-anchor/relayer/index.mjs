@@ -150,10 +150,48 @@ async function ensureDependenciesReady(force = false) {
 async function processOne() {
   const pending = await loadPending()
   if (pending) {
-    await confirm(pending.batch.id, pending.confirmation)
-    await clearPending()
-    console.log(JSON.stringify({ level: "info", event: "proof.confirmed", batch_id: pending.batch.id, entry_uuid: pending.confirmation.entry_uuid }))
-    return true
+    try {
+      await confirm(pending.batch.id, pending.confirmation)
+      await clearPending()
+      console.log(JSON.stringify({ level: "info", event: "proof.confirmed", batch_id: pending.batch.id, entry_uuid: pending.confirmation.entry_uuid }))
+      return true
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      if (message.includes("crowdrelay HTTP 404")) {
+        await clearPending()
+        console.warn(JSON.stringify({
+          level: "warn",
+          event: "proof.pending_released",
+          batch_id: pending.batch.id,
+          batch_status: "missing",
+          error_kind: errorKind(error),
+        }))
+        return true
+      }
+      if (message.includes("crowdrelay HTTP 409")) {
+        const current = await requestJson(
+          `${crowdrelayUrl}/v1/public/proofs/batches/${encodeURIComponent(pending.batch.id)}`,
+          { method: "GET", headers: { accept: "application/json" } },
+        )
+        const status = current?.status
+        const leaseTime = Date.parse(pending.batch.lease_expires_at || "")
+        const leaseExpired = Number.isFinite(leaseTime) && leaseTime <= Date.now()
+        if (["confirmed", "failed", "dead", "queued"].includes(status)
+          || (status === "processing" && leaseExpired)) {
+          await clearPending()
+          console.warn(JSON.stringify({
+            level: "warn",
+            event: "proof.pending_released",
+            batch_id: pending.batch.id,
+            batch_status: status,
+            lease_expired: leaseExpired,
+            error_kind: errorKind(error),
+          }))
+          return true
+        }
+      }
+      throw error
+    }
   }
 
   const claimed = await crowdrelay("/v1/internal/proofs/claim", {
