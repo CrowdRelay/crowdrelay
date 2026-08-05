@@ -32,6 +32,8 @@ const MAX_PRODUCTS: usize = 100;
 const MAX_VARIANTS_PER_PRODUCT: usize = 50;
 const MAX_RESERVATION_ITEMS: usize = 50;
 const MAX_RESERVATION_QUANTITY: i32 = 100;
+const MAX_STOCKTAKE_ITEMS: usize = 500;
+const MAX_STOCK_ON_HAND: i32 = 1_000_000;
 const MAX_TEXT_CHARS: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +193,114 @@ pub struct InventoryAdjustmentView {
     on_hand: i64,
     reserved: i64,
     available_quantity: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryStocktakeRequest {
+    items: Vec<InventoryStocktakeItemRequest>,
+    actor_id: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InventoryStocktakeItemRequest {
+    sku: String,
+    on_hand: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InventoryStocktakeView {
+    id: Uuid,
+    replayed: bool,
+    created_at: OffsetDateTime,
+    items: Vec<InventoryStocktakeItemView>,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow)]
+struct InventoryStocktakeItemView {
+    sku: String,
+    label: String,
+    target_on_hand: i32,
+    on_hand_before: i64,
+    reserved_at_apply: i64,
+    applied_delta: i32,
+    available_quantity: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct ExistingStocktake {
+    id: Uuid,
+    request_hash: Vec<u8>,
+    created_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InventoryOverviewView {
+    generated_at: OffsetDateTime,
+    items: Vec<InventoryOverviewItemView>,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow)]
+struct InventoryOverviewItemView {
+    product_slug: String,
+    product_name: String,
+    variant_id: Uuid,
+    sku: String,
+    variant_label: String,
+    attributes: Value,
+    active: bool,
+    low_stock_threshold: i32,
+    sell_without_stock: bool,
+    counted: bool,
+    last_counted_at: Option<OffsetDateTime>,
+    on_hand: i64,
+    order_reserved: i64,
+    campaign_reserved: i64,
+    operational_reserved: i64,
+    reserved: i64,
+    available_quantity: i64,
+    sold_total: i64,
+    sold_30d: i64,
+    promotional_issued_total: i64,
+    active_campaigns: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InventoryActivationView {
+    status: String,
+    ready: bool,
+    fully_enabled: bool,
+    catalog_seed_version: i32,
+    catalog_seeded_at: Option<OffsetDateTime>,
+    ready_at: Option<OffsetDateTime>,
+    ready_by: Option<String>,
+    version: i64,
+    total_active_variants: i64,
+    counted_active_variants: i64,
+    missing_skus: Vec<String>,
+    blockers: Vec<String>,
+    can_mark_ready: bool,
+    public_enabled: bool,
+    writes_enabled: bool,
+    campaigns_enabled: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct InventoryActivationRow {
+    status: String,
+    catalog_seed_version: i32,
+    catalog_seeded_at: Option<OffsetDateTime>,
+    ready_at: Option<OffsetDateTime>,
+    ready_by: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarkInventoryReadyRequest {
+    actor_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -377,7 +487,8 @@ pub async fn public_catalog(State(state): State<crate::AppState>, headers: Heade
     if !matches!(
         crate::ecosystem::feature_enabled(&state, "merch_inventory_enabled").await,
         Ok(true)
-    ) {
+    ) || !matches!(inventory_ready(&state).await, Ok(true))
+    {
         return CommerceError::Unavailable.response(request_id(&headers));
     }
     let request_id_value = request_id(&headers);
@@ -455,6 +566,100 @@ pub async fn adjust_inventory(
         Err(_) => return CommerceError::Invalid.response(request_id_value),
     };
     let future = adjust_inventory_inner(&state, mutation_key, payload);
+    match timeout(state.ticketing.operation_timeout(), future).await {
+        Ok(Ok(view)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(view),
+        )
+            .into_response(),
+        Ok(Err(error)) => error.response(request_id_value),
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
+pub async fn inventory_activation(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    match timeout(
+        state.ticketing.operation_timeout(),
+        load_inventory_activation(&state),
+    )
+    .await
+    {
+        Ok(Ok(view)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(view),
+        )
+            .into_response(),
+        Ok(Err(error)) => error.response(request_id_value),
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
+pub async fn inventory_overview(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    match timeout(
+        state.ticketing.operation_timeout(),
+        load_inventory_overview(&state),
+    )
+    .await
+    {
+        Ok(Ok(view)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(view),
+        )
+            .into_response(),
+        Ok(Err(error)) => error.response(request_id_value),
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
+pub async fn inventory_stocktake(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<InventoryStocktakeRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let mutation_key = match idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(error) => return error.response(request_id_value),
+    };
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => return CommerceError::Invalid.response(request_id_value),
+    };
+    let future = inventory_stocktake_inner(&state, mutation_key, payload);
+    match timeout(state.ticketing.operation_timeout(), future).await {
+        Ok(Ok(view)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(view),
+        )
+            .into_response(),
+        Ok(Err(error)) => error.response(request_id_value),
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
+pub async fn mark_inventory_ready(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<MarkInventoryReadyRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => return CommerceError::Invalid.response(request_id_value),
+    };
+    let future = mark_inventory_ready_inner(&state, payload, request_id_value.as_deref());
     match timeout(state.ticketing.operation_timeout(), future).await {
         Ok(Ok(view)) => (
             StatusCode::OK,
@@ -713,7 +918,8 @@ async fn require_inventory_writes(state: &crate::AppState) -> Result<(), Commerc
     if matches!(
         crate::ecosystem::feature_enabled(state, "merch_inventory_writes_enabled").await,
         Ok(true)
-    ) {
+    ) && matches!(inventory_ready(state).await, Ok(true))
+    {
         Ok(())
     } else {
         Err(CommerceError::Unavailable)
@@ -1019,6 +1225,627 @@ async fn inventory_adjustment_view(
         reserved: row.reserved,
         available_quantity: row.on_hand.saturating_sub(row.reserved),
     })
+}
+
+async fn ensure_inventory_activation_row(state: &crate::AppState) -> Result<(), CommerceError> {
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_activation_state (workspace_id)
+        VALUES ($1)
+        ON CONFLICT (workspace_id) DO NOTHING
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .execute(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+    Ok(())
+}
+
+async fn inventory_ready(state: &crate::AppState) -> Result<bool, CommerceError> {
+    ensure_inventory_activation_row(state).await?;
+    sqlx::query_scalar::<_, bool>(
+        "SELECT status = 'ready' FROM inventory_activation_state WHERE workspace_id = $1",
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .fetch_one(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)
+}
+
+async fn load_inventory_activation(
+    state: &crate::AppState,
+) -> Result<InventoryActivationView, CommerceError> {
+    ensure_inventory_activation_row(state).await?;
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let row = sqlx::query_as::<_, InventoryActivationRow>(
+        r#"
+        SELECT status, catalog_seed_version, catalog_seeded_at,
+               ready_at, ready_by, version
+        FROM inventory_activation_state
+        WHERE workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    let total_active_variants = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM merch_variants AS variant
+        JOIN merch_products AS product
+          ON product.workspace_id = variant.workspace_id
+         AND product.id = variant.product_id
+        WHERE variant.workspace_id = $1 AND variant.active AND product.active
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    let missing_skus = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT variant.sku
+        FROM merch_variants AS variant
+        JOIN merch_products AS product
+          ON product.workspace_id = variant.workspace_id
+         AND product.id = variant.product_id
+        WHERE variant.workspace_id = $1
+          AND variant.active
+          AND product.active
+          AND NOT EXISTS (
+              SELECT 1
+              FROM inventory_stocktake_items AS item
+              WHERE item.workspace_id = variant.workspace_id
+                AND item.variant_id = variant.id
+          )
+        ORDER BY product.slug, variant.label, variant.sku
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+    let counted_active_variants =
+        total_active_variants.saturating_sub(i64::try_from(missing_skus.len()).unwrap_or(i64::MAX));
+
+    let invalid_availability = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH stock AS (
+            SELECT variant_id, COALESCE(SUM(delta), 0)::bigint AS on_hand
+            FROM inventory_ledger
+            WHERE workspace_id = $1
+            GROUP BY variant_id
+        ), reservations AS (
+            SELECT item.variant_id, COALESCE(SUM(item.quantity), 0)::bigint AS reserved
+            FROM inventory_reservation_items AS item
+            JOIN inventory_reservations AS reservation
+              ON reservation.workspace_id = item.workspace_id
+             AND reservation.id = item.reservation_id
+            WHERE item.workspace_id = $1
+              AND reservation.status = 'active'
+              AND (reservation.expires_at IS NULL OR reservation.expires_at > now())
+            GROUP BY item.variant_id
+        )
+        SELECT COUNT(*)::bigint
+        FROM merch_variants AS variant
+        JOIN merch_products AS product
+          ON product.workspace_id = variant.workspace_id
+         AND product.id = variant.product_id
+        LEFT JOIN stock ON stock.variant_id = variant.id
+        LEFT JOIN reservations ON reservations.variant_id = variant.id
+        WHERE variant.workspace_id = $1
+          AND variant.active
+          AND product.active
+          AND NOT variant.sell_without_stock
+          AND COALESCE(stock.on_hand, 0) < COALESCE(reservations.reserved, 0)
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    let flags = sqlx::query_as::<_, (String, bool)>(
+        r#"
+        SELECT key, enabled
+        FROM ecosystem_feature_flags
+        WHERE workspace_id = $1
+          AND key IN (
+              'merch_inventory_enabled',
+              'merch_inventory_writes_enabled',
+              'reward_campaigns_enabled'
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+    let flag = |key: &str| {
+        flags
+            .iter()
+            .any(|(candidate, enabled)| candidate == key && *enabled)
+    };
+    let public_enabled = flag("merch_inventory_enabled");
+    let writes_enabled = flag("merch_inventory_writes_enabled");
+    let campaigns_enabled = flag("reward_campaigns_enabled");
+    let fully_enabled = public_enabled && writes_enabled && campaigns_enabled;
+
+    let mut blockers = Vec::new();
+    if total_active_variants == 0 || row.catalog_seeded_at.is_none() {
+        blockers.push("catalog_empty".to_owned());
+    }
+    if !missing_skus.is_empty() {
+        blockers.push("uncounted_variants".to_owned());
+    }
+    if invalid_availability > 0 {
+        blockers.push("reserved_exceeds_stock".to_owned());
+    }
+    let ready = row.status == "ready";
+    if ready && !fully_enabled {
+        blockers.push("feature_flags_inconsistent".to_owned());
+    }
+    let can_mark_ready = blockers
+        .iter()
+        .all(|blocker| blocker == "feature_flags_inconsistent");
+
+    Ok(InventoryActivationView {
+        status: row.status,
+        ready,
+        fully_enabled,
+        catalog_seed_version: row.catalog_seed_version,
+        catalog_seeded_at: row.catalog_seeded_at,
+        ready_at: row.ready_at,
+        ready_by: row.ready_by,
+        version: row.version,
+        total_active_variants,
+        counted_active_variants,
+        missing_skus,
+        blockers,
+        can_mark_ready,
+        public_enabled,
+        writes_enabled,
+        campaigns_enabled,
+    })
+}
+
+async fn load_inventory_overview(
+    state: &crate::AppState,
+) -> Result<InventoryOverviewView, CommerceError> {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let items = sqlx::query_as::<_, InventoryOverviewItemView>(
+        r#"
+        WITH stock AS (
+            SELECT
+                variant_id,
+                COALESCE(SUM(delta), 0)::bigint AS on_hand,
+                COALESCE(SUM(-delta) FILTER (
+                    WHERE movement_kind = 'sale' AND delta < 0
+                ), 0)::bigint AS sold_total,
+                COALESCE(SUM(-delta) FILTER (
+                    WHERE movement_kind = 'sale' AND delta < 0
+                      AND occurred_at >= now() - interval '30 days'
+                ), 0)::bigint AS sold_30d,
+                COALESCE(SUM(-delta) FILTER (
+                    WHERE movement_kind = 'promotional_issue' AND delta < 0
+                ), 0)::bigint AS promotional_issued_total
+            FROM inventory_ledger
+            WHERE workspace_id = $1
+            GROUP BY variant_id
+        ), reservations AS (
+            SELECT
+                item.variant_id,
+                COALESCE(SUM(item.quantity) FILTER (
+                    WHERE reservation.reservation_kind = 'order'
+                ), 0)::bigint AS order_reserved,
+                COALESCE(SUM(item.quantity) FILTER (
+                    WHERE reservation.reservation_kind = 'campaign'
+                ), 0)::bigint AS campaign_reserved,
+                COALESCE(SUM(item.quantity) FILTER (
+                    WHERE reservation.reservation_kind = 'operational'
+                ), 0)::bigint AS operational_reserved,
+                COALESCE(SUM(item.quantity), 0)::bigint AS reserved,
+                COUNT(DISTINCT reservation.id) FILTER (
+                    WHERE reservation.reservation_kind = 'campaign'
+                )::bigint AS active_campaigns
+            FROM inventory_reservation_items AS item
+            JOIN inventory_reservations AS reservation
+              ON reservation.workspace_id = item.workspace_id
+             AND reservation.id = item.reservation_id
+            WHERE item.workspace_id = $1
+              AND reservation.status = 'active'
+              AND (reservation.expires_at IS NULL OR reservation.expires_at > now())
+            GROUP BY item.variant_id
+        ), counted AS (
+            SELECT variant_id, MAX(created_at) AS last_counted_at
+            FROM inventory_stocktake_items
+            WHERE workspace_id = $1
+            GROUP BY variant_id
+        )
+        SELECT
+            product.slug AS product_slug,
+            product.name AS product_name,
+            variant.id AS variant_id,
+            variant.sku,
+            variant.label AS variant_label,
+            variant.attributes,
+            variant.active,
+            variant.low_stock_threshold,
+            variant.sell_without_stock,
+            counted.variant_id IS NOT NULL AS counted,
+            counted.last_counted_at,
+            COALESCE(stock.on_hand, 0)::bigint AS on_hand,
+            COALESCE(reservations.order_reserved, 0)::bigint AS order_reserved,
+            COALESCE(reservations.campaign_reserved, 0)::bigint AS campaign_reserved,
+            COALESCE(reservations.operational_reserved, 0)::bigint AS operational_reserved,
+            COALESCE(reservations.reserved, 0)::bigint AS reserved,
+            (COALESCE(stock.on_hand, 0) - COALESCE(reservations.reserved, 0))::bigint AS available_quantity,
+            COALESCE(stock.sold_total, 0)::bigint AS sold_total,
+            COALESCE(stock.sold_30d, 0)::bigint AS sold_30d,
+            COALESCE(stock.promotional_issued_total, 0)::bigint AS promotional_issued_total,
+            COALESCE(reservations.active_campaigns, 0)::bigint AS active_campaigns
+        FROM merch_products AS product
+        JOIN merch_variants AS variant
+          ON variant.workspace_id = product.workspace_id
+         AND variant.product_id = product.id
+        LEFT JOIN stock ON stock.variant_id = variant.id
+        LEFT JOIN reservations ON reservations.variant_id = variant.id
+        LEFT JOIN counted ON counted.variant_id = variant.id
+        WHERE product.workspace_id = $1
+        ORDER BY product.slug, variant.label, variant.sku, variant.id
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(state.ticketing.pool())
+    .await
+    .map_err(CommerceError::sqlx)?;
+    Ok(InventoryOverviewView {
+        generated_at: OffsetDateTime::now_utc(),
+        items,
+    })
+}
+
+async fn inventory_stocktake_inner(
+    state: &crate::AppState,
+    mutation_key: String,
+    payload: InventoryStocktakeRequest,
+) -> Result<InventoryStocktakeView, CommerceError> {
+    if inventory_ready(state).await? {
+        require_inventory_writes(state).await?;
+    }
+    let normalized = normalize_stocktake(payload)?;
+    let request_hash = stocktake_request_hash(&normalized)?;
+    let actor_id = optional_text(normalized.actor_id.as_deref(), 200)?;
+    let reason = optional_text(normalized.reason.as_deref(), 500)?;
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let mut transaction = state
+        .ticketing
+        .pool()
+        .begin()
+        .await
+        .map_err(CommerceError::sqlx)?;
+    configure_transaction(&mut transaction, &state.ticketing).await?;
+
+    sqlx::query(
+        "INSERT INTO inventory_activation_state (workspace_id) VALUES ($1) ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(workspace_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    if let Some(existing) = sqlx::query_as::<_, ExistingStocktake>(
+        r#"
+        SELECT id, request_hash, created_at
+        FROM inventory_stocktakes
+        WHERE workspace_id = $1 AND idempotency_key = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&mutation_key)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?
+    {
+        if existing.request_hash != request_hash {
+            return Err(CommerceError::Conflict);
+        }
+        let items = load_stocktake_items_tx(&mut transaction, workspace_id, existing.id).await?;
+        transaction.commit().await.map_err(CommerceError::sqlx)?;
+        return Ok(InventoryStocktakeView {
+            id: existing.id,
+            replayed: true,
+            created_at: existing.created_at,
+            items,
+        });
+    }
+
+    let stocktake_id = Uuid::now_v7();
+    let created_at = sqlx::query_scalar::<_, OffsetDateTime>(
+        r#"
+        INSERT INTO inventory_stocktakes (
+            id, workspace_id, idempotency_key, request_hash, actor_id, reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING created_at
+        "#,
+    )
+    .bind(stocktake_id)
+    .bind(workspace_id)
+    .bind(&mutation_key)
+    .bind(&request_hash)
+    .bind(actor_id.as_deref())
+    .bind(reason.as_deref())
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    for item in &normalized.items {
+        let availability =
+            lock_variant_availability(&mut transaction, workspace_id, &item.sku).await?;
+        if !availability.sell_without_stock && i64::from(item.on_hand) < availability.reserved {
+            return Err(CommerceError::Conflict);
+        }
+        let delta_i64 = i64::from(item.on_hand).saturating_sub(availability.on_hand);
+        let delta = i32::try_from(delta_i64).map_err(|_| CommerceError::Invalid)?;
+        if delta != 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO inventory_ledger (
+                    workspace_id, variant_id, delta, movement_kind, idempotency_key,
+                    actor_kind, actor_id, reason
+                )
+                VALUES ($1, $2, $3, 'stocktake', $4, 'admin', $5, $6)
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(availability.id)
+            .bind(delta)
+            .bind(format!("stocktake:{stocktake_id}:{}", item.sku))
+            .bind(actor_id.as_deref())
+            .bind(reason.as_deref().unwrap_or("exact physical stocktake"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(CommerceError::sqlx)?;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO inventory_stocktake_items (
+                workspace_id, stocktake_id, variant_id, target_on_hand,
+                on_hand_before, reserved_at_apply, applied_delta
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(stocktake_id)
+        .bind(availability.id)
+        .bind(item.on_hand)
+        .bind(availability.on_hand)
+        .bind(availability.reserved)
+        .bind(delta)
+        .execute(&mut *transaction)
+        .await
+        .map_err(CommerceError::sqlx)?;
+    }
+
+    let items = load_stocktake_items_tx(&mut transaction, workspace_id, stocktake_id).await?;
+    transaction.commit().await.map_err(CommerceError::sqlx)?;
+    Ok(InventoryStocktakeView {
+        id: stocktake_id,
+        replayed: false,
+        created_at,
+        items,
+    })
+}
+
+async fn load_stocktake_items_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    stocktake_id: Uuid,
+) -> Result<Vec<InventoryStocktakeItemView>, CommerceError> {
+    sqlx::query_as::<_, InventoryStocktakeItemView>(
+        r#"
+        SELECT
+            variant.sku,
+            variant.label,
+            item.target_on_hand,
+            item.on_hand_before,
+            item.reserved_at_apply,
+            item.applied_delta,
+            (item.target_on_hand::bigint - item.reserved_at_apply)::bigint AS available_quantity
+        FROM inventory_stocktake_items AS item
+        JOIN merch_variants AS variant
+          ON variant.workspace_id = item.workspace_id
+         AND variant.id = item.variant_id
+        WHERE item.workspace_id = $1 AND item.stocktake_id = $2
+        ORDER BY variant.sku
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(stocktake_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(CommerceError::sqlx)
+}
+
+async fn mark_inventory_ready_inner(
+    state: &crate::AppState,
+    payload: MarkInventoryReadyRequest,
+    request_id_value: Option<&str>,
+) -> Result<InventoryActivationView, CommerceError> {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let actor_id = optional_text(payload.actor_id.as_deref(), 200)?
+        .unwrap_or_else(|| "virya-staff".to_owned());
+    let mut transaction = state
+        .ticketing
+        .pool()
+        .begin()
+        .await
+        .map_err(CommerceError::sqlx)?;
+    configure_transaction(&mut transaction, &state.ticketing).await?;
+
+    sqlx::query(
+        "INSERT INTO inventory_activation_state (workspace_id) VALUES ($1) ON CONFLICT (workspace_id) DO NOTHING",
+    )
+    .bind(workspace_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM inventory_activation_state WHERE workspace_id = $1 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    if status != "ready" {
+        let _: Vec<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT variant.id
+            FROM merch_variants AS variant
+            JOIN merch_products AS product
+              ON product.workspace_id = variant.workspace_id
+             AND product.id = variant.product_id
+            WHERE variant.workspace_id = $1 AND variant.active AND product.active
+            ORDER BY variant.id
+            FOR UPDATE OF variant
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(CommerceError::sqlx)?;
+
+        let missing_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM merch_variants AS variant
+            JOIN merch_products AS product
+              ON product.workspace_id = variant.workspace_id
+             AND product.id = variant.product_id
+            WHERE variant.workspace_id = $1
+              AND variant.active AND product.active
+              AND NOT EXISTS (
+                  SELECT 1 FROM inventory_stocktake_items AS item
+                  WHERE item.workspace_id = variant.workspace_id
+                    AND item.variant_id = variant.id
+              )
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(CommerceError::sqlx)?;
+
+        let active_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM merch_variants AS variant
+            JOIN merch_products AS product
+              ON product.workspace_id = variant.workspace_id
+             AND product.id = variant.product_id
+            WHERE variant.workspace_id = $1 AND variant.active AND product.active
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(CommerceError::sqlx)?;
+
+        let invalid_availability = sqlx::query_scalar::<_, i64>(
+            r#"
+            WITH stock AS (
+                SELECT variant_id, COALESCE(SUM(delta), 0)::bigint AS on_hand
+                FROM inventory_ledger WHERE workspace_id = $1 GROUP BY variant_id
+            ), reservations AS (
+                SELECT item.variant_id, COALESCE(SUM(item.quantity), 0)::bigint AS reserved
+                FROM inventory_reservation_items AS item
+                JOIN inventory_reservations AS reservation
+                  ON reservation.workspace_id = item.workspace_id
+                 AND reservation.id = item.reservation_id
+                WHERE item.workspace_id = $1
+                  AND reservation.status = 'active'
+                  AND (reservation.expires_at IS NULL OR reservation.expires_at > now())
+                GROUP BY item.variant_id
+            )
+            SELECT COUNT(*)::bigint
+            FROM merch_variants AS variant
+            JOIN merch_products AS product
+              ON product.workspace_id = variant.workspace_id
+             AND product.id = variant.product_id
+            LEFT JOIN stock ON stock.variant_id = variant.id
+            LEFT JOIN reservations ON reservations.variant_id = variant.id
+            WHERE variant.workspace_id = $1
+              AND variant.active AND product.active
+              AND NOT variant.sell_without_stock
+              AND COALESCE(stock.on_hand, 0) < COALESCE(reservations.reserved, 0)
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(CommerceError::sqlx)?;
+
+        if active_count == 0 || missing_count > 0 || invalid_availability > 0 {
+            return Err(CommerceError::Conflict);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE inventory_activation_state
+            SET status = 'ready', ready_at = now(), ready_by = $2, version = version + 1
+            WHERE workspace_id = $1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&actor_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(CommerceError::sqlx)?;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO ecosystem_feature_flags (
+            workspace_id, key, enabled, reason, updated_by_request_id
+        )
+        SELECT $1, flag.key, true, 'inventory activated from staff panel', $2
+        FROM (VALUES
+            ('merch_inventory_enabled'),
+            ('merch_inventory_writes_enabled'),
+            ('reward_campaigns_enabled')
+        ) AS flag(key)
+        ON CONFLICT (workspace_id, key) DO UPDATE SET
+            enabled = true,
+            reason = EXCLUDED.reason,
+            version = ecosystem_feature_flags.version + 1,
+            updated_at = now(),
+            updated_by_request_id = EXCLUDED.updated_by_request_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(request_id_value)
+    .execute(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    transaction.commit().await.map_err(CommerceError::sqlx)?;
+    for key in [
+        "merch_inventory_enabled",
+        "merch_inventory_writes_enabled",
+        "reward_campaigns_enabled",
+    ] {
+        crate::ecosystem::cache_feature_flag(workspace_id, key, true).await;
+    }
+    load_inventory_activation(state).await
 }
 
 async fn reserve_inventory_inner(
@@ -2523,6 +3350,37 @@ fn normalize_slug(value: &str) -> Result<String, CommerceError> {
     Ok(normalized)
 }
 
+fn normalize_stocktake(
+    payload: InventoryStocktakeRequest,
+) -> Result<InventoryStocktakeRequest, CommerceError> {
+    if payload.items.is_empty() || payload.items.len() > MAX_STOCKTAKE_ITEMS {
+        return Err(CommerceError::Invalid);
+    }
+    let mut unique = BTreeSet::new();
+    let mut items = Vec::with_capacity(payload.items.len());
+    for item in payload.items {
+        let sku = clean_text(&item.sku, 128)?;
+        if item.on_hand < 0 || item.on_hand > MAX_STOCK_ON_HAND || !unique.insert(sku.clone()) {
+            return Err(CommerceError::Invalid);
+        }
+        items.push(InventoryStocktakeItemRequest {
+            sku,
+            on_hand: item.on_hand,
+        });
+    }
+    items.sort_by(|left, right| left.sku.cmp(&right.sku));
+    Ok(InventoryStocktakeRequest {
+        items,
+        actor_id: optional_text(payload.actor_id.as_deref(), 200)?,
+        reason: optional_text(payload.reason.as_deref(), 500)?,
+    })
+}
+
+fn stocktake_request_hash(payload: &InventoryStocktakeRequest) -> Result<Vec<u8>, CommerceError> {
+    let encoded = serde_json::to_vec(payload).map_err(|_| CommerceError::Unexpected)?;
+    Ok(Sha256::digest(encoded).to_vec())
+}
+
 fn clean_text(value: &str, max_chars: usize) -> Result<String, CommerceError> {
     let cleaned = value.trim();
     if cleaned.is_empty()
@@ -2665,356 +3523,5 @@ mod tests {
             idempotency_key(&headers),
             Err(CommerceError::Invalid)
         ));
-    }
-
-    #[test]
-    fn valid_inventory_mutation_key_is_accepted() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            IDEMPOTENCY_KEY,
-            axum::http::HeaderValue::from_static("adjust-2026-08-05-0001"),
-        );
-        assert_eq!(
-            idempotency_key(&headers).as_deref(),
-            Ok("adjust-2026-08-05-0001")
-        );
-    }
-
-    #[test]
-    fn reservation_hash_changes_when_items_or_reference_change() {
-        let base = reservation(
-            OffsetDateTime::now_utc() + TimeDuration::minutes(30),
-            vec![("SKU-A", 2)],
-        );
-        let mut different_reference = base.clone();
-        different_reference.external_reference = "checkout-456".to_owned();
-        let different_quantity = reservation(
-            OffsetDateTime::now_utc() + TimeDuration::minutes(30),
-            vec![("SKU-A", 3)],
-        );
-
-        let base_hash = reservation_request_hash(&normalize_reservation(base).unwrap()).unwrap();
-        let reference_hash =
-            reservation_request_hash(&normalize_reservation(different_reference).unwrap()).unwrap();
-        let quantity_hash =
-            reservation_request_hash(&normalize_reservation(different_quantity).unwrap()).unwrap();
-
-        assert_ne!(base_hash, reference_hash);
-        assert_ne!(base_hash, quantity_hash);
-    }
-
-    #[test]
-    fn reservation_rejects_expiry_outside_the_allowed_window() {
-        let now = OffsetDateTime::now_utc();
-        assert!(matches!(
-            normalize_reservation(reservation(
-                now + TimeDuration::seconds(30),
-                vec![("SKU-A", 1)]
-            )),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            normalize_reservation(reservation(
-                now + TimeDuration::hours(25),
-                vec![("SKU-A", 1)]
-            )),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(
-            normalize_reservation(reservation(
-                now + TimeDuration::hours(1),
-                vec![("SKU-A", 1)]
-            ))
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn reservation_rejects_empty_items_and_quantity_overflow() {
-        assert!(matches!(
-            normalize_reservation(reservation(
-                OffsetDateTime::now_utc() + TimeDuration::minutes(30),
-                vec![],
-            )),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            normalize_reservation(reservation(
-                OffsetDateTime::now_utc() + TimeDuration::minutes(30),
-                vec![("SKU-A", MAX_RESERVATION_QUANTITY + 1)],
-            )),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            normalize_reservation(reservation(
-                OffsetDateTime::now_utc() + TimeDuration::minutes(30),
-                vec![("SKU-A", MAX_RESERVATION_QUANTITY), ("SKU-A", 1)],
-            )),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    fn reward_campaign(status: &str, eligibility_kind: &str) -> CreateRewardCampaignRequest {
-        let now = OffsetDateTime::now_utc();
-        CreateRewardCampaignRequest {
-            slug: "cd-giveaway".to_owned(),
-            name: "CD giveaway".to_owned(),
-            prize_sku: "virya-signal-cd".to_owned(),
-            winner_count: 5,
-            units_per_winner: 1,
-            eligibility_kind: eligibility_kind.to_owned(),
-            event_slug: if eligibility_kind == "event_interest" {
-                Some("wroclaw-2026".to_owned())
-            } else {
-                None
-            },
-            base_entries: 1,
-            entries_per_referral: 1,
-            entries_per_checkin: 0,
-            max_entries: 1_000,
-            claim_expires_hours: 168,
-            opens_at: now,
-            closes_at: now + TimeDuration::days(7),
-            draw_at: now + TimeDuration::days(8),
-            status: status.to_owned(),
-        }
-    }
-
-    #[test]
-    fn reward_campaign_accepts_a_well_formed_payload() {
-        assert!(validate_reward_campaign(&reward_campaign("draft", "all_active")).is_ok());
-        assert!(validate_reward_campaign(&reward_campaign("scheduled", "event_interest")).is_ok());
-    }
-
-    #[test]
-    fn reward_campaign_rejects_out_of_order_milestones() {
-        let mut payload = reward_campaign("draft", "all_active");
-        payload.closes_at = payload.opens_at;
-        assert!(matches!(
-            validate_reward_campaign(&payload),
-            Err(CommerceError::Invalid)
-        ));
-
-        let mut payload = reward_campaign("draft", "all_active");
-        payload.draw_at = payload.closes_at - TimeDuration::minutes(1);
-        assert!(matches!(
-            validate_reward_campaign(&payload),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn reward_campaign_rejects_max_entries_below_base_entries() {
-        let mut payload = reward_campaign("draft", "all_active");
-        payload.base_entries = 100;
-        payload.max_entries = 50;
-        assert!(matches!(
-            validate_reward_campaign(&payload),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn reward_campaign_event_interest_requires_a_slug_and_all_active_forbids_one() {
-        let mut missing_slug = reward_campaign("draft", "event_interest");
-        missing_slug.event_slug = None;
-        assert!(matches!(
-            validate_reward_campaign(&missing_slug),
-            Err(CommerceError::Invalid)
-        ));
-
-        let mut unexpected_slug = reward_campaign("draft", "all_active");
-        unexpected_slug.event_slug = Some("wroclaw-2026".to_owned());
-        assert!(matches!(
-            validate_reward_campaign(&unexpected_slug),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn reward_campaign_rejects_unknown_status_and_eligibility() {
-        assert!(matches!(
-            validate_reward_campaign(&reward_campaign("active", "all_active")),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            validate_reward_campaign(&reward_campaign("draft", "everyone")),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn reward_campaign_rejects_out_of_range_counts() {
-        let mut payload = reward_campaign("draft", "all_active");
-        payload.winner_count = 0;
-        assert!(matches!(
-            validate_reward_campaign(&payload),
-            Err(CommerceError::Invalid)
-        ));
-
-        let mut payload = reward_campaign("draft", "all_active");
-        payload.units_per_winner = 101;
-        assert!(matches!(
-            validate_reward_campaign(&payload),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    fn variant(sku: &str) -> UpsertVariantRequest {
-        UpsertVariantRequest {
-            sku: sku.to_owned(),
-            label: "Default".to_owned(),
-            attributes: empty_object(),
-            active: true,
-            low_stock_threshold: 3,
-            sell_without_stock: false,
-        }
-    }
-
-    fn product(slug: &str, variants: Vec<UpsertVariantRequest>) -> UpsertProductRequest {
-        UpsertProductRequest {
-            slug: slug.to_owned(),
-            name: "Signal (CD)".to_owned(),
-            description: None,
-            image_url: None,
-            currency: "PLN".to_owned(),
-            price_gross_minor: 4_999,
-            active: true,
-            public: true,
-            variants,
-        }
-    }
-
-    #[test]
-    fn catalog_accepts_a_well_formed_payload() {
-        let payload = UpsertCatalogRequest {
-            products: vec![product("signal-cd", vec![variant("VIRYA-CD")])],
-        };
-        assert!(validate_catalog(&payload).is_ok());
-    }
-
-    #[test]
-    fn catalog_rejects_duplicate_slugs_and_skus() {
-        let duplicate_slugs = UpsertCatalogRequest {
-            products: vec![
-                product("signal-cd", vec![variant("VIRYA-CD")]),
-                product("signal-cd", vec![variant("VIRYA-CD-2")]),
-            ],
-        };
-        assert!(matches!(
-            validate_catalog(&duplicate_slugs),
-            Err(CommerceError::Invalid)
-        ));
-
-        let duplicate_skus = UpsertCatalogRequest {
-            products: vec![
-                product("signal-cd", vec![variant("VIRYA-CD")]),
-                product("signal-vinyl", vec![variant("VIRYA-CD")]),
-            ],
-        };
-        assert!(matches!(
-            validate_catalog(&duplicate_skus),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn catalog_rejects_empty_products_and_empty_variants() {
-        assert!(matches!(
-            validate_catalog(&UpsertCatalogRequest { products: vec![] }),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            validate_catalog(&UpsertCatalogRequest {
-                products: vec![product("signal-cd", vec![])],
-            }),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn catalog_rejects_malformed_currency_and_negative_price() {
-        let mut bad_currency = product("signal-cd", vec![variant("VIRYA-CD")]);
-        bad_currency.currency = "PL".to_owned();
-        assert!(matches!(
-            validate_catalog(&UpsertCatalogRequest {
-                products: vec![bad_currency],
-            }),
-            Err(CommerceError::Invalid)
-        ));
-
-        let mut negative_price = product("signal-cd", vec![variant("VIRYA-CD")]);
-        negative_price.price_gross_minor = -1;
-        assert!(matches!(
-            validate_catalog(&UpsertCatalogRequest {
-                products: vec![negative_price],
-            }),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn movement_kind_only_allows_the_manual_admin_actions() {
-        for kind in [
-            "initial",
-            "receipt",
-            "refund",
-            "adjustment",
-            "damage",
-            "staff_issue",
-        ] {
-            assert_eq!(clean_movement_kind(kind).as_deref(), Ok(kind));
-        }
-        for kind in ["sale", "promotional_issue", "bogus"] {
-            assert!(matches!(
-                clean_movement_kind(kind),
-                Err(CommerceError::Invalid)
-            ));
-        }
-    }
-
-    #[test]
-    fn fulfillment_status_only_allows_the_documented_transitions() {
-        for status in ["prepared", "delivered", "cancelled"] {
-            assert_eq!(clean_fulfillment_status(status).as_deref(), Ok(status));
-        }
-        assert!(matches!(
-            clean_fulfillment_status("pending"),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn https_url_validation_rejects_non_https_and_embedded_credentials() {
-        assert_eq!(validate_optional_https_url(None), Ok(None));
-        assert!(
-            validate_optional_https_url(Some("https://cdn.example.com/cover.jpg"))
-                .is_ok_and(|value| value.is_some())
-        );
-        assert!(matches!(
-            validate_optional_https_url(Some("http://cdn.example.com/cover.jpg")),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            validate_optional_https_url(Some("https://user:pass@cdn.example.com/cover.jpg")),
-            Err(CommerceError::Invalid)
-        ));
-        assert!(matches!(
-            validate_optional_https_url(Some("not a url")),
-            Err(CommerceError::Invalid)
-        ));
-    }
-
-    #[test]
-    fn duration_milliseconds_rejects_zero_and_overflow() {
-        assert!(matches!(
-            duration_milliseconds(Duration::from_millis(0)),
-            Err(CommerceError::Unexpected)
-        ));
-        assert!(matches!(
-            duration_milliseconds(Duration::from_secs(u64::MAX)),
-            Err(CommerceError::Unexpected)
-        ));
-        assert_eq!(duration_milliseconds(Duration::from_millis(250)), Ok(250));
     }
 }

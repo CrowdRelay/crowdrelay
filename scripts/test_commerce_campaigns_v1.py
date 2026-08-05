@@ -5,6 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations/0027_merch_inventory_reward_campaigns.sql").read_text(encoding="utf-8")
+ONBOARDING = (ROOT / "migrations/0028_inventory_onboarding.sql").read_text(encoding="utf-8")
 COMMERCE = (ROOT / "crates/crowdrelay-api/src/commerce.rs").read_text(encoding="utf-8")
 ROUTER = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text(encoding="utf-8")
 FLAGS = (ROOT / "crates/crowdrelay-api/src/ecosystem.rs").read_text(encoding="utf-8")
@@ -53,6 +54,61 @@ class CommerceCampaignsV1(unittest.TestCase):
             self.assertIn(f"('{key}')", MIGRATION)
             self.assertIn(f'("{key}", false)', FLAGS)
 
+    def test_feature_flag_seed_uses_the_workspace_primary_key(self):
+        self.assertIn(
+            "SELECT workspace.id, flag.key, false, 'staged rollout'",
+            MIGRATION,
+        )
+        self.assertIn("FROM workspaces AS workspace", MIGRATION)
+        self.assertNotRegex(
+            MIGRATION,
+            r"SELECT\s+workspace_id\s*,\s*flag\.key[\s\S]*?FROM\s+workspaces(?:\s|$)",
+        )
+
+    def test_inventory_onboarding_is_additive_and_seeds_the_canonical_catalog(self):
+        sql = strip_sql_comments(ONBOARDING).lower()
+        for table in PROTECTED_TABLES:
+            self.assertNotRegex(sql, rf"\balter\s+table\s+{re.escape(table)}\b")
+            self.assertNotRegex(sql, rf"\b(delete\s+from|update)\s+{re.escape(table)}\b")
+        self.assertIn("CREATE TABLE inventory_activation_state", ONBOARDING)
+        self.assertIn("CREATE TABLE inventory_stocktakes", ONBOARDING)
+        self.assertIn("'stocktake'", ONBOARDING)
+        self.assertEqual(ONBOARDING.count("VIRYA-TEE-"), 20)
+        self.assertIn("VIRYA-CD-ECHOES", ONBOARDING)
+        self.assertIn("VIRYA-BAG-CREST", ONBOARDING)
+        self.assertIn("ON CONFLICT (workspace_id, slug) DO NOTHING", ONBOARDING)
+        self.assertIn("ON CONFLICT (workspace_id, sku) DO NOTHING", ONBOARDING)
+
+    def test_staff_ready_is_atomic_and_requires_a_complete_stocktake(self):
+        for path in (
+            "/v1/internal/merch/inventory/activation",
+            "/v1/admin/merch/inventory/activation",
+            "/v1/staff/merch/inventory/overview",
+            "/v1/admin/merch/inventory/stocktakes",
+            "/v1/staff/merch/inventory/stocktakes",
+            "/v1/admin/merch/inventory/ready",
+            "/v1/staff/merch/inventory/ready",
+        ):
+            self.assertIn(path, ROUTER)
+            self.assertIn(path.removeprefix("/v1") + ":", OPENAPI)
+        start = COMMERCE.index("async fn mark_inventory_ready_inner")
+        end = COMMERCE.index("\nasync fn reserve_inventory_inner", start)
+        block = COMMERCE[start:end]
+        self.assertIn("missing_count > 0", block)
+        self.assertIn("invalid_availability > 0", block)
+        self.assertIn("status = 'ready'", block)
+        self.assertIn("inventory activated from staff panel", block)
+        self.assertLess(block.index("UPDATE inventory_activation_state"), block.index("INSERT INTO ecosystem_feature_flags"))
+        self.assertLess(block.index("INSERT INTO ecosystem_feature_flags"), block.index("transaction.commit()"))
+
+    def test_stocktake_records_explicit_zero_without_zero_delta_ledger_rows(self):
+        start = COMMERCE.index("async fn inventory_stocktake_inner")
+        end = COMMERCE.index("\nasync fn load_stocktake_items_tx", start)
+        block = COMMERCE[start:end]
+        self.assertIn("if delta != 0", block)
+        self.assertIn("INSERT INTO inventory_stocktake_items", block)
+        self.assertIn("i64::from(item.on_hand) < availability.reserved", block)
+
     def test_privileged_routes_reuse_existing_namespace_authentication(self):
         for path in (
             "/v1/internal/merch/reservations",
@@ -60,6 +116,7 @@ class CommerceCampaignsV1(unittest.TestCase):
             "/v1/admin/reward-campaigns",
             "/v1/admin/merch/promotion-recommendations",
             "/v1/staff/reward-fulfillments",
+            "/v1/staff/merch/inventory/ready",
         ):
             self.assertIn(path, ROUTER)
         self.assertIn('path.starts_with("/v1/admin/")', ROUTER)

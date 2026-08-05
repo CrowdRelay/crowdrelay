@@ -550,6 +550,10 @@ async fn write_cached_flag(workspace_id: Uuid, key: &'static str, enabled: bool)
     );
 }
 
+pub(crate) async fn cache_feature_flag(workspace_id: Uuid, key: &'static str, enabled: bool) {
+    write_cached_flag(workspace_id, key, enabled).await;
+}
+
 async fn update_flag_inner(
     state: &crate::AppState,
     headers: &HeaderMap,

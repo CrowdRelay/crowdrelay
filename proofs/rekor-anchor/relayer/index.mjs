@@ -24,6 +24,7 @@ const keyFile = env.REKOR_SIGNING_KEY_FILE || "/run/secrets/rekor_signing_key"
 const tokenFile = env.CROWDRELAY_COMMERCE_API_KEY_FILE || "/run/secrets/crowdrelay_commerce_api_key"
 const pendingFile = env.ANCHOR_PENDING_FILE || "/data/pending-confirmation.json"
 const pollMs = boundedInt(env.ANCHOR_POLL_MS, 1_000, 60_000, 5_000)
+const dependencyProbeMs = boundedInt(env.DEPENDENCY_PROBE_MS, 5_000, 300_000, 30_000)
 const requestTimeoutMs = boundedInt(env.REQUEST_TIMEOUT_MS, 1_000, 60_000, 15_000)
 const leaseSeconds = boundedInt(env.ANCHOR_LEASE_SECONDS, 30, 900, 300)
 const claimLimit = boundedInt(env.ANCHOR_CLAIM_LIMIT, 1, 16, 8)
@@ -36,18 +37,26 @@ const [apiToken, privateKeyPem] = await Promise.all([
 const signer = loadSigner(privateKeyPem)
 
 let stopping = false
-let healthy = true
+let ready = false
 let lastSuccessAt = null
-let lastError = null
+let lastError = "startup.dependencies_unchecked"
+let lastDependencyCheckAt = null
+let lastDependencyCheckMs = 0
+let dependencies = {
+  crowdrelay: { ready: false, error: "unchecked" },
+  rekor: { ready: false, error: "unchecked" },
+}
 
 const server = http.createServer((request, response) => {
   if (request.url === "/health/live") return json(response, 200, { status: "ok" })
   if (request.url === "/health/ready") {
-    return json(response, healthy ? 200 : 503, {
-      status: healthy ? "ok" : "degraded",
+    return json(response, ready ? 200 : 503, {
+      status: ready ? "ok" : "degraded",
       anchor: "sigstore.rekor.v1",
       rekor_url: rekorUrl,
       signer_fingerprint: signer.fingerprint,
+      dependencies,
+      last_dependency_check_at: lastDependencyCheckAt,
       last_success_at: lastSuccessAt,
       last_error: lastError,
     })
@@ -65,17 +74,58 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 
 while (!stopping) {
   try {
+    await ensureDependenciesReady()
     const worked = await processOne()
-    healthy = true
+    ready = true
     lastError = null
     if (worked) lastSuccessAt = new Date().toISOString()
     if (!worked) await delay(pollMs)
   } catch (error) {
-    healthy = false
+    ready = false
     lastError = errorKind(error)
     console.error(JSON.stringify({ level: "error", error_kind: lastError, message: safeMessage(error) }))
     await delay(pollMs)
   }
+}
+
+async function ensureDependenciesReady(force = false) {
+  const now = Date.now()
+  if (!force && ready && now - lastDependencyCheckMs < dependencyProbeMs) return
+
+  const checkedAt = new Date().toISOString()
+  const next = {
+    crowdrelay: { ready: false, error: null },
+    rekor: { ready: false, error: null },
+  }
+
+  try {
+    await requestJson(`${crowdrelayUrl}/v1/health/ready`, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    })
+    next.crowdrelay.ready = true
+  } catch (error) {
+    next.crowdrelay.error = safeMessage(error)
+  }
+
+  try {
+    const publicKey = await requestText(`${rekorUrl}/api/v1/log/publicKey`, {
+      method: "GET",
+      headers: { accept: "text/plain, application/x-pem-file;q=0.9, */*;q=0.1" },
+    })
+    if (!publicKey.includes("BEGIN PUBLIC KEY") && !publicKey.includes("BEGIN CERTIFICATE")) {
+      throw new Error("rekor public key response invalid")
+    }
+    next.rekor.ready = true
+  } catch (error) {
+    next.rekor.error = safeMessage(error)
+  }
+
+  dependencies = next
+  lastDependencyCheckAt = checkedAt
+  lastDependencyCheckMs = now
+  ready = next.crowdrelay.ready && next.rekor.ready
+  if (!ready) throw new Error("dependency readiness failed")
 }
 
 async function processOne() {
@@ -163,6 +213,20 @@ async function crowdrelay(path, options) {
 
 async function requestJson(url, options) {
   return (await requestJsonResponse(url, options)).body
+}
+
+async function requestText(url, options) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error("request timeout")), requestTimeoutMs)
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal, redirect: "error" })
+    const text = await response.text()
+    if (!response.ok) throw new Error(`${originLabel(url)} HTTP ${response.status}`)
+    if (text.length < 32 || text.length > 256 * 1024) throw new Error(`${originLabel(url)} response size invalid`)
+    return text
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function requestJsonResponse(url, options, allowedStatuses = null) {

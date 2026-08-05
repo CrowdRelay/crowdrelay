@@ -1858,7 +1858,7 @@ paths:
   /public/proofs/draws/{draw_slug}:
     get:
       operationId: getPublicDrawProof
-      summary: Read a reproducible draw receipt and optional chain anchor
+      summary: Read a reproducible draw receipt and optional Sigstore Rekor anchor
       parameters:
       - in: path
         name: draw_slug
@@ -1939,6 +1939,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MerchCatalog'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /internal/merch/inventory/activation:
+    get:
+      operationId: getInternalMerchInventoryActivation
+      summary: Read inventory onboarding and automatic activation state
+      security:
+      - commerceBearer: []
+      responses:
+        '200':
+          description: Catalog, stocktake and activation readiness.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryActivation'
         '503':
           $ref: '#/components/responses/Problem'
   /internal/merch/reservations:
@@ -2068,6 +2083,184 @@ paths:
               schema:
                 $ref: '#/components/schemas/MerchCatalog'
         '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/inventory/activation:
+    get:
+      operationId: getAdminMerchInventoryActivation
+      summary: Read catalog and stocktake preparation state
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Inventory activation state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryActivation'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/merch/inventory/activation:
+    get:
+      operationId: getStaffMerchInventoryActivation
+      security:
+      - staffBearer: []
+      responses:
+        '200':
+          description: Inventory activation state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryActivation'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/inventory/overview:
+    get:
+      operationId: getAdminMerchInventoryOverview
+      summary: Read exact stock, split reservations, sales and campaign pressure
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Exact per-variant inventory overview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryOverview'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/merch/inventory/overview:
+    get:
+      operationId: getStaffMerchInventoryOverview
+      security:
+      - staffBearer: []
+      responses:
+        '200':
+          description: Exact per-variant inventory overview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryOverview'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/inventory/stocktakes:
+    post:
+      operationId: createAdminMerchInventoryStocktake
+      summary: Set exact physical quantities for one or more variants
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryStocktakeRequest'
+      responses:
+        '200':
+          description: Exact stocktake applied or idempotently replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryStocktake'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/merch/inventory/stocktakes:
+    post:
+      operationId: createStaffMerchInventoryStocktake
+      summary: Set exact physical quantities from the staff panel
+      security:
+      - staffBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryStocktakeRequest'
+      responses:
+        '200':
+          description: Exact stocktake applied or idempotently replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryStocktake'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/merch/inventory/ready:
+    post:
+      operationId: markAdminMerchInventoryReady
+      summary: Atomically enable public inventory, reservations and campaigns after preflight
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryReadyRequest'
+      responses:
+        '200':
+          description: Inventory is ready and all commerce flags are enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryActivation'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /staff/merch/inventory/ready:
+    post:
+      operationId: markStaffMerchInventoryReady
+      summary: Activate the verified inventory from the staff panel
+      security:
+      - staffBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryReadyRequest'
+      responses:
+        '200':
+          description: Inventory is ready and all commerce flags are enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryActivation'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
@@ -2624,6 +2817,118 @@ components:
         active: { type: boolean }
         low_stock_threshold: { type: integer, minimum: 0 }
         sell_without_stock: { type: boolean }
+    InventoryActivation:
+      type: object
+      additionalProperties: false
+      required: [status, ready, fully_enabled, catalog_seed_version, version, total_active_variants, counted_active_variants, missing_skus, blockers, can_mark_ready, public_enabled, writes_enabled, campaigns_enabled]
+      properties:
+        status: { type: string, enum: [preparing, ready] }
+        ready: { type: boolean }
+        fully_enabled: { type: boolean }
+        catalog_seed_version: { type: integer, minimum: 1 }
+        catalog_seeded_at: { type: [string, 'null'], format: date-time }
+        ready_at: { type: [string, 'null'], format: date-time }
+        ready_by: { type: [string, 'null'], maxLength: 200 }
+        version: { type: integer, format: int64, minimum: 1 }
+        total_active_variants: { type: integer, format: int64, minimum: 0 }
+        counted_active_variants: { type: integer, format: int64, minimum: 0 }
+        missing_skus:
+          type: array
+          items: { type: string }
+        blockers:
+          type: array
+          items:
+            type: string
+            enum: [catalog_empty, uncounted_variants, reserved_exceeds_stock, feature_flags_inconsistent]
+        can_mark_ready: { type: boolean }
+        public_enabled: { type: boolean }
+        writes_enabled: { type: boolean }
+        campaigns_enabled: { type: boolean }
+    InventoryOverview:
+      type: object
+      additionalProperties: false
+      required: [generated_at, items]
+      properties:
+        generated_at: { type: string, format: date-time }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InventoryOverviewItem'
+    InventoryOverviewItem:
+      type: object
+      additionalProperties: false
+      required: [product_slug, product_name, variant_id, sku, variant_label, attributes, active, low_stock_threshold, sell_without_stock, counted, on_hand, order_reserved, campaign_reserved, operational_reserved, reserved, available_quantity, sold_total, sold_30d, promotional_issued_total, active_campaigns]
+      properties:
+        product_slug: { type: string }
+        product_name: { type: string }
+        variant_id: { type: string, format: uuid }
+        sku: { type: string }
+        variant_label: { type: string }
+        attributes: { type: object, additionalProperties: true }
+        active: { type: boolean }
+        low_stock_threshold: { type: integer, minimum: 0 }
+        sell_without_stock: { type: boolean }
+        counted: { type: boolean }
+        last_counted_at: { type: [string, 'null'], format: date-time }
+        on_hand: { type: integer, format: int64 }
+        order_reserved: { type: integer, format: int64, minimum: 0 }
+        campaign_reserved: { type: integer, format: int64, minimum: 0 }
+        operational_reserved: { type: integer, format: int64, minimum: 0 }
+        reserved: { type: integer, format: int64, minimum: 0 }
+        available_quantity: { type: integer, format: int64 }
+        sold_total: { type: integer, format: int64, minimum: 0 }
+        sold_30d: { type: integer, format: int64, minimum: 0 }
+        promotional_issued_total: { type: integer, format: int64, minimum: 0 }
+        active_campaigns: { type: integer, format: int64, minimum: 0 }
+    InventoryStocktakeRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/InventoryStocktakeItemRequest'
+        actor_id: { type: [string, 'null'], maxLength: 200 }
+        reason: { type: [string, 'null'], maxLength: 500 }
+    InventoryStocktakeItemRequest:
+      type: object
+      additionalProperties: false
+      required: [sku, on_hand]
+      properties:
+        sku: { type: string, maxLength: 128 }
+        on_hand: { type: integer, minimum: 0, maximum: 1000000 }
+    InventoryStocktake:
+      type: object
+      additionalProperties: false
+      required: [id, replayed, created_at, items]
+      properties:
+        id: { type: string, format: uuid }
+        replayed: { type: boolean }
+        created_at: { type: string, format: date-time }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InventoryStocktakeItem'
+    InventoryStocktakeItem:
+      type: object
+      additionalProperties: false
+      required: [sku, label, target_on_hand, on_hand_before, reserved_at_apply, applied_delta, available_quantity]
+      properties:
+        sku: { type: string }
+        label: { type: string }
+        target_on_hand: { type: integer, minimum: 0 }
+        on_hand_before: { type: integer, format: int64 }
+        reserved_at_apply: { type: integer, format: int64, minimum: 0 }
+        applied_delta: { type: integer }
+        available_quantity: { type: integer, format: int64 }
+    InventoryReadyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        actor_id: { type: [string, 'null'], maxLength: 200 }
     InventoryReservationRequest:
       type: object
       additionalProperties: false

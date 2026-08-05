@@ -213,6 +213,10 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/public/events", get(events::list_events))
         .route("/v1/public/merch/catalog", get(commerce::public_catalog))
         .route(
+            "/v1/internal/merch/inventory/activation",
+            get(commerce::inventory_activation),
+        )
+        .route(
             "/v1/internal/merch/reservations",
             post(commerce::reserve_inventory),
         )
@@ -229,6 +233,38 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             get(commerce::admin_catalog).post(commerce::upsert_catalog),
         )
         .route("/v1/staff/merch/catalog", get(commerce::admin_catalog))
+        .route(
+            "/v1/admin/merch/inventory/activation",
+            get(commerce::inventory_activation),
+        )
+        .route(
+            "/v1/staff/merch/inventory/activation",
+            get(commerce::inventory_activation),
+        )
+        .route(
+            "/v1/admin/merch/inventory/overview",
+            get(commerce::inventory_overview),
+        )
+        .route(
+            "/v1/staff/merch/inventory/overview",
+            get(commerce::inventory_overview),
+        )
+        .route(
+            "/v1/admin/merch/inventory/stocktakes",
+            post(commerce::inventory_stocktake),
+        )
+        .route(
+            "/v1/admin/merch/inventory/ready",
+            post(commerce::mark_inventory_ready),
+        )
+        .route(
+            "/v1/staff/merch/inventory/stocktakes",
+            post(commerce::inventory_stocktake),
+        )
+        .route(
+            "/v1/staff/merch/inventory/ready",
+            post(commerce::mark_inventory_ready),
+        )
         .route(
             "/v1/admin/merch/inventory/adjustments",
             post(commerce::adjust_inventory),

@@ -10,6 +10,7 @@ services:
       REKOR_URL: ${REKOR_URL:-https://rekor.sigstore.dev}
       ANCHOR_WORKER_ID: ${ANCHOR_WORKER_ID:-virya-rekor-anchor-01}
       ANCHOR_PENDING_FILE: /data/pending-confirmation.json
+      DEPENDENCY_PROBE_MS: ${DEPENDENCY_PROBE_MS:-30000}
     secrets:
       - crowdrelay_commerce_api_key
       - rekor_signing_key

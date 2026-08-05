@@ -1,40 +1,23 @@
-# Virya commerce and reward campaigns
+# Virya commerce inventory onboarding
 
-This directory contains the initial Virya product catalog and a deliberately
-blank physical-stock worksheet. The new inventory path is staged behind three
-CrowdRelay feature flags and one Virya site environment switch.
+The canonical catalog lives in `virya-catalog.seed.json`; migration `0028_inventory_onboarding.sql` contains the same idempotent seed so the catalog exists before the updated API starts. The CSV remains a printable counting aid only. The authoritative stocktake is entered in `/staff/commerce/`.
 
-## Safety order
+## Safe order
 
-1. Apply database migration `0027_merch_inventory_reward_campaigns.sql`.
-2. Deploy the CrowdRelay API and worker with every new flag still disabled.
-3. Enable only `merch_inventory_writes_enabled` while the Virya site variable
-   `CROWDRELAY_MERCH_INVENTORY_WRITES_ENABLED` remains unset/false.
-4. Import `virya-catalog.seed.json` through `POST /v1/admin/merch/catalog`.
-5. Count every physical SKU and fill `virya-initial-stock.template.csv`.
-6. Record the initial quantities as idempotent `initial` ledger adjustments.
-7. Enable `merch_inventory_enabled` and verify public read-only availability.
-8. Deploy Virya and Virya Signal, then verify graceful timeout/error states.
-9. Enable the Virya site write switch for one controlled Stripe canary order.
-10. Enable `reward_campaigns_enabled` only after the order canary and rollback
-    drill have passed.
+1. Apply the corrected migration 0027 and migration 0028 through the normal `crowdrelay-worker setup` command.
+2. Deploy API and worker. All three commerce feature flags remain disabled.
+3. Open `/staff/commerce/`. Verify the six products and 22 active SKUs.
+4. Enter the exact physical quantity for every SKU, including explicit zeros.
+5. Click **ZAPISZ DOKŁADNY STAN**.
+6. Review the split between physical stock, order reservations, campaign reservations and available quantity.
+7. Click **MAGAZYN GOTOWY — READY**.
 
-Do not down-migrate during an incident. Disable new writes first and let signed
-Stripe webhook reconciliation continue through the internal commit/release
-endpoints.
+READY performs a fresh locked preflight and atomically enables:
 
-## Feature flags
+- `merch_inventory_enabled`;
+- `merch_inventory_writes_enabled`;
+- `reward_campaigns_enabled`.
 
-- `merch_inventory_enabled`: public read model is available.
-- `merch_inventory_writes_enabled`: catalog, manual stock, order reservations,
-  campaign creation and promotional issue mutations are allowed.
-- `reward_campaigns_enabled`: draft campaigns may be scheduled and the worker
-  may pick them up through the existing draw mechanism.
+The Virya checkout reads the activation state dynamically. No Netlify environment change or redeploy is needed after clicking READY.
 
-All three default to `false`.
-
-## Stock import rule
-
-Never infer stock from the old static web values. The CSV intentionally has
-blank quantities. Count the physical stock first and use stable idempotency keys
-such as `initial-stock:VIRYA-CD-ECHOES:v1` for each adjustment.
+Do not infer quantities from the old static page. The CSV intentionally has blank values. Do not down-migrate during an incident: pause the feature flags and preserve the ledger, stocktakes and active Stripe reservation reconciliation.
