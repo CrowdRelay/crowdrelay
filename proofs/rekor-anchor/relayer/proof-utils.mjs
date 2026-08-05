@@ -117,7 +117,10 @@ export function parseRekorCreateResponse(responseJson, expected) {
   }
   const inclusionProof = verification.inclusionProof
   if (!inclusionProof || typeof inclusionProof !== "object") throw new Error("rekor.inclusion_proof")
-  if (inclusionProof.logIndex !== record.logIndex) throw new Error("rekor.inclusion_log_index")
+  // Rekor exposes a virtual/global record.logIndex across shards, while the
+  // RFC 6962 inclusion proof carries the leaf index local to its tree shard.
+  // They are intentionally different after sharding; verify the proof against
+  // its own index instead of comparing the two coordinate systems.
   if (!verifyInclusionProof(Buffer.from(record.body, "base64"), inclusionProof)) {
     throw new Error("rekor.inclusion_invalid")
   }
@@ -214,6 +217,25 @@ export function validatePending(value) {
   if (typeof c.signed_entry_timestamp !== "string" || c.signed_entry_timestamp.length < 16) throw new Error("pending.set")
   if (!c.inclusion_proof || typeof c.inclusion_proof !== "object") throw new Error("pending.inclusion_proof")
   return value
+}
+
+export function summarizeRemoteError(text) {
+  let candidate = ""
+  try {
+    const parsed = JSON.parse(String(text ?? ""))
+    const details = [parsed?.code, parsed?.message, parsed?.error]
+      .filter((value) => typeof value === "string" || typeof value === "number")
+      .map(String)
+    candidate = details.join(": ")
+  } catch {
+    candidate = String(text ?? "")
+  }
+  return (candidate || "empty response")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/https?:\/\/[^\s]+/g, "[url]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240)
 }
 
 export function errorKind(error) {

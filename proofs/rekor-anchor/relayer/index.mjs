@@ -12,6 +12,7 @@ import {
   rekorEntryUrlFromConflict,
   sha256Hex,
   signPayload,
+  summarizeRemoteError,
   validateBatch,
   validatePending,
   validateWorkerId,
@@ -182,7 +183,13 @@ async function processOne() {
       console.log(JSON.stringify({ level: "info", event: "proof.confirmed", batch_id: batch.id, entry_uuid: confirmation.entry_uuid, log_index: confirmation.log_index }))
     },
     onFailed: (batch, error) => {
-      console.error(JSON.stringify({ level: "warn", event: "proof.failed", batch_id: batch.id, error_kind: errorKind(error) }))
+      console.error(JSON.stringify({
+        level: "warn",
+        event: "proof.failed",
+        batch_id: batch.id,
+        error_kind: errorKind(error),
+        message: safeMessage(error),
+      }))
     },
   })
   return processed > 0
@@ -259,7 +266,12 @@ async function requestJsonResponse(url, options, allowedStatuses = null) {
     const response = await fetch(url, { ...options, signal: controller.signal, redirect: "error" })
     const text = await readBodyLimited(response, maxJsonResponseBytes, originLabel(url))
     if (!(allowedStatuses?.has(response.status) ?? response.ok)) {
-      throw new Error(`${originLabel(url)} HTTP ${response.status}`)
+      const detail = summarizeRemoteError(text)
+      const retryAfter = response.headers.get("retry-after")
+      throw new Error(
+        `${originLabel(url)} HTTP ${response.status}: ${detail}`
+        + (retryAfter ? `; retry-after=${retryAfter}` : ""),
+      )
     }
     let body = null
     if (text) {

@@ -11,6 +11,7 @@ import {
   rekorEntryUrlFromConflict,
   sha256Hex,
   signPayload,
+  summarizeRemoteError,
   validateBatch,
   validatePending,
 } from "./proof-utils.mjs"
@@ -78,7 +79,9 @@ test("parses and binds Rekor response", () => {
       body,
       integratedTime: 1_700_000_000,
       logID: "b".repeat(64),
-      logIndex: 0,
+      // Public Rekor uses a virtual/global index across shards. The inclusion
+      // proof index remains local to the shard and is therefore allowed to differ.
+      logIndex: 61_057_801,
       verification: {
         inclusionProof: { hashes: [], logIndex: 0, rootHash, treeSize: 1, checkpoint: "test checkpoint data" },
         signedEntryTimestamp: "dGVzdC1zaWduZWQtZW50cnktdGltZXN0YW1w",
@@ -87,6 +90,8 @@ test("parses and binds Rekor response", () => {
   }
   const parsed = parseRekorCreateResponse(response, expected)
   assert.equal(parsed.entry_uuid, uuid)
+  assert.equal(parsed.log_index, 61_057_801)
+  assert.equal(parsed.inclusion_proof.logIndex, 0)
   assert.equal(parsed.payload_sha256, sha256Hex(payload))
   validatePending({ batch, confirmation: parsed })
 
@@ -167,4 +172,14 @@ test("recovers a duplicate Rekor entry only from the configured origin", () => {
     () => rekorEntryUrlFromConflict("/api/v1/log/entries/not-a-uuid", "https://rekor.sigstore.dev"),
     /rekor\.conflict_path/,
   )
+})
+
+
+test("summarizes remote API errors without leaking URLs or control characters", () => {
+  assert.equal(
+    summarizeRemoteError(JSON.stringify({ code: 400, message: "invalid rekord\nsee https://example.invalid/private" })),
+    "400: invalid rekord see [url]",
+  )
+  assert.equal(summarizeRemoteError(""), "empty response")
+  assert.equal(summarizeRemoteError("plain\u0000error"), "plain error")
 })
