@@ -16,7 +16,12 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertNotIn('let healthy = true', text)
 
     def test_oracle_compose_has_isolated_relayer(self):
-        compose = (ROOT / "compose.oracle.yaml").read_text()
+        compose_path = ROOT / "compose.oracle.yaml"
+        if not compose_path.exists():
+            self.skipTest(
+                "compose.oracle.yaml is a private operator file and is not tracked in git"
+            )
+        compose = compose_path.read_text()
         service = compose.split("  rekor-proof-anchor:", 1)[1].split("\nsecrets:", 1)[0]
         self.assertIn("condition: service_healthy", service)
         self.assertIn("read_only: true", service)
