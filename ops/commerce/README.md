@@ -21,3 +21,13 @@ READY performs a fresh locked preflight and atomically enables:
 The Virya checkout reads the activation state dynamically. No Netlify environment change or redeploy is needed after clicking READY.
 
 Do not infer quantities from the old static page. The CSV intentionally has blank values. Do not down-migrate during an incident: pause the feature flags and preserve the ledger, stocktakes and active Stripe reservation reconciliation.
+
+## Safe CLI activation
+
+After all 22 SKUs have an explicit stocktake, activate and verify the public catalog without touching feature flags directly:
+
+```bash
+sudo ./ops/commerce/activate-inventory.sh
+```
+
+The script uses the staff key already present inside `crowdrelay-api`, refuses activation while the locked server preflight reports blockers, calls the canonical READY endpoint, and verifies `/v1/public/merch/catalog` before succeeding.

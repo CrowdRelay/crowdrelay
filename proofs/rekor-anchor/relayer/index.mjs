@@ -2,6 +2,7 @@ import http from "node:http"
 import process from "node:process"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
+import { processClaimedBatches } from "./batch-runner.mjs"
 import {
   buildProofPayload,
   buildRekorEntry,
@@ -17,7 +18,7 @@ import {
 } from "./proof-utils.mjs"
 
 const env = process.env
-const crowdrelayUrl = requiredUrl("CROWDRELAY_INTERNAL_URL")
+const crowdrelayUrl = requiredUrl("CROWDRELAY_INTERNAL_URL", true)
 const rekorUrl = normalizeUrl(env.REKOR_URL || "https://rekor.sigstore.dev")
 const workerId = validateWorkerId(env.ANCHOR_WORKER_ID || "virya-rekor-anchor-01")
 const keyFile = env.REKOR_SIGNING_KEY_FILE || "/run/secrets/rekor_signing_key"
@@ -26,10 +27,13 @@ const pendingFile = env.ANCHOR_PENDING_FILE || "/data/pending-confirmation.json"
 const pollMs = boundedInt(env.ANCHOR_POLL_MS, 1_000, 60_000, 5_000)
 const dependencyProbeMs = boundedInt(env.DEPENDENCY_PROBE_MS, 5_000, 300_000, 30_000)
 const requestTimeoutMs = boundedInt(env.REQUEST_TIMEOUT_MS, 1_000, 60_000, 15_000)
+const maxJsonResponseBytes = boundedInt(env.MAX_JSON_RESPONSE_BYTES, 16 * 1024, 2 * 1024 * 1024, 512 * 1024)
+const maxTextResponseBytes = boundedInt(env.MAX_TEXT_RESPONSE_BYTES, 16 * 1024, 1024 * 1024, 256 * 1024)
 const leaseSeconds = boundedInt(env.ANCHOR_LEASE_SECONDS, 30, 900, 300)
 const claimLimit = boundedInt(env.ANCHOR_CLAIM_LIMIT, 1, 16, 8)
 const port = boundedInt(env.PORT, 1, 65_535, 8081)
 
+await verifyPendingStorage()
 const [apiToken, privateKeyPem] = await Promise.all([
   readSecret(tokenFile),
   readSecret(keyFile, false),
@@ -144,25 +148,30 @@ async function processOne() {
   const batches = Array.isArray(claimed?.batches) ? claimed.batches : []
   if (batches.length === 0) return false
 
-  const batch = validateBatch(batches[0])
-  try {
-    const confirmation = await publish(batch)
-    await savePending({ batch, confirmation })
-    await confirm(batch.id, confirmation)
-    await clearPending()
-    console.log(JSON.stringify({ level: "info", event: "proof.confirmed", batch_id: batch.id, entry_uuid: confirmation.entry_uuid, log_index: confirmation.log_index }))
-  } catch (error) {
-    if (await loadPending()) throw error
-    const kind = errorKind(error)
-    await crowdrelay(`/v1/internal/proofs/${encodeURIComponent(batch.id)}/fail`, {
-      method: "POST",
-      body: { worker_id: workerId, error_kind: kind },
-    }).catch((failError) => {
-      throw new Error(`crowdrelay fail callback: ${safeMessage(failError)}`)
-    })
-    console.error(JSON.stringify({ level: "warn", event: "proof.failed", batch_id: batch.id, error_kind: kind }))
-  }
-  return true
+  const processed = await processClaimedBatches(batches, {
+    validate: validateBatch,
+    publish,
+    savePending,
+    confirm,
+    clearPending,
+    hasPending: loadPending,
+    fail: async (batch, error) => {
+      const kind = errorKind(error)
+      await crowdrelay(`/v1/internal/proofs/${encodeURIComponent(batch.id)}/fail`, {
+        method: "POST",
+        body: { worker_id: workerId, error_kind: kind },
+      }).catch((failError) => {
+        throw new Error(`crowdrelay fail callback: ${safeMessage(failError)}`)
+      })
+    },
+    onConfirmed: (batch, confirmation) => {
+      console.log(JSON.stringify({ level: "info", event: "proof.confirmed", batch_id: batch.id, entry_uuid: confirmation.entry_uuid, log_index: confirmation.log_index }))
+    },
+    onFailed: (batch, error) => {
+      console.error(JSON.stringify({ level: "warn", event: "proof.failed", batch_id: batch.id, error_kind: errorKind(error) }))
+    },
+  })
+  return processed > 0
 }
 
 async function publish(batch) {
@@ -220,9 +229,9 @@ async function requestText(url, options) {
   const timer = setTimeout(() => controller.abort(new Error("request timeout")), requestTimeoutMs)
   try {
     const response = await fetch(url, { ...options, signal: controller.signal, redirect: "error" })
-    const text = await response.text()
+    const text = await readBodyLimited(response, maxTextResponseBytes, originLabel(url))
     if (!response.ok) throw new Error(`${originLabel(url)} HTTP ${response.status}`)
-    if (text.length < 32 || text.length > 256 * 1024) throw new Error(`${originLabel(url)} response size invalid`)
+    if (text.length < 32) throw new Error(`${originLabel(url)} response size invalid`)
     return text
   } finally {
     clearTimeout(timer)
@@ -234,17 +243,54 @@ async function requestJsonResponse(url, options, allowedStatuses = null) {
   const timer = setTimeout(() => controller.abort(new Error("request timeout")), requestTimeoutMs)
   try {
     const response = await fetch(url, { ...options, signal: controller.signal, redirect: "error" })
-    const text = await response.text()
+    const text = await readBodyLimited(response, maxJsonResponseBytes, originLabel(url))
+    if (!(allowedStatuses?.has(response.status) ?? response.ok)) {
+      throw new Error(`${originLabel(url)} HTTP ${response.status}`)
+    }
     let body = null
     if (text) {
       try { body = JSON.parse(text) } catch { throw new Error(`invalid JSON from ${originLabel(url)}`) }
     }
-    if (!(allowedStatuses?.has(response.status) ?? response.ok)) {
-      throw new Error(`${originLabel(url)} HTTP ${response.status}`)
-    }
     return { status: response.status, headers: response.headers, body }
   } finally {
     clearTimeout(timer)
+  }
+}
+
+async function readBodyLimited(response, maximumBytes, label) {
+  const declaredLength = Number.parseInt(response.headers.get("content-length") || "", 10)
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    response.body?.cancel().catch(() => {})
+    throw new Error(`${label} response too large`)
+  }
+  if (!response.body) return ""
+
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maximumBytes) {
+      await reader.cancel().catch(() => {})
+      throw new Error(`${label} response too large`)
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks, total).toString("utf8")
+}
+
+async function verifyPendingStorage() {
+  const directory = dirname(pendingFile)
+  await mkdir(directory, { recursive: true })
+  const probe = `${directory}/.write-probe-${process.pid}`
+  try {
+    await writeFile(probe, "", { flag: "wx", mode: 0o600 })
+  } catch (error) {
+    throw new Error(`pending storage is not writable: ${safeMessage(error)}`)
+  } finally {
+    await rm(probe, { force: true }).catch(() => {})
   }
 }
 
@@ -276,16 +322,17 @@ async function readSecret(path, trim = true) {
   return normalized
 }
 
-function requiredUrl(name) {
+function requiredUrl(name, allowTrustedHttp = false) {
   const value = env[name]
   if (!value) throw new Error(`${name} is required`)
-  return normalizeUrl(value)
+  return normalizeUrl(value, allowTrustedHttp)
 }
 
-function normalizeUrl(value) {
+function normalizeUrl(value, allowTrustedHttp = false) {
   const parsed = new URL(value)
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname))) {
-    throw new Error("URL must use HTTPS")
+  const trustedHttpHosts = new Set(["localhost", "127.0.0.1", "crowdrelay-api", "api"])
+  if (parsed.protocol !== "https:" && !(allowTrustedHttp && parsed.protocol === "http:" && trustedHttpHosts.has(parsed.hostname))) {
+    throw new Error("URL must use HTTPS or a trusted local service name")
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "")
   parsed.search = ""

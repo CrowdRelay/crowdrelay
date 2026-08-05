@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "check": "node --check index.mjs && node --check proof-utils.mjs",
-    "test": "node --test proof-utils.test.mjs"
+    "check": "node --check index.mjs && node --check proof-utils.mjs && node --check batch-runner.mjs",
+    "test": "node --test *.test.mjs"
   }
 }

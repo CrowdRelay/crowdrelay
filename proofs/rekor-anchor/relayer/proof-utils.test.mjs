@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { generateKeyPairSync } from "node:crypto"
+import { createHash, generateKeyPairSync } from "node:crypto"
 import {
   buildProofPayload,
   buildRekorEntry,
@@ -68,21 +68,27 @@ test("parses and binds Rekor response", () => {
     signerFingerprint: signer.fingerprint,
   }
   const uuid = "a".repeat(64)
-  const parsed = parseRekorCreateResponse({
+  const rootHash = createHash("sha256").update(Buffer.concat([Buffer.from([0]), Buffer.from(body, "base64")])).digest("hex")
+  const response = {
     [uuid]: {
       body,
       integratedTime: 1_700_000_000,
       logID: "b".repeat(64),
-      logIndex: 123,
+      logIndex: 0,
       verification: {
-        inclusionProof: { hashes: [], logIndex: 123, rootHash: "c".repeat(64), treeSize: 124 },
+        inclusionProof: { hashes: [], logIndex: 0, rootHash, treeSize: 1, checkpoint: "test checkpoint data" },
         signedEntryTimestamp: "dGVzdC1zaWduZWQtZW50cnktdGltZXN0YW1w",
       },
     },
-  }, expected)
+  }
+  const parsed = parseRekorCreateResponse(response, expected)
   assert.equal(parsed.entry_uuid, uuid)
   assert.equal(parsed.payload_sha256, sha256Hex(payload))
   validatePending({ batch, confirmation: parsed })
+
+  const corrupted = structuredClone(response)
+  corrupted[uuid].verification.inclusionProof.rootHash = "c".repeat(64)
+  assert.throws(() => parseRekorCreateResponse(corrupted, expected), /rekor\.inclusion_invalid/)
 })
 
 test("rejects malformed batches and classifies errors", () => {

@@ -8,8 +8,10 @@ env_file="${CROWDRELAY_REKOR_ENV_FILE:-deploy/rekor-anchor.env}"
 secret_dir="${CROWDRELAY_SECRET_DIR:-deploy/secrets}"
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-[[ -n "${CROWDRELAY_IMAGE_TAG:-}" ]] || fail 'CROWDRELAY_IMAGE_TAG must be the exact validated sha-* tag'
+[[ "${CROWDRELAY_IMAGE_TAG:-}" =~ ^sha-[0-9a-f]{40,64}$ ]] || fail 'CROWDRELAY_IMAGE_TAG must be an exact validated sha-<40..64 lowercase hex> tag'
 [[ -f "$env_file" ]] || fail "$env_file is missing; copy deploy/rekor-anchor.env.example first"
+grep -Eq '^CROWDRELAY_INTERNAL_URL=http://(crowdrelay-api|api):8080/?$' "$env_file" \
+  || fail 'CROWDRELAY_INTERNAL_URL must use the private Docker API endpoint, not public Caddy/HTTPS'
 for file in crowdrelay_commerce_api_key crowdrelay_admin_api_key rekor_signing_key.pem; do
   [[ -s "$secret_dir/$file" ]] || fail "$secret_dir/$file is missing or empty"
 done

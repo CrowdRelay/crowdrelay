@@ -57,7 +57,7 @@ This first disables the CrowdRelay feature flag, then stops the relayer. It does
 ```bash
 docker inspect --format '{{json .State.Health}}' crowdrelay-rekor-proof-anchor
 docker logs --tail=100 crowdrelay-rekor-proof-anchor
-curl --fail --silent http://127.0.0.1:8081/health/ready | python3 -m json.tool
+docker exec crowdrelay-rekor-proof-anchor node -e "fetch('http://127.0.0.1:8081/health/ready').then(async r=>{console.log(await r.text());process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"
 ```
 
 The readiness payload must show both dependencies as ready and must expose the expected signer fingerprint. The container starts unready; it cannot report a successful READY state before checking both CrowdRelay and Rekor.

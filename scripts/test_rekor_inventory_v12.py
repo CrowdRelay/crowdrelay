@@ -2,7 +2,6 @@
 from __future__ import annotations
 import pathlib
 import unittest
-import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -17,24 +16,40 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertNotIn('let healthy = true', text)
 
     def test_oracle_compose_has_isolated_relayer(self):
-        data = yaml.safe_load((ROOT / "compose.oracle.yaml").read_text())
-        service = data["services"]["rekor-proof-anchor"]
-        self.assertEqual(service["depends_on"]["api"]["condition"], "service_healthy")
-        self.assertTrue(service["read_only"])
-        self.assertEqual(service["cap_drop"], ["ALL"])
-        self.assertIn("rekor-anchor-state:/data", service["volumes"])
-        self.assertNotIn("ports", service)
+        compose = (ROOT / "compose.oracle.yaml").read_text()
+        service = compose.split("  rekor-proof-anchor:", 1)[1].split("\nsecrets:", 1)[0]
+        self.assertIn("condition: service_healthy", service)
+        self.assertIn("read_only: true", service)
+        self.assertIn("cap_drop: [ALL]", service)
+        self.assertIn("rekor-anchor-state:/data", service)
+        self.assertNotIn("\n    ports:", service)
 
     def test_ghcr_publishes_relayer(self):
         workflow = (ROOT / ".github/workflows/publish-images.yml").read_text()
         self.assertIn("crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}", workflow)
         self.assertIn("context: proofs/rekor-anchor/relayer", workflow)
 
+    def test_relayer_image_contains_batch_runtime_and_writable_journal_directory(self):
+        dockerfile = (ROOT / "proofs/rekor-anchor/relayer/Dockerfile").read_text()
+        runtime = (ROOT / "proofs/rekor-anchor/relayer/index.mjs").read_text()
+        self.assertIn("batch-runner.mjs", dockerfile)
+        self.assertIn("chown -R node:node /app /data", dockerfile)
+        self.assertIn("chmod 700 /data", dockerfile)
+        self.assertIn("await verifyPendingStorage()", runtime)
+        self.assertIn("pending storage is not writable", runtime)
+
     def test_canary_rolls_back_flag(self):
         text = (ROOT / "scripts/rekor-canary.py").read_text()
         self.assertIn('set_flag(client, False', text)
         self.assertIn('verify_rekor_entry(anchor_url, entry_id)', text)
         self.assertIn('external_proof_anchoring_enabled', text)
+
+    def test_installer_requires_immutable_image_and_private_api_path(self):
+        installer = (ROOT / "ops/rekor/install-anchor.sh").read_text()
+        env_example = (ROOT / "deploy/rekor-anchor.env.example").read_text()
+        self.assertIn("^sha-[0-9a-f]{40,64}$", installer)
+        self.assertIn("CROWDRELAY_INTERNAL_URL=http://crowdrelay-api:8080", env_example)
+        self.assertIn("private Docker API endpoint", installer)
 
     def test_inventory_ready_is_atomic(self):
         text = (ROOT / "crates/crowdrelay-api/src/commerce.rs").read_text()

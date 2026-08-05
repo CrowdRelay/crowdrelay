@@ -117,6 +117,10 @@ export function parseRekorCreateResponse(responseJson, expected) {
   }
   const inclusionProof = verification.inclusionProof
   if (!inclusionProof || typeof inclusionProof !== "object") throw new Error("rekor.inclusion_proof")
+  if (inclusionProof.logIndex !== record.logIndex) throw new Error("rekor.inclusion_log_index")
+  if (!verifyInclusionProof(Buffer.from(record.body, "base64"), inclusionProof)) {
+    throw new Error("rekor.inclusion_invalid")
+  }
 
   const canonicalBody = JSON.parse(Buffer.from(record.body, "base64").toString("utf8"))
   if (canonicalBody.kind !== "rekord" || canonicalBody.apiVersion !== "0.0.1") throw new Error("rekor.body_kind")
@@ -140,6 +144,49 @@ export function parseRekorCreateResponse(responseJson, expected) {
     signature_base64: expected.signatureBase64,
     signed_entry_timestamp: verification.signedEntryTimestamp,
     signer_fingerprint: expected.signerFingerprint,
+  }
+}
+
+
+export function verifyInclusionProof(canonicalBody, proof) {
+  if (!Buffer.isBuffer(canonicalBody) || canonicalBody.length === 0) return false
+  if (!proof || !Number.isSafeInteger(proof.logIndex) || !Number.isSafeInteger(proof.treeSize)) return false
+  if (proof.logIndex < 0 || proof.treeSize <= proof.logIndex || !Array.isArray(proof.hashes)) return false
+
+  let fn = proof.logIndex
+  let sn = proof.treeSize - 1
+  let hash = createHash("sha256").update(Buffer.concat([Buffer.from([0]), canonicalBody])).digest()
+  for (const encoded of proof.hashes) {
+    const sibling = decodeHash(encoded)
+    if (!sibling) return false
+    if ((fn & 1) === 1 || fn === sn) {
+      hash = nodeHash(sibling, hash)
+      while ((fn & 1) === 0 && fn !== 0) {
+        fn >>= 1
+        sn >>= 1
+      }
+    } else {
+      hash = nodeHash(hash, sibling)
+    }
+    fn >>= 1
+    sn >>= 1
+  }
+  const expected = decodeHash(proof.rootHash)
+  return expected !== null && hash.equals(expected)
+}
+
+function nodeHash(left, right) {
+  return createHash("sha256").update(Buffer.concat([Buffer.from([1]), left, right])).digest()
+}
+
+function decodeHash(value) {
+  if (typeof value !== "string") return null
+  if (/^[0-9a-f]{64}$/i.test(value)) return Buffer.from(value, "hex")
+  try {
+    const decoded = Buffer.from(value, "base64")
+    return decoded.length === 32 ? decoded : null
+  } catch {
+    return null
   }
 }
 

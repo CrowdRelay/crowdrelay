@@ -61,6 +61,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node --check index.mjs && node --check proof-utils.mjs
-      - run: node --test proof-utils.test.mjs
+      - run: node --check index.mjs && node --check proof-utils.mjs && node --check batch-runner.mjs
+      - run: node --test *.test.mjs
       - run: docker build --tag virya-rekor-proof-anchor:test .

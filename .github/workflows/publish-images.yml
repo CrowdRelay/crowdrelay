@@ -83,3 +83,20 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
           provenance: mode=max
           sbom: true
+      - name: Build and publish Rekor proof anchor image
+        uses: docker/build-push-action@v6
+        with:
+          context: proofs/rekor-anchor/relayer
+          platforms: linux/amd64
+          push: true
+          tags: >-
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=crowdrelay-rekor-proof-anchor
+          cache-from: type=gha,scope=crowdrelay-rekor-proof-anchor
+          cache-to: type=gha,mode=max,scope=crowdrelay-rekor-proof-anchor
+          provenance: mode=max
+          sbom: true

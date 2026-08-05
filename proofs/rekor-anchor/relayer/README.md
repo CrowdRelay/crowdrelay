@@ -21,8 +21,10 @@ The public-key SHA-256 fingerprint is exposed on `/health/ready` and stored with
 
 ```bash
 node --check index.mjs
-node --test proof-utils.test.mjs
+node --test *.test.mjs
 docker build -t crowdrelay-rekor-proof-anchor:test .
 ```
+
+Startup fails closed unless the persisted pending-confirmation directory is writable by the non-root worker.
 
 The upload is idempotent across a lost response: Rekor HTTP 409 conflicts are resolved through the returned same-origin entry `Location`, then confirmed normally.
