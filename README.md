@@ -18,9 +18,12 @@ The operator owns the data. Public requests never send emails or call external p
 * weighted prize draws with auditable weight snapshots and sampling without replacement;
 * admission pass pools, claims, rotating QR codes, and atomic redemption at the venue;
 * first-party ticket inventory with explicit sold, held, and available counters, durable Stripe Checkout holds, VAT-inclusive pricing, refunds, and paid pass issuance;
+* canonical merch product catalog, variant-level inventory, stocktakes, staff READY activation, and Stripe order reservations;
+* reward campaigns with reserved merch, weighted winner selection, and fulfillment tracking;
 * short-lived, revocable event attendance QR codes;
 * HMAC-signed webhooks, retries, idempotency, replay protection, and n8n integrations;
-* role-scoped admin, staff, and service API namespaces with separate bearer credentials;
+* role-scoped admin, staff, service, and commerce API namespaces with separate bearer credentials;
+* optional Sigstore Rekor transparency-log anchoring for draw and audit receipts;
 * PostgreSQL, migrations, health checks, metrics, structured logging, and graceful shutdown;
 * a dependency-free TypeScript client and an OpenAPI 3.1 contract.
 
