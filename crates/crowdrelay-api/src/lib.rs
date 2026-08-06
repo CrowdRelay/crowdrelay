@@ -50,6 +50,7 @@ use tracing::{Level, info_span};
 mod accounting;
 mod acquisition;
 mod admission;
+mod area;
 mod commerce;
 mod concert_qr;
 mod ecosystem;
@@ -209,6 +210,27 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/fans/confirm", post(fan_lifecycle::confirm_fan))
         .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
         .route("/v1/public/cities", get(acquisition::list_cities))
+        .route("/v1/public/area/drops", get(area::public_drops))
+        .route("/v1/me/area", get(area::me_wallet))
+        .route("/v1/me/area/challenge", post(area::me_challenge))
+        .route("/v1/me/area/claim", post(area::me_claim))
+        .route("/v1/internal/area/players", post(area::link_player))
+        .route(
+            "/v1/internal/area/players/{player_id}",
+            get(area::internal_wallet),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/challenge",
+            post(area::internal_challenge),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/claim",
+            post(area::internal_claim),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/claims/import",
+            post(area::internal_import_claims),
+        )
         .route("/v1/public/cities/requests", post(mobile_fan::request_city))
         .route("/v1/public/events", get(events::list_events))
         .route("/v1/public/merch/catalog", get(commerce::public_catalog))
