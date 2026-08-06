@@ -55,7 +55,7 @@ LABEL org.opencontainers.image.source="https://github.com/wojciechbator/crowdrel
       org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 crowdrelay \
@@ -72,6 +72,10 @@ WORKDIR /app
 ENV RUST_LOG=info
 
 FROM runtime AS api
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/crowdrelay-api /usr/local/bin/crowdrelay-api
 

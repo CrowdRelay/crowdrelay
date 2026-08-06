@@ -6,6 +6,8 @@ services:
     command: ["setup"]
     env_file:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
+    environment:
+      TOKIO_WORKER_THREADS: ${CROWDRELAY_SETUP_TOKIO_THREADS:-1}
     volumes:
       - ${CROWDRELAY_BOOTSTRAP_HOST_FILE:-./deploy/bootstrap.production.json}:/run/crowdrelay/bootstrap.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
@@ -21,6 +23,8 @@ services:
     image: ${CROWDRELAY_API_IMAGE:-ghcr.io/wojciechbator/crowdrelay-api}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     env_file:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
+    environment:
+      TOKIO_WORKER_THREADS: ${CROWDRELAY_API_TOKIO_THREADS:-2}
     depends_on:
       setup:
         condition: service_completed_successfully
@@ -55,6 +59,8 @@ services:
     command: ["run"]
     env_file:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
+    environment:
+      TOKIO_WORKER_THREADS: ${CROWDRELAY_WORKER_TOKIO_THREADS:-1}
     volumes:
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
     depends_on:

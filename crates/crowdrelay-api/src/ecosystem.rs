@@ -31,6 +31,7 @@ const SHOW_SNAPSHOT_SCHEMA: u32 = 1;
 const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
+const MAX_FLAG_CACHE_ENTRIES: usize = 256;
 const FLAG_KEYS: [(&str, bool); 13] = [
     ("ticket_sales_enabled", true),
     ("ticket_delivery_enabled", true),
@@ -540,14 +541,38 @@ async fn read_cached_flag(workspace_id: Uuid, key: &'static str) -> Option<bool>
         .map(|entry| entry.enabled)
 }
 
-async fn write_cached_flag(workspace_id: Uuid, key: &'static str, enabled: bool) {
-    flag_cache().write().await.insert(
-        (workspace_id, key),
+fn insert_cached_flag(
+    cache: &mut FlagCache,
+    workspace_id: Uuid,
+    key: &'static str,
+    enabled: bool,
+    now: Instant,
+) {
+    let cache_key = (workspace_id, key);
+    if cache.len() >= MAX_FLAG_CACHE_ENTRIES && !cache.contains_key(&cache_key) {
+        cache.retain(|_, entry| entry.expires_at > now);
+        if cache.len() >= MAX_FLAG_CACHE_ENTRIES
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(key, _)| *key)
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(
+        cache_key,
         CachedFlag {
             enabled,
-            expires_at: Instant::now() + FLAG_CACHE_TTL,
+            expires_at: now + FLAG_CACHE_TTL,
         },
     );
+}
+
+async fn write_cached_flag(workspace_id: Uuid, key: &'static str, enabled: bool) {
+    let now = Instant::now();
+    let mut cache = flag_cache().write().await;
+    insert_cached_flag(&mut cache, workspace_id, key, enabled, now);
 }
 
 pub(crate) async fn cache_feature_flag(workspace_id: Uuid, key: &'static str, enabled: bool) {
@@ -1678,5 +1703,25 @@ mod tests {
         assert_eq!(FLAG_KEYS.len(), 13);
         assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
         assert_eq!(flag_default("unknown"), None);
+    }
+
+    #[test]
+    fn feature_flag_cache_is_strictly_bounded() {
+        let now = Instant::now();
+        let mut cache = FlagCache::new();
+        for index in 0..(MAX_FLAG_CACHE_ENTRIES + 32) {
+            insert_cached_flag(
+                &mut cache,
+                Uuid::from_u128(index as u128 + 1),
+                "mailer_enabled",
+                index % 2 == 0,
+                now,
+            );
+        }
+        assert_eq!(cache.len(), MAX_FLAG_CACHE_ENTRIES);
+        assert!(cache.contains_key(&(
+            Uuid::from_u128((MAX_FLAG_CACHE_ENTRIES + 32) as u128),
+            "mailer_enabled"
+        )));
     }
 }

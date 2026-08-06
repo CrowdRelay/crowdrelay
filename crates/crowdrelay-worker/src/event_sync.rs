@@ -69,6 +69,10 @@ impl EventSyncWorker {
         }
         let client = Client::builder()
             .timeout(config.http_timeout)
+            .connect_timeout(config.http_timeout.min(Duration::from_secs(5)))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(2)
+            .tcp_keepalive(Duration::from_secs(30))
             .user_agent("CrowdRelay/0.1 event-sync")
             .build()
             .map_err(|_| EventSyncError::InvalidConfiguration)?;

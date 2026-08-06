@@ -41,6 +41,9 @@ impl WebhookDispatcher {
     ) -> Result<Self, TransportBuildError> {
         let client = Client::builder()
             .connect_timeout(connect_timeout)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(2)
+            .tcp_keepalive(Duration::from_secs(30))
             .redirect(Policy::none())
             .user_agent(user_agent)
             .build()
