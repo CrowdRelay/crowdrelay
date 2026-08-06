@@ -116,11 +116,8 @@ CREATE INDEX IF NOT EXISTS area_claims_player_idx
 
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = 'virya') THEN
-        RAISE EXCEPTION 'VIRYA AREA migration requires workspace slug virya';
-    END IF;
-
-    IF EXISTS (
+    IF EXISTS (SELECT 1 FROM workspaces WHERE slug = 'virya')
+       AND EXISTS (
         SELECT 1
         FROM (VALUES
             ('wroclaw'), ('poznan'), ('gdansk'), ('warszawa'),
@@ -240,14 +237,18 @@ DO $$
 DECLARE
     seeded integer;
 BEGIN
-    SELECT count(*)::integer
-    INTO seeded
-    FROM area_drops AS area_drop
-    INNER JOIN workspaces AS workspace ON workspace.id = area_drop.workspace_id
-    WHERE workspace.slug = 'virya';
+    IF EXISTS (SELECT 1 FROM workspaces WHERE slug = 'virya') THEN
+        SELECT count(*)::integer
+        INTO seeded
+        FROM area_drops AS area_drop
+        INNER JOIN workspaces AS workspace ON workspace.id = area_drop.workspace_id
+        WHERE workspace.slug = 'virya';
 
-    IF seeded <> 12 THEN
-        RAISE EXCEPTION 'VIRYA AREA expected 12 drops, found %', seeded;
+        IF seeded <> 12 THEN
+            RAISE EXCEPTION 'VIRYA AREA expected 12 drops, found %', seeded;
+        END IF;
+    ELSE
+        RAISE NOTICE 'VIRYA AREA seed skipped: workspace slug virya is absent';
     END IF;
 END
 $$;
