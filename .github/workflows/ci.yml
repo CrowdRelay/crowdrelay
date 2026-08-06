@@ -1,6 +1,8 @@
+# actions-recovery: 20260806-201024
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: ["main"]
   pull_request:
