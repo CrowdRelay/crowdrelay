@@ -26,3 +26,11 @@ n8n/*
 !n8n/README.md
 !n8n/examples/
 !n8n/examples/**
+
+# Editor/recovery files must never enter source packages.
+*.bak
+*.orig
+*.rej
+*.tmp
+*~
+.recovery-backup

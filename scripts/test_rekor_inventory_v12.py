@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import pathlib
+
+from rust_source_tree import read_rust_module
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -57,7 +59,7 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertIn("private Docker API endpoint", installer)
 
     def test_inventory_ready_is_atomic(self):
-        text = (ROOT / "crates/crowdrelay-api/src/commerce.rs").read_text()
+        text = read_rust_module(ROOT, "crates/crowdrelay-api/src/commerce.rs")
         update_position = text.index("SET status = 'ready'")
         flags_position = text.index("inventory activated from staff panel")
         commit_position = text.index("transaction.commit()", flags_position)
