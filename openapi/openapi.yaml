@@ -1855,6 +1855,18 @@ paths:
       responses:
         '200': { description: Merkle path and local verification result. }
         '404': { $ref: '#/components/responses/Problem' }
+  /public/proofs/draws/{draw_slug}/status:
+    get:
+      operationId: getPublicDrawStatus
+      summary: Read the public lifecycle state of a draw without exposing participants
+      parameters:
+      - in: path
+        name: draw_slug
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        '200': { description: Public draw lifecycle metadata and proof availability. }
+        '404': { $ref: '#/components/responses/Problem' }
   /public/proofs/draws/{draw_slug}:
     get:
       operationId: getPublicDrawProof

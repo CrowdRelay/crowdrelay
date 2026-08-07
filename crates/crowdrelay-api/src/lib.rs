@@ -345,6 +345,10 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             get(proofs::public_inclusion),
         )
         .route(
+            "/v1/public/proofs/draws/{draw_slug}/status",
+            get(proofs::public_draw_status),
+        )
+        .route(
             "/v1/public/proofs/draws/{draw_slug}",
             get(proofs::public_draw),
         )

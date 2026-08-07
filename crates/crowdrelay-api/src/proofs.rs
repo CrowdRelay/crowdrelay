@@ -26,6 +26,7 @@ use crate::{IDEMPOTENCY_KEY, Problem, ecosystem, request_id};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const PUBLIC_PROOF_CACHE: &str = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+const PUBLIC_DRAW_STATUS_CACHE: &str = "public, max-age=5, s-maxage=10, must-revalidate";
 const MAX_AUDIT_BATCH: i64 = 4_096;
 const MAX_LIST_LIMIT: i64 = 100;
 const DEFAULT_LEASE_SECONDS: i64 = 300;
@@ -205,6 +206,27 @@ struct DrawProofRow {
     signed_payload_sha256: Option<Vec<u8>>,
     confirmed_at: Option<OffsetDateTime>,
     completed_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct DrawStatusRow {
+    draw_slug: String,
+    draw_name: String,
+    status: String,
+    draw_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+    proof_available: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicDrawStatus {
+    schema: &'static str,
+    draw_slug: String,
+    draw_name: String,
+    status: String,
+    draw_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+    proof_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -407,6 +429,18 @@ pub async fn public_inclusion(
     }
     let future = inclusion_proof(&state, batch_id, &source_kind, source_id);
     respond_public(run(&state, future).await, request_id(&headers))
+}
+
+pub async fn public_draw_status(
+    State(state): State<crate::AppState>,
+    Path(draw_slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if draw_slug.is_empty() || draw_slug.len() > 128 {
+        return ProofError::BadRequest.into_response(request_id(&headers));
+    }
+    let future = load_draw_status(&state, &draw_slug);
+    respond_public_status(run(&state, future).await, request_id(&headers))
 }
 
 pub async fn public_draw(
@@ -808,6 +842,46 @@ async fn inclusion_proof(
             })
             .collect(),
         verified,
+    })
+}
+
+async fn load_draw_status(
+    state: &crate::AppState,
+    draw_slug: &str,
+) -> Result<PublicDrawStatus, ProofError> {
+    let row = sqlx::query_as::<_, DrawStatusRow>(
+        r#"
+        SELECT draw.slug AS draw_slug,
+               draw.name AS draw_name,
+               draw.status,
+               draw.draw_at,
+               draw.completed_at,
+               EXISTS (
+                   SELECT 1
+                   FROM reward_draw_proofs AS proof
+                   WHERE proof.workspace_id = draw.workspace_id
+                     AND proof.draw_id = draw.id
+               ) AS proof_available
+        FROM reward_draws AS draw
+        WHERE draw.workspace_id = $1 AND draw.slug = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(draw_slug)
+    .fetch_optional(state.ticketing.pool())
+    .await
+    .map_err(ProofError::sqlx)?
+    .ok_or(ProofError::NotFound)?;
+
+    Ok(PublicDrawStatus {
+        schema: "crowdrelay/draw-status/v1",
+        draw_slug: row.draw_slug,
+        draw_name: row.draw_name,
+        status: row.status,
+        draw_at: row.draw_at,
+        completed_at: row.completed_at,
+        proof_available: row.proof_available,
     })
 }
 
@@ -1683,6 +1757,13 @@ fn respond_public<T: Serialize>(
     request_id_value: Option<String>,
 ) -> Response {
     respond(result, request_id_value, PUBLIC_PROOF_CACHE)
+}
+
+fn respond_public_status<T: Serialize>(
+    result: Result<T, ProofError>,
+    request_id_value: Option<String>,
+) -> Response {
+    respond(result, request_id_value, PUBLIC_DRAW_STATUS_CACHE)
 }
 
 fn respond<T: Serialize>(
