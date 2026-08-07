@@ -30,6 +30,15 @@ class RewardDrawAdminContracts(unittest.TestCase):
         self.assertNotIn("DELETE FROM external_proof_batches", delete)
         self.assertNotIn("DELETE FROM reward_draw_proofs", delete)
 
+
+    def test_management_dates_are_serialized_as_rfc3339_strings(self):
+        source = (ROOT / "crates/crowdrelay-api/src/commerce.rs").read_text()
+        campaign = source.split("pub struct RewardCampaignView", 1)[1].split("pub struct RewardDrawAdminView", 1)[0]
+        draw = source.split("pub struct RewardDrawAdminView", 1)[1].split("pub struct DeletedRewardDrawView", 1)[0]
+        for view in [campaign, draw]:
+            self.assertGreaterEqual(view.count('#[serde(with = "time::serde::rfc3339")]'), 3)
+            self.assertIn('#[serde(with = "time::serde::rfc3339::option")]', view)
+
     def test_management_list_exposes_why_delete_is_locked(self):
         source = (ROOT / "crates/crowdrelay-api/src/commerce/campaigns.rs").read_text()
         listing = source.split("async fn load_reward_draws", 1)[1]

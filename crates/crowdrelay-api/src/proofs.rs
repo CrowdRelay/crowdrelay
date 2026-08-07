@@ -224,7 +224,9 @@ pub struct PublicDrawStatus {
     draw_slug: String,
     draw_name: String,
     status: String,
+    #[serde(with = "time::serde::rfc3339")]
     draw_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     completed_at: Option<OffsetDateTime>,
     proof_available: bool,
 }
@@ -247,6 +249,7 @@ pub struct PublicDrawProof {
     receipt_sha256: String,
     locally_verified: bool,
     anchor: PublicAnchor,
+    #[serde(with = "time::serde::rfc3339")]
     completed_at: OffsetDateTime,
 }
 
@@ -258,11 +261,13 @@ pub struct PublicAnchor {
     anchor_url: Option<String>,
     entry_id: Option<String>,
     sequence: Option<i64>,
+    #[serde(with = "time::serde::rfc3339::option")]
     integrated_at: Option<OffsetDateTime>,
     log_id: Option<String>,
     receipt: Option<Value>,
     signer_fingerprint: Option<String>,
     signed_payload_sha256: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     confirmed_at: Option<OffsetDateTime>,
 }
 

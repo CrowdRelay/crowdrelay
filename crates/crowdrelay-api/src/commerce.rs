@@ -427,9 +427,13 @@ pub struct RewardCampaignView {
     reserved_quantity: i32,
     pending_fulfillments: i64,
     delivered_fulfillments: i64,
+    #[serde(with = "time::serde::rfc3339")]
     opens_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     closes_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     draw_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     completed_at: Option<OffsetDateTime>,
 }
 
@@ -447,9 +451,13 @@ pub struct RewardDrawAdminView {
     selected_winners: i64,
     proof_count: i64,
     can_delete: bool,
+    #[serde(with = "time::serde::rfc3339")]
     opens_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     closes_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     draw_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     completed_at: Option<OffsetDateTime>,
 }
 
