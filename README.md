@@ -55,9 +55,10 @@ The operator owns the data. Public requests never send emails or call external p
 | Admission Passes | admin issue/revoke, fan claim/status/QR, and staff redemption under `/v1/admin/admission`, `/v1/passes`, `/v1/me/pass`, and `/v1/staff/admission` |
 | Ticketing        | public sale/reservation/status, admin configuration/overview, and authenticated Stripe reconciliation under `/v1/public`, `/v1/admin`, and `/v1/internal` |
 | Operations       | admin queue summary, dead-item inspection, delivery attempt history, and audited manual retry under `/v1/admin/ops`                                    |
-| Commerce         | `POST /v1/commerce/coupons/redeem`                                                                                                                |
+| Commerce         | staff/admin inventory + reward campaigns and `POST /v1/commerce/coupons/redeem`                                                                  |
+| Synesthesia      | `POST /v1/public/synesthesia/runs`, ordered room completion, album completion and five-CD draw entry                                             |
 
-Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin and staff credentials cannot call service routes, while service credentials cannot call operator routes. Exact schemas and error codes are documented in the OpenAPI contract. First-party ticketing invariants and deployment order are documented in [`docs/TICKETING.md`](docs/TICKETING.md). Operations endpoints and their staged rollout are documented in [`docs/OPS_CONTROL_PLANE.md`](docs/OPS_CONTROL_PLANE.md). The cross-product event, Signal, AREA, ticket, accounting and n8n boundaries are summarized in [`docs/VIRYA_ECOSYSTEM.md`](docs/VIRYA_ECOSYSTEM.md).
+Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin and staff credentials cannot call service routes, while service credentials cannot call operator routes. Exact schemas and error codes are documented in the OpenAPI contract. Architecture, reliability, inventory and external-proof operations are documented under `docs/`.
 
 ### Local Development
 
@@ -86,12 +87,9 @@ The reverse proxy must join the same Docker network and route traffic to `crowdr
 
 Apache-2.0. See `LICENSE`.
 
-## Ecosystem max control plane
+## Synesthesia eligibility plane
 
-The private control plane includes auditable feature flags, reconciliation,
-show checklists, a signed offline gate snapshot, correlation propagation and
-restore/load/contract tooling. See `docs/ECOSYSTEM_MAX.md`.
-
+Migration `0030_synesthesia_ecosystem.sql` adds an isolated run/completion ledger. A completed run may create one draw entry per normalized e-mail for campaign `virya-synesthesia-album-v1`. This endpoint does not change `fan_consents`, enqueue mail, collect shipping PII or award referral/check-in weight. `synesthesia_completion` reward campaigns are server-locked to five winners, one physical item each and one equal entry per candidate; normal inventory reservation and Proof-of-Fair code is reused.
 
 ## Optional external proofs
 
@@ -102,4 +100,4 @@ availability never enters a critical path. See `docs/EXTERNAL_PROOFS.md`.
 
 ## Engineering documentation
 
-Architecture and reliability: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/RELIABILITY.md`](docs/RELIABILITY.md).
+Architecture, ecosystem boundaries and reliability: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/VIRYA_ECOSYSTEM.md`](docs/VIRYA_ECOSYSTEM.md) and [`docs/RELIABILITY.md`](docs/RELIABILITY.md).

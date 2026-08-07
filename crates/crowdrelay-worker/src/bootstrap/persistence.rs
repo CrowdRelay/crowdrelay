@@ -786,19 +786,20 @@ async fn upsert_reward_draw(
     let changed = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO reward_draws (
-            workspace_id, slug, name, prize_kind, eligibility_kind,
+            workspace_id, slug, name, prize_kind, eligibility_kind, eligibility_ref,
             event_id, admission_pool_id, reward_rule_id, winner_count,
             base_entries, entries_per_referral, entries_per_checkin, max_entries,
             claim_expires_hours, opens_at, closes_at, draw_at, status
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14, $15, $16, $17, $18
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, $17, $18, $19
         )
         ON CONFLICT (workspace_id, slug) DO UPDATE SET
             name = EXCLUDED.name,
             prize_kind = EXCLUDED.prize_kind,
             eligibility_kind = EXCLUDED.eligibility_kind,
+            eligibility_ref = EXCLUDED.eligibility_ref,
             event_id = EXCLUDED.event_id,
             admission_pool_id = EXCLUDED.admission_pool_id,
             reward_rule_id = EXCLUDED.reward_rule_id,
@@ -820,6 +821,7 @@ async fn upsert_reward_draw(
               reward_draws.name,
               reward_draws.prize_kind,
               reward_draws.eligibility_kind,
+              reward_draws.eligibility_ref,
               reward_draws.event_id,
               reward_draws.admission_pool_id,
               reward_draws.reward_rule_id,
@@ -837,6 +839,7 @@ async fn upsert_reward_draw(
               EXCLUDED.name,
               EXCLUDED.prize_kind,
               EXCLUDED.eligibility_kind,
+              EXCLUDED.eligibility_ref,
               EXCLUDED.event_id,
               EXCLUDED.admission_pool_id,
               EXCLUDED.reward_rule_id,
@@ -859,6 +862,7 @@ async fn upsert_reward_draw(
     .bind(&draw.name)
     .bind(&draw.prize_kind)
     .bind(&draw.eligibility_kind)
+    .bind(draw.eligibility_ref.as_ref().map(crowdrelay_domain::EventSlug::as_str))
     .bind(event_id)
     .bind(admission_pool_id)
     .bind(reward_rule_id)

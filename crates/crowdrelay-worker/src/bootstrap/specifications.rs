@@ -151,6 +151,7 @@ struct RawRewardDrawSpec {
     prize_kind: String,
     #[serde(default = "default_draw_eligibility")]
     eligibility_kind: String,
+    eligibility_ref: Option<String>,
     event_slug: Option<String>,
     admission_pool_slug: Option<String>,
     reward_rule_name: Option<String>,
@@ -217,6 +218,7 @@ struct RewardDrawSpec {
     name: String,
     prize_kind: String,
     eligibility_kind: String,
+    eligibility_ref: Option<crowdrelay_domain::EventSlug>,
     event_slug: Option<crowdrelay_domain::EventSlug>,
     admission_pool_slug: Option<crowdrelay_domain::EventSlug>,
     reward_rule_name: Option<String>,

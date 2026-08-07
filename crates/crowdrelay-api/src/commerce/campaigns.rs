@@ -169,6 +169,7 @@ async fn load_reward_campaigns_filtered(
             draw.name,
             draw.status,
             draw.eligibility_kind,
+            draw.eligibility_ref,
             event.slug AS event_slug,
             draw.winner_count,
             COALESCE(winner_totals.selected_winners, 0)::bigint AS selected_winners,
@@ -256,6 +257,11 @@ async fn create_reward_campaign_inner(
         .as_deref()
         .map(normalize_slug)
         .transpose()?;
+    let eligibility_ref = payload
+        .eligibility_ref
+        .as_deref()
+        .map(normalize_slug)
+        .transpose()?;
     let reserved_quantity = payload
         .winner_count
         .checked_mul(payload.units_per_winner)
@@ -289,7 +295,7 @@ async fn create_reward_campaign_inner(
     }
 
     let event_id = match payload.eligibility_kind.as_str() {
-        "all_active" => None,
+        "all_active" | "synesthesia_completion" => None,
         "event_interest" => {
             let slug = event_slug.as_deref().ok_or(CommerceError::Invalid)?;
             Some(
@@ -339,15 +345,15 @@ async fn create_reward_campaign_inner(
     sqlx::query(
         r#"
         INSERT INTO reward_draws (
-            id, workspace_id, slug, name, prize_kind, eligibility_kind,
+            id, workspace_id, slug, name, prize_kind, eligibility_kind, eligibility_ref,
             event_id, reward_rule_id, winner_count, base_entries,
             entries_per_referral, entries_per_checkin, max_entries,
             claim_expires_hours, opens_at, closes_at, draw_at, status
         )
         VALUES (
-            $1, $2, $3, $4, 'physical_item', $5,
-            $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17
+            $1, $2, $3, $4, 'physical_item', $5, $6,
+            $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18
         )
         "#,
     )
@@ -356,6 +362,7 @@ async fn create_reward_campaign_inner(
     .bind(&slug)
     .bind(name)
     .bind(&payload.eligibility_kind)
+    .bind(eligibility_ref.as_deref())
     .bind(event_id)
     .bind(reward_rule_id)
     .bind(payload.winner_count)
@@ -574,6 +581,7 @@ async fn load_reward_draws(
             draw.name,
             draw.prize_kind,
             draw.eligibility_kind,
+            draw.eligibility_ref,
             event.slug AS event_slug,
             draw.status,
             draw.winner_count,

@@ -371,6 +371,7 @@ pub struct CreateRewardCampaignRequest {
     units_per_winner: i32,
     #[serde(default = "default_draw_eligibility")]
     eligibility_kind: String,
+    eligibility_ref: Option<String>,
     event_slug: Option<String>,
     #[serde(default = "default_base_entries")]
     base_entries: i32,
@@ -417,6 +418,7 @@ pub struct RewardCampaignView {
     name: String,
     status: String,
     eligibility_kind: String,
+    eligibility_ref: Option<String>,
     event_slug: Option<String>,
     winner_count: i32,
     selected_winners: i64,
@@ -444,6 +446,7 @@ pub struct RewardDrawAdminView {
     name: String,
     prize_kind: String,
     eligibility_kind: String,
+    eligibility_ref: Option<String>,
     event_slug: Option<String>,
     status: String,
     winner_count: i32,

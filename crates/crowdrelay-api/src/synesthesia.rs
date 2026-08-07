@@ -1,0 +1,649 @@
+//! Public Synesthesia completion ledger.
+//!
+//! The game remains offline-first. This module only records a bounded,
+//! pseudonymous completion trail and optional draw entry. It deliberately does
+//! not collect shipping data and does not alter the existing fan mail flow.
+
+use axum::{
+    Json,
+    extract::{Path, State, rejection::JsonRejection},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{AUTHORIZATION, CACHE_CONTROL},
+    },
+    response::{IntoResponse, Response},
+};
+use crowdrelay_domain::NormalizedEmail;
+use getrandom::fill as fill_random;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use sqlx::{Postgres, Transaction};
+use uuid::Uuid;
+
+use crate::{Problem, request_id};
+
+const PRIVATE_NO_STORE: &str = "private, no-store";
+const CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
+const ROOM_IDS: [&str; 11] = [
+    "wave-of-uncertainty",
+    "party-time",
+    "unmasked",
+    "the-calling",
+    "seed-of-doubt",
+    "hybrid",
+    "technophobia",
+    "invaluable",
+    "from-the-ashes",
+    "waves",
+    "rise",
+];
+const MIN_ROOM_ELAPSED_MS: i64 = 1_000;
+const MAX_ROOM_ELAPSED_MS: i64 = 7_200_000;
+const MAX_TOTAL_ELAPSED_MS: i64 = 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartRunRequest {
+    campaign_slug: String,
+    install_id: String,
+    app_version: String,
+    locale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StartRunResponse {
+    run_id: Uuid,
+    run_token: String,
+    next_room_index: i16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordRoomRequest {
+    room_index: i16,
+    client_elapsed_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RecordRoomResponse {
+    next_room_index: i16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteRunRequest {
+    client_total_elapsed_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CompleteRunResponse {
+    completed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewardEntryRequest {
+    email: String,
+    policy_version: String,
+    locale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RewardEntryResponse {
+    status: &'static str,
+    message: &'static str,
+    draw_size: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SynesthesiaError {
+    Invalid,
+    Unauthorized,
+    Conflict,
+    Unavailable,
+}
+
+impl SynesthesiaError {
+    fn response(self, request_id_value: Option<String>) -> Response {
+        match self {
+            Self::Invalid => Problem::unprocessable(request_id_value)
+                .private()
+                .into_response(),
+            Self::Unauthorized => Problem::unauthorized(request_id_value)
+                .private()
+                .into_response(),
+            Self::Conflict => Problem::conflict(request_id_value)
+                .private()
+                .into_response(),
+            Self::Unavailable => Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response(),
+        }
+    }
+
+    fn sqlx(error: sqlx::Error) -> Self {
+        tracing::warn!(%error, "synesthesia persistence failed");
+        Self::Unavailable
+    }
+}
+
+pub async fn start_run(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<StartRunRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    if validate_start(&payload).is_err() {
+        return SynesthesiaError::Invalid.response(request_id_value);
+    }
+
+    let token = match random_token() {
+        Ok(token) => token,
+        Err(()) => return SynesthesiaError::Unavailable.response(request_id_value),
+    };
+    let token_hash = Sha256::digest(token.as_bytes()).to_vec();
+    let install_hash =
+        Sha256::digest(format!("{}\0{}", payload.campaign_slug, payload.install_id).as_bytes())
+            .to_vec();
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let row = sqlx::query_as::<_, (Uuid, i16)>(
+        r#"
+        INSERT INTO synesthesia_runs (
+            workspace_id, campaign_slug, install_hash, run_token_hash,
+            app_version, locale
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (workspace_id, campaign_slug, install_hash) DO UPDATE
+        SET run_token_hash = EXCLUDED.run_token_hash,
+            app_version = EXCLUDED.app_version,
+            locale = EXCLUDED.locale,
+            updated_at = now()
+        RETURNING id, next_room_index
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&payload.campaign_slug)
+    .bind(install_hash)
+    .bind(token_hash)
+    .bind(payload.app_version.trim())
+    .bind(clean_locale(payload.locale.as_deref()))
+    .fetch_one(state.ticketing.pool())
+    .await;
+
+    match row {
+        Ok((run_id, next_room_index)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(StartRunResponse {
+                run_id,
+                run_token: token,
+                next_room_index,
+            }),
+        )
+            .into_response(),
+        Err(error) => SynesthesiaError::sqlx(error).response(request_id_value),
+    }
+}
+
+pub async fn record_room(
+    State(state): State<crate::AppState>,
+    Path((run_id, room_id)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+    payload: Result<Json<RecordRoomRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    if payload.room_index < 0
+        || usize::try_from(payload.room_index)
+            .ok()
+            .is_none_or(|index| index >= ROOM_IDS.len())
+        || !(MIN_ROOM_ELAPSED_MS..=MAX_ROOM_ELAPSED_MS).contains(&payload.client_elapsed_ms)
+    {
+        return SynesthesiaError::Invalid.response(request_id_value);
+    }
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let mut transaction = match state.ticketing.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+
+    let result = record_room_inner(
+        &mut transaction,
+        workspace_id,
+        run_id,
+        &room_id,
+        &token_hash,
+        &payload,
+    )
+    .await;
+    let next_room_index = match result {
+        Ok(index) => index,
+        Err(error) => return error.response(request_id_value),
+    };
+    if let Err(error) = transaction.commit().await {
+        return SynesthesiaError::sqlx(error).response(request_id_value);
+    }
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        Json(RecordRoomResponse { next_room_index }),
+    )
+        .into_response()
+}
+
+async fn record_room_inner(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    room_id: &str,
+    token_hash: &[u8],
+    payload: &RecordRoomRequest,
+) -> Result<i16, SynesthesiaError> {
+    let Some((campaign_slug, next_room_index, completed_at)) =
+        sqlx::query_as::<_, (String, i16, Option<time::OffsetDateTime>)>(
+            r#"
+            SELECT campaign_slug, next_room_index, completed_at
+            FROM synesthesia_runs
+            WHERE workspace_id = $1 AND id = $2 AND run_token_hash = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(run_id)
+        .bind(token_hash)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(SynesthesiaError::sqlx)?
+    else {
+        return Err(SynesthesiaError::Unauthorized);
+    };
+    if campaign_slug != CAMPAIGN_SLUG || completed_at.is_some() {
+        return Err(SynesthesiaError::Conflict);
+    }
+
+    if payload.room_index < next_room_index {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM synesthesia_room_completions
+                WHERE workspace_id = $1 AND run_id = $2
+                  AND room_index = $3 AND room_id = $4
+            )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(run_id)
+        .bind(payload.room_index)
+        .bind(room_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(SynesthesiaError::sqlx)?;
+        return if exists {
+            Ok(next_room_index)
+        } else {
+            Err(SynesthesiaError::Conflict)
+        };
+    }
+    if payload.room_index != next_room_index {
+        return Err(SynesthesiaError::Conflict);
+    }
+    let expected_room = usize::try_from(next_room_index)
+        .ok()
+        .and_then(|index| ROOM_IDS.get(index))
+        .copied()
+        .ok_or(SynesthesiaError::Conflict)?;
+    if room_id != expected_room {
+        return Err(SynesthesiaError::Conflict);
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO synesthesia_room_completions (
+            workspace_id, run_id, room_index, room_id, client_elapsed_ms
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (workspace_id, run_id, room_index) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(payload.room_index)
+    .bind(room_id)
+    .bind(payload.client_elapsed_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?;
+
+    let advanced = next_room_index.saturating_add(1);
+    sqlx::query(
+        r#"
+        UPDATE synesthesia_runs
+        SET next_room_index = $3, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(advanced)
+    .execute(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?;
+    Ok(advanced)
+}
+
+pub async fn complete_run(
+    State(state): State<crate::AppState>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<CompleteRunRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    if !(i64::try_from(ROOM_IDS.len()).unwrap_or(11) * MIN_ROOM_ELAPSED_MS..=MAX_TOTAL_ELAPSED_MS)
+        .contains(&payload.client_total_elapsed_ms)
+    {
+        return SynesthesiaError::Invalid.response(request_id_value);
+    }
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let row = sqlx::query_as::<_, (i16, Option<time::OffsetDateTime>, i64)>(
+        r#"
+        SELECT run.next_room_index, run.completed_at,
+               COALESCE(SUM(room.client_elapsed_ms), 0)::bigint AS recorded_elapsed_ms
+        FROM synesthesia_runs AS run
+        LEFT JOIN synesthesia_room_completions AS room
+          ON room.workspace_id = run.workspace_id AND room.run_id = run.id
+        WHERE run.workspace_id = $1 AND run.id = $2 AND run.run_token_hash = $3
+        GROUP BY run.id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(token_hash)
+    .fetch_optional(state.ticketing.pool())
+    .await;
+    let Some((next_room_index, completed_at, recorded_elapsed_ms)) = (match row {
+        Ok(row) => row,
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    }) else {
+        return SynesthesiaError::Unauthorized.response(request_id_value);
+    };
+    if completed_at.is_some() {
+        return (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(CompleteRunResponse { completed: true }),
+        )
+            .into_response();
+    }
+    if usize::try_from(next_room_index).ok() != Some(ROOM_IDS.len())
+        || payload.client_total_elapsed_ms < recorded_elapsed_ms
+    {
+        return SynesthesiaError::Conflict.response(request_id_value);
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE synesthesia_runs
+        SET completed_at = now(), client_total_elapsed_ms = $3, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND completed_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(payload.client_total_elapsed_ms)
+    .execute(state.ticketing.pool())
+    .await;
+    match result {
+        Ok(_) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(CompleteRunResponse { completed: true }),
+        )
+            .into_response(),
+        Err(error) => SynesthesiaError::sqlx(error).response(request_id_value),
+    }
+}
+
+pub async fn enter_reward_draw(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<RewardEntryRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let email = match NormalizedEmail::parse(&payload.email) {
+        Ok(email) => email,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    if payload.policy_version.trim().is_empty()
+        || payload.policy_version.len() > 120
+        || clean_locale(payload.locale.as_deref()).is_none() && payload.locale.is_some()
+    {
+        return SynesthesiaError::Invalid.response(request_id_value);
+    }
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let mut transaction = match state.ticketing.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+
+    let result = enter_reward_draw_inner(
+        &mut transaction,
+        workspace_id,
+        &token_hash,
+        email.as_str(),
+        &payload,
+    )
+    .await;
+    match result {
+        Ok(()) => {}
+        Err(error) => return error.response(request_id_value),
+    }
+    if let Err(error) = transaction.commit().await {
+        return SynesthesiaError::sqlx(error).response(request_id_value);
+    }
+
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        Json(RewardEntryResponse {
+            status: "entered_draw",
+            message: "Jesteś w losowaniu jednej z 5 płyt Echoes Of The Modern Mind. Jedno ukończenie = jeden los.",
+            draw_size: 5,
+        }),
+    )
+        .into_response()
+}
+
+async fn enter_reward_draw_inner(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    token_hash: &[u8],
+    normalized_email: &str,
+    payload: &RewardEntryRequest,
+) -> Result<(), SynesthesiaError> {
+    let Some((run_id, campaign_slug)) = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT id, campaign_slug
+        FROM synesthesia_runs
+        WHERE workspace_id = $1 AND run_token_hash = $2 AND completed_at IS NOT NULL
+        FOR SHARE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(token_hash)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?
+    else {
+        return Err(SynesthesiaError::Unauthorized);
+    };
+    if campaign_slug != CAMPAIGN_SLUG {
+        return Err(SynesthesiaError::Conflict);
+    }
+
+    let draw_is_open = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM reward_draws
+            WHERE workspace_id = $1
+              AND eligibility_kind = 'synesthesia_completion'
+              AND eligibility_ref = $2
+              AND status = 'scheduled'
+              AND opens_at <= now()
+              AND closes_at > now()
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&campaign_slug)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?;
+    if !draw_is_open {
+        return Err(SynesthesiaError::Conflict);
+    }
+
+    let fan_id = match sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT id, status
+        FROM fans
+        WHERE workspace_id = $1 AND normalized_email = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(normalized_email)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?
+    {
+        Some((_, status)) if status == "suppressed" => return Err(SynesthesiaError::Conflict),
+        Some((fan_id, _)) => fan_id,
+        None => sqlx::query_scalar::<_, Uuid>(
+            r#"
+                INSERT INTO fans (workspace_id, normalized_email, locale, status)
+                VALUES ($1, $2, $3, 'pending')
+                RETURNING id
+                "#,
+        )
+        .bind(workspace_id)
+        .bind(normalized_email)
+        .bind(clean_locale(payload.locale.as_deref()))
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(SynesthesiaError::sqlx)?,
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO synesthesia_reward_entries (
+            workspace_id, campaign_slug, run_id, fan_id, normalized_email,
+            policy_version, locale
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (workspace_id, campaign_slug, normalized_email) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&campaign_slug)
+    .bind(run_id)
+    .bind(fan_id)
+    .bind(normalized_email)
+    .bind(payload.policy_version.trim())
+    .bind(clean_locale(payload.locale.as_deref()))
+    .execute(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?;
+
+    Ok(())
+}
+
+fn validate_start(payload: &StartRunRequest) -> Result<(), ()> {
+    if payload.campaign_slug != CAMPAIGN_SLUG
+        || payload.install_id.len() < 24
+        || payload.install_id.len() > 128
+        || !payload
+            .install_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        || payload.app_version.trim().is_empty()
+        || payload.app_version.len() > 64
+        || (payload.locale.is_some() && clean_locale(payload.locale.as_deref()).is_none())
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn clean_locale(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty()
+        || value.len() > 35
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn bearer_hash(headers: &HeaderMap) -> Option<Vec<u8>> {
+    let token = headers
+        .get(AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?
+        .trim();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(Sha256::digest(token.to_ascii_lowercase().as_bytes()).to_vec())
+}
+
+fn random_token() -> Result<String, ()> {
+    let mut bytes = [0_u8; 32];
+    fill_random(&mut bytes).map_err(|_| ())?;
+    Ok(hex::encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn campaign_contract_is_fixed_and_ordered() {
+        assert_eq!(ROOM_IDS.len(), 11);
+        assert_eq!(ROOM_IDS.first(), Some(&"wave-of-uncertainty"));
+        assert_eq!(ROOM_IDS.last(), Some(&"rise"));
+    }
+
+    #[test]
+    fn public_identifiers_are_bounded() {
+        assert!(clean_locale(Some("pl-PL")).is_some());
+        assert!(clean_locale(Some("pl/PL")).is_none());
+    }
+}

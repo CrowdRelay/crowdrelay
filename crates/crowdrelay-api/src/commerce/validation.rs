@@ -124,7 +124,7 @@ fn validate_reward_campaign(payload: &CreateRewardCampaignRequest) -> Result<(),
     if !matches!(payload.status.as_str(), "draft" | "scheduled")
         || !matches!(
             payload.eligibility_kind.as_str(),
-            "all_active" | "event_interest"
+            "all_active" | "event_interest" | "synesthesia_completion"
         )
         || payload.winner_count <= 0
         || payload.winner_count > 10_000
@@ -153,8 +153,31 @@ fn validate_reward_campaign(payload: &CreateRewardCampaignRequest) -> Result<(),
                     .as_deref()
                     .ok_or(CommerceError::Invalid)?,
             )?;
+            if payload.eligibility_ref.is_some() {
+                return Err(CommerceError::Invalid);
+            }
         }
-        "all_active" if payload.event_slug.is_some() => return Err(CommerceError::Invalid),
+        "synesthesia_completion" => {
+            normalize_slug(
+                payload
+                    .eligibility_ref
+                    .as_deref()
+                    .ok_or(CommerceError::Invalid)?,
+            )?;
+            if payload.event_slug.is_some()
+                || payload.winner_count != 5
+                || payload.units_per_winner != 1
+                || payload.base_entries != 1
+                || payload.entries_per_referral != 0
+                || payload.entries_per_checkin != 0
+                || payload.max_entries != 1
+            {
+                return Err(CommerceError::Invalid);
+            }
+        }
+        "all_active" if payload.event_slug.is_some() || payload.eligibility_ref.is_some() => {
+            return Err(CommerceError::Invalid);
+        }
         _ => {}
     }
     Ok(())

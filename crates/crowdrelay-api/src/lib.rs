@@ -63,6 +63,7 @@ mod proofs;
 mod referrals;
 mod releases;
 mod security;
+mod synesthesia;
 mod ticket_qr;
 mod ticketing;
 
@@ -233,6 +234,19 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         )
         .route("/v1/public/cities/requests", post(mobile_fan::request_city))
         .route("/v1/public/events", get(events::list_events))
+        .route("/v1/public/synesthesia/runs", post(synesthesia::start_run))
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}",
+            post(synesthesia::record_room),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/complete",
+            post(synesthesia::complete_run),
+        )
+        .route(
+            "/v1/public/synesthesia/reward-claims",
+            post(synesthesia::enter_reward_draw),
+        )
         .route("/v1/public/merch/catalog", get(commerce::public_catalog))
         .route(
             "/v1/internal/merch/inventory/activation",

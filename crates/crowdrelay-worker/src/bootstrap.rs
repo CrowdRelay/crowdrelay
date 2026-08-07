@@ -434,6 +434,13 @@ impl BootstrapSpec {
                 return Err(duplicate("reward draw slug"));
             }
             let name = validate_name(raw_draw.name, "reward_draws[].name")?;
+            let eligibility_ref = raw_draw
+                .eligibility_ref
+                .map(|value| {
+                    crowdrelay_domain::EventSlug::parse(value)
+                        .map_err(|_| invalid_field("reward_draws[].eligibility_ref"))
+                })
+                .transpose()?;
             let event_slug = raw_draw
                 .event_slug
                 .map(|value| {
@@ -472,12 +479,26 @@ impl BootstrapSpec {
             }
             if !matches!(
                 raw_draw.eligibility_kind.as_str(),
-                "all_active" | "event_interest"
+                "all_active" | "event_interest" | "synesthesia_completion"
             ) {
                 return Err(invalid_field("reward_draws[].eligibility_kind"));
             }
             if raw_draw.eligibility_kind == "event_interest" && event_slug.is_none() {
                 return Err(invalid_field("reward_draws[].event_slug"));
+            }
+            if raw_draw.eligibility_kind == "synesthesia_completion" {
+                if eligibility_ref.is_none()
+                    || event_slug.is_some()
+                    || raw_draw.winner_count != 5
+                    || raw_draw.base_entries != 1
+                    || raw_draw.entries_per_referral != 0
+                    || raw_draw.entries_per_checkin != 0
+                    || raw_draw.max_entries != 1
+                {
+                    return Err(invalid_field("reward_draws[].eligibility_ref"));
+                }
+            } else if eligibility_ref.is_some() {
+                return Err(invalid_field("reward_draws[].eligibility_ref"));
             }
             if event_slug
                 .as_ref()
@@ -516,6 +537,7 @@ impl BootstrapSpec {
                 name,
                 prize_kind: raw_draw.prize_kind,
                 eligibility_kind: raw_draw.eligibility_kind,
+                eligibility_ref,
                 event_slug,
                 admission_pool_slug,
                 reward_rule_name: raw_draw.reward_rule_name,

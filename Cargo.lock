@@ -298,6 +298,7 @@ dependencies = [
  "crowdrelay-application",
  "crowdrelay-domain",
  "crowdrelay-infra",
+ "getrandom 0.4.3",
  "hex",
  "hmac",
  "serde",

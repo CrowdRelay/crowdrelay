@@ -483,6 +483,129 @@ paths:
           description: Cached representation is still current.
         '400': &id002
           $ref: '#/components/responses/Problem'
+  /public/synesthesia/runs:
+    post:
+      operationId: startSynesthesiaRun
+      summary: Start or resume a pseudonymous Synesthesia album run
+      description: Rotates the bearer run token for the same installation and campaign while preserving ordered progress. No fan identity or marketing consent is created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SynesthesiaRunStartRequest'
+      responses:
+        '200':
+          description: Run created or resumed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SynesthesiaRunStartResponse'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '422':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /public/synesthesia/runs/{run_id}/rooms/{room_id}:
+    post:
+      operationId: recordSynesthesiaRoom
+      summary: Record the next ordered Synesthesia room completion
+      security:
+      - synesthesiaRunBearer: []
+      parameters:
+      - $ref: '#/components/parameters/SynesthesiaRunId'
+      - $ref: '#/components/parameters/SynesthesiaRoomId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SynesthesiaRoomRecordRequest'
+      responses:
+        '200':
+          description: Completion accepted or recognized as an identical replay.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SynesthesiaRoomRecordResponse'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '422':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /public/synesthesia/runs/{run_id}/complete:
+    post:
+      operationId: completeSynesthesiaRun
+      summary: Seal a fully recorded eleven-room Synesthesia run
+      security:
+      - synesthesiaRunBearer: []
+      parameters:
+      - $ref: '#/components/parameters/SynesthesiaRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SynesthesiaRunCompleteRequest'
+      responses:
+        '200':
+          description: The completed run is sealed idempotently.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SynesthesiaRunCompleteResponse'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '422':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /public/synesthesia/reward-claims:
+    post:
+      operationId: enterSynesthesiaRewardDraw
+      summary: Enter a completed Synesthesia run into the five-CD draw
+      description: Creates one draw entry per normalized e-mail for the fixed Synesthesia campaign while its scheduled five-disc draw window is open. This endpoint records lottery eligibility only; it does not change marketing consent or mail flow. Shipping data is collected only from selected winners through normal fulfillment.
+      security:
+      - synesthesiaRunBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SynesthesiaRewardEntryRequest'
+      responses:
+        '200':
+          description: Draw entry accepted or recognized as an existing entry.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SynesthesiaRewardEntryResponse'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '422':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /public/events/{slug}:
     get:
       operationId: getPublicEvent
@@ -2670,6 +2793,11 @@ components:
         type: string
         format: uuid
   securitySchemes:
+    synesthesiaRunBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-run-token
+      description: Ephemeral bearer token returned by the Synesthesia run-start endpoint.
     fanSession:
       type: apiKey
       in: cookie
@@ -2695,6 +2823,20 @@ components:
       scheme: bearer
       bearerFormat: opaque
   parameters:
+    SynesthesiaRunId:
+      in: path
+      name: run_id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SynesthesiaRoomId:
+      in: path
+      name: room_id
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z0-9][a-z0-9-]{0,127}$'
     IdempotencyKey:
       in: header
       name: Idempotency-Key
@@ -3076,6 +3218,64 @@ components:
         recommendation: { type: string, enum: [hold, limited, candidate] }
         confidence: { type: string, enum: [low, medium, high] }
         reason: { type: string }
+    SynesthesiaRunStartRequest:
+      type: object
+      additionalProperties: false
+      required: [campaign_slug, install_id, app_version]
+      properties:
+        campaign_slug: { type: string, const: virya-synesthesia-album-v1 }
+        install_id: { type: string, minLength: 24, maxLength: 128 }
+        app_version: { type: string, minLength: 1, maxLength: 64 }
+        locale: { type: [string, 'null'], maxLength: 35 }
+    SynesthesiaRunStartResponse:
+      type: object
+      additionalProperties: false
+      required: [run_id, run_token, next_room_index]
+      properties:
+        run_id: { type: string, format: uuid }
+        run_token: { type: string, pattern: '^[a-f0-9]{64}$' }
+        next_room_index: { type: integer, minimum: 0, maximum: 11 }
+    SynesthesiaRoomRecordRequest:
+      type: object
+      additionalProperties: false
+      required: [room_index, client_elapsed_ms]
+      properties:
+        room_index: { type: integer, minimum: 0, maximum: 10 }
+        client_elapsed_ms: { type: integer, format: int64, minimum: 1000, maximum: 7200000 }
+    SynesthesiaRoomRecordResponse:
+      type: object
+      additionalProperties: false
+      required: [next_room_index]
+      properties:
+        next_room_index: { type: integer, minimum: 0, maximum: 11 }
+    SynesthesiaRunCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [client_total_elapsed_ms]
+      properties:
+        client_total_elapsed_ms: { type: integer, format: int64, minimum: 11000, maximum: 86400000 }
+    SynesthesiaRunCompleteResponse:
+      type: object
+      additionalProperties: false
+      required: [completed]
+      properties:
+        completed: { type: boolean }
+    SynesthesiaRewardEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [email, policy_version]
+      properties:
+        email: { type: string, format: email }
+        policy_version: { type: string, minLength: 1, maxLength: 120 }
+        locale: { type: [string, 'null'], maxLength: 35 }
+    SynesthesiaRewardEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [status, message, draw_size]
+      properties:
+        status: { type: string, const: entered_draw }
+        message: { type: string }
+        draw_size: { type: integer, const: 5 }
     RewardCampaignCreate:
       type: object
       additionalProperties: false
@@ -3086,7 +3286,8 @@ components:
         prize_sku: { type: string, maxLength: 128 }
         winner_count: { type: integer, minimum: 1, maximum: 10000 }
         units_per_winner: { type: integer, minimum: 1, maximum: 100, default: 1 }
-        eligibility_kind: { type: string, enum: [all_active, event_interest], default: all_active }
+        eligibility_kind: { type: string, enum: [all_active, event_interest, synesthesia_completion], default: all_active }
+        eligibility_ref: { type: [string, 'null'], pattern: '^[a-z0-9][a-z0-9_-]*$' }
         event_slug: { type: [string, 'null'] }
         base_entries: { type: integer, minimum: 1, default: 1 }
         entries_per_referral: { type: integer, minimum: 0, default: 1 }
@@ -3106,7 +3307,8 @@ components:
         slug: { type: string }
         name: { type: string }
         status: { type: string, enum: [draft, scheduled, running, completed, cancelled] }
-        eligibility_kind: { type: string, enum: [all_active, event_interest] }
+        eligibility_kind: { type: string, enum: [all_active, event_interest, synesthesia_completion] }
+        eligibility_ref: { type: [string, 'null'] }
         event_slug: { type: [string, 'null'] }
         winner_count: { type: integer }
         selected_winners: { type: integer, format: int64 }
@@ -3130,7 +3332,8 @@ components:
         slug: { type: string }
         name: { type: string }
         prize_kind: { type: string, enum: [admission_pass, physical_item] }
-        eligibility_kind: { type: string, enum: [all_active, event_interest] }
+        eligibility_kind: { type: string, enum: [all_active, event_interest, synesthesia_completion] }
+        eligibility_ref: { type: [string, 'null'] }
         event_slug: { type: [string, 'null'] }
         status: { type: string, enum: [draft, scheduled, running, completed, cancelled] }
         winner_count: { type: integer }

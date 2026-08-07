@@ -161,6 +161,7 @@ struct DrawRow {
     name: String,
     prize_kind: String,
     eligibility_kind: String,
+    eligibility_ref: Option<String>,
     event_id: Option<Uuid>,
     admission_pool_id: Option<Uuid>,
     reward_rule_id: Option<Uuid>,
@@ -249,7 +250,7 @@ async fn lock_due_draw(
     let row = sqlx::query_as::<_, DrawRow>(
         r#"
         SELECT
-            id, workspace_id, slug, name, prize_kind, eligibility_kind,
+            id, workspace_id, slug, name, prize_kind, eligibility_kind, eligibility_ref,
             event_id, admission_pool_id, reward_rule_id, winner_count,
             base_entries, entries_per_referral, entries_per_checkin, max_entries,
             claim_expires_hours, closes_at, opens_at
@@ -639,7 +640,7 @@ fn validate_draw(draw: &DrawRow) -> Result<(), DrawWorkerError> {
         || draw.claim_expires_hours <= 0
         || !matches!(
             draw.eligibility_kind.as_str(),
-            "all_active" | "event_interest"
+            "all_active" | "event_interest" | "synesthesia_completion"
         )
     {
         return Err(DrawWorkerError::InvalidDraw);
@@ -655,6 +656,16 @@ fn validate_draw(draw: &DrawRow) -> Result<(), DrawWorkerError> {
     }
 
     if draw.eligibility_kind == "event_interest" && draw.event_id.is_none() {
+        return Err(DrawWorkerError::InvalidDraw);
+    }
+    if draw.eligibility_kind == "synesthesia_completion"
+        && (draw.eligibility_ref.as_deref().is_none_or(str::is_empty)
+            || draw.winner_count != 5
+            || draw.base_entries != 1
+            || draw.entries_per_referral != 0
+            || draw.entries_per_checkin != 0
+            || draw.max_entries != 1)
+    {
         return Err(DrawWorkerError::InvalidDraw);
     }
     Ok(())
@@ -690,21 +701,39 @@ async fn load_candidates(
               AND checkin.checked_in_at <= $4
         ) AS checkin_count
         WHERE fan.workspace_id = $1
-          AND fan.status = 'active'
+          AND fan.status <> 'suppressed'
           AND fan.created_at <= $4
-          AND COALESCE(
-              (
-                  SELECT max(token.consumed_at)
-                  FROM fan_action_tokens AS token
-                  WHERE token.workspace_id = fan.workspace_id
-                    AND token.fan_id = fan.id
-                    AND token.purpose = 'confirm'
-                    AND token.consumed_at IS NOT NULL
-              ),
-              fan.created_at
-          ) <= $4
           AND (
-              $2 = 'all_active'
+              (
+                  $2 IN ('all_active', 'event_interest')
+                  AND fan.status = 'active'
+                  AND COALESCE(
+                      (
+                          SELECT max(token.consumed_at)
+                          FROM fan_action_tokens AS token
+                          WHERE token.workspace_id = fan.workspace_id
+                            AND token.fan_id = fan.id
+                            AND token.purpose = 'confirm'
+                            AND token.consumed_at IS NOT NULL
+                      ),
+                      fan.created_at
+                  ) <= $4
+              )
+              OR (
+                  $2 = 'synesthesia_completion'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM synesthesia_reward_entries AS entry
+                      WHERE entry.workspace_id = fan.workspace_id
+                        AND entry.fan_id = fan.id
+                        AND entry.campaign_slug = $6
+                        AND entry.entered_at >= $5
+                        AND entry.entered_at <= $4
+                  )
+              )
+          )
+          AND (
+              $2 <> 'event_interest'
               OR EXISTS (
                   SELECT 1
                   FROM event_interests AS interest
@@ -722,6 +751,7 @@ async fn load_candidates(
     .bind(draw.event_id)
     .bind(draw.closes_at)
     .bind(draw.opens_at)
+    .bind(draw.eligibility_ref.as_deref())
     .fetch_all(&mut **transaction)
     .await
     .map_err(DrawWorkerError::sqlx)
@@ -1409,6 +1439,7 @@ mod tests {
             name: "Global albums".to_owned(),
             prize_kind: "physical_item".to_owned(),
             eligibility_kind: "all_active".to_owned(),
+            eligibility_ref: None,
             event_id: None,
             admission_pool_id: None,
             reward_rule_id: Some(Uuid::from_u128(12)),
