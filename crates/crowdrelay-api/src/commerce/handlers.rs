@@ -366,6 +366,47 @@ pub async fn schedule_reward_campaign(
     }
 }
 
+pub async fn list_reward_draws(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let future = load_reward_draws(&state);
+    match timeout(state.ticketing.operation_timeout(), future).await {
+        Ok(Ok(items)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(items),
+        )
+            .into_response(),
+        Ok(Err(error)) => error.response(request_id_value),
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
+pub async fn delete_reward_draw(
+    State(state): State<crate::AppState>,
+    Path(draw_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let draw_id = match Uuid::parse_str(draw_id.trim()) {
+        Ok(value) => value,
+        Err(_) => return CommerceError::Invalid.response(request_id_value),
+    };
+    let future = delete_reward_draw_inner(&state, draw_id, request_id_value.as_deref());
+    match timeout(state.ticketing.operation_timeout(), future).await {
+        Ok(Ok(view)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(view),
+        )
+            .into_response(),
+        Ok(Err(error)) => error.response(request_id_value),
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
 pub async fn list_reward_fulfillments(
     State(state): State<crate::AppState>,
     headers: HeaderMap,

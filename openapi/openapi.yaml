@@ -2438,6 +2438,49 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/reward-draws:
+    get:
+      operationId: getAdminRewardDraws
+      summary: List every weighted draw with deletion safety state
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: All weighted draws, including admission and physical-item draws.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RewardDrawAdmin'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/reward-draws/{draw_id}/delete:
+    post:
+      operationId: deleteAdminRewardDraw
+      summary: Delete an unexecuted weighted draw without deleting its event
+      description: Fails closed once any run, winner or Proof-of-Fair receipt exists.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/DrawId'
+      responses:
+        '200':
+          description: Unexecuted draw deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RewardDrawDeleted'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/reward-fulfillments:
     get:
       operationId: getAdminRewardFulfillments
@@ -3066,6 +3109,35 @@ components:
         closes_at: { type: string, format: date-time }
         draw_at: { type: string, format: date-time }
         completed_at: { type: [string, 'null'], format: date-time }
+    RewardDrawAdmin:
+      type: object
+      additionalProperties: false
+      required: [id, slug, name, prize_kind, eligibility_kind, status, winner_count, run_count, selected_winners, proof_count, can_delete, opens_at, closes_at, draw_at]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        prize_kind: { type: string, enum: [admission_pass, physical_item] }
+        eligibility_kind: { type: string, enum: [all_active, event_interest] }
+        event_slug: { type: [string, 'null'] }
+        status: { type: string, enum: [draft, scheduled, running, completed, cancelled] }
+        winner_count: { type: integer }
+        run_count: { type: integer, format: int64, minimum: 0 }
+        selected_winners: { type: integer, format: int64, minimum: 0 }
+        proof_count: { type: integer, format: int64, minimum: 0 }
+        can_delete: { type: boolean }
+        opens_at: { type: string, format: date-time }
+        closes_at: { type: string, format: date-time }
+        draw_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+    RewardDrawDeleted:
+      type: object
+      additionalProperties: false
+      required: [id, slug, deleted]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        deleted: { type: boolean, const: true }
     RewardFulfillment:
       type: object
       additionalProperties: false

@@ -434,6 +434,33 @@ pub struct RewardCampaignView {
 }
 
 #[derive(Clone, Debug, Serialize, FromRow)]
+pub struct RewardDrawAdminView {
+    id: Uuid,
+    slug: String,
+    name: String,
+    prize_kind: String,
+    eligibility_kind: String,
+    event_slug: Option<String>,
+    status: String,
+    winner_count: i32,
+    run_count: i64,
+    selected_winners: i64,
+    proof_count: i64,
+    can_delete: bool,
+    opens_at: OffsetDateTime,
+    closes_at: OffsetDateTime,
+    draw_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeletedRewardDrawView {
+    id: Uuid,
+    slug: String,
+    deleted: bool,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow)]
 pub struct PromotionRecommendationView {
     sku: String,
     product_name: String,

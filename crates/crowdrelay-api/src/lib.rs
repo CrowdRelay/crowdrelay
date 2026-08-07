@@ -315,6 +315,11 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             "/v1/admin/reward-campaigns/{draw_id}/schedule",
             post(commerce::schedule_reward_campaign),
         )
+        .route("/v1/admin/reward-draws", get(commerce::list_reward_draws))
+        .route(
+            "/v1/admin/reward-draws/{draw_id}/delete",
+            post(commerce::delete_reward_draw),
+        )
         .route(
             "/v1/admin/reward-fulfillments",
             get(commerce::list_reward_fulfillments),
