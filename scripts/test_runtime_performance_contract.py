@@ -129,6 +129,15 @@ class RuntimePerformanceContract(unittest.TestCase):
             event_sync,
         )
 
+
+    def test_event_repository_caches_stable_workspace_identity(self):
+        source = (ROOT / "crates/crowdrelay-infra/src/events.rs").read_text()
+        self.assertIn("workspace_id: Arc<OnceCell<WorkspaceId>>", source)
+        trusted = source[source.index("async fn trusted_workspace_id") :]
+        trusted = trusted[: trusted.index("async fn load_published_events_inner")]
+        self.assertIn(".get_or_try_init(|| async {", trusted)
+        self.assertIn("SELECT id FROM workspaces WHERE slug = $1", trusted)
+
     def test_production_runtime_threads_are_explicitly_bounded(self):
         compose = (ROOT / "compose.production.yaml").read_text()
         for fragment in (

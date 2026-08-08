@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{OnceCell, mpsc, watch},
     time::{MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
@@ -41,6 +41,7 @@ const MAX_FAN_INTEREST_ROWS: u32 = 100;
 pub struct PostgresEventRepository {
     pool: PgPool,
     workspace_slug: WorkspaceSlug,
+    workspace_id: Arc<OnceCell<WorkspaceId>>,
     operation_timeout: Duration,
     lock_timeout: Duration,
     reminder_offsets_minutes: Arc<Vec<u32>>,
@@ -57,6 +58,7 @@ impl PostgresEventRepository {
         Self {
             pool,
             workspace_slug,
+            workspace_id: Arc::new(OnceCell::new()),
             operation_timeout: database.operation_timeout,
             lock_timeout: database.lock_timeout,
             reminder_offsets_minutes: Arc::new(reminder_offsets_minutes),
@@ -73,13 +75,18 @@ impl PostgresEventRepository {
     }
 
     async fn trusted_workspace_id(&self) -> Result<WorkspaceId, EventStoreError> {
-        let id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM workspaces WHERE slug = $1")
-            .bind(self.workspace_slug.as_str())
-            .fetch_optional(&self.pool)
+        self.workspace_id
+            .get_or_try_init(|| async {
+                let id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM workspaces WHERE slug = $1")
+                    .bind(self.workspace_slug.as_str())
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(EventStoreError::from_sqlx)?
+                    .ok_or(EventStoreError::NotFound)?;
+                Ok(WorkspaceId::from_uuid(id))
+            })
             .await
-            .map_err(EventStoreError::from_sqlx)?
-            .ok_or(EventStoreError::NotFound)?;
-        Ok(WorkspaceId::from_uuid(id))
+            .copied()
     }
 
     async fn load_published_events_inner(&self) -> Result<Vec<PublicEvent>, EventStoreError> {
