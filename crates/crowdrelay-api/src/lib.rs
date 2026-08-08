@@ -51,6 +51,7 @@ mod accounting;
 mod acquisition;
 mod admission;
 mod area;
+mod audience;
 mod commerce;
 mod concert_qr;
 mod ecosystem;
@@ -483,6 +484,50 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             "/v1/admin/accounting/documents/{document_id}/csv",
             get(accounting::download_accounting_csv),
         )
+        .route("/v1/admin/audience/overview", get(audience::overview))
+        .route("/v1/admin/audience/fans", get(audience::list_fans))
+        .route(
+            "/v1/admin/audience/fans/{fan_id}",
+            get(audience::fan_detail),
+        )
+        .route(
+            "/v1/admin/audience/fans/{fan_id}/tags",
+            post(audience::add_tag),
+        )
+        .route(
+            "/v1/admin/audience/fans/{fan_id}/tags/{tag}/remove",
+            post(audience::remove_tag),
+        )
+        .route(
+            "/v1/admin/audience/segments",
+            get(audience::list_segments).post(audience::create_segment),
+        )
+        .route(
+            "/v1/admin/audience/segments/{slug}/preview",
+            get(audience::preview_segment),
+        )
+        .route(
+            "/v1/admin/communications/campaigns",
+            get(audience::list_campaigns).post(audience::create_campaign),
+        )
+        .route(
+            "/v1/admin/communications/campaigns/{campaign_id}/schedule",
+            post(audience::schedule_campaign),
+        )
+        .route(
+            "/v1/admin/communications/campaigns/{campaign_id}/cancel",
+            post(audience::cancel_campaign),
+        )
+        .route(
+            "/v1/internal/communications/campaigns/{campaign_id}/delivery-plan",
+            get(audience::delivery_plan),
+        )
+        .route(
+            "/v1/internal/communications/campaigns/{campaign_id}/complete",
+            post(audience::complete_campaign),
+        )
+        .route("/v1/admin/analytics/funnel", get(audience::funnel))
+        .route("/v1/admin/analytics/revenue", get(audience::revenue))
         .route("/v1/admin/ecosystem/overview", get(ecosystem::overview))
         .route("/v1/admin/ecosystem/flags", get(ecosystem::list_flags))
         .route(

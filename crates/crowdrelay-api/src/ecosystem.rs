@@ -32,11 +32,12 @@ const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
 const MAX_FLAG_CACHE_ENTRIES: usize = 256;
-const FLAG_KEYS: [(&str, bool); 13] = [
+const FLAG_KEYS: [(&str, bool); 14] = [
     ("ticket_sales_enabled", true),
     ("ticket_delivery_enabled", true),
     ("gate_redemption_enabled", true),
     ("mailer_enabled", true),
+    ("communication_campaigns_enabled", false),
     ("meta_publish_enabled", true),
     ("bandsintown_sync_enabled", true),
     ("n8n_ingress_enabled", true),
@@ -444,6 +445,7 @@ async fn ensure_default_flags(state: &crate::AppState) -> Result<(), EcosystemEr
             ('ticket_delivery_enabled', true),
             ('gate_redemption_enabled', true),
             ('mailer_enabled', true),
+            ('communication_campaigns_enabled', false),
             ('meta_publish_enabled', true),
             ('bandsintown_sync_enabled', true),
             ('n8n_ingress_enabled', true),
@@ -1596,6 +1598,18 @@ impl EcosystemError {
     }
 }
 
+impl std::fmt::Display for EcosystemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest => f.write_str("bad request"),
+            Self::NotFound => f.write_str("not found"),
+            Self::Conflict => f.write_str("conflict"),
+            Self::Unavailable => f.write_str("unavailable"),
+            Self::Unexpected => f.write_str("unexpected"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod basic_tests {
     use super::{deterministic_id, flag_default, hash_json};
@@ -1700,7 +1714,7 @@ mod tests {
 
     #[test]
     fn all_expected_feature_flags_have_safe_defaults() {
-        assert_eq!(FLAG_KEYS.len(), 13);
+        assert_eq!(FLAG_KEYS.len(), 14);
         assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
         assert_eq!(flag_default("unknown"), None);
     }

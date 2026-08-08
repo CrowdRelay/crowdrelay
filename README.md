@@ -12,6 +12,7 @@ The operator owns the data. Public requests never send emails or call external p
 
 * campaigns, smart links, redirect attribution, and asynchronous click statistics;
 * fan signup, consent management, double opt-in, unsubscribe, and private sessions;
+* first-party Fan 360 audience intelligence, reusable segments, operator tags, communication intents, and currency-safe funnel analytics;
 * referral links, reward thresholds, coupons, and physical reward fulfillment;
 * city-level interest aggregation;
 * event catalog, fan actions, reminders, and Bandsintown synchronization;
@@ -55,6 +56,7 @@ The operator owns the data. Public requests never send emails or call external p
 | Admission Passes | admin issue/revoke, fan claim/status/QR, and staff redemption under `/v1/admin/admission`, `/v1/passes`, `/v1/me/pass`, and `/v1/staff/admission` |
 | Ticketing        | public sale/reservation/status, admin configuration/overview, and authenticated Stripe reconciliation under `/v1/public`, `/v1/admin`, and `/v1/internal` |
 | Operations       | admin queue summary, dead-item inspection, delivery attempt history, and audited manual retry under `/v1/admin/ops`                                    |
+| Audience         | admin-only Fan 360, segments, communication intents and analytics under `/v1/admin/audience`, `/v1/admin/communications` and `/v1/admin/analytics` |
 | Commerce         | staff/admin inventory + reward campaigns and `POST /v1/commerce/coupons/redeem`                                                                  |
 | Synesthesia      | `POST /v1/public/synesthesia/runs`, ordered room completion, album completion and five-CD draw entry                                             |
 

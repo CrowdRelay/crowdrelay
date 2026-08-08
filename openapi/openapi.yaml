@@ -2708,6 +2708,475 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/audience/overview:
+    get:
+      operationId: getAdminAudienceOverview
+      summary: Read the first-party audience scorecard
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Audience totals across canonical CrowdRelay state.
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/audience/fans:
+    get:
+      operationId: listAdminAudienceFans
+      summary: List Fan 360 cards
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+      - in: query
+        name: search
+        schema:
+          type: string
+          maxLength: 160
+      - in: query
+        name: city_slug
+        schema:
+          type: string
+          maxLength: 128
+      responses:
+        '200':
+          description: Fan cards ordered by most recently updated.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/audience/fans/{fan_id}:
+    get:
+      operationId: getAdminAudienceFan
+      summary: Read one Fan 360 timeline
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Fan identity and first-party activity timeline.
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/audience/fans/{fan_id}/tags:
+    post:
+      operationId: tagAdminAudienceFan
+      summary: Add an operator audience tag
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [tag]
+              properties:
+                tag:
+                  type: string
+                  maxLength: 64
+      responses:
+        '201':
+          description: Tag assigned.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/audience/fans/{fan_id}/tags/{tag}/remove:
+    post:
+      operationId: untagAdminAudienceFan
+      summary: Remove an operator audience tag
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: path
+        name: tag
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+      responses:
+        '204':
+          description: Tag absent after the operation.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/audience/segments:
+    get:
+      operationId: listAdminAudienceSegments
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Reusable audience segments.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: createAdminAudienceSegment
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [slug, name]
+              properties:
+                slug:
+                  type: string
+                  maxLength: 128
+                name:
+                  type: string
+                  maxLength: 160
+                description:
+                  type: string
+                  maxLength: 1000
+                filter:
+                  type: object
+      responses:
+        '201':
+          description: Segment created.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/audience/segments/{slug}/preview:
+    get:
+      operationId: previewAdminAudienceSegment
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: slug
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+      responses:
+        '200':
+          description: Exact current count with a bounded sample.
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/communications/campaigns:
+    get:
+      operationId: listAdminCommunicationCampaigns
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Communication intents and delivery state.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: createAdminCommunicationCampaign
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [slug, name, channel, segment_slug, template_key, content]
+              properties:
+                slug:
+                  type: string
+                  maxLength: 128
+                name:
+                  type: string
+                  maxLength: 160
+                channel:
+                  type: string
+                  enum: [email, push, in_app]
+                segment_slug:
+                  type: string
+                  maxLength: 128
+                template_key:
+                  type: string
+                  maxLength: 160
+                subject:
+                  type: string
+                  maxLength: 240
+                content:
+                  type: object
+      responses:
+        '201':
+          description: Draft communication intent created.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/communications/campaigns/{campaign_id}/schedule:
+    post:
+      operationId: scheduleAdminCommunicationCampaign
+      summary: Schedule a feature-gated communication intent
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [scheduled_at]
+              properties:
+                scheduled_at:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Campaign scheduled or an identical schedule replayed.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/communications/campaigns/{campaign_id}/cancel:
+    post:
+      operationId: cancelAdminCommunicationCampaign
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Campaign cancelled.
+        '401':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /internal/communications/campaigns/{campaign_id}/delivery-plan:
+    get:
+      operationId: getInternalCommunicationDeliveryPlan
+      summary: Resolve current recipients after the campaign becomes due
+      security:
+      - commerceBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 2000
+      - in: query
+        name: after_fan_id
+        description: Stable fan-id cursor returned by the previous delivery-plan page.
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Late-bound, consent-filtered delivery plan.
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /internal/communications/campaigns/{campaign_id}/complete:
+    post:
+      operationId: completeInternalCommunicationCampaign
+      security:
+      - commerceBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [recipient_count, delivered_count, failed_count]
+              properties:
+                recipient_count:
+                  type: integer
+                  minimum: 0
+                delivered_count:
+                  type: integer
+                  minimum: 0
+                failed_count:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: Delivery counters persisted or idempotently replayed.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/analytics/funnel:
+    get:
+      operationId: getAdminAudienceFunnel
+      summary: Read first-touch fan conversion by acquisition source
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Acquisition-to-ticket-to-attendance funnel.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/analytics/revenue:
+    get:
+      operationId: getAdminAudienceRevenue
+      summary: Read ticket revenue grouped by currency
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Paid, refunded and after-refund ticket totals by currency.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
 components:
   headers:
     RequestId:

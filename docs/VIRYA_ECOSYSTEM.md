@@ -14,7 +14,7 @@ Synesthesia ───────┘
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
-| `crowdrelay` | fans, consent, events, tickets, inventory, draw state, Synesthesia completion ledger, audit/proofs | presentation, game rendering |
+| `crowdrelay` | fans, consent, audience segments, communication intents, events, tickets, inventory, draw state, Synesthesia completion ledger, audit/proofs | presentation, provider message rendering, game rendering |
 | `virya` | public web, trusted Netlify edge, Stripe/web mail edge, staff UI | canonical fan/ticket/draw state |
 | `virya-signal` | native fan/staff UX, encrypted local credentials/wallet | server authority, duplicated commerce or draw logic |
 | `synesthesia` | album experience, local progress, sensory/rendering state | marketing consent, shipping PII, winner selection |
