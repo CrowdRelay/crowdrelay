@@ -85,10 +85,12 @@ mod tests {
             generated_at: OffsetDateTime::UNIX_EPOCH,
             products: Vec::new(),
         };
-        let Some(etag) = merch_catalog_etag(&catalog) else {
-            assert!(false, "serializable empty merch catalog must have an etag");
-            return;
-        };
+        let etag = merch_catalog_etag(&catalog);
+        assert!(
+            etag.is_some(),
+            "serializable empty merch catalog must have an etag"
+        );
+        let Some(etag) = etag else { return };
         let weak = HeaderValue::from_str(&format!("W/{etag}"));
         assert!(weak.is_ok());
         let Ok(weak) = weak else { return };

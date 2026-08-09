@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{Problem, request_id};
+use crate::{Problem, acquisition::fan_session_from_headers, request_id};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
@@ -40,6 +40,7 @@ const ROOM_IDS: [&str; 11] = [
 const MIN_ROOM_ELAPSED_MS: i64 = 1_000;
 const MAX_ROOM_ELAPSED_MS: i64 = 7_200_000;
 const MAX_TOTAL_ELAPSED_MS: i64 = 24 * 60 * 60 * 1000;
+const HANDOFF_TTL_MINUTES: i64 = 15;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +79,38 @@ pub struct CompleteRunRequest {
 #[derive(Debug, Serialize)]
 struct CompleteRunResponse {
     completed: bool,
+    linked_to_fan: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time::serde::rfc3339::option")]
+    handoff_expires_at: Option<time::OffsetDateTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_event: Option<SynesthesiaNextEvent>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct SynesthesiaNextEvent {
+    slug: String,
+    title: String,
+    venue: Option<String>,
+    city: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    starts_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRunRequest {
+    handoff_code: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkRunResponse {
+    linked: bool,
+    run_id: Uuid,
+    rooms_completed: i16,
+    client_total_elapsed_ms: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,40 +416,193 @@ pub async fn complete_run(
     }) else {
         return SynesthesiaError::Unauthorized.response(request_id_value);
     };
-    if completed_at.is_some() {
-        return (
+    if completed_at.is_none() {
+        if usize::try_from(next_room_index).ok() != Some(ROOM_IDS.len())
+            || payload.client_total_elapsed_ms < recorded_elapsed_ms
+        {
+            return SynesthesiaError::Conflict.response(request_id_value);
+        }
+        let result = sqlx::query(
+            r#"
+            UPDATE synesthesia_runs
+            SET completed_at = now(), client_total_elapsed_ms = $3, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2 AND completed_at IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(run_id)
+        .bind(payload.client_total_elapsed_ms)
+        .execute(state.ticketing.pool())
+        .await;
+        if let Err(error) = result {
+            return SynesthesiaError::sqlx(error).response(request_id_value);
+        }
+    }
+
+    match completion_response(&state, workspace_id, run_id).await {
+        Ok(response) => (
             StatusCode::OK,
             [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
-            Json(CompleteRunResponse { completed: true }),
+            Json(response),
         )
-            .into_response();
+            .into_response(),
+        Err(error) => error.response(request_id_value),
     }
-    if usize::try_from(next_room_index).ok() != Some(ROOM_IDS.len())
-        || payload.client_total_elapsed_ms < recorded_elapsed_ms
-    {
-        return SynesthesiaError::Conflict.response(request_id_value);
-    }
-    let result = sqlx::query(
+}
+
+async fn completion_response(
+    state: &crate::AppState,
+    workspace_id: Uuid,
+    run_id: Uuid,
+) -> Result<CompleteRunResponse, SynesthesiaError> {
+    let linked_to_fan = sqlx::query_scalar::<_, bool>(
         r#"
-        UPDATE synesthesia_runs
-        SET completed_at = now(), client_total_elapsed_ms = $3, updated_at = now()
-        WHERE workspace_id = $1 AND id = $2 AND completed_at IS NULL
+        SELECT fan_id IS NOT NULL
+        FROM synesthesia_runs
+        WHERE workspace_id = $1 AND id = $2 AND completed_at IS NOT NULL
         "#,
     )
     .bind(workspace_id)
     .bind(run_id)
-    .bind(payload.client_total_elapsed_ms)
-    .execute(state.ticketing.pool())
-    .await;
-    match result {
-        Ok(_) => (
-            StatusCode::OK,
-            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
-            Json(CompleteRunResponse { completed: true }),
+    .fetch_optional(state.ticketing.pool())
+    .await
+    .map_err(SynesthesiaError::sqlx)?
+    .ok_or(SynesthesiaError::Conflict)?;
+
+    let (handoff_code, handoff_expires_at) = if linked_to_fan {
+        (None, None)
+    } else {
+        let code = random_token().map_err(|()| SynesthesiaError::Unavailable)?;
+        let hash = Sha256::digest(code.as_bytes()).to_vec();
+        let expires_at =
+            time::OffsetDateTime::now_utc() + time::Duration::minutes(HANDOFF_TTL_MINUTES);
+        sqlx::query(
+            r#"
+            UPDATE synesthesia_runs
+            SET handoff_token_hash = $3, handoff_expires_at = $4, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2 AND fan_id IS NULL AND completed_at IS NOT NULL
+            "#,
         )
-            .into_response(),
-        Err(error) => SynesthesiaError::sqlx(error).response(request_id_value),
+        .bind(workspace_id)
+        .bind(run_id)
+        .bind(hash)
+        .bind(expires_at)
+        .execute(state.ticketing.pool())
+        .await
+        .map_err(SynesthesiaError::sqlx)?;
+        (Some(code), Some(expires_at))
+    };
+
+    let next_event = sqlx::query_as::<_, SynesthesiaNextEvent>(
+        r#"
+        SELECT event.slug, event.title, event.venue, city.name AS city, event.starts_at
+        FROM events AS event
+        LEFT JOIN cities AS city ON city.id = event.city_id
+        WHERE event.workspace_id = $1
+          AND event.status = 'published'
+          AND event.starts_at > now()
+        ORDER BY event.starts_at, event.id
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(state.ticketing.pool())
+    .await
+    .map_err(SynesthesiaError::sqlx)?;
+
+    Ok(CompleteRunResponse {
+        completed: true,
+        linked_to_fan,
+        handoff_code,
+        handoff_expires_at,
+        next_event,
+    })
+}
+
+pub async fn link_completed_run_to_fan(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<LinkRunRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let handoff_code = payload.handoff_code.trim().to_ascii_lowercase();
+    if handoff_code.len() != 64 || !handoff_code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return SynesthesiaError::Invalid.response(request_id_value);
     }
+    let Some(session) = fan_session_from_headers(&headers) else {
+        return SynesthesiaError::Unauthorized.response(request_id_value);
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let mut transaction = match state.ticketing.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+    let fan_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE fan_sessions AS session
+        SET last_seen_at = now()
+        FROM fans AS fan
+        WHERE session.workspace_id = $1
+          AND session.session_token_hash = digest($2, 'sha256')
+          AND session.revoked_at IS NULL
+          AND session.expires_at > now()
+          AND fan.workspace_id = session.workspace_id
+          AND fan.id = session.fan_id
+          AND fan.status = 'active'
+        RETURNING session.fan_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(session.as_str())
+    .fetch_optional(&mut *transaction)
+    .await;
+    let fan_id = match fan_id {
+        Ok(Some(fan_id)) => fan_id,
+        Ok(None) => return SynesthesiaError::Unauthorized.response(request_id_value),
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+
+    let handoff_hash = Sha256::digest(handoff_code.as_bytes()).to_vec();
+    let linked = sqlx::query_as::<_, (Uuid, i16, i64)>(
+        r#"
+        UPDATE synesthesia_runs
+        SET fan_id = $3, linked_at = COALESCE(linked_at, now()), updated_at = now()
+        WHERE workspace_id = $1
+          AND handoff_token_hash = $2
+          AND handoff_expires_at > now()
+          AND completed_at IS NOT NULL
+          AND (fan_id IS NULL OR fan_id = $3)
+        RETURNING id, next_room_index, COALESCE(client_total_elapsed_ms, 0)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(handoff_hash)
+    .bind(fan_id)
+    .fetch_optional(&mut *transaction)
+    .await;
+    let (run_id, rooms_completed, client_total_elapsed_ms) = match linked {
+        Ok(Some(value)) => value,
+        Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+    if let Err(error) = transaction.commit().await {
+        return SynesthesiaError::sqlx(error).response(request_id_value);
+    }
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        Json(LinkRunResponse {
+            linked: true,
+            run_id,
+            rooms_completed,
+            client_total_elapsed_ms,
+        }),
+    )
+        .into_response()
 }
 
 pub async fn enter_reward_draw(
@@ -557,6 +743,25 @@ async fn enter_reward_draw_inner(
         .await
         .map_err(SynesthesiaError::sqlx)?,
     };
+
+    let linked_run = sqlx::query(
+        r#"
+        UPDATE synesthesia_runs
+        SET fan_id = $3, linked_at = COALESCE(linked_at, now()),
+            handoff_token_hash = NULL, handoff_expires_at = NULL, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2
+          AND (fan_id IS NULL OR fan_id = $3)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(fan_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(SynesthesiaError::sqlx)?;
+    if linked_run.rows_affected() != 1 {
+        return Err(SynesthesiaError::Conflict);
+    }
 
     sqlx::query(
         r#"

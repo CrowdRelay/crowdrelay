@@ -19,7 +19,10 @@
 //! This crate owns routing, protocol-level responses, and HTTP middleware. Domain
 //! and application logic belongs in their respective crates.
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
@@ -32,7 +35,7 @@ use axum::{
             InvalidHeaderValue,
         },
     },
-    middleware::{Next, from_fn_with_state},
+    middleware::{Next, from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -57,7 +60,9 @@ mod concert_qr;
 mod ecosystem;
 mod event_copy;
 mod events;
+mod fan_context;
 mod fan_lifecycle;
+mod http_metrics;
 mod mobile_fan;
 mod ops;
 mod proofs;
@@ -86,6 +91,13 @@ const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_CROWDRELAY_CORRELATION_ID: HeaderName =
     HeaderName::from_static("x-crowdrelay-correlation-id");
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
+const SERVER_TIMING: HeaderName = HeaderName::from_static("server-timing");
+const X_CROWDRELAY_RELEASE: HeaderName = HeaderName::from_static("x-crowdrelay-release");
+static HTTP_METRICS: OnceLock<Arc<http_metrics::HttpMetrics>> = OnceLock::new();
+
+fn http_metrics() -> &'static Arc<http_metrics::HttpMetrics> {
+    HTTP_METRICS.get_or_init(|| Arc::new(http_metrics::HttpMetrics::default()))
+}
 const MAX_PUBLIC_BODY_BYTES: usize = 16 * 1024;
 
 /// Shared HTTP state assembled by the API composition root.
@@ -171,9 +183,16 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             X_REQUEST_ID,
             X_CROWDRELAY_CORRELATION_ID,
         ])
-        .expose_headers([CACHE_CONTROL, ETAG, X_REQUEST_ID]);
+        .expose_headers([
+            CACHE_CONTROL,
+            ETAG,
+            X_REQUEST_ID,
+            SERVER_TIMING.clone(),
+            X_CROWDRELAY_RELEASE.clone(),
+        ]);
 
     let middleware = ServiceBuilder::new()
+        .layer(from_fn(measure_request))
         .layer(from_fn_with_state(state.clone(), normalize_request_id))
         .layer(SetRequestIdLayer::new(
             X_REQUEST_ID.clone(),
@@ -216,6 +235,15 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/v1/me/area", get(area::me_wallet))
         .route("/v1/me/area/challenge", post(area::me_challenge))
         .route("/v1/me/area/claim", post(area::me_claim))
+        .route("/v1/me/home", get(fan_context::fan_home))
+        .route(
+            "/v1/me/events/{slug}/context",
+            get(fan_context::fan_event_context),
+        )
+        .route(
+            "/v1/me/synesthesia/link",
+            post(synesthesia::link_completed_run_to_fan),
+        )
         .route("/v1/internal/area/players", post(area::link_player))
         .route(
             "/v1/internal/area/players/{player_id}",
@@ -590,6 +618,10 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             "/v1/staff/event-qr/campaigns",
             get(concert_qr::list_campaigns).post(concert_qr::create_campaign),
         )
+        .route(
+            "/v1/staff/events/{slug}/dashboard",
+            get(fan_context::staff_event_dashboard),
+        )
         .route("/v1/staff/event-qr/overview", get(concert_qr::overview))
         .route(
             "/v1/staff/event-qr/campaigns/{campaign_id}/revoke",
@@ -631,6 +663,24 @@ async fn enforce_privileged_namespace(
             .into_response();
     }
     next.run(request).await
+}
+
+async fn measure_request(request: Request<Body>, next: Next) -> Response {
+    let started = Instant::now();
+    let mut response = next.run(request).await;
+    let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    http_metrics().record(elapsed_micros, response.status().as_u16());
+    let elapsed_ms = elapsed_micros as f64 / 1_000.0;
+    if let Ok(value) = HeaderValue::from_str(&format!("app;dur={elapsed_ms:.2}")) {
+        response.headers_mut().insert(SERVER_TIMING.clone(), value);
+    }
+    let release = option_env!("CROWDRELAY_RELEASE").unwrap_or(env!("CARGO_PKG_VERSION"));
+    if let Ok(value) = HeaderValue::from_str(release) {
+        response
+            .headers_mut()
+            .insert(X_CROWDRELAY_RELEASE.clone(), value);
+    }
+    response
 }
 
 async fn normalize_request_id(
@@ -696,11 +746,31 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
+    let http_snapshot = http_metrics().snapshot();
     let snapshot = state.acquisition.click_metrics_snapshot();
     let event_snapshot = state.events.metrics_snapshot();
     let ops_snapshot = state.ops.metrics_snapshot().await.unwrap_or_default();
     let body = format!(
         concat!(
+            "# HELP crowdrelay_http_requests_total HTTP requests completed by the API.\n",
+            "# TYPE crowdrelay_http_requests_total counter\n",
+            "crowdrelay_http_requests_total {}\n",
+            "# HELP crowdrelay_http_requests_5xx_total HTTP requests completed with a 5xx status.\n",
+            "# TYPE crowdrelay_http_requests_5xx_total counter\n",
+            "crowdrelay_http_requests_5xx_total {}\n",
+            "# HELP crowdrelay_http_request_duration_seconds_sum Total request wall time.\n",
+            "# TYPE crowdrelay_http_request_duration_seconds histogram\n",
+            "crowdrelay_http_request_duration_seconds_sum {:.6}\n",
+            "crowdrelay_http_request_duration_seconds_count {}\n",
+            "",
+            "crowdrelay_http_request_duration_bucket{{le=\"0.05\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"0.10\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"0.25\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"0.50\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"1.00\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"2.50\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"5.00\"}} {}\n",
+            "crowdrelay_http_request_duration_bucket{{le=\"+Inf\"}} {}\n",
             "# HELP crowdrelay_click_events_queued_total Click events accepted by the bounded buffer.\n",
             "# TYPE crowdrelay_click_events_queued_total counter\n",
             "crowdrelay_click_events_queued_total {}\n",
@@ -753,6 +823,18 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# TYPE crowdrelay_webhook_delivery_oldest_pending_seconds gauge\n",
             "crowdrelay_webhook_delivery_oldest_pending_seconds {}\n",
         ),
+        http_snapshot.total,
+        http_snapshot.errors_5xx,
+        http_snapshot.latency_micros_sum as f64 / 1_000_000.0,
+        http_snapshot.total,
+        http_snapshot.le_50_ms,
+        http_snapshot.le_100_ms,
+        http_snapshot.le_250_ms,
+        http_snapshot.le_500_ms,
+        http_snapshot.le_1000_ms,
+        http_snapshot.le_2500_ms,
+        http_snapshot.le_5000_ms,
+        http_snapshot.total,
         snapshot.queued,
         snapshot.persisted,
         snapshot.dropped,

@@ -177,6 +177,32 @@ class RuntimePerformanceContract(unittest.TestCase):
         self.assertIn("'304':", merch)
         self.assertIn("$ref: '#/components/headers/EntityTag'", merch)
 
+    def test_v4_private_read_models_do_not_write_last_seen_on_every_refresh(self):
+        source = (ROOT / "crates/crowdrelay-api/src/fan_context.rs").read_text()
+        self.assertIn("session.last_seen_at < now() - interval '15 minutes'", source)
+        self.assertIn("WITH valid_session AS", source)
+        self.assertIn("PRIVATE_REVALIDATE", source)
+        self.assertIn('"private, max-age=20, stale-if-error=600"', source)
+
+    def test_v4_http_observability_is_bounded_and_privacy_safe(self):
+        metrics = (ROOT / "crates/crowdrelay-api/src/http_metrics.rs").read_text()
+        api = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        for bucket in ("le_50_ms", "le_100_ms", "le_250_ms", "le_500_ms", "le_1000_ms", "le_2500_ms", "le_5000_ms"):
+            self.assertIn(bucket, metrics)
+        self.assertNotIn("HashMap", metrics)
+        self.assertNotIn("path:", metrics)
+        self.assertIn("server-timing", api)
+        self.assertIn("x-crowdrelay-release", api)
+        self.assertIn("privileged && authorized", api)
+
+
+    def test_privileged_correlation_id_is_bounded_and_normalized(self):
+        source = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        self.assertIn('HeaderName::from_static("x-crowdrelay-correlation-id")', source)
+        self.assertIn('request.headers_mut().remove(&X_REQUEST_ID)', source)
+        self.assertIn('if privileged && authorized', source)
+        self.assertIn('.insert(X_REQUEST_ID.clone(), correlation)', source)
+
 
 if __name__ == "__main__":
     unittest.main()

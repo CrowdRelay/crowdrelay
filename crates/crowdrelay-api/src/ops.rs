@@ -53,6 +53,17 @@ impl OpsState {
 pub struct OpsSummary {
     outbox: QueueSummary,
     deliveries: QueueSummary,
+    http: HttpRequestSummary,
+    release: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct HttpRequestSummary {
+    requests: u64,
+    errors_5xx: u64,
+    average_ms: u64,
+    p50_ms: u64,
+    p95_ms: u64,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -939,7 +950,50 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             cancelled: row.delivery_cancelled,
             oldest_pending_seconds: row.delivery_oldest_pending_seconds,
         },
+        http: http_request_summary(crate::http_metrics().snapshot()),
+        release: option_env!("CROWDRELAY_RELEASE")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .to_owned(),
     })
+}
+
+fn http_request_summary(snapshot: crate::http_metrics::HttpMetricsSnapshot) -> HttpRequestSummary {
+    let average_ms = snapshot
+        .latency_micros_sum
+        .checked_div(snapshot.total)
+        .unwrap_or_default()
+        / 1_000;
+    HttpRequestSummary {
+        requests: snapshot.total,
+        errors_5xx: snapshot.errors_5xx,
+        average_ms,
+        p50_ms: percentile_bucket_ms(snapshot, 50),
+        p95_ms: percentile_bucket_ms(snapshot, 95),
+    }
+}
+
+fn percentile_bucket_ms(
+    snapshot: crate::http_metrics::HttpMetricsSnapshot,
+    percentile: u64,
+) -> u64 {
+    if snapshot.total == 0 {
+        return 0;
+    }
+    let target = snapshot.total.saturating_mul(percentile).div_ceil(100);
+    for (bound, count) in [
+        (50, snapshot.le_50_ms),
+        (100, snapshot.le_100_ms),
+        (250, snapshot.le_250_ms),
+        (500, snapshot.le_500_ms),
+        (1_000, snapshot.le_1000_ms),
+        (2_500, snapshot.le_2500_ms),
+        (5_000, snapshot.le_5000_ms),
+    ] {
+        if count >= target {
+            return bound;
+        }
+    }
+    5_001
 }
 
 async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, OpsError> {

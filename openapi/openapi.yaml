@@ -576,6 +576,76 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /me/home:
+    get:
+      operationId: getFanHome
+      summary: Read one private fan home snapshot
+      security:
+      - fanSession: []
+      responses:
+        '200':
+          description: Fan profile, next-event, Synesthesia, referral and lightweight activity context.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: 'private, max-age=20, stale-if-error=600' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FanHomeSnapshot' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/events/{slug}/context:
+    get:
+      operationId: getFanEventContext
+      summary: Read private fan context for one event
+      security:
+      - fanSession: []
+      parameters:
+      - $ref: '#/components/parameters/EventSlug'
+      responses:
+        '200':
+          description: Interest, pass, ticket and sale state for this fan/event.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FanEventContext' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/synesthesia/link:
+    post:
+      operationId: linkSynesthesiaCompletion
+      summary: Link a completed anonymous Synesthesia run to the current fan session
+      description: Binds a short-lived handoff code to the current fan session. The binding is single-fan and may be retried idempotently by that same fan until expiry; it can never be rebound to another fan. Fan/session credentials are never embedded in the handoff URL.
+      security:
+      - fanSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SynesthesiaLinkRequest' }
+      responses:
+        '200':
+          description: Completion linked. Same-fan retries remain idempotent until the handoff expires.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaLinkResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/events/{slug}/dashboard:
+    get:
+      operationId: getStaffEventDashboard
+      summary: Read a compact operational snapshot for one event
+      parameters:
+      - $ref: '#/components/parameters/EventSlug'
+      responses:
+        '200':
+          description: Aggregate interests, sales, ticket quantity and admission-pass lifecycle counts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffEventDashboard' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/synesthesia/reward-claims:
     post:
       operationId: enterSynesthesiaRewardDraw
@@ -3322,6 +3392,15 @@ components:
       schema:
         type: string
         pattern: '^[a-z0-9][a-z0-9-]{0,127}$'
+    EventSlug:
+      in: path
+      name: slug
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[a-z0-9][a-z0-9_-]*$'
     IdempotencyKey:
       in: header
       name: Idempotency-Key
@@ -3742,9 +3821,113 @@ components:
     SynesthesiaRunCompleteResponse:
       type: object
       additionalProperties: false
-      required: [completed]
+      required: [completed, linked_to_fan]
       properties:
         completed: { type: boolean }
+        linked_to_fan: { type: boolean }
+        handoff_code: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+        handoff_expires_at: { type: [string, 'null'], format: date-time }
+        next_event:
+          anyOf:
+          - $ref: '#/components/schemas/SynesthesiaNextEvent'
+          - type: 'null'
+    SynesthesiaNextEvent:
+      type: object
+      additionalProperties: false
+      required: [slug, title, starts_at]
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        venue: { type: [string, 'null'] }
+        city: { type: [string, 'null'] }
+        starts_at: { type: string, format: date-time }
+    SynesthesiaLinkRequest:
+      type: object
+      additionalProperties: false
+      required: [handoff_code]
+      properties:
+        handoff_code: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+    SynesthesiaLinkResponse:
+      type: object
+      additionalProperties: false
+      required: [linked, run_id, rooms_completed, client_total_elapsed_ms]
+      properties:
+        linked: { type: boolean, const: true }
+        run_id: { type: string, format: uuid }
+        rooms_completed: { type: integer, minimum: 0, maximum: 11 }
+        client_total_elapsed_ms: { type: integer, format: int64, minimum: 0 }
+    FanHomeEvent:
+      type: object
+      additionalProperties: false
+      required: [slug, title, venue, city, starts_at, doors_at, ends_at, phase, ticket_url, interested, has_pass, has_paid_ticket, ticket_sale_active]
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        venue: { type: [string, 'null'] }
+        city: { type: [string, 'null'] }
+        starts_at: { type: string, format: date-time }
+        doors_at: { type: [string, 'null'], format: date-time }
+        ends_at: { type: [string, 'null'], format: date-time }
+        phase: { type: string, enum: [upcoming, live, afterglow] }
+        ticket_url: { type: [string, 'null'] }
+        interested: { type: boolean }
+        has_pass: { type: boolean }
+        has_paid_ticket: { type: boolean }
+        ticket_sale_active: { type: boolean }
+    FanHomeSnapshot:
+      type: object
+      additionalProperties: false
+      required: [schema_version, generated_at, profile, next_event, synesthesia, referral, counts, recommended_action]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        generated_at: { type: string, format: date-time }
+        profile: { type: object, additionalProperties: true }
+        next_event:
+          oneOf:
+            - { $ref: '#/components/schemas/FanHomeEvent' }
+            - { type: 'null' }
+        synesthesia: { type: object, additionalProperties: true }
+        referral: { type: object, additionalProperties: true }
+        counts: { type: object, additionalProperties: true }
+        recommended_action:
+          type: string
+          enum: [continue_synesthesia, open_wallet, open_live_event, share_post_show_feedback, get_ticket, follow_next_event, explore_signal]
+    FanEventContext:
+      type: object
+      additionalProperties: false
+      required: [schema_version, slug, title, venue, city, starts_at, doors_at, ends_at, phase, ticket_url, interested, pass_status, paid_ticket_quantity, ticket_sale_active, recommended_action]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        slug: { type: string }
+        title: { type: string }
+        venue: { type: [string, 'null'] }
+        city: { type: [string, 'null'] }
+        starts_at: { type: string, format: date-time }
+        doors_at: { type: [string, 'null'], format: date-time }
+        ends_at: { type: [string, 'null'], format: date-time }
+        phase: { type: string, enum: [upcoming, live, afterglow] }
+        ticket_url: { type: [string, 'null'] }
+        interested: { type: boolean }
+        pass_status: { type: [string, 'null'] }
+        paid_ticket_quantity: { type: integer, format: int64, minimum: 0 }
+        ticket_sale_active: { type: boolean }
+        recommended_action: { type: string, enum: [open_wallet, open_live_event, share_post_show_feedback, get_ticket, follow_event] }
+    StaffEventDashboard:
+      type: object
+      additionalProperties: false
+      required: [schema_version, slug, title, starts_at, interested_fans, paid_orders, paid_tickets, passes_issued, passes_claimed, passes_redeemed]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        slug: { type: string }
+        title: { type: string }
+        venue: { type: [string, 'null'] }
+        starts_at: { type: string, format: date-time }
+        interested_fans: { type: integer, format: int64, minimum: 0 }
+        paid_orders: { type: integer, format: int64, minimum: 0 }
+        paid_tickets: { type: integer, format: int64, minimum: 0 }
+        passes_issued: { type: integer, format: int64, minimum: 0 }
+        passes_claimed: { type: integer, format: int64, minimum: 0 }
+        passes_redeemed: { type: integer, format: int64, minimum: 0 }
     SynesthesiaRewardEntryRequest:
       type: object
       additionalProperties: false
@@ -3878,20 +4061,33 @@ components:
     OpsQueueSummary:
       type: object
       additionalProperties: false
-      required: [pending, processing, delivered_24h, dead, oldest_pending_seconds]
+      required: [pending, processing, delivered_24h, dead, cancelled, oldest_pending_seconds]
       properties:
         pending: { type: integer, format: int64, minimum: 0 }
         processing: { type: integer, format: int64, minimum: 0 }
         delivered_24h: { type: integer, format: int64, minimum: 0 }
         dead: { type: integer, format: int64, minimum: 0 }
+        cancelled: { type: integer, format: int64, minimum: 0 }
         oldest_pending_seconds: { type: integer, format: int64, minimum: 0 }
+    HttpRequestSummary:
+      type: object
+      additionalProperties: false
+      required: [requests, errors_5xx, average_ms, p50_ms, p95_ms]
+      properties:
+        requests: { type: integer, format: int64, minimum: 0 }
+        errors_5xx: { type: integer, format: int64, minimum: 0 }
+        average_ms: { type: integer, format: int64, minimum: 0 }
+        p50_ms: { type: integer, format: int64, minimum: 0 }
+        p95_ms: { type: integer, format: int64, minimum: 0 }
     OpsSummary:
       type: object
       additionalProperties: false
-      required: [outbox, deliveries]
+      required: [outbox, deliveries, http, release]
       properties:
+        release: { type: string, minLength: 1, maxLength: 128 }
         outbox: { $ref: '#/components/schemas/OpsQueueSummary' }
         deliveries: { $ref: '#/components/schemas/OpsQueueSummary' }
+        http: { $ref: '#/components/schemas/HttpRequestSummary' }
     OpsOutboxItem:
       type: object
       additionalProperties: false

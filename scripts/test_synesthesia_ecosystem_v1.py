@@ -42,6 +42,23 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         self.assertIn('payload.max_entries != 1', validation)
         self.assertIn('synesthesia_reward_entries', worker)
 
+    def test_v4_handoff_is_idempotent_and_identity_safe(self):
+        api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
+        migration = (ROOT / 'migrations/0032_fan_context_synesthesia_handoff.sql').read_text()
+        router = (ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text()
+        self.assertIn('/v1/me/synesthesia/link', router)
+        self.assertIn('handoff_token_hash', migration)
+        self.assertIn("AND (fan_id IS NULL OR fan_id = $3)", api)
+        # A successful link keeps the short-lived hash until expiry so a lost
+        # 200 response can be retried by the same fan without re-binding it.
+        link_block = api.split('pub async fn link_completed_run_to_fan', 1)[1].split('pub async fn enter_reward_draw', 1)[0]
+        self.assertNotIn('handoff_token_hash = NULL', link_block)
+        self.assertIn("fan.status = 'active'", link_block)
+        # Reward entry must never diverge from an already-bound run identity.
+        reward_block = api.split('async fn enter_reward_draw_inner', 1)[1]
+        self.assertIn('if linked_run.rows_affected() != 1', reward_block)
+        self.assertIn('return Err(SynesthesiaError::Conflict);', reward_block)
+
     def test_openapi_documents_the_game_contract(self):
         spec = (ROOT / 'openapi/openapi.yaml').read_text()
         self.assertIn('/public/synesthesia/runs:', spec)
