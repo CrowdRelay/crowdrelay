@@ -17,10 +17,11 @@ jobs:
     name: External ecosystem smoke
     if: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL != '' && vars.VIRYA_PRODUCTION_BASE_URL != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4
     env:
       CROWDRELAY_BASE_URL: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL }}
       VIRYA_BASE_URL: ${{ vars.VIRYA_PRODUCTION_BASE_URL }}
+      SYNESTHESIA_BASE_URL: ${{ vars.SYNESTHESIA_PRODUCTION_BASE_URL || 'https://synesthesia.virya.music' }}
       N8N_INGRESS_URL: ${{ vars.N8N_PRODUCTION_INGRESS_URL }}
       ALERT_WEBHOOK_URL: ${{ secrets.PRODUCTION_DISCORD_WEBHOOK_URL }}
 
@@ -35,8 +36,10 @@ jobs:
               --silent \
               --show-error \
               --location \
-              --max-time 15 \
-              --retry 2 \
+              --connect-timeout 4 \
+              --max-time 10 \
+              --retry 1 \
+              --retry-delay 1 \
               --retry-all-errors \
               --output /dev/null \
               --write-out '%{http_code}' \
@@ -59,6 +62,8 @@ jobs:
           require_200 crowdrelay_ready "${CROWDRELAY_BASE_URL%/}/v1/health/ready"
           require_200 crowdrelay_metrics "${CROWDRELAY_BASE_URL%/}/metrics"
           require_200 virya_home "${VIRYA_BASE_URL%/}/"
+          require_200 synesthesia_home "${SYNESTHESIA_BASE_URL%/}/"
+          require_200 synesthesia_boot_art "${SYNESTHESIA_BASE_URL%/}/menu-eye-poster.webp"
 
           if [[ -n "${N8N_INGRESS_URL:-}" ]]; then
             status="$(request_status \
@@ -86,8 +91,6 @@ jobs:
             --silent \
             --show-error \
             --max-time 15 \
-            --retry 2 \
-            --retry-all-errors \
             --header 'content-type: application/json' \
             --data "$payload" \
             "$ALERT_WEBHOOK_URL"

@@ -16,6 +16,7 @@ services:
       - /tmp:size=16m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    pids_limit: 64
     restart: "no"
     networks: [runtime]
 
@@ -41,6 +42,7 @@ services:
       - /tmp:size=16m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    pids_limit: 128
     mem_limit: ${CROWDRELAY_API_MEMORY:-256m}
     cpus: ${CROWDRELAY_API_CPUS:-0.75}
     stop_grace_period: 25s
@@ -88,6 +90,7 @@ services:
       - /tmp:size=16m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    pids_limit: 128
     mem_limit: ${CROWDRELAY_WORKER_MEMORY:-256m}
     cpus: ${CROWDRELAY_WORKER_CPUS:-0.35}
     stop_grace_period: 30s
