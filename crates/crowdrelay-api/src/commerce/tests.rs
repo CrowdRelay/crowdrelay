@@ -86,7 +86,8 @@ mod tests {
             products: Vec::new(),
         };
         let Some(etag) = merch_catalog_etag(&catalog) else {
-            panic!("serializable empty merch catalog must have an etag");
+            assert!(false, "serializable empty merch catalog must have an etag");
+            return;
         };
         let weak = HeaderValue::from_str(&format!("W/{etag}"));
         assert!(weak.is_ok());
