@@ -462,6 +462,7 @@ paths:
           minimum: 1
           maximum: 100
           default: 50
+      - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Published events ordered by start time.
@@ -620,6 +621,7 @@ paths:
           minLength: 1
           maxLength: 128
           pattern: ^[a-z0-9][a-z0-9_-]*$
+      - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Published event.
@@ -2062,10 +2064,15 @@ paths:
     get:
       operationId: getPublicMerchCatalog
       summary: Read the public merch catalog and coarse availability
+      description: Clients may revalidate the latest catalog and availability snapshot with If-None-Match.
+      parameters:
+      - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Public merch catalog. Exact quantities are intentionally omitted.
           headers:
+            ETag:
+              $ref: '#/components/headers/EntityTag'
             Cache-Control:
               schema:
                 type: string
@@ -2074,6 +2081,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MerchCatalog'
+        '304':
+          description: Cached catalog and availability representation is still current.
+          headers:
+            ETag:
+              $ref: '#/components/headers/EntityTag'
+            Cache-Control:
+              schema:
+                type: string
+                const: public, max-age=15, stale-while-revalidate=60
         '503':
           $ref: '#/components/responses/Problem'
   /internal/merch/inventory/activation:
@@ -3336,7 +3352,7 @@ components:
       in: header
       name: If-None-Match
       required: false
-      description: ETag received with a previous city-aggregate representation.
+      description: ETag received with a previous cacheable public representation.
       schema:
         type: string
     OpsStatus:

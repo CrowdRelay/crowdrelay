@@ -13,12 +13,39 @@ pub async fn public_catalog(State(state): State<crate::AppState>, headers: Heade
     )
     .await
     {
-        Ok(Ok(catalog)) => (
-            StatusCode::OK,
-            [(CACHE_CONTROL, PUBLIC_CACHE)],
-            Json(catalog),
-        )
-            .into_response(),
+        Ok(Ok(catalog)) => {
+            let Some(etag) = merch_catalog_etag(&catalog) else {
+                return (
+                    StatusCode::OK,
+                    [(CACHE_CONTROL, PUBLIC_CACHE)],
+                    Json(catalog),
+                )
+                    .into_response();
+            };
+            let Ok(etag_header) = HeaderValue::from_str(&etag) else {
+                return (
+                    StatusCode::OK,
+                    [(CACHE_CONTROL, PUBLIC_CACHE)],
+                    Json(catalog),
+                )
+                    .into_response();
+            };
+
+            if merch_etag_matches(headers.get(IF_NONE_MATCH), &etag) {
+                return (
+                    StatusCode::NOT_MODIFIED,
+                    [(CACHE_CONTROL, HeaderValue::from_static(PUBLIC_CACHE)), (ETAG, etag_header)],
+                )
+                    .into_response();
+            }
+
+            (
+                StatusCode::OK,
+                [(CACHE_CONTROL, HeaderValue::from_static(PUBLIC_CACHE)), (ETAG, etag_header)],
+                Json(catalog),
+            )
+                .into_response()
+        },
         Ok(Err(error)) => error.response(request_id_value),
         Err(_) => CommerceError::Unavailable.response(request_id_value),
     }

@@ -12,7 +12,10 @@ use std::{
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH},
+    },
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -35,6 +38,30 @@ const MAX_RESERVATION_QUANTITY: i32 = 100;
 const MAX_STOCKTAKE_ITEMS: usize = 500;
 const MAX_STOCK_ON_HAND: i32 = 1_000_000;
 const MAX_TEXT_CHARS: usize = 2_000;
+
+fn merch_catalog_etag(catalog: &MerchCatalogView) -> Option<String> {
+    // `generated_at` is deliberately excluded: it changes on every DB read and
+    // would defeat conditional revalidation even when inventory is identical.
+    let payload = serde_json::to_vec(&catalog.products).ok()?;
+    let digest = Sha256::digest(payload);
+    Some(format!(
+        "\"merch-{}-{}\"",
+        catalog.products.len(),
+        hex::encode(digest)
+    ))
+}
+
+fn merch_etag_matches(candidate: Option<&HeaderValue>, expected: &str) -> bool {
+    candidate
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').map(str::trim).any(|candidate| {
+                candidate == "*"
+                    || candidate == expected
+                    || candidate.strip_prefix("W/") == Some(expected)
+            })
+        })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommerceError {

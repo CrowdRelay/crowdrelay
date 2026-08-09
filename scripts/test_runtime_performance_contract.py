@@ -160,6 +160,23 @@ class RuntimePerformanceContract(unittest.TestCase):
         self.assertNotRegex(runtime, r"apt-get install[^\n]*\bcurl\b")
         self.assertRegex(api, r"apt-get install[^\n]*\bcurl\b")
 
+    def test_public_merch_catalog_supports_strong_etag_revalidation(self):
+        commerce = (ROOT / "crates/crowdrelay-api/src/commerce.rs").read_text()
+        handlers = (ROOT / "crates/crowdrelay-api/src/commerce/handlers.rs").read_text()
+        self.assertIn("header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH}", commerce)
+        self.assertIn("fn merch_catalog_etag(catalog: &MerchCatalogView)", commerce)
+        self.assertIn("serde_json::to_vec(&catalog.products)", commerce)
+        self.assertNotIn("serde_json::to_vec(catalog)", commerce)
+        self.assertIn("fn merch_etag_matches", commerce)
+        self.assertIn("headers.get(IF_NONE_MATCH)", handlers)
+        self.assertIn("StatusCode::NOT_MODIFIED", handlers)
+        self.assertIn("(ETAG, etag_header)", handlers)
+        openapi = (ROOT / "openapi/openapi.yaml").read_text()
+        merch = openapi[openapi.index("  /public/merch/catalog:") : openapi.index("  /internal/merch/inventory/activation:")]
+        self.assertIn("$ref: '#/components/parameters/IfNoneMatch'", merch)
+        self.assertIn("'304':", merch)
+        self.assertIn("$ref: '#/components/headers/EntityTag'", merch)
+
 
 if __name__ == "__main__":
     unittest.main()

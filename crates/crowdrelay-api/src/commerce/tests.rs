@@ -67,6 +67,34 @@ mod tests {
     }
 
     #[test]
+    fn public_merch_etag_ignores_generated_at() {
+        let first = MerchCatalogView {
+            generated_at: OffsetDateTime::UNIX_EPOCH,
+            products: Vec::new(),
+        };
+        let second = MerchCatalogView {
+            generated_at: OffsetDateTime::UNIX_EPOCH + TimeDuration::hours(1),
+            products: Vec::new(),
+        };
+        assert_eq!(merch_catalog_etag(&first), merch_catalog_etag(&second));
+    }
+
+    #[test]
+    fn public_merch_etag_accepts_weak_client_revalidation() {
+        let catalog = MerchCatalogView {
+            generated_at: OffsetDateTime::UNIX_EPOCH,
+            products: Vec::new(),
+        };
+        let Some(etag) = merch_catalog_etag(&catalog) else {
+            panic!("serializable empty merch catalog must have an etag");
+        };
+        let weak = HeaderValue::from_str(&format!("W/{etag}"));
+        assert!(weak.is_ok());
+        let Ok(weak) = weak else { return };
+        assert!(merch_etag_matches(Some(&weak), &etag));
+    }
+
+    #[test]
     fn unsafe_inventory_mutation_keys_are_rejected() {
         let mut headers = HeaderMap::new();
         headers.insert(
