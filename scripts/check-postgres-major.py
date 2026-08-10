@@ -4,7 +4,7 @@ from pathlib import Path
 import re, sys
 ROOT = Path(__file__).resolve().parents[1]
 SCAN = [ROOT/'docker-compose.yml', ROOT/'compose.production.yaml', ROOT/'.github', ROOT/'ops']
-allowed = {ROOT/'ops/postgres18/README.md', ROOT/'ops/postgres18/migrate.sh'}
+allowed: set[Path] = set()
 patterns = [re.compile(r'postgres\s*:\s*(?:1[0-7])(?:\D|$)', re.I), re.compile(r'postgres:(?:1[0-7])(?:[-@\s]|$)', re.I)]
 violations=[]
 for base in SCAN:

@@ -28,11 +28,11 @@ runtime-contracts:
 	python3 scripts/check-postgres-major.py
 	python3 scripts/postgres18_runtime_contract.py
 	python3 scripts/area_wallet_authority_v2_contract.py
+	python3 scripts/staff_device_sessions_v2_contract.py
 	python3 scripts/test-ecosystem-contract-v2.py
 	python3 scripts/test-ops-control-plane-v2.py
 	python3 scripts/test-ecosystem-design-contract.py
 	python3 scripts/test-image-provenance-policy.py
-	python3 scripts/sync-client-contract.py --check
 
 ci: check validate-contract-assets contract-tests runtime-contracts
 

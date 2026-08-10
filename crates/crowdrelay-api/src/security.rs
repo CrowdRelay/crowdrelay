@@ -5,19 +5,24 @@ use sha2::{Digest, Sha256};
 
 /// Verifies a bearer token against a precomputed SHA-256 digest without
 /// data-dependent early returns during digest comparison.
+pub(crate) fn bearer_sha256(headers: &HeaderMap) -> Option<[u8; 32]> {
+    let raw_token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))?;
+    if raw_token.is_empty() || raw_token.len() > 512 {
+        return None;
+    }
+    Some(Sha256::digest(raw_token.as_bytes()).into())
+}
+
 pub(crate) fn bearer_sha256_matches(headers: &HeaderMap, expected_hash: Option<[u8; 32]>) -> bool {
     let Some(expected_hash) = expected_hash else {
         return false;
     };
-    let Some(raw_token) = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
+    let Some(candidate) = bearer_sha256(headers) else {
         return false;
     };
-
-    let candidate: [u8; 32] = Sha256::digest(raw_token.as_bytes()).into();
     constant_time_eq(&candidate, &expected_hash)
 }
 

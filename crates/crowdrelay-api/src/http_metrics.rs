@@ -16,6 +16,9 @@ pub(crate) struct HttpMetrics {
     le_1000_ms: AtomicU64,
     le_2500_ms: AtomicU64,
     le_5000_ms: AtomicU64,
+    legacy_area_claim_imports: AtomicU64,
+    legacy_area_wallet_imports: AtomicU64,
+    legacy_static_staff_auth: AtomicU64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -31,6 +34,9 @@ pub(crate) struct HttpMetricsSnapshot {
     pub le_1000_ms: u64,
     pub le_2500_ms: u64,
     pub le_5000_ms: u64,
+    pub legacy_area_claim_imports: u64,
+    pub legacy_area_wallet_imports: u64,
+    pub legacy_static_staff_auth: u64,
 }
 
 impl HttpMetrics {
@@ -67,6 +73,21 @@ impl HttpMetrics {
         }
     }
 
+    pub(crate) fn record_legacy_area_claim_import(&self) {
+        self.legacy_area_claim_imports
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_legacy_area_wallet_import(&self) {
+        self.legacy_area_wallet_imports
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_legacy_static_staff_auth(&self) {
+        self.legacy_static_staff_auth
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> HttpMetricsSnapshot {
         HttpMetricsSnapshot {
             total: self.total.load(Ordering::Relaxed),
@@ -80,6 +101,9 @@ impl HttpMetrics {
             le_1000_ms: self.le_1000_ms.load(Ordering::Relaxed),
             le_2500_ms: self.le_2500_ms.load(Ordering::Relaxed),
             le_5000_ms: self.le_5000_ms.load(Ordering::Relaxed),
+            legacy_area_claim_imports: self.legacy_area_claim_imports.load(Ordering::Relaxed),
+            legacy_area_wallet_imports: self.legacy_area_wallet_imports.load(Ordering::Relaxed),
+            legacy_static_staff_auth: self.legacy_static_staff_auth.load(Ordering::Relaxed),
         }
     }
 }

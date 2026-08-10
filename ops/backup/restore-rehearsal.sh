@@ -78,7 +78,7 @@ sql() {
 
 migration="$(sql "SELECT COALESCE(max(version),0) FROM _sqlx_migrations" 2>/dev/null || echo 0)"
 [[ "$migration" =~ ^[0-9]+$ ]] || die "invalid SQLx migration version: $migration"
-(( migration >= 37 )) || die "backup schema is older than required migration 37: $migration"
+(( migration >= 38 )) || die "backup schema is older than required migration 38: $migration"
 
 for table in workspaces fans area_players area_claims area_credit_ledger area_reward_vouchers area_ticket_rewards outbox_events webhook_deliveries; do
   exists="$(sql "SELECT to_regclass('public.${table}') IS NOT NULL")"

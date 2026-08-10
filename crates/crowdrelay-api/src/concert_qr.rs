@@ -23,9 +23,7 @@ use sqlx::{FromRow, PgPool};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use crate::{
-    Problem, acquisition::fan_session_from_headers, request_id, security::bearer_sha256_matches,
-};
+use crate::{Problem, acquisition::fan_session_from_headers, request_id};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -44,8 +42,6 @@ const LATEST_AFTER_EVENT: Duration = Duration::hours(36);
 pub struct ConcertQrState {
     workspace_id: WorkspaceId,
     database: PgPool,
-    admin_api_key_sha256: Option<[u8; 32]>,
-    staff_api_key_sha256: Option<[u8; 32]>,
     signing_key: Option<[u8; 32]>,
 }
 
@@ -54,8 +50,6 @@ impl ConcertQrState {
     pub fn new(
         workspace_id: WorkspaceId,
         database: PgPool,
-        admin_api_key_sha256: Option<[u8; 32]>,
-        staff_api_key_sha256: Option<[u8; 32]>,
         root_signing_key: Option<[u8; 32]>,
     ) -> Self {
         // Domain separation prevents a concert token from being accepted by the
@@ -69,8 +63,6 @@ impl ConcertQrState {
         Self {
             workspace_id,
             database,
-            admin_api_key_sha256,
-            staff_api_key_sha256,
             signing_key,
         }
     }
@@ -210,13 +202,6 @@ pub async fn create_campaign(
     payload: Result<Json<CreateCampaignRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !(bearer_sha256_matches(&headers, state.concert_qr.admin_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.concert_qr.staff_api_key_sha256))
-    {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Some(signing_key) = state.concert_qr.signing_key else {
         return Problem::service_unavailable(request_id_value)
             .private()
@@ -385,13 +370,6 @@ pub async fn list_campaigns(
     query: Result<Query<CampaignListQuery>, QueryRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !(bearer_sha256_matches(&headers, state.concert_qr.admin_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.concert_qr.staff_api_key_sha256))
-    {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Query(query) = match query {
         Ok(value) => value,
         Err(_) => {
@@ -428,13 +406,6 @@ pub async fn list_campaigns(
 
 pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let request_id_value = request_id(&headers);
-    if !(bearer_sha256_matches(&headers, state.concert_qr.admin_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.concert_qr.staff_api_key_sha256))
-    {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
 
     let (event_rows, campaign_rows) = tokio::join!(
         load_staff_events(&state.concert_qr),
@@ -531,13 +502,6 @@ pub async fn revoke_campaign(
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !(bearer_sha256_matches(&headers, state.concert_qr.admin_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.concert_qr.staff_api_key_sha256))
-    {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Ok(campaign_id) = Uuid::parse_str(&raw_id) else {
         return Problem::bad_request(request_id_value)
             .private()

@@ -203,6 +203,7 @@ pub async fn internal_import_claims(
     if !state.ticketing.commerce_authorized(&headers) {
         return error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized.");
     }
+    crate::http_metrics().record_legacy_area_claim_import();
     if !valid_idempotency_key(&headers) {
         return error_response(
             StatusCode::BAD_REQUEST,

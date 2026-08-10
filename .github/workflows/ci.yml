@@ -19,7 +19,7 @@ concurrency:
 jobs:
   rust:
     name: Format, lint, test, audit, and setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
 
     services:
@@ -86,6 +86,9 @@ jobs:
         run: |
           cargo run --locked --package crowdrelay-worker -- setup
           cargo run --locked --package crowdrelay-worker -- setup
+
+      - name: Verify PostgreSQL 18 hot-path index plans
+        run: python3 scripts/query-plan-regression.py
 
       - name: Run repository checks
         run: make ci
@@ -222,20 +225,10 @@ jobs:
           [[ "$(printf '%s\n' "$digest_images" | grep -c '@sha256:')" -eq 3 ]]
           ./scripts/audit-public-tree.sh
 
-      - name: Check TypeScript client
-        run: >-
-          npm exec
-          --yes
-          --package=typescript@5.8.3
-          --
-          tsc
-          --project packages/crowdrelay-js/tsconfig.json
-          --noEmit
-
   containers:
     name: Build container targets
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:

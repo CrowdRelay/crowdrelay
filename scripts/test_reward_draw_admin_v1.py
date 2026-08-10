@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class RewardDrawAdminContracts(unittest.TestCase):
     def test_routes_are_admin_only_and_additive(self):
-        router = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        router = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text() + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text())
         openapi = (ROOT / "openapi/openapi.yaml").read_text()
         self.assertIn('"/v1/admin/reward-draws"', router)
         self.assertIn('"/v1/admin/reward-draws/{draw_id}/delete"', router)

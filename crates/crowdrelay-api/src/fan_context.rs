@@ -520,9 +520,6 @@ pub async fn staff_event_dashboard(
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !state.ticketing.operator_authorized(&headers) {
-        return ContextError::Unauthorized.response(request_id_value);
-    }
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let dashboard = sqlx::query_as::<_, StaffEventDashboard>(
         r#"

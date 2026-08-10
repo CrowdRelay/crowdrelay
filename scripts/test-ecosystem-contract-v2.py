@@ -8,7 +8,7 @@ root = Path(__file__).resolve().parents[1]
 ecosystem = root.parent
 manifest = json.loads((root / "integration/ecosystem/compatibility.json").read_text())
 meta = (root / "crates/crowdrelay-api/src/meta.rs").read_text()
-router = (root / "crates/crowdrelay-api/src/lib.rs").read_text()
+router = ((root / "crates/crowdrelay-api/src/lib.rs").read_text() + (root / "crates/crowdrelay-api/src/routing.rs").read_text())
 openapi = (root / "openapi/openapi.yaml").read_text()
 errors: list[str] = []
 

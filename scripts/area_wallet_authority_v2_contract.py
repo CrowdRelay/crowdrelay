@@ -33,7 +33,7 @@ must(ROOT/'crates/crowdrelay-api/src/area/legacy_wallet.rs', [
     'source_ticket_reward_count',
 ])
 must_not(ROOT/'crates/crowdrelay-api/src/area/legacy_wallet.rs', ['expect("validated above")', 'ON CONFLICT DO NOTHING'])
-must(ROOT/'crates/crowdrelay-api/src/lib.rs', [
+must(ROOT/'crates/crowdrelay-api/src/routing.rs', [
     '/v1/internal/area/players/{player_id}/wallet/import',
     '/v1/internal/area/players/{player_id}/vouchers',
     '/v1/internal/area/players/{player_id}/ticket-rewards/reserve',

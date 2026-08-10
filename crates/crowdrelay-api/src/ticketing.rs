@@ -28,7 +28,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
-    IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id, security::bearer_sha256_matches,
+    IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id,
+    security::{bearer_sha256, bearer_sha256_matches},
     ticket_qr::encode_ticket_qr,
 };
 
@@ -111,8 +112,39 @@ impl TicketingState {
         bearer_sha256_matches(headers, self.admin_api_key_sha256)
     }
 
-    pub(crate) fn operator_authorized(&self, headers: &HeaderMap) -> bool {
-        self.admin_authorized(headers) || bearer_sha256_matches(headers, self.staff_api_key_sha256)
+    pub(crate) async fn operator_authorized(&self, headers: &HeaderMap) -> bool {
+        if self.admin_authorized(headers) {
+            return true;
+        }
+        if bearer_sha256_matches(headers, self.staff_api_key_sha256) {
+            crate::http_metrics().record_legacy_static_staff_auth();
+            return true;
+        }
+        let Some(token_hash) = bearer_sha256(headers) else {
+            return false;
+        };
+        match sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM staff_device_sessions
+                WHERE workspace_id = $1
+                  AND token_hash = $2
+                  AND revoked_at IS NULL
+                  AND expires_at > now()
+            )
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(token_hash.to_vec())
+        .fetch_one(&self.pool)
+        .await
+        {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                tracing::warn!(%error, "staff device session lookup failed");
+                false
+            }
+        }
     }
 }
 

@@ -26,10 +26,7 @@ use sha2::Sha256;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{
-    IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id, security::bearer_sha256_matches,
-    ticket_qr::decode_ticket_qr,
-};
+use crate::{IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id, ticket_qr::decode_ticket_qr};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -48,8 +45,6 @@ pub struct AdmissionState {
     load_pass: LoadAdmissionPass,
     redeem_pass: RedeemAdmissionPass,
     revoke_pass: RevokeAdmissionPass,
-    admin_api_key_sha256: Option<[u8; 32]>,
-    staff_api_key_sha256: Option<[u8; 32]>,
     qr_signing_key: Option<[u8; 32]>,
     qr_ttl: Duration,
     secure_cookies: bool,
@@ -63,8 +58,6 @@ pub struct AdmissionStateArgs {
     pub load_pass: LoadAdmissionPass,
     pub redeem_pass: RedeemAdmissionPass,
     pub revoke_pass: RevokeAdmissionPass,
-    pub admin_api_key_sha256: Option<[u8; 32]>,
-    pub staff_api_key_sha256: Option<[u8; 32]>,
     pub qr_signing_key: Option<[u8; 32]>,
     pub qr_ttl: Duration,
     pub secure_cookies: bool,
@@ -81,8 +74,6 @@ impl AdmissionState {
             load_pass: args.load_pass,
             redeem_pass: args.redeem_pass,
             revoke_pass: args.revoke_pass,
-            admin_api_key_sha256: args.admin_api_key_sha256,
-            staff_api_key_sha256: args.staff_api_key_sha256,
             qr_signing_key: args.qr_signing_key,
             qr_ttl: args.qr_ttl,
             secure_cookies: args.secure_cookies,
@@ -112,11 +103,6 @@ pub async fn issue_pass(
     payload: Result<Json<IssuePassRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !bearer_sha256_matches(&headers, state.admission.admin_api_key_sha256) {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Json(payload) = match payload {
         Ok(payload) => payload,
         Err(_) => {
@@ -365,13 +351,6 @@ pub async fn redeem_pass(
             .into_response();
     }
     let request_id_value = request_id(&headers);
-    if !(bearer_sha256_matches(&headers, state.admission.staff_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.admission.admin_api_key_sha256))
-    {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Json(payload) = match payload {
         Ok(payload) => payload,
         Err(_) => {
@@ -466,11 +445,6 @@ pub async fn revoke_pass(
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !bearer_sha256_matches(&headers, state.admission.admin_api_key_sha256) {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Some((idempotency_key, command_request_id)) = request_context(&headers) else {
         return Problem::bad_request(request_id_value)
             .private()

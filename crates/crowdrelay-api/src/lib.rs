@@ -71,7 +71,9 @@ mod ops_routes;
 mod proofs;
 mod referrals;
 mod releases;
+mod routing;
 mod security;
+mod staff_sessions;
 mod synesthesia;
 mod ticket_qr;
 mod ticketing;
@@ -102,6 +104,13 @@ fn http_metrics() -> &'static Arc<http_metrics::HttpMetrics> {
     HTTP_METRICS.get_or_init(|| Arc::new(http_metrics::HttpMetrics::default()))
 }
 const MAX_PUBLIC_BODY_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivilegedAuthorization {
+    Admin,
+    Operator,
+    Commerce,
+}
 
 /// Shared HTTP state assembled by the API composition root.
 #[derive(Clone)]
@@ -228,545 +237,27 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .layer(PropagateRequestIdLayer::new(X_REQUEST_ID.clone()))
         .layer(cors);
 
-    Router::new()
-        .route("/health/live", get(live))
-        .route("/health/ready", get(ready))
-        .route("/metrics", get(metrics))
-        .route("/v1/health/live", get(live))
-        .route("/v1/health/ready", get(ready))
-        .route("/v1/meta", get(meta::get))
-        .route("/v1/go/{slug}", get(acquisition::redirect_smart_link))
-        .route("/v1/fans", post(acquisition::signup_fan))
-        .route("/v1/fans/access", post(fan_lifecycle::request_fan_access))
-        .route("/v1/fans/confirm", post(fan_lifecycle::confirm_fan))
-        .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
-        .route("/v1/public/cities", get(acquisition::list_cities))
-        .route("/v1/public/area/drops", get(area::public_drops))
-        .route("/v1/me/area", get(area::me_wallet))
-        .route("/v1/me/area/challenge", post(area::me_challenge))
-        .route("/v1/me/area/claim", post(area::me_claim))
-        .route("/v1/me/home", get(fan_context::fan_home))
-        .route(
-            "/v1/me/events/{slug}/context",
-            get(fan_context::fan_event_context),
-        )
-        .route(
-            "/v1/me/synesthesia/link",
-            post(synesthesia::link_completed_run_to_fan),
-        )
-        .route("/v1/internal/area/players", post(area::link_player))
-        .route(
-            "/v1/internal/area/players/{player_id}",
-            get(area::internal_wallet),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/challenge",
-            post(area::internal_challenge),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/claim",
-            post(area::internal_claim),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/claims/import",
-            post(area::internal_import_claims),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/wallet/import",
-            post(area::internal_import_legacy_wallet),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/vouchers",
-            post(area::internal_create_voucher),
-        )
-        .route(
-            "/v1/internal/area/rewards/preview",
-            post(area::internal_reward_preview),
-        )
-        .route(
-            "/v1/internal/area/rewards/reserve",
-            post(area::internal_reward_reserve),
-        )
-        .route(
-            "/v1/internal/area/rewards/attach",
-            post(area::internal_reward_attach),
-        )
-        .route(
-            "/v1/internal/area/rewards/redeem",
-            post(area::internal_reward_redeem),
-        )
-        .route(
-            "/v1/internal/area/rewards/release",
-            post(area::internal_reward_release),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/ticket-rewards",
-            get(area::internal_ticket_rewards),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/ticket-rewards/reserve",
-            post(area::internal_ticket_reward_reserve),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/ticket-rewards/finalize",
-            post(area::internal_ticket_reward_finalize),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/ticket-rewards/fail",
-            post(area::internal_ticket_reward_fail),
-        )
-        .route("/v1/public/cities/requests", post(mobile_fan::request_city))
-        .route("/v1/public/events", get(events::list_events))
-        .route("/v1/public/synesthesia/runs", post(synesthesia::start_run))
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}",
-            post(synesthesia::record_room),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/complete",
-            post(synesthesia::complete_run),
-        )
-        .route(
-            "/v1/public/synesthesia/reward-claims",
-            post(synesthesia::enter_reward_draw),
-        )
-        .route("/v1/public/merch/catalog", get(commerce::public_catalog))
-        .route(
-            "/v1/internal/merch/inventory/activation",
-            get(commerce::inventory_activation),
-        )
-        .route(
-            "/v1/internal/merch/reservations",
-            post(commerce::reserve_inventory),
-        )
-        .route(
-            "/v1/internal/merch/reservations/{reservation_id}/commit",
-            post(commerce::commit_inventory),
-        )
-        .route(
-            "/v1/internal/merch/reservations/{reservation_id}/release",
-            post(commerce::release_inventory),
-        )
-        .route(
-            "/v1/admin/merch/catalog",
-            get(commerce::admin_catalog).post(commerce::upsert_catalog),
-        )
-        .route("/v1/staff/merch/catalog", get(commerce::admin_catalog))
-        .route(
-            "/v1/admin/merch/inventory/activation",
-            get(commerce::inventory_activation),
-        )
-        .route(
-            "/v1/staff/merch/inventory/activation",
-            get(commerce::inventory_activation),
-        )
-        .route(
-            "/v1/admin/merch/inventory/overview",
-            get(commerce::inventory_overview),
-        )
-        .route(
-            "/v1/staff/merch/inventory/overview",
-            get(commerce::inventory_overview),
-        )
-        .route(
-            "/v1/admin/merch/inventory/stocktakes",
-            post(commerce::inventory_stocktake),
-        )
-        .route(
-            "/v1/admin/merch/inventory/ready",
-            post(commerce::mark_inventory_ready),
-        )
-        .route(
-            "/v1/staff/merch/inventory/stocktakes",
-            post(commerce::inventory_stocktake),
-        )
-        .route(
-            "/v1/staff/merch/inventory/ready",
-            post(commerce::mark_inventory_ready),
-        )
-        .route(
-            "/v1/admin/merch/inventory/adjustments",
-            post(commerce::adjust_inventory),
-        )
-        .route(
-            "/v1/admin/merch/promotion-recommendations",
-            get(commerce::promotion_recommendations),
-        )
-        .route(
-            "/v1/staff/merch/promotion-recommendations",
-            get(commerce::promotion_recommendations),
-        )
-        .route(
-            "/v1/admin/reward-campaigns",
-            get(commerce::list_reward_campaigns).post(commerce::create_reward_campaign),
-        )
-        .route(
-            "/v1/staff/reward-campaigns",
-            get(commerce::list_reward_campaigns),
-        )
-        .route(
-            "/v1/admin/reward-campaigns/{draw_id}/cancel",
-            post(commerce::cancel_reward_campaign),
-        )
-        .route(
-            "/v1/admin/reward-campaigns/{draw_id}/schedule",
-            post(commerce::schedule_reward_campaign),
-        )
-        .route("/v1/admin/reward-draws", get(commerce::list_reward_draws))
-        .route(
-            "/v1/admin/reward-draws/{draw_id}/delete",
-            post(commerce::delete_reward_draw),
-        )
-        .route(
-            "/v1/admin/reward-fulfillments",
-            get(commerce::list_reward_fulfillments),
-        )
-        .route(
-            "/v1/staff/reward-fulfillments",
-            get(commerce::list_reward_fulfillments),
-        )
-        .route(
-            "/v1/admin/reward-fulfillments/{winner_id}",
-            post(commerce::fulfill_reward),
-        )
-        .route(
-            "/v1/staff/reward-fulfillments/{winner_id}",
-            post(commerce::fulfill_reward),
-        )
-        .route(
-            "/v1/public/proofs/batches/{batch_id}",
-            get(proofs::public_batch),
-        )
-        .route(
-            "/v1/public/proofs/batches/{batch_id}/{source_kind}/{source_id}",
-            get(proofs::public_inclusion),
-        )
-        .route(
-            "/v1/public/proofs/draws/{draw_slug}/status",
-            get(proofs::public_draw_status),
-        )
-        .route(
-            "/v1/public/proofs/draws/{draw_slug}",
-            get(proofs::public_draw),
-        )
-        .route("/v1/public/events/{slug}", get(events::get_event))
-        .route(
-            "/v1/public/events/{slug}/tickets",
-            get(ticketing::public_sale),
-        )
-        .route(
-            "/v1/public/events/{slug}/ticket-orders",
-            post(ticketing::reserve_order),
-        )
-        .route(
-            "/v1/public/ticket-orders/{order_id}",
-            get(ticketing::order_status),
-        )
-        .route(
-            "/v1/public/ticket-orders/{order_id}/wallet",
-            get(ticketing::order_wallet),
-        )
-        .route(
-            "/v1/public/ticket-orders/{order_id}/delivery-requests",
-            post(ticketing::request_delivery),
-        )
-        .route("/v1/public/events/{slug}/view", post(events::track_view))
-        .route(
-            "/v1/public/events/{slug}/ticket",
-            get(events::ticket_redirect),
-        )
-        .route(
-            "/v1/public/events/{slug}/listen",
-            get(events::listen_redirect),
-        )
-        .route(
-            "/v1/public/events/{slug}/calendar.ics",
-            get(events::calendar),
-        )
-        .route("/v1/public/events/{slug}/share", post(events::track_share))
-        .route(
-            "/v1/events/{slug}/interest",
-            post(events::register_interest),
-        )
-        .route("/v1/me/events", get(events::my_events))
-        .route("/r/{code}", get(referrals::redirect_referral))
-        .route("/v1/r/{code}", get(referrals::redirect_referral))
-        .route("/v1/me/referral", get(referrals::referral_progress))
-        .route(
-            "/v1/commerce/coupons/redeem",
-            post(referrals::redeem_coupon),
-        )
-        .route("/v1/staff/coupons/redeem", post(referrals::redeem_coupon))
-        .route(
-            "/v1/admin/events/{slug}/ticketing",
-            get(ticketing::admin_overview).post(ticketing::configure_sale),
-        )
-        .route(
-            "/v1/staff/events/{slug}/ticketing",
-            get(ticketing::admin_overview),
-        )
-        .route(
-            "/v1/internal/ticket-orders/{order_id}/stripe-checkout",
-            post(ticketing::bind_stripe_checkout),
-        )
-        .route(
-            "/v1/internal/ticket-orders/{order_id}/cancel",
-            post(ticketing::cancel_order),
-        )
-        .route(
-            "/v1/internal/ticket-orders/stripe-events",
-            post(ticketing::stripe_event),
-        )
-        .route(
-            "/v1/internal/events/{event_id}/copy-enrichment",
-            post(event_copy::apply_event_copy),
-        )
-        .route(
-            "/v1/internal/releases/announce",
-            post(releases::announce_release),
-        )
-        .route(
-            "/v1/internal/cities/{city_id}/geocode",
-            post(mobile_fan::geocode_city),
-        )
-        .route(
-            "/v1/internal/nearby-gigs/emit-due",
-            post(mobile_fan::emit_due_nearby_gigs),
-        )
-        .route("/v1/internal/proofs/claim", post(proofs::internal_claim))
-        .route(
-            "/v1/internal/proofs/{batch_id}/confirm",
-            post(proofs::internal_confirm),
-        )
-        .route(
-            "/v1/internal/proofs/{batch_id}/fail",
-            post(proofs::internal_fail),
-        )
-        .route(
-            "/v1/internal/proofs/audit-batches",
-            post(proofs::admin_create_audit_batch),
-        )
-        .route(
-            "/v1/admin/accounting/profile",
-            get(accounting::get_profile).post(accounting::configure_profile),
-        )
-        .route(
-            "/v1/admin/accounting/ticket-sales/preview",
-            get(accounting::preview_ticket_sales),
-        )
-        .route(
-            "/v1/admin/accounting/ticket-sales/finalize",
-            post(accounting::finalize_ticket_sales),
-        )
-        .route(
-            "/v1/admin/accounting/invoice-requests",
-            get(accounting::list_invoice_requests),
-        )
-        .route(
-            "/v1/admin/accounting/documents/{document_id}/csv",
-            get(accounting::download_accounting_csv),
-        )
-        .route("/v1/admin/audience/overview", get(audience::overview))
-        .route("/v1/admin/audience/fans", get(audience::list_fans))
-        .route(
-            "/v1/admin/audience/fans/{fan_id}",
-            get(audience::fan_detail),
-        )
-        .route(
-            "/v1/admin/audience/fans/{fan_id}/tags",
-            post(audience::add_tag),
-        )
-        .route(
-            "/v1/admin/audience/fans/{fan_id}/tags/{tag}/remove",
-            post(audience::remove_tag),
-        )
-        .route(
-            "/v1/admin/audience/segments",
-            get(audience::list_segments).post(audience::create_segment),
-        )
-        .route(
-            "/v1/admin/audience/segments/{slug}/preview",
-            get(audience::preview_segment),
-        )
-        .route(
-            "/v1/admin/communications/campaigns",
-            get(audience::list_campaigns).post(audience::create_campaign),
-        )
-        .route(
-            "/v1/admin/communications/campaigns/{campaign_id}/schedule",
-            post(audience::schedule_campaign),
-        )
-        .route(
-            "/v1/admin/communications/campaigns/{campaign_id}/cancel",
-            post(audience::cancel_campaign),
-        )
-        .route(
-            "/v1/internal/communications/campaigns/{campaign_id}/delivery-plan",
-            get(audience::delivery_plan),
-        )
-        .route(
-            "/v1/internal/communications/campaigns/{campaign_id}/complete",
-            post(audience::complete_campaign),
-        )
-        .route("/v1/admin/analytics/funnel", get(audience::funnel))
-        .route("/v1/admin/analytics/revenue", get(audience::revenue))
-        .route("/v1/admin/ecosystem/overview", get(ecosystem::overview))
-        .route("/v1/admin/ecosystem/flags", get(ecosystem::list_flags))
-        .route(
-            "/v1/admin/ecosystem/flags/{key}",
-            post(ecosystem::update_flag),
-        )
-        .route("/v1/admin/ecosystem/reconcile", post(ecosystem::reconcile))
-        .route(
-            "/v1/admin/ecosystem/reconciliation",
-            get(ecosystem::list_findings),
-        )
-        .route(
-            "/v1/admin/ecosystem/checklists/{event_slug}",
-            get(ecosystem::show_checklist),
-        )
-        .route(
-            "/v1/admin/ecosystem/checklists/{event_slug}/{item_key}",
-            post(ecosystem::update_checklist),
-        )
-        .route(
-            "/v1/admin/ecosystem/checklists/emit-due",
-            post(ecosystem::emit_due_checklists),
-        )
-        .route(
-            "/v1/staff/ops/show-snapshot/{event_slug}",
-            get(ecosystem::show_snapshot),
-        )
-        .route("/v1/admin/proofs/batches", get(proofs::admin_list_batches))
-        .route(
-            "/v1/admin/proofs/audit-batches",
-            post(proofs::admin_create_audit_batch),
-        )
-        .route("/v1/admin/signal/overview", get(ops::signal_overview))
-        .route("/v1/admin/autopilot/overview", get(autopilot::overview))
-        .route(
-            "/v1/admin/autopilot/chief-of-staff",
-            get(autopilot::chief_of_staff),
-        )
-        .route(
-            "/v1/admin/autopilot/policies/{context}",
-            post(autopilot::set_authority),
-        )
-        .route(
-            "/v1/admin/autopilot/booking-targets",
-            post(autopilot::upsert_booking_target),
-        )
-        .route(
-            "/v1/admin/autopilot/ticket-allocation-guardrails",
-            post(autopilot::upsert_ticket_allocation_guardrail),
-        )
-        .route(
-            "/v1/admin/autopilot/merch-economics",
-            post(autopilot::upsert_merch_product_economics),
-        )
-        .route(
-            "/v1/admin/autopilot/booking-targets/{target_id}/reply",
-            post(autopilot::record_booking_reply),
-        )
-        .route(
-            "/v1/admin/autopilot/outreach-targets",
-            post(autopilot::upsert_outreach_target),
-        )
-        .route(
-            "/v1/admin/autopilot/outreach-targets/{target_id}/reply",
-            post(autopilot::record_outreach_reply),
-        )
-        .route(
-            "/v1/admin/autopilot/outreach-opportunities",
-            post(autopilot::upsert_outreach_opportunity),
-        )
-        .route(
-            "/v1/admin/autopilot/content-sources",
-            post(autopilot::upsert_content_source),
-        )
-        .route(
-            "/v1/admin/autopilot/experiments",
-            post(autopilot::create_experiment),
-        )
-        .route(
-            "/v1/admin/autopilot/experiments/{experiment_id}/assign",
-            post(autopilot::assign_experiment),
-        )
-        .route(
-            "/v1/admin/autopilot/experiments/observations",
-            post(autopilot::record_experiment_observation),
-        )
-        .route(
-            "/v1/admin/autopilot/promotion-state",
-            post(autopilot::upsert_promotion_state),
-        )
-        .route(
-            "/v1/admin/autopilot/promotion-budget-guardrails",
-            post(autopilot::upsert_promotion_budget_guardrail),
-        )
-        .route(
-            "/v1/admin/autopilot/market-signals/city",
-            post(autopilot::upsert_city_market_signal),
-        )
-        .route(
-            "/v1/admin/autopilot/actions/{action_id}/approve",
-            post(autopilot::approve_action),
-        )
-        .route(
-            "/v1/admin/autopilot/actions/{action_id}/cancel",
-            post(autopilot::cancel_action),
-        )
-        .merge(ops_routes::router())
-        .route("/v1/admin/admission/passes", post(admission::issue_pass))
-        .route(
-            "/v1/admin/event-qr/campaigns",
-            get(concert_qr::list_campaigns).post(concert_qr::create_campaign),
-        )
-        .route("/v1/admin/event-qr/overview", get(concert_qr::overview))
-        .route(
-            "/v1/admin/event-qr/campaigns/{campaign_id}/revoke",
-            post(concert_qr::revoke_campaign),
-        )
-        .route(
-            "/v1/staff/event-qr/campaigns",
-            get(concert_qr::list_campaigns).post(concert_qr::create_campaign),
-        )
-        .route(
-            "/v1/staff/events/{slug}/dashboard",
-            get(fan_context::staff_event_dashboard),
-        )
-        .route("/v1/staff/event-qr/overview", get(concert_qr::overview))
-        .route(
-            "/v1/staff/event-qr/campaigns/{campaign_id}/revoke",
-            post(concert_qr::revoke_campaign),
-        )
-        .route("/v1/events/{slug}/check-in", post(concert_qr::check_in))
-        .route(
-            "/v1/admin/admission/passes/{public_reference}/revoke",
-            post(admission::revoke_pass),
-        )
-        .route("/v1/passes/claim", post(admission::claim_pass))
-        .route("/v1/me/pass", get(admission::my_pass))
-        .route("/v1/me/pass/qr", get(admission::my_pass_qr))
-        .route("/v1/staff/admission/redeem", post(admission::redeem_pass))
-        .layer(DefaultBodyLimit::max(MAX_PUBLIC_BODY_BYTES))
-        .with_state(state.clone())
+    routing::application_routes(state.clone())
         .layer(from_fn_with_state(state, enforce_privileged_namespace))
         .layer(middleware)
 }
 
 async fn enforce_privileged_namespace(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
+    let authorization = request
+        .extensions()
+        .get::<PrivilegedAuthorization>()
+        .copied();
     let authorized = if path.starts_with("/v1/admin/") {
-        state.ticketing.admin_authorized(request.headers())
+        authorization == Some(PrivilegedAuthorization::Admin)
     } else if path.starts_with("/v1/staff/") {
-        state.ticketing.operator_authorized(request.headers())
+        authorization == Some(PrivilegedAuthorization::Operator)
     } else if path.starts_with("/v1/commerce/") || path.starts_with("/v1/internal/") {
-        state.ticketing.commerce_authorized(request.headers())
+        authorization == Some(PrivilegedAuthorization::Commerce)
     } else {
         true
     };
@@ -807,16 +298,24 @@ async fn normalize_request_id(
         || path.starts_with("/v1/staff/")
         || path.starts_with("/v1/internal/")
         || path.starts_with("/v1/commerce/");
-    let authorized = if path.starts_with("/v1/admin/") {
-        state.ticketing.admin_authorized(request.headers())
-    } else if path.starts_with("/v1/staff/") {
-        state.ticketing.operator_authorized(request.headers())
-    } else if path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/") {
-        state.ticketing.commerce_authorized(request.headers())
-    } else {
-        false
-    };
-    if privileged && authorized {
+    let authorization =
+        if path.starts_with("/v1/admin/") && state.ticketing.admin_authorized(request.headers()) {
+            Some(PrivilegedAuthorization::Admin)
+        } else if path.starts_with("/v1/staff/")
+            && state.ticketing.operator_authorized(request.headers()).await
+        {
+            Some(PrivilegedAuthorization::Operator)
+        } else if (path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/"))
+            && state.ticketing.commerce_authorized(request.headers())
+        {
+            Some(PrivilegedAuthorization::Commerce)
+        } else {
+            None
+        };
+    if let Some(authorization) = authorization {
+        request.extensions_mut().insert(authorization);
+    }
+    if privileged && authorization.is_some() {
         let correlation = request
             .headers()
             .get(&X_CROWDRELAY_CORRELATION_ID)
@@ -911,6 +410,15 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_event_actions_persistence_failed_total Event conversion actions lost after bounded persistence failure.\n",
             "# TYPE crowdrelay_event_actions_persistence_failed_total counter\n",
             "crowdrelay_event_actions_persistence_failed_total {}\n",
+            "# HELP crowdrelay_legacy_area_claim_import_total Authorized calls to the pre-PostgreSQL AREA claim import compatibility path.\n",
+            "# TYPE crowdrelay_legacy_area_claim_import_total counter\n",
+            "crowdrelay_legacy_area_claim_import_total {}\n",
+            "# HELP crowdrelay_legacy_area_wallet_import_total Authorized calls to the pre-PostgreSQL AREA wallet import compatibility path.\n",
+            "# TYPE crowdrelay_legacy_area_wallet_import_total counter\n",
+            "crowdrelay_legacy_area_wallet_import_total {}\n",
+            "# HELP crowdrelay_legacy_static_staff_auth_total Requests authenticated with the deprecated global staff bearer instead of a device session.\n",
+            "# TYPE crowdrelay_legacy_static_staff_auth_total counter\n",
+            "crowdrelay_legacy_static_staff_auth_total {}\n",
             "# HELP crowdrelay_outbox_pending Current pending outbox events.\n",
             "# TYPE crowdrelay_outbox_pending gauge\n",
             "crowdrelay_outbox_pending {}\n",
@@ -960,6 +468,9 @@ async fn metrics(State(state): State<AppState>) -> Response {
         event_snapshot.persisted,
         event_snapshot.dropped,
         event_snapshot.persistence_failed,
+        http_snapshot.legacy_area_claim_imports,
+        http_snapshot.legacy_area_wallet_imports,
+        http_snapshot.legacy_static_staff_auth,
         ops_snapshot.outbox_pending,
         ops_snapshot.outbox_processing,
         ops_snapshot.outbox_dead,
@@ -1393,8 +904,6 @@ mod tests {
             load_pass: LoadAdmissionPass::new(Arc::clone(&repository)),
             redeem_pass: RedeemAdmissionPass::new(Arc::clone(&repository)),
             revoke_pass: RevokeAdmissionPass::new(repository),
-            admin_api_key_sha256: None,
-            staff_api_key_sha256: None,
             qr_signing_key: None,
             qr_ttl: Duration::from_secs(30),
             secure_cookies: false,
@@ -1437,9 +946,6 @@ mod tests {
             RedeemCoupon::new(repository),
             Url::parse("http://localhost:4321")?,
             false,
-            Some(sha2::Sha256::digest(b"test-commerce-api-key-1234567890").into()),
-            Some(sha2::Sha256::digest(b"test-staff-api-key-123456789012").into()),
-            Some(sha2::Sha256::digest(b"test-admin-api-key-123456789012").into()),
         ))
     }
 
@@ -1472,7 +978,7 @@ mod tests {
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://crowdrelay:crowdrelay@127.0.0.1:1/crowdrelay")?;
 
-        let concert_qr = ConcertQrState::new(workspace_id, database.clone(), None, None, None);
+        let concert_qr = ConcertQrState::new(workspace_id, database.clone(), None);
         let ticketing = TicketingState::new(
             workspace_id,
             database.clone(),

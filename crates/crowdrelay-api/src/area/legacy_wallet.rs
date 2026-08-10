@@ -24,6 +24,7 @@ pub async fn internal_import_legacy_wallet(
     if !state.ticketing.commerce_authorized(&headers) {
         return error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized.");
     }
+    crate::http_metrics().record_legacy_area_wallet_import();
     if !valid_idempotency_key(&headers) {
         return error_response(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "A valid Idempotency-Key is required.");
     }

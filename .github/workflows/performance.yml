@@ -1,0 +1,106 @@
+name: Runtime performance report
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: Requests in the bounded local benchmark
+        required: true
+        default: "800"
+      concurrency:
+        description: Concurrent HTTP workers
+        required: true
+        default: "24"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: crowdrelay
+          POSTGRES_USER: crowdrelay
+          POSTGRES_PASSWORD: crowdrelay-perf-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crowdrelay -d crowdrelay"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      CROWDRELAY_ENV: test
+      CROWDRELAY_BIND_ADDR: 127.0.0.1:8080
+      CROWDRELAY_DATABASE_URL: postgres://crowdrelay:crowdrelay-perf-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-perf-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_DATABASE_MAX_CONNECTIONS: 12
+      CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
+      CROWDRELAY_WORKSPACE_SLUG: example
+      CROWDRELAY_PUBLIC_SITE_BASE_URL: http://localhost:4321
+      CROWDRELAY_DEFAULT_COUNTRY_CODE: PL
+      CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
+      CROWDRELAY_REQUIRE_DOUBLE_OPT_IN: "false"
+      CROWDRELAY_BOOTSTRAP_JSON: >-
+        {"workspace_name":"CrowdRelay Performance","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"Performance","active":true,"smart_links":[{"slug":"perf","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+      RUST_LOG: warn
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Activate repository-pinned Rust toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Set up PostgreSQL 18 schema and workspace
+        run: cargo run --locked --package crowdrelay-worker -- setup
+      - name: Verify hot-path query/index compatibility
+        run: python3 scripts/query-plan-regression.py
+      - name: Build API once in release mode
+        run: cargo build --locked --release --package crowdrelay-api
+      - name: Start API
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          target/release/crowdrelay-api > artifacts/crowdrelay-api.log 2>&1 &
+          echo "$!" > artifacts/crowdrelay-api.pid
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8080/v1/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat artifacts/crowdrelay-api.log >&2
+          exit 1
+      - name: Run bounded runtime benchmark
+        env:
+          REQUESTS: ${{ inputs.requests }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+        run: |
+          python3 scripts/benchmark-http.py \
+            --requests "$REQUESTS" \
+            --concurrency "$CONCURRENCY" \
+            --output artifacts/http-benchmark.json
+      - name: Capture final Prometheus snapshot
+        if: always()
+        run: curl --fail --silent http://127.0.0.1:8080/metrics > artifacts/metrics.prom || true
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: crowdrelay-performance-${{ github.sha }}
+          path: |
+            artifacts/http-benchmark.json
+            artifacts/metrics.prom
+            artifacts/crowdrelay-api.log
+          if-no-files-found: warn
+          retention-days: 30

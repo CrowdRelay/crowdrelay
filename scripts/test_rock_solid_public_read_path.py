@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class RockSolidPublicReadPath(unittest.TestCase):
     def test_city_snapshot_and_stale_fallback(self):
         source = (ROOT / "crates/crowdrelay-api/src/acquisition.rs").read_text()
-        api_contract = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        api_contract = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text() + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text())
         self.assertIn("CITY_SNAPSHOT_MAX_AGE", source)
         self.assertIn("city refresh failed; serving previous snapshot", source)
         self.assertIn("stale-if-error=86400", source)

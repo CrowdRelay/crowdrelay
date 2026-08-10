@@ -185,9 +185,6 @@ async fn main() -> Result<()> {
         RedeemCoupon::new(referral_repository),
         config.public_site_base_url.clone(),
         config.environment.is_production(),
-        config.commerce_api_key_sha256,
-        config.admission_security.staff_api_key_sha256,
-        config.admission_security.admin_api_key_sha256,
     );
     let events = EventState::new(
         workspace_id,
@@ -204,8 +201,6 @@ async fn main() -> Result<()> {
         load_pass: LoadAdmissionPass::new(Arc::clone(&admission_repository)),
         redeem_pass: RedeemAdmissionPass::new(Arc::clone(&admission_repository)),
         revoke_pass: RevokeAdmissionPass::new(admission_repository),
-        admin_api_key_sha256: config.admission_security.admin_api_key_sha256,
-        staff_api_key_sha256: config.admission_security.staff_api_key_sha256,
         qr_signing_key: config.admission_security.qr_signing_key,
         qr_ttl: config.admission_security.qr_ttl,
         secure_cookies: config.environment.is_production(),
@@ -213,8 +208,6 @@ async fn main() -> Result<()> {
     let concert_qr = ConcertQrState::new(
         workspace_id,
         database.clone(),
-        config.admission_security.admin_api_key_sha256,
-        config.admission_security.staff_api_key_sha256,
         config.admission_security.qr_signing_key,
     );
     let ticketing = TicketingState::new(

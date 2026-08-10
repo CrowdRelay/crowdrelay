@@ -60,7 +60,7 @@ class AudienceIntelligenceContracts(unittest.TestCase):
         self.assertIn("orders.currency::text AS currency", revenue)
 
     def test_router_and_contract_are_wired(self):
-        router = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        router = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text() + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text())
         openapi = (ROOT / "openapi/openapi.yaml").read_text()
         required = (
             "/v1/admin/audience/overview",

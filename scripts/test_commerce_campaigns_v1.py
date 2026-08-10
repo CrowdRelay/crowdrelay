@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations/0027_merch_inventory_reward_campaigns.sql").read_text(encoding="utf-8")
 ONBOARDING = (ROOT / "migrations/0028_inventory_onboarding.sql").read_text(encoding="utf-8")
 COMMERCE = read_rust_module(ROOT, "crates/crowdrelay-api/src/commerce.rs")
-ROUTER = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text(encoding="utf-8")
+ROUTER = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text(encoding="utf-8") + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text(encoding="utf-8"))
 FLAGS = read_rust_module(ROOT, "crates/crowdrelay-api/src/ecosystem.rs")
 WORKER = read_rust_module(ROOT, "crates/crowdrelay-worker/src/draws.rs")
 OPENAPI = (ROOT / "openapi/openapi.yaml").read_text(encoding="utf-8")

@@ -10,7 +10,7 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
     def test_public_ledger_is_additive_and_no_shipping_pii(self):
         migration = (ROOT / 'migrations/0030_synesthesia_ecosystem.sql').read_text()
         api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
-        router = (ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text()
+        router = ((ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text() + (ROOT / 'crates/crowdrelay-api/src/routing.rs').read_text())
         for path in (
             '/v1/public/synesthesia/runs',
             '/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}',
@@ -47,7 +47,7 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
     def test_v4_handoff_is_idempotent_and_identity_safe(self):
         api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
         migration = (ROOT / 'migrations/0032_fan_context_synesthesia_handoff.sql').read_text()
-        router = (ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text()
+        router = ((ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text() + (ROOT / 'crates/crowdrelay-api/src/routing.rs').read_text())
         self.assertIn('/v1/me/synesthesia/link', router)
         self.assertIn('handoff_token_hash', migration)
         self.assertIn("AND (fan_id IS NULL OR fan_id = $3)", api)

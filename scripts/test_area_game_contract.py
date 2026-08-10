@@ -7,7 +7,7 @@ from rust_source_tree import read_rust_module
 
 ROOT = Path(__file__).resolve().parents[1]
 API = read_rust_module(ROOT, "crates/crowdrelay-api/src/area.rs")
-ROUTER = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+ROUTER = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text() + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text())
 MIGRATION = (ROOT / "migrations/0029_area_game_backend.sql").read_text()
 
 EXPECTED_DROPS = [

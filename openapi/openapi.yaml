@@ -19,6 +19,66 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/EcosystemMeta' }
+  /admin/staff/pairing-codes:
+    post:
+      operationId: createStaffPairingCode
+      summary: Mint a one-time staff pairing code
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStaffPairingCodeRequest' }
+      responses:
+        '201':
+          description: One-time code for a trusted staff-device QR.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffPairingCode' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+  /staff-pairing/exchange:
+    post:
+      operationId: exchangeStaffPairingCode
+      summary: Exchange a one-time pairing code for a revocable device session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExchangeStaffPairingCodeRequest' }
+      responses:
+        '201':
+          description: New per-device staff session. The bearer is returned only once.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffDeviceSessionCredential' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/staff/sessions:
+    get:
+      operationId: listStaffDeviceSessions
+      summary: List staff device sessions for revocation
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Recent staff device sessions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffDeviceSessionList' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/staff/sessions/{session_id}/revoke:
+    post:
+      operationId: revokeStaffDeviceSession
+      summary: Revoke one staff device session
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: session_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Device session revoked or already revoked. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
   /public/area/drops:
     get:
       operationId: listPublicAreaDrops
@@ -4166,6 +4226,58 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    CreateStaffPairingCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [displayName]
+      properties:
+        displayName: { type: string, minLength: 1, maxLength: 64 }
+        ttlMinutes: { type: integer, minimum: 1, maximum: 10, default: 5 }
+    StaffPairingCode:
+      type: object
+      additionalProperties: false
+      required: [version, role, displayName, pairingCode, expiresAt]
+      properties:
+        version: { type: integer, const: 2 }
+        role: { type: string, const: staff }
+        displayName: { type: string }
+        pairingCode: { type: string, minLength: 24, maxLength: 128 }
+        expiresAt: { type: integer, format: int64 }
+    ExchangeStaffPairingCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [pairingCode]
+      properties:
+        pairingCode: { type: string, minLength: 24, maxLength: 128 }
+    StaffDeviceSessionCredential:
+      type: object
+      additionalProperties: false
+      required: [version, role, displayName, bearerToken, sessionId, expiresAt]
+      properties:
+        version: { type: integer, const: 2 }
+        role: { type: string, const: staff }
+        displayName: { type: string }
+        bearerToken: { type: string, minLength: 24, writeOnly: true }
+        sessionId: { type: string, format: uuid }
+        expiresAt: { type: integer, format: int64 }
+    StaffDeviceSession:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, expiresAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        expiresAt: { type: string, format: date-time }
+        revokedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+    StaffDeviceSessionList:
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items: { $ref: '#/components/schemas/StaffDeviceSession' }
     EcosystemMeta:
       type: object
       additionalProperties: false

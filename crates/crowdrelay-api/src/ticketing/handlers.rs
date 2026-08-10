@@ -94,11 +94,6 @@ pub async fn admin_overview(
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !state.ticketing.operator_authorized(&headers) {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let event_slug = match EventSlug::parse(event_slug) {
         Ok(value) => value,
         Err(_) => return TicketingError::Invalid.response(request_id_value),

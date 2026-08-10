@@ -19,7 +19,6 @@ use url::Url;
 
 use crate::{
     IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, acquisition::fan_session_from_headers, request_id,
-    security::bearer_sha256_matches,
 };
 
 const REFERRAL_COOKIE: &str = "crowdrelay_referral";
@@ -35,9 +34,6 @@ pub struct ReferralState {
     redeem_coupon: RedeemCoupon,
     public_site_base_url: Url,
     secure_cookies: bool,
-    commerce_api_key_sha256: Option<[u8; 32]>,
-    staff_api_key_sha256: Option<[u8; 32]>,
-    admin_api_key_sha256: Option<[u8; 32]>,
 }
 
 impl ReferralState {
@@ -51,9 +47,6 @@ impl ReferralState {
         redeem_coupon: RedeemCoupon,
         public_site_base_url: Url,
         secure_cookies: bool,
-        commerce_api_key_sha256: Option<[u8; 32]>,
-        staff_api_key_sha256: Option<[u8; 32]>,
-        admin_api_key_sha256: Option<[u8; 32]>,
     ) -> Self {
         Self {
             workspace_id,
@@ -62,9 +55,6 @@ impl ReferralState {
             redeem_coupon,
             public_site_base_url,
             secure_cookies,
-            commerce_api_key_sha256,
-            staff_api_key_sha256,
-            admin_api_key_sha256,
         }
     }
 }
@@ -181,14 +171,6 @@ pub async fn redeem_coupon(
     payload: Result<Json<RedeemCouponRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    let authorized = bearer_sha256_matches(&headers, state.referrals.commerce_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.referrals.staff_api_key_sha256)
-        || bearer_sha256_matches(&headers, state.referrals.admin_api_key_sha256);
-    if !authorized {
-        return Problem::unauthorized(request_id_value)
-            .private()
-            .into_response();
-    }
     let Json(payload) = match payload {
         Ok(payload) => payload,
         Err(rejection) => {

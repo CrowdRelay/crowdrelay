@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicDrawStatusContracts(unittest.TestCase):
     def test_public_status_route_is_additive_and_documented(self):
-        router = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        router = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text() + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text())
         spec_text = (ROOT / "openapi/openapi.yaml").read_text()
         self.assertIn('"/v1/public/proofs/draws/{draw_slug}/status"', router)
         self.assertIn("/public/proofs/draws/{draw_slug}/status:", spec_text)

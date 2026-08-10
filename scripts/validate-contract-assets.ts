@@ -427,9 +427,6 @@ function validateJsonAssets(): number {
       .map((name) => join("n8n", name)),
     "deploy/bootstrap.example.json",
     "deploy/webhook-secrets.example.json",
-    "integration/virya/package-additions.json",
-    "packages/crowdrelay-js/package.json",
-    "packages/crowdrelay-js/tsconfig.json",
   ];
 
   for (const path of jsonFiles) parseJson<unknown>(path);
@@ -450,22 +447,12 @@ function validateN8nWorkflows(): void {
   }
 }
 
-function validateClientMirror(): void {
-  const packageClient = readText("packages/crowdrelay-js/src/index.ts").replaceAll("\r\n", "\n");
-  const viryaClient = readText("integration/virya/src/lib/crowdrelay-client.ts").replaceAll("\r\n", "\n");
-  if (packageClient !== viryaClient) {
-    failValidation(
-      "integration/virya/src/lib/crowdrelay-client.ts differs from packages/crowdrelay-js/src/index.ts",
-    );
-  }
-}
 
 const openApiPathCount = validateOpenApi();
 const jsonAssetCount = validateJsonAssets();
 validateBootstrap();
 validateN8nWorkflows();
-validateClientMirror();
 
 console.log(
-  `validated OpenAPI (${openApiPathCount} paths), ${jsonAssetCount} JSON assets, bootstrap relations, n8n exports, and the Virya client mirror`,
+  `validated OpenAPI (${openApiPathCount} paths), ${jsonAssetCount} JSON assets, bootstrap relations, and n8n exports`,
 );

@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 const API_VERSION: &str = "1";
-const SCHEMA_VERSION: u32 = 37;
+const SCHEMA_VERSION: u32 = 38;
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
 
 #[derive(Debug, Serialize)]
@@ -30,6 +30,7 @@ pub async fn get() -> impl IntoResponse {
         ("synesthesia_runs_v1", true),
         ("synesthesia_rewards_v1", true),
         ("ticketing_v1", true),
+        ("staff_device_sessions_v2", true),
         ("viryaos_ops_v1", true),
     ]);
     (
@@ -52,6 +53,6 @@ mod tests {
 
     #[test]
     fn compatibility_contract_tracks_latest_migration() {
-        assert_eq!(SCHEMA_VERSION, 37);
+        assert_eq!(SCHEMA_VERSION, 38);
     }
 }

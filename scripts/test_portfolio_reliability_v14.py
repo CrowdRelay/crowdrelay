@@ -21,9 +21,8 @@ class PortfolioReliabilityV14(unittest.TestCase):
         self.assertIn("panic.file", OBS)
         self.assertIn("panic.line", OBS)
 
-    def test_portfolio_docs_are_linked(self):
+    def test_architecture_doc_is_linked(self):
         self.assertIn("docs/ARCHITECTURE.md", README)
-        self.assertIn("docs/RELIABILITY.md", README)
 
 
 if __name__ == "__main__":

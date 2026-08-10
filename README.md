@@ -23,10 +23,10 @@ The operator owns the data. Public requests never send emails or call external p
 * reward campaigns with reserved merch, weighted winner selection, and fulfillment tracking;
 * short-lived, revocable event attendance QR codes;
 * HMAC-signed webhooks, retries, idempotency, replay protection, and n8n integrations;
-* role-scoped admin, staff, service, and commerce API namespaces with separate bearer credentials;
+* role-scoped admin, staff, service, and commerce API namespaces; staff pairing issues short-lived one-time codes and revocable per-device bearer sessions, while the legacy static staff bearer remains compatibility-only and is metered for retirement;
 * optional Sigstore Rekor transparency-log anchoring for draw and audit receipts;
 * PostgreSQL, migrations, health checks, metrics, structured logging, and graceful shutdown;
-* a dependency-free TypeScript client and an OpenAPI 3.1 contract.
+* an OpenAPI 3.1 contract used as the canonical cross-repository API boundary.
 
 ## ViryaOS Autopilot
 
@@ -49,7 +49,6 @@ PostgreSQL 18 is the persistence baseline. The local stack uses its asynchronous
 | `crowdrelay-api`          | HTTP API exposed under the `/v1` prefix                                                 |
 | `crowdrelay-worker run`   | outbox processing, reminders, retention, prize draws, and event synchronization         |
 | `crowdrelay-worker setup` | migrations and idempotent workspace bootstrap                                           |
-| `packages/crowdrelay-js`  | TypeScript client for frontend and backend applications                                 |
 | `openapi/openapi.yaml`    | complete request, response, and authentication contract                                 |
 | `crowdrelayctl`           | local deployment, SHA pinning, verification, logs, backup hooks, and SSH-based shipping |
 
@@ -63,7 +62,7 @@ PostgreSQL 18 is the persistence baseline. The local stack uses its asynchronous
 | Cities           | `GET /v1/public/cities`                                                                                                                           |
 | Events           | `GET /v1/public/events`, `/public/events/{slug}`, and the `view`, `ticket`, `listen`, `calendar.ics`, and `share` actions                         |
 | Interest         | `POST /v1/events/{slug}/interest`, `GET /v1/me/events`                                                                                            |
-| Check-in         | `POST /v1/events/{slug}/check-in`                                                                                                                 |
+| Check-in         | `POST /v1/events/{slug}/check-in`                                                            |
 | Admin QR         | `GET /v1/admin/event-qr/overview`, `GET/POST /v1/admin/event-qr/campaigns`, `POST .../{id}/revoke`                                                |
 | Admission Passes | admin issue/revoke, fan claim/status/QR, and staff redemption under `/v1/admin/admission`, `/v1/passes`, `/v1/me/pass`, and `/v1/staff/admission` |
 | Ticketing        | public sale/reservation/status, admin configuration/overview, and authenticated Stripe reconciliation under `/v1/public`, `/v1/admin`, and `/v1/internal` |
@@ -72,7 +71,7 @@ PostgreSQL 18 is the persistence baseline. The local stack uses its asynchronous
 | Commerce         | staff/admin inventory + reward campaigns and `POST /v1/commerce/coupons/redeem`                                                                  |
 | Synesthesia      | `POST /v1/public/synesthesia/runs`, ordered room completion, album completion and five-CD draw entry                                             |
 
-Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin and staff credentials cannot call service routes, while service credentials cannot call operator routes. Exact schemas and error codes are documented in the OpenAPI contract. Architecture, reliability, inventory and external-proof operations are documented under `docs/`.
+Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin credentials and staff device sessions cannot call service routes, while service credentials cannot call operator routes. The legacy static staff bearer is accepted only as a measured compatibility fallback until production telemetry confirms zero use. Exact schemas and error codes are documented in the OpenAPI contract. The maintained architecture documentation lives under `docs/`.
 
 ### Local Development
 
@@ -103,15 +102,8 @@ Apache-2.0. See `LICENSE`.
 
 ## Synesthesia eligibility plane
 
-Migration `0030_synesthesia_ecosystem.sql` adds an isolated run/completion ledger. A completed run may create one draw entry per normalized e-mail for campaign `virya-synesthesia-album-v1`. This endpoint does not change `fan_consents`, enqueue mail, collect shipping PII or award referral/check-in weight. `synesthesia_completion` reward campaigns are server-locked to five winners, one physical item each and one equal entry per candidate; normal inventory reservation and Proof-of-Fair code is reused.
-
-## Optional external proofs
-
-CrowdRelay can create public SHA-256 draw receipts and Merkle commitments for
-append-only audit records, then optionally publish signed commitments to the
-Sigstore Rekor transparency log. PostgreSQL remains authoritative and Rekor
-availability never enters a critical path. See `docs/EXTERNAL_PROOFS.md`.
+Synesthesia uses an isolated run/completion ledger. A completed run may create one draw entry per normalized e-mail for campaign `virya-synesthesia-album-v1`. This endpoint does not change `fan_consents`, enqueue mail, collect shipping PII or award referral/check-in weight. `synesthesia_completion` reward campaigns are server-locked to five winners, one physical item each and one equal entry per candidate; normal inventory reservation and Proof-of-Fair code is reused.
 
 ## Engineering documentation
 
-Architecture, ecosystem boundaries and reliability: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/VIRYA_ECOSYSTEM.md`](docs/VIRYA_ECOSYSTEM.md) and [`docs/RELIABILITY.md`](docs/RELIABILITY.md).
+Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
