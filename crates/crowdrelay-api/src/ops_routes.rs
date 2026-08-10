@@ -1,0 +1,27 @@
+use axum::{
+    Router,
+    routing::{get, post},
+};
+
+pub(crate) fn router() -> Router<crate::AppState> {
+    Router::new()
+        .route("/v1/admin/ops/summary", get(crate::ops::summary))
+        .route(
+            "/v1/admin/ops/operations/{request_id}",
+            get(crate::ops::operation_timeline),
+        )
+        .route("/v1/admin/ops/outbox", get(crate::ops::list_outbox))
+        .route("/v1/admin/ops/deliveries", get(crate::ops::list_deliveries))
+        .route(
+            "/v1/admin/ops/deliveries/{delivery_id}",
+            get(crate::ops::delivery_details),
+        )
+        .route(
+            "/v1/admin/ops/outbox/{event_id}/retry",
+            post(crate::ops::retry_outbox),
+        )
+        .route(
+            "/v1/admin/ops/deliveries/{delivery_id}/retry",
+            post(crate::ops::retry_delivery),
+        )
+}

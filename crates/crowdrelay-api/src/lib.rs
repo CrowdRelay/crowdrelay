@@ -67,6 +67,7 @@ mod http_metrics;
 mod meta;
 mod mobile_fan;
 mod ops;
+mod ops_routes;
 mod proofs;
 mod referrals;
 mod releases;
@@ -715,25 +716,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             "/v1/admin/autopilot/actions/{action_id}/cancel",
             post(autopilot::cancel_action),
         )
-        .route("/v1/admin/ops/summary", get(ops::summary))
-        .route(
-            "/v1/admin/ops/operations/{request_id}",
-            get(ops::operation_timeline),
-        )
-        .route("/v1/admin/ops/outbox", get(ops::list_outbox))
-        .route("/v1/admin/ops/deliveries", get(ops::list_deliveries))
-        .route(
-            "/v1/admin/ops/deliveries/{delivery_id}",
-            get(ops::delivery_details),
-        )
-        .route(
-            "/v1/admin/ops/outbox/{event_id}/retry",
-            post(ops::retry_outbox),
-        )
-        .route(
-            "/v1/admin/ops/deliveries/{delivery_id}/retry",
-            post(ops::retry_delivery),
-        )
+        .merge(ops_routes::router())
         .route("/v1/admin/admission/passes", post(admission::issue_pass))
         .route(
             "/v1/admin/event-qr/campaigns",
