@@ -220,6 +220,8 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         infra = INFRA_TEXT
         worker = WORKER.read_text()
         performance = (DOMAIN / "performance.rs").read_text()
+        self.assertNotIn("isfinite(", migration)
+        self.assertIn("'Infinity'::double precision", migration)
         self.assertIn("viryaos_autopilot_measurements", migration)
         self.assertIn("viryaos_autopilot_measurements_due_idx", migration)
         self.assertIn("measurement_id uuid", migration)

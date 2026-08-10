@@ -396,7 +396,9 @@ CREATE TABLE viryaos_autopilot_measurements (
     )),
     subject_id uuid NOT NULL,
     action_finished_at timestamptz NOT NULL,
-    baseline_value double precision NOT NULL CHECK (isfinite(baseline_value) AND baseline_value >= 0),
+    baseline_value double precision NOT NULL CHECK (
+        baseline_value >= 0 AND baseline_value < 'Infinity'::double precision
+    ),
     due_at timestamptz NOT NULL,
     status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'succeeded', 'failed')),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
@@ -431,8 +433,16 @@ CREATE TABLE viryaos_autopilot_outcomes (
     action_id uuid,
     measurement_id uuid,
     metric_key text NOT NULL CHECK (btrim(metric_key) <> '' AND char_length(metric_key) <= 96),
-    observed_value double precision NOT NULL CHECK (isfinite(observed_value)),
-    baseline_value double precision CHECK (baseline_value IS NULL OR isfinite(baseline_value)),
+    observed_value double precision NOT NULL CHECK (
+        observed_value > '-Infinity'::double precision
+        AND observed_value < 'Infinity'::double precision
+    ),
+    baseline_value double precision CHECK (
+        baseline_value IS NULL OR (
+            baseline_value > '-Infinity'::double precision
+            AND baseline_value < 'Infinity'::double precision
+        )
+    ),
     effect_assessment text CHECK (effect_assessment IS NULL OR effect_assessment IN ('improved', 'neutral', 'worsened')),
     delta_basis_points integer,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
