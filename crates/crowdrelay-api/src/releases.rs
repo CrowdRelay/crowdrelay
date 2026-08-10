@@ -351,6 +351,37 @@ async fn announce_release_inner(
     .await
     .map_err(|_| AnnounceReleaseError::Unavailable)?;
 
+    // Feed the trusted release fact into ViryaOS Content Supply inside the
+    // same transaction. This is a projection only; Rust policy still decides
+    // which artifacts are due and n8n only executes the resulting request.
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_content_sources(
+            workspace_id,source_kind,source_key,title,occurred_at,expires_at,metadata,active
+        ) VALUES(
+            $1,'release',$2,$3,
+            (($4::date)::timestamp AT TIME ZONE 'UTC'),
+            (($4::date)::timestamp AT TIME ZONE 'UTC') + INTERVAL '45 days',
+            $5,true
+        )
+        ON CONFLICT(workspace_id,source_kind,source_key) DO UPDATE SET
+            title=EXCLUDED.title,
+            occurred_at=EXCLUDED.occurred_at,
+            expires_at=EXCLUDED.expires_at,
+            metadata=EXCLUDED.metadata,
+            active=true,
+            version=viryaos_content_sources.version+1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(format!("{}:{}", release.source, release.id))
+    .bind(&release.title)
+    .bind(&release.release_date)
+    .bind(&release_payload)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| AnnounceReleaseError::Unavailable)?;
+
     let response = AnnounceReleaseResponse {
         accepted: true,
         duplicate: false,

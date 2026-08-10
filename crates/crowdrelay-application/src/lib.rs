@@ -22,6 +22,7 @@
 //! the redirect and event-discovery fast paths.
 
 pub mod admission;
+pub mod autopilot;
 pub mod cache;
 pub mod events;
 pub mod fan_lifecycle;

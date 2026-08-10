@@ -321,9 +321,11 @@ dependencies = [
  "async-trait",
  "crowdrelay-domain",
  "serde",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -368,6 +370,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "crowdrelay-application",
  "crowdrelay-domain",
  "crowdrelay-infra",
  "getrandom 0.4.3",

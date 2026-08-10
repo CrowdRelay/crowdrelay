@@ -41,6 +41,8 @@ const CLICK_FLUSH_INTERVAL_MS_KEY: &str = "CROWDRELAY_CLICK_FLUSH_INTERVAL_MS";
 const COMMERCE_API_KEY: &str = "CROWDRELAY_COMMERCE_API_KEY";
 const EVENT_REMINDER_OFFSETS_MINUTES_KEY: &str = "CROWDRELAY_EVENT_REMINDER_OFFSETS_MINUTES";
 const EVENT_REMINDER_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_EVENT_REMINDER_POLL_INTERVAL_MS";
+const AUTOPILOT_ENABLED_KEY: &str = "CROWDRELAY_AUTOPILOT_ENABLED";
+const AUTOPILOT_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_AUTOPILOT_POLL_INTERVAL_MS";
 const ADMIN_API_KEY_KEY: &str = "CROWDRELAY_ADMIN_API_KEY";
 const STAFF_API_KEY_KEY: &str = "CROWDRELAY_STAFF_API_KEY";
 const QR_SIGNING_SECRET_KEY: &str = "CROWDRELAY_QR_SIGNING_SECRET";
@@ -76,6 +78,9 @@ const DEFAULT_EVENT_REMINDER_OFFSETS_MINUTES: &str = "1440,120";
 const DEFAULT_EVENT_REMINDER_POLL_INTERVAL_MS: u64 = 30_000;
 const MIN_EVENT_REMINDER_POLL_INTERVAL_MS: u64 = 1_000;
 const MAX_EVENT_REMINDER_POLL_INTERVAL_MS: u64 = 600_000;
+const DEFAULT_AUTOPILOT_POLL_INTERVAL_MS: u64 = 300_000;
+const MIN_AUTOPILOT_POLL_INTERVAL_MS: u64 = 60_000;
+const MAX_AUTOPILOT_POLL_INTERVAL_MS: u64 = 3_600_000;
 const MAX_EVENT_REMINDER_OFFSETS: usize = 8;
 const MAX_EVENT_REMINDER_OFFSET_MINUTES: u32 = 43_200;
 const DEFAULT_ADMIN_MEMBER_EMAIL: &str = "admin@example.invalid";
@@ -107,6 +112,8 @@ const KNOWN_KEYS: &[&str] = &[
     COMMERCE_API_KEY,
     EVENT_REMINDER_OFFSETS_MINUTES_KEY,
     EVENT_REMINDER_POLL_INTERVAL_MS_KEY,
+    AUTOPILOT_ENABLED_KEY,
+    AUTOPILOT_POLL_INTERVAL_MS_KEY,
     ADMIN_API_KEY_KEY,
     STAFF_API_KEY_KEY,
     QR_SIGNING_SECRET_KEY,
@@ -134,6 +141,8 @@ pub struct Config {
     pub commerce_api_key_sha256: Option<[u8; 32]>,
     pub event_reminder_offsets_minutes: Vec<u32>,
     pub event_reminder_poll_interval: Duration,
+    pub autopilot_enabled: bool,
+    pub autopilot_poll_interval: Duration,
     pub admission_security: AdmissionSecurityConfig,
     /// Derived AEAD key for sensitive idempotency response replay.
     pub response_encryption_key: SensitiveResponseKey,
@@ -214,6 +223,18 @@ impl Config {
             MIN_EVENT_REMINDER_POLL_INTERVAL_MS,
             MAX_EVENT_REMINDER_POLL_INTERVAL_MS,
         )?;
+        let autopilot_enabled = parse_bool(
+            values.get(AUTOPILOT_ENABLED_KEY),
+            AUTOPILOT_ENABLED_KEY,
+            false,
+        )?;
+        let autopilot_poll_interval = parse_bounded_duration(
+            values.get(AUTOPILOT_POLL_INTERVAL_MS_KEY),
+            AUTOPILOT_POLL_INTERVAL_MS_KEY,
+            DEFAULT_AUTOPILOT_POLL_INTERVAL_MS,
+            MIN_AUTOPILOT_POLL_INTERVAL_MS,
+            MAX_AUTOPILOT_POLL_INTERVAL_MS,
+        )?;
         let admission_security = parse_admission_security(&values, environment.is_production())?;
         let response_encryption_key = parse_response_encryption_key(
             values.get(RESPONSE_ENCRYPTION_SECRET_KEY),
@@ -248,6 +269,8 @@ impl Config {
             commerce_api_key_sha256,
             event_reminder_offsets_minutes,
             event_reminder_poll_interval,
+            autopilot_enabled,
+            autopilot_poll_interval,
             admission_security,
             response_encryption_key,
             previous_response_encryption_key,

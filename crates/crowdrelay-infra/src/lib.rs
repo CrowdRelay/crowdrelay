@@ -22,6 +22,7 @@
 
 pub mod acquisition;
 pub mod admission;
+pub mod autopilot;
 pub mod config;
 pub mod database;
 pub mod events;

@@ -19,8 +19,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use crowdrelay_infra::{config::Config, database, observability};
+use crowdrelay_domain::WorkspaceId;
+use crowdrelay_infra::{
+    autopilot::PostgresAutopilotRepository, config::Config, database, observability,
+};
 use crowdrelay_worker::{
+    autopilot::AutopilotWorker,
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
@@ -34,6 +38,7 @@ use tokio::{
     sync::watch,
     time::{Instant, MissedTickBehavior, interval, timeout, timeout_at},
 };
+use uuid::Uuid;
 
 const DATABASE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const WEBHOOK_SECRETS_FILE_KEY: &str = "CROWDRELAY_WEBHOOK_SECRETS_FILE";
@@ -204,11 +209,23 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         tracing::info!("weighted draws are disabled by configuration");
         None
     };
+    let autopilot_worker = if config.autopilot_enabled {
+        let workspace_id = trusted_workspace_id(&database, config).await?;
+        Some(AutopilotWorker::new(
+            PostgresAutopilotRepository::new(database.clone(), &config.database),
+            workspace_id,
+            config.autopilot_poll_interval,
+        ))
+    } else {
+        tracing::info!("ViryaOS Autopilot is disabled by configuration");
+        None
+    };
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
     let event_sync_shutdown = shutdown_receiver.clone();
     let draw_shutdown = shutdown_receiver.clone();
+    let autopilot_shutdown = shutdown_receiver.clone();
     let mut outbox_task = tokio::spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
     });
@@ -225,6 +242,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         match weighted_draw_worker {
             Some(worker) => worker.run(draw_shutdown).await,
             None => wait_for_shutdown(draw_shutdown).await,
+        }
+    });
+    let mut autopilot_task = tokio::spawn(async move {
+        match autopilot_worker {
+            Some(worker) => worker.run(autopilot_shutdown).await,
+            None => wait_for_shutdown(autopilot_shutdown).await,
         }
     });
 
@@ -255,6 +278,10 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             result = &mut draw_task => {
                 result.context("weighted draw worker task failed")?;
                 bail!("weighted draw worker stopped before shutdown was requested");
+            }
+            result = &mut autopilot_task => {
+                result.context("ViryaOS Autopilot worker task failed")?;
+                bail!("ViryaOS Autopilot worker stopped before shutdown was requested");
             }
             () = &mut shutdown => {
                 tracing::info!("shutdown requested");
@@ -302,13 +329,33 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         await_worker_shutdown(event_sync_task, "event sync worker", shutdown_deadline).await;
     let draw_result =
         await_worker_shutdown(draw_task, "weighted draw worker", shutdown_deadline).await;
+    let autopilot_result = await_worker_shutdown(
+        autopilot_task,
+        "ViryaOS Autopilot worker",
+        shutdown_deadline,
+    )
+    .await;
     outbox_result?;
     reminder_result?;
     retention_result?;
     event_sync_result?;
     draw_result?;
+    autopilot_result?;
 
     Ok(())
+}
+
+async fn trusted_workspace_id(database: &PgPool, config: &Config) -> Result<WorkspaceId> {
+    let id = timeout(
+        config.database.operation_timeout,
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM workspaces WHERE slug = $1")
+            .bind(config.workspace_slug.as_str())
+            .fetch_optional(database),
+    )
+    .await
+    .context("workspace lookup timed out")??
+    .with_context(|| format!("workspace `{}` does not exist", config.workspace_slug))?;
+    Ok(WorkspaceId::from_uuid(id))
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {

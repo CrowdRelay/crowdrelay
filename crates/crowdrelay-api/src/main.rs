@@ -33,6 +33,7 @@ use crowdrelay_application::{
 use crowdrelay_infra::{
     acquisition::{ClickBuffer, PostgresAcquisitionRepository},
     admission::PostgresAdmissionRepository,
+    autopilot::PostgresAutopilotRepository,
     config::Config,
     database,
     events::{EventActionBuffer, PostgresEventRepository},
@@ -238,6 +239,7 @@ async fn main() -> Result<()> {
         database.clone(),
         config.database.operation_timeout,
     );
+    let autopilot = PostgresAutopilotRepository::new(database.clone(), &config.database);
     let http_config = HttpConfig::new(config.allowed_origins.clone())
         .context("configured CORS origin is not a valid HTTP header value")?;
     let app = crowdrelay_api::router(
@@ -252,6 +254,8 @@ async fn main() -> Result<()> {
             fan_lifecycle,
             ticketing,
             ops,
+            autopilot,
+            config.autopilot_enabled,
         ),
         http_config,
     );

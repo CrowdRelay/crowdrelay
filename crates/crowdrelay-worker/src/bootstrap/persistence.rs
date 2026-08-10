@@ -28,6 +28,8 @@ async fn bootstrap_inner(
         upsert_workspace(&mut transaction, workspace_slug, &spec.workspace_name).await?;
     changes.workspaces = u64::from(workspace_changed);
 
+    ensure_autopilot_policies(&mut transaction, workspace_id).await?;
+
     for city in &spec.cities {
         let (city_id, city_changed) = upsert_city(&mut transaction, city).await?;
         changes.cities = changes.cities.saturating_add(u64::from(city_changed));
@@ -161,6 +163,38 @@ async fn upsert_workspace(
         .await
         .map_err(|_| BootstrapError::Database)?;
     Ok((id, false))
+}
+
+async fn ensure_autopilot_policies(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> Result<(), BootstrapError> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_policies (workspace_id, context)
+        SELECT $1, context.name
+        FROM (VALUES
+            ('ticket_yield'),
+            ('fan_lifecycle'),
+            ('campaign_lifecycle'),
+            ('merchandising'),
+            ('merch_pricing'),
+            ('merch_bundle'),
+            ('booking_opportunity'),
+            ('outreach'),
+            ('content_supply'),
+            ('promotion_budget'),
+            ('experimentation'),
+            ('show_operations')
+        ) AS context(name)
+        ON CONFLICT (workspace_id, context) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| BootstrapError::Database)?;
+    Ok(())
 }
 
 async fn upsert_city(

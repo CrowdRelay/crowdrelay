@@ -303,13 +303,20 @@ impl PgOutboxStore {
                 .and_then(|fan| fan.get("id"))
                 .and_then(Value::as_str)
                 .and_then(|value| Uuid::parse_str(value).ok()),
+            "viryaos.fan_lifecycle.message_requested" => payload
+                .get("fan_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok()),
             _ => return Ok(true),
         };
         let Some(fan_id) = fan_id else {
             return Ok(false);
         };
 
-        if event_type == "event.announcement_due" {
+        if matches!(
+            event_type,
+            "event.announcement_due" | "viryaos.fan_lifecycle.message_requested"
+        ) {
             return sqlx::query_scalar::<_, bool>(
                 r#"
                 SELECT EXISTS (

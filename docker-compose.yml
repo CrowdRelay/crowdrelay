@@ -1,12 +1,22 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     env_file:
       - ${CROWDRELAY_ENV_FILE:-.env}
+    command:
+      - "postgres"
+      - "-c"
+      - "io_method=worker"
+      - "-c"
+      - "io_workers=${CROWDRELAY_POSTGRES_IO_WORKERS:-3}"
+      - "-c"
+      - "effective_io_concurrency=${CROWDRELAY_POSTGRES_EFFECTIVE_IO_CONCURRENCY:-16}"
+      - "-c"
+      - "maintenance_io_concurrency=${CROWDRELAY_POSTGRES_MAINTENANCE_IO_CONCURRENCY:-16}"
     ports:
       - "127.0.0.1:${CROWDRELAY_POSTGRES_PORT:-5432}:5432"
     volumes:
-      - crowdrelay_postgres:/var/lib/postgresql/data
+      - crowdrelay_postgres18:/var/lib/postgresql
     healthcheck:
       test:
         [
@@ -93,4 +103,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  crowdrelay_postgres:
+  crowdrelay_postgres18:

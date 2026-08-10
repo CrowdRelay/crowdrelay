@@ -21,4 +21,5 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 crowdrelay-domain = { path = "../crowdrelay-domain" }
+crowdrelay-application = { path = "../crowdrelay-application" }
 crowdrelay-infra = { path = "../crowdrelay-infra" }

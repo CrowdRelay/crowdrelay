@@ -47,6 +47,11 @@ impl OpsState {
     pub(crate) async fn metrics_snapshot(&self) -> Result<OpsMetricsSnapshot, OpsError> {
         run_with_timeout(self.operation_timeout, load_metrics_snapshot(self)).await
     }
+
+    #[must_use]
+    pub(crate) const fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -54,7 +59,29 @@ pub struct OpsSummary {
     outbox: QueueSummary,
     deliveries: QueueSummary,
     http: HttpRequestSummary,
+    database: DatabaseRuntimeSummary,
     release: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatabaseRuntimeSummary {
+    server_version_num: i32,
+    io_method: Option<String>,
+    io_workers: Option<i32>,
+    io_max_concurrency: Option<i32>,
+    effective_io_concurrency: Option<i32>,
+    maintenance_io_concurrency: Option<i32>,
+    async_io_active: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct DatabaseRuntimeRow {
+    server_version_num: i32,
+    io_method: Option<String>,
+    io_workers: Option<i32>,
+    io_max_concurrency: Option<i32>,
+    effective_io_concurrency: Option<i32>,
+    maintenance_io_concurrency: Option<i32>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -934,6 +961,34 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
     .await
     .map_err(OpsError::sqlx)?;
 
+    let database = sqlx::query_as::<_, DatabaseRuntimeRow>(
+        r#"
+        SELECT
+            current_setting('server_version_num')::integer AS server_version_num,
+            current_setting('io_method', true) AS io_method,
+            NULLIF(current_setting('io_workers', true), '')::integer AS io_workers,
+            NULLIF(current_setting('io_max_concurrency', true), '')::integer AS io_max_concurrency,
+            NULLIF(current_setting('effective_io_concurrency', true), '')::integer
+                AS effective_io_concurrency,
+            NULLIF(current_setting('maintenance_io_concurrency', true), '')::integer
+                AS maintenance_io_concurrency
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)?;
+    let database = DatabaseRuntimeSummary {
+        server_version_num: database.server_version_num,
+        async_io_active: database.server_version_num >= 180_000
+            && database.effective_io_concurrency.unwrap_or_default() > 0
+            && database.io_method.as_deref() != Some("sync"),
+        io_method: database.io_method,
+        io_workers: database.io_workers,
+        io_max_concurrency: database.io_max_concurrency,
+        effective_io_concurrency: database.effective_io_concurrency,
+        maintenance_io_concurrency: database.maintenance_io_concurrency,
+    };
+
     Ok(OpsSummary {
         outbox: QueueSummary {
             pending: row.outbox_pending,
@@ -952,6 +1007,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             oldest_pending_seconds: row.delivery_oldest_pending_seconds,
         },
         http: http_request_summary(crate::http_metrics().snapshot()),
+        database,
         release: option_env!("CROWDRELAY_RELEASE")
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_owned(),

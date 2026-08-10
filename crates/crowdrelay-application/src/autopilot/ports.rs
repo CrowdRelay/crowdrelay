@@ -1,0 +1,230 @@
+//! Infrastructure ports used by Autopilot evaluation, execution and measurement.
+
+use async_trait::async_trait;
+use crowdrelay_domain::{
+    AutopilotActionId, AutopilotMeasurementId, WorkspaceId,
+    audience_lifecycle::FanLifecycleSnapshot,
+    booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
+    campaign_lifecycle::EventCampaignSnapshot,
+    content_supply::ContentSupplySnapshot,
+    experimentation::ExperimentSnapshot,
+    merch_bundle::MerchBundleSnapshot,
+    merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
+    outreach::OutreachSnapshot,
+    performance::{EffectDirection, EffectResult, assess_effect},
+    pricing::TicketYieldSnapshot,
+    promotion::PromotionPerformanceSnapshot,
+    show_operations::ShowTaskSnapshot,
+};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+
+use super::model::{
+    AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, DecisionCandidate,
+};
+use crate::RepositoryError;
+
+#[async_trait]
+pub trait AutopilotDecisionRepository: Send + Sync {
+    async fn load_policies(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<AutopilotPolicy>, RepositoryError>;
+
+    async fn load_ticket_yield_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<TicketYieldSnapshot>, RepositoryError>;
+
+    async fn load_fan_lifecycle_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<FanLifecycleSnapshot>, RepositoryError>;
+
+    async fn load_event_campaign_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<EventCampaignSnapshot>, RepositoryError>;
+
+    async fn load_merch_inventory_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<MerchInventorySnapshot>, RepositoryError>;
+
+    async fn load_merch_price_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<MerchPriceSnapshot>, RepositoryError>;
+
+    async fn load_merch_bundle_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<MerchBundleSnapshot>, RepositoryError>;
+
+    async fn load_city_opportunity_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<CityOpportunitySnapshot>, RepositoryError>;
+
+    async fn load_booking_target_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BookingTargetSnapshot>, RepositoryError>;
+
+    async fn load_outreach_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<OutreachSnapshot>, RepositoryError>;
+
+    async fn load_content_supply_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ContentSupplySnapshot>, RepositoryError>;
+
+    async fn load_experiment_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ExperimentSnapshot>, RepositoryError>;
+
+    async fn load_show_task_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ShowTaskSnapshot>, RepositoryError>;
+
+    async fn load_promotion_performance_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PromotionPerformanceSnapshot>, RepositoryError>;
+
+    /// Persists the decision and, for executable dispositions, creates exactly
+    /// one durable action unless an equivalent action is already in flight.
+    async fn persist_candidate(
+        &self,
+        workspace_id: WorkspaceId,
+        candidate: &DecisionCandidate,
+    ) -> Result<CandidatePersistence, RepositoryError>;
+}
+
+/// Durable execution port. Kept separate from decision snapshot access so the
+/// evaluator cannot accidentally grow side-effect responsibilities.
+#[async_trait]
+pub trait AutopilotActionRepository: Send + Sync {
+    async fn claim_due_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAutopilotAction>, RepositoryError>;
+
+    async fn execute_action(
+        &self,
+        workspace_id: WorkspaceId,
+        action: &ClaimedAutopilotAction,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    async fn fail_action(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: AutopilotActionId,
+        error_kind: &'static str,
+        retryable: bool,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutopilotMeasurementKind {
+    TicketRevenue72h,
+    MerchGrossProxy7d,
+    PromotionRoas7d,
+}
+
+impl AutopilotMeasurementKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TicketRevenue72h => "ticket_revenue_72h",
+            Self::MerchGrossProxy7d => "merch_gross_proxy_7d",
+            Self::PromotionRoas7d => "promotion_roas_7d",
+        }
+    }
+
+    #[must_use]
+    pub const fn direction(self) -> EffectDirection {
+        EffectDirection::HigherIsBetter
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ClaimedAutopilotMeasurement {
+    pub id: AutopilotMeasurementId,
+    pub action_id: AutopilotActionId,
+    pub kind: AutopilotMeasurementKind,
+    pub subject_id: uuid::Uuid,
+    pub baseline_value: f64,
+    pub action_finished_at: OffsetDateTime,
+    pub attempt_number: u32,
+}
+
+#[async_trait]
+pub trait AutopilotMeasurementRepository: Send + Sync {
+    async fn claim_due_measurements(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAutopilotMeasurement>, RepositoryError>;
+
+    async fn observe_measurement(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement: &ClaimedAutopilotMeasurement,
+        now: OffsetDateTime,
+    ) -> Result<f64, RepositoryError>;
+
+    async fn complete_measurement(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement: &ClaimedAutopilotMeasurement,
+        observed_value: f64,
+        effect: EffectResult,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    async fn fail_measurement(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement_id: AutopilotMeasurementId,
+        error_kind: &'static str,
+        retryable: bool,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+}
+
+#[must_use]
+pub fn assess_measurement_effect(
+    measurement: &ClaimedAutopilotMeasurement,
+    observed_value: f64,
+) -> Option<EffectResult> {
+    assess_effect(
+        measurement.baseline_value,
+        observed_value,
+        measurement.kind.direction(),
+        500,
+    )
+}

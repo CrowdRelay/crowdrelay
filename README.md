@@ -28,6 +28,18 @@ The operator owns the data. Public requests never send emails or call external p
 * PostgreSQL, migrations, health checks, metrics, structured logging, and graceful shutdown;
 * a dependency-free TypeScript client and an OpenAPI 3.1 contract.
 
+## ViryaOS Autopilot
+
+ViryaOS Autopilot is an opt-in, deterministic operations plane built on CrowdRelay. Its core loop is:
+
+`first-party + market facts → bounded-context decision → autonomy policy → durable action → measured outcome`
+
+Business rules live in small Rust domain modules rather than n8n or provider workflows. Current bounded capabilities cover ticket yield, fan and campaign lifecycle, merch stock/pricing/bundles, booking opportunities and outreach, content supply, promotion budgets, experiments, and show operations. External market signals are typed, confidence-scored, expiring inputs; they cannot bypass first-party evidence or policy limits.
+
+The global `CROWDRELAY_AUTOPILOT_ENABLED` switch is off by default, and each capability has its own versioned authority, confidence threshold and 24-hour action quota. Durable action jobs are idempotent, bounded-retry, crash-recoverable and auditable. Financial changes use explicit operator-owned guardrails, while delayed outcome measurements keep execution evidence separate from effectiveness evidence. n8n and provider integrations remain execution adapters: they receive typed intents and report facts, but do not own business decisions.
+
+PostgreSQL 18 is the persistence baseline. The local stack uses its asynchronous I/O subsystem conservatively and exposes the active server/AIO settings through operations telemetry so tuning can be based on the production host rather than assumed defaults.
+
 ## Integration and Usage
 
 ### Entry Points

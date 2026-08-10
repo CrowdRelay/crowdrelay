@@ -32,10 +32,24 @@
 
 pub mod acquisition;
 pub mod admission;
+pub mod audience_lifecycle;
+pub mod autonomy;
+pub mod booking;
+pub mod campaign_lifecycle;
+pub mod content_supply;
 pub mod events;
+pub mod experimentation;
 pub mod fan_lifecycle;
 pub mod ids;
+pub mod market_intelligence;
+pub mod merch_bundle;
+pub mod merchandising;
+pub mod outreach;
+pub mod performance;
+pub mod pricing;
+pub mod promotion;
 pub mod referrals;
+pub mod show_operations;
 pub mod values;
 
 pub use acquisition::{
@@ -56,8 +70,11 @@ pub use fan_lifecycle::{
     FanActionToken, FanActionTokenError, FanConfirmationResult, FanUnsubscribeResult,
 };
 pub use ids::{
-    AdmissionPassId, AdmissionPoolId, CampaignId, CityId, EventId, FanId, MerchCouponId,
-    PassSessionId, ReferralAttributionId, RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId,
+    AdmissionPassId, AdmissionPoolId, AutopilotActionId, AutopilotDecisionId,
+    AutopilotMeasurementId, BookingTargetId, CampaignId, CityId, ContentSourceId, EventId,
+    ExperimentId, ExperimentVariantId, FanId, MarketSignalId, MerchCouponId, MerchProductId,
+    MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PromotionCampaignId,
+    ReferralAttributionId, RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId, TicketTypeId,
     VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
 };
 pub use referrals::{

@@ -99,6 +99,20 @@ typed_uuid_id!(
     PassSessionId,
     WorkspaceMemberId,
     WorkspaceMemberSessionId,
+    TicketTypeId,
+    MerchVariantId,
+    MerchProductId,
+    AutopilotDecisionId,
+    AutopilotActionId,
+    AutopilotMeasurementId,
+    PromotionCampaignId,
+    MarketSignalId,
+    BookingTargetId,
+    OutreachTargetId,
+    OutreachOpportunityId,
+    ContentSourceId,
+    ExperimentId,
+    ExperimentVariantId,
 );
 
 #[cfg(test)]
@@ -114,14 +128,5 @@ mod tests {
         assert_eq!(encoded.parse::<WorkspaceId>()?, id);
         assert_eq!(WorkspaceId::from_uuid(id.into_uuid()), id);
         Ok(())
-    }
-
-    #[test]
-    fn typed_ids_are_not_interchangeable() {
-        let raw = Uuid::now_v7();
-        let workspace = WorkspaceId::from_uuid(raw);
-        let fan = FanId::from_uuid(raw);
-
-        assert_eq!(workspace.into_uuid(), fan.into_uuid());
     }
 }

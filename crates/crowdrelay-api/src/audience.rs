@@ -129,6 +129,7 @@ pub struct AudienceFilter {
     interested_event_slugs: Vec<String>,
     attended_event_slugs: Vec<String>,
     purchased_event_slugs: Vec<String>,
+    excluded_purchased_event_slugs: Vec<String>,
     synesthesia_completed: Option<bool>,
     marketing_consent: Option<bool>,
     tags_all: Vec<String>,
@@ -155,6 +156,10 @@ impl AudienceFilter {
                 .iter()
                 .all(|value| valid_slug(value))
             && self
+                .excluded_purchased_event_slugs
+                .iter()
+                .all(|value| valid_slug(value))
+            && self
                 .min_qualified_referrals
                 .is_none_or(|value| (0..=1_000_000).contains(&value))
             && self.tags_all.iter().all(|value| valid_tag(value))
@@ -163,6 +168,7 @@ impl AudienceFilter {
             && self.interested_event_slugs.len() <= 50
             && self.attended_event_slugs.len() <= 50
             && self.purchased_event_slugs.len() <= 50
+            && self.excluded_purchased_event_slugs.len() <= 50
             && self.tags_all.len() <= 50
     }
 }
@@ -1726,6 +1732,7 @@ async fn segment_member_count(
         .bind(&filter.interested_event_slugs)
         .bind(&filter.attended_event_slugs)
         .bind(&filter.purchased_event_slugs)
+        .bind(&filter.excluded_purchased_event_slugs)
         .bind(filter.synesthesia_completed)
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
@@ -1740,7 +1747,7 @@ async fn segment_member_ids(
     limit: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let sql = format!(
-        "SELECT fan.id FROM fans fan WHERE {} ORDER BY fan.updated_at DESC, fan.id DESC LIMIT $11",
+        "SELECT fan.id FROM fans fan WHERE {} ORDER BY fan.updated_at DESC, fan.id DESC LIMIT $12",
         segment_predicate()
     );
     sqlx::query_scalar::<_, Uuid>(&sql)
@@ -1751,6 +1758,7 @@ async fn segment_member_ids(
         .bind(&filter.interested_event_slugs)
         .bind(&filter.attended_event_slugs)
         .bind(&filter.purchased_event_slugs)
+        .bind(&filter.excluded_purchased_event_slugs)
         .bind(filter.synesthesia_completed)
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
@@ -1791,11 +1799,11 @@ async fn ensure_recipient_snapshot(
     let sql = format!(
         r#"
         INSERT INTO communication_campaign_recipients (workspace_id, campaign_id, fan_id)
-        SELECT $1, $11, fan.id
+        SELECT $1, $12, fan.id
         FROM fans fan
         WHERE {}
           AND fan.status = 'active'
-          AND ($12::boolean = false OR EXISTS (
+          AND ($13::boolean = false OR EXISTS (
               SELECT 1
               FROM fan_consents consent
               WHERE consent.workspace_id = fan.workspace_id
@@ -1824,6 +1832,7 @@ async fn ensure_recipient_snapshot(
         .bind(&filter.interested_event_slugs)
         .bind(&filter.attended_event_slugs)
         .bind(&filter.purchased_event_slugs)
+        .bind(&filter.excluded_purchased_event_slugs)
         .bind(filter.synesthesia_completed)
         .bind(filter.marketing_consent)
         .bind(&filter.tags_all)
@@ -1973,13 +1982,27 @@ fn segment_predicate() -> &'static str {
               AND orders.status IN ('paid', 'partially_refunded', 'refunded')
               AND event.slug = ANY($7::text[])
         ))
-        AND ($8::boolean IS NULL OR EXISTS (
+        AND (cardinality($8::text[]) = 0 OR NOT EXISTS (
+            SELECT 1
+            FROM ticket_orders excluded_orders
+            JOIN ticket_sales excluded_sale
+              ON excluded_sale.workspace_id = excluded_orders.workspace_id
+             AND excluded_sale.id = excluded_orders.ticket_sale_id
+            JOIN events excluded_event
+              ON excluded_event.workspace_id = excluded_sale.workspace_id
+             AND excluded_event.id = excluded_sale.event_id
+            WHERE excluded_orders.workspace_id = fan.workspace_id
+              AND excluded_orders.buyer_email = fan.normalized_email
+              AND excluded_orders.status IN ('paid', 'partially_refunded')
+              AND excluded_event.slug = ANY($8::text[])
+        ))
+        AND ($9::boolean IS NULL OR EXISTS (
             SELECT 1
             FROM synesthesia_reward_entries entry
             WHERE entry.workspace_id = fan.workspace_id
               AND entry.fan_id = fan.id
-        ) = $8)
-        AND ($9::boolean IS NULL OR EXISTS (
+        ) = $9)
+        AND ($10::boolean IS NULL OR EXISTS (
             SELECT 1
             FROM fan_consents consent
             WHERE consent.workspace_id = fan.workspace_id
@@ -1995,10 +2018,10 @@ fn segment_predicate() -> &'static str {
                   ORDER BY newest.recorded_at DESC, newest.id DESC
                   LIMIT 1
               )
-        ) = $9)
-        AND (cardinality($10::text[]) = 0 OR NOT EXISTS (
+        ) = $10)
+        AND (cardinality($11::text[]) = 0 OR NOT EXISTS (
             SELECT 1
-            FROM unnest($10::text[]) required(tag)
+            FROM unnest($11::text[]) required(tag)
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM fan_audience_tags assigned
@@ -2168,6 +2191,7 @@ mod tests {
             interested_event_slugs: vec!["gorzow-guest-list-2026".to_owned()],
             attended_event_slugs: Vec::new(),
             purchased_event_slugs: Vec::new(),
+            excluded_purchased_event_slugs: Vec::new(),
             synesthesia_completed: Some(true),
             marketing_consent: Some(true),
             tags_all: vec!["ambassador".to_owned()],

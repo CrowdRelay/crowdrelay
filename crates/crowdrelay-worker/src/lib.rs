@@ -20,6 +20,7 @@
 //! outbox worker for signed webhook delivery, and the durable event reminder
 //! scheduler.
 
+pub mod autopilot;
 pub mod bootstrap;
 pub mod draws;
 pub mod event_sync;

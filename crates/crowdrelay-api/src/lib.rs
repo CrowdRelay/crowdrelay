@@ -39,7 +39,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use crowdrelay_infra::database;
+use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, database};
 use serde::Serialize;
 use sqlx::PgPool;
 use tower::ServiceBuilder;
@@ -55,6 +55,7 @@ mod acquisition;
 mod admission;
 mod area;
 mod audience;
+mod autopilot;
 mod commerce;
 mod concert_qr;
 mod ecosystem;
@@ -113,6 +114,8 @@ pub struct AppState {
     pub(crate) fan_lifecycle: FanLifecycleState,
     pub(crate) ticketing: TicketingState,
     pub(crate) ops: OpsState,
+    pub(crate) autopilot: PostgresAutopilotRepository,
+    pub(crate) autopilot_runtime_enabled: bool,
 }
 
 impl AppState {
@@ -130,6 +133,8 @@ impl AppState {
         fan_lifecycle: FanLifecycleState,
         ticketing: TicketingState,
         ops: OpsState,
+        autopilot: PostgresAutopilotRepository,
+        autopilot_runtime_enabled: bool,
     ) -> Self {
         Self {
             database,
@@ -142,6 +147,8 @@ impl AppState {
             fan_lifecycle,
             ticketing,
             ops,
+            autopilot,
+            autopilot_runtime_enabled,
         }
     }
 }
@@ -589,6 +596,79 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             post(proofs::admin_create_audit_batch),
         )
         .route("/v1/admin/signal/overview", get(ops::signal_overview))
+        .route("/v1/admin/autopilot/overview", get(autopilot::overview))
+        .route(
+            "/v1/admin/autopilot/chief-of-staff",
+            get(autopilot::chief_of_staff),
+        )
+        .route(
+            "/v1/admin/autopilot/policies/{context}",
+            post(autopilot::set_authority),
+        )
+        .route(
+            "/v1/admin/autopilot/booking-targets",
+            post(autopilot::upsert_booking_target),
+        )
+        .route(
+            "/v1/admin/autopilot/ticket-allocation-guardrails",
+            post(autopilot::upsert_ticket_allocation_guardrail),
+        )
+        .route(
+            "/v1/admin/autopilot/merch-economics",
+            post(autopilot::upsert_merch_product_economics),
+        )
+        .route(
+            "/v1/admin/autopilot/booking-targets/{target_id}/reply",
+            post(autopilot::record_booking_reply),
+        )
+        .route(
+            "/v1/admin/autopilot/outreach-targets",
+            post(autopilot::upsert_outreach_target),
+        )
+        .route(
+            "/v1/admin/autopilot/outreach-targets/{target_id}/reply",
+            post(autopilot::record_outreach_reply),
+        )
+        .route(
+            "/v1/admin/autopilot/outreach-opportunities",
+            post(autopilot::upsert_outreach_opportunity),
+        )
+        .route(
+            "/v1/admin/autopilot/content-sources",
+            post(autopilot::upsert_content_source),
+        )
+        .route(
+            "/v1/admin/autopilot/experiments",
+            post(autopilot::create_experiment),
+        )
+        .route(
+            "/v1/admin/autopilot/experiments/{experiment_id}/assign",
+            post(autopilot::assign_experiment),
+        )
+        .route(
+            "/v1/admin/autopilot/experiments/observations",
+            post(autopilot::record_experiment_observation),
+        )
+        .route(
+            "/v1/admin/autopilot/promotion-state",
+            post(autopilot::upsert_promotion_state),
+        )
+        .route(
+            "/v1/admin/autopilot/promotion-budget-guardrails",
+            post(autopilot::upsert_promotion_budget_guardrail),
+        )
+        .route(
+            "/v1/admin/autopilot/market-signals/city",
+            post(autopilot::upsert_city_market_signal),
+        )
+        .route(
+            "/v1/admin/autopilot/actions/{action_id}/approve",
+            post(autopilot::approve_action),
+        )
+        .route(
+            "/v1/admin/autopilot/actions/{action_id}/cancel",
+            post(autopilot::cancel_action),
+        )
         .route("/v1/admin/ops/summary", get(ops::summary))
         .route("/v1/admin/ops/outbox", get(ops::list_outbox))
         .route("/v1/admin/ops/deliveries", get(ops::list_deliveries))
@@ -1040,6 +1120,7 @@ mod tests {
         ReferralProgress, ResolvedSmartLink, SmartLinkId, SmartLinkSlug, WorkspaceId,
         WorkspaceSlug,
     };
+    use crowdrelay_infra::autopilot::PostgresAutopilotRepository;
     use serde_json::Value;
     use sha2::Digest;
     use sqlx::postgres::PgPoolOptions;
@@ -1370,6 +1451,11 @@ mod tests {
             Some([7_u8; 32]),
         );
         let ops = OpsState::new(workspace_id, database.clone(), Duration::from_millis(50));
+        let autopilot = PostgresAutopilotRepository::new_with_timeouts(
+            database.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
         Ok(AppState::new(
             database,
             Duration::from_millis(50),
@@ -1381,6 +1467,8 @@ mod tests {
             fan_lifecycle_state(workspace_id)?,
             ticketing,
             ops,
+            autopilot,
+            false,
         ))
     }
 

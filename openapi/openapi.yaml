@@ -989,6 +989,481 @@ paths:
         '503':
           $ref: '#/components/responses/PrivateProblem'
 
+  /admin/autopilot/overview:
+    get:
+      operationId: getAutopilotOverview
+      summary: Read deterministic ViryaOS Autopilot policies, exceptions and recent evidence
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Exception-first Autopilot control-plane snapshot.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutopilotOverview'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/autopilot/policies/{context}:
+    post:
+      operationId: setAutopilotAuthority
+      summary: Change bounded autonomy authority with optimistic concurrency
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/AutopilotContextPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutopilotAuthorityRequest'
+      responses:
+        '200':
+          description: Policy authority updated or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutopilotMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/booking-targets:
+    post:
+      operationId: upsertAutopilotBookingTarget
+      summary: Create or version-update an operator-verified booking target
+      description: >
+        Promotes a verified venue/promoter/festival contact into the deterministic Booking
+        bounded context. Market intelligence never chooses recipients; ViryaOS selects only
+        from this allowlisted relationship state and n8n receives the selected target.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingTargetRequest'
+      responses:
+        '200':
+          description: Booking target created/updated or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingTargetMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/ticket-allocation-guardrails:
+    post:
+      operationId: upsertAutopilotTicketAllocationGuardrail
+      summary: Configure bounded capacity unlocks for one explicit ticket tier
+      description: >
+        Stores operator-owned min/max/step capacity guardrails for a ticket type.
+        ViryaOS never infers tier semantics from names or ordering; allocation changes
+        remain bounded by the ticket sale capacity and optimistic guardrail version.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketAllocationGuardrailRequest'
+      responses:
+        '200':
+          description: Ticket allocation guardrail created/updated or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketAllocationGuardrailMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/merch-economics:
+    post:
+      operationId: upsertAutopilotMerchEconomics
+      summary: Configure bounded product price/cost guardrails for deterministic Merch Yield
+      description: >
+        Stores operator-owned product economics. ViryaOS refuses to infer price floors or unit costs;
+        optimistic versioning and Idempotency-Key make updates safe to retry.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MerchProductEconomicsRequest'
+      responses:
+        '200':
+          description: Product economics created/updated or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchProductEconomicsMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/promotion-state:
+    post:
+      operationId: upsertAutopilotPromotionState
+      summary: Ingest a provider-neutral paid-promotion performance snapshot
+      description: >
+        Records fresh campaign facts for the deterministic Promotion Budget bounded context.
+        The caller reports observed state only; budget decisions remain inside ViryaOS.
+        Older snapshots are rejected so delayed integration retries cannot roll state backward.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromotionCampaignStateRequest'
+      responses:
+        '200':
+          description: Campaign state accepted or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromotionCampaignStateMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/promotion-budget-guardrails:
+    post:
+      operationId: upsertAutopilotPromotionBudgetGuardrail
+      summary: Set a currency-scoped aggregate paid-promotion safety budget
+      description: >
+        Creates or version-updates the workspace financial ceiling used by Promotion Yield.
+        Autonomous budget increases fail closed without this guardrail and are atomically
+        reserved before provider execution.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromotionBudgetGuardrailRequest'
+      responses:
+        '200':
+          description: Financial guardrail created/updated or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromotionBudgetGuardrailMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/market-signals/city:
+    post:
+      operationId: upsertAutopilotCityMarketSignal
+      summary: Ingest a bounded city-level market observation
+      description: >
+        Records one fresh provider-neutral market signal. Signal families are aggregated
+        deterministically and can only contribute a bounded confirmation bonus to booking demand.
+        Older observations are rejected to prevent delayed retries from rolling evidence backward.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CityMarketSignalRequest'
+      responses:
+        '200':
+          description: Market signal accepted or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CityMarketSignalMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/chief-of-staff:
+    get:
+      operationId: getAutopilotChiefOfStaff
+      summary: Read the deterministic ViryaOS daily operating brief
+      description: >
+        Returns measured work performed, exception count, evidence-backed opportunities and
+        due show tasks. It is a deterministic read model; no LLM-generated narrative is used.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Deterministic operating brief.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotChiefOfStaff' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/booking-targets/{target_id}/reply:
+    post:
+      operationId: recordAutopilotBookingReply
+      summary: Record a booking reply and stop inappropriate automatic follow-ups
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: target_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingReplyRequest' }
+      responses:
+        '200': { description: Reply recorded or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/outreach-targets:
+    post:
+      operationId: upsertAutopilotOutreachTarget
+      summary: Create or version-update a verified non-booking outreach relationship
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OutreachTargetRequest' }
+      responses:
+        '200': { description: Outreach target created/updated or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/OutreachTargetMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/outreach-targets/{target_id}/reply:
+    post:
+      operationId: recordAutopilotOutreachReply
+      summary: Record a verified outreach reply and relationship disposition
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: target_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OutreachReplyRequest' }
+      responses:
+        '200': { description: Reply recorded or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/outreach-opportunities:
+    post:
+      operationId: upsertAutopilotOutreachOpportunity
+      summary: Ingest a bounded outreach opportunity for a verified target
+      description: >
+        Records fresh opportunity evidence only. The Outreach bounded context decides whether
+        and when an initial contact or follow-up may be emitted.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OutreachOpportunityRequest' }
+      responses:
+        '200': { description: Opportunity accepted or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/OutreachOpportunityMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/content-sources:
+    post:
+      operationId: upsertAutopilotContentSource
+      summary: Upsert a trusted source fact for deterministic content production
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContentSourceRequest' }
+      responses:
+        '200': { description: Content source accepted or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/ContentSourceMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/experiments:
+    post:
+      operationId: createAutopilotExperiment
+      summary: Create a deterministic aggregate experiment
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExperimentRequest' }
+      responses:
+        '201': { description: Experiment created or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/ExperimentMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/experiments/{experiment_id}/assign:
+    post:
+      operationId: assignAutopilotExperimentVariant
+      summary: Deterministically assign a stable key to a running experiment variant
+      security:
+      - adminBearer: []
+      parameters:
+      - name: experiment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExperimentAssignmentRequest' }
+      responses:
+        '200': { description: Stable assignment for the current experiment allocation, content: { application/json: { schema: { $ref: '#/components/schemas/ExperimentAssignment' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/experiments/observations:
+    post:
+      operationId: recordAutopilotExperimentObservation
+      summary: Add an idempotent aggregate experiment observation
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExperimentObservationRequest' }
+      responses:
+        '200': { description: Observation recorded or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/actions/{action_id}/approve:
+    post:
+      operationId: approveAutopilotAction
+      summary: Approve one prepared Autopilot action
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/AutopilotActionId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Action queued or idempotently replayed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/actions/{action_id}/cancel:
+    post:
+      operationId: cancelAutopilotAction
+      summary: Cancel one prepared Autopilot action
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/AutopilotActionId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Action cancelled or idempotently replayed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+
   /admin/ops/summary:
     get:
       operationId: getOperationsSummary
@@ -3434,6 +3909,18 @@ components:
       description: ETag received with a previous cacheable public representation.
       schema:
         type: string
+    AutopilotContextPath:
+      in: path
+      name: context
+      required: true
+      schema:
+        type: string
+        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations]
+    AutopilotActionId:
+      in: path
+      name: action_id
+      required: true
+      schema: { type: string, format: uuid }
     OpsStatus:
       in: query
       name: status
@@ -4058,6 +4545,523 @@ components:
           enum:
           - ok
           - ready
+    AutonomyLevel:
+      type: string
+      enum: [observe, recommend, require_approval, bounded_auto]
+    AutopilotContext:
+      type: string
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations]
+    AutopilotDisposition:
+      type: string
+      enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
+    AutopilotPolicySummary:
+      type: object
+      additionalProperties: false
+      required: [context, enabled, autonomy_level, minimum_confidence, max_actions_24h, version]
+      properties:
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        enabled: { type: boolean }
+        autonomy_level: { $ref: '#/components/schemas/AutonomyLevel' }
+        minimum_confidence: { type: integer, minimum: 0, maximum: 10000 }
+        max_actions_24h: { type: integer, minimum: 1, maximum: 1000 }
+        version: { type: integer, format: int64, minimum: 1 }
+    PromotionBudgetGuardrailSummary:
+      type: object
+      additionalProperties: false
+      required: [currency, maximum_total_daily_budget_minor, maximum_monthly_spend_minor, version]
+      properties:
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        maximum_total_daily_budget_minor: { type: integer, format: int64, minimum: 1 }
+        maximum_monthly_spend_minor: { type: integer, format: int64, minimum: 1 }
+        version: { type: integer, format: int64, minimum: 1 }
+    AutopilotActionPayload:
+      type: object
+      description: Typed bounded action intent. Exact fields depend on the kind discriminator.
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change]
+      additionalProperties: true
+    PendingAutopilotAction:
+      type: object
+      additionalProperties: false
+      required: [id, context, action_kind, subject_kind, subject_id, payload, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        action_kind: { type: string, maxLength: 96 }
+        subject_kind: { type: string, maxLength: 64 }
+        subject_id: { type: string, format: uuid }
+        payload: { $ref: '#/components/schemas/AutopilotActionPayload' }
+        created_at: { type: string, format: date-time }
+    RecentAutopilotDecision:
+      type: object
+      additionalProperties: false
+      required: [id, context, decision_kind, confidence, disposition, reason, evaluated_at]
+      properties:
+        id: { type: string, format: uuid }
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        decision_kind: { type: string, maxLength: 96 }
+        confidence: { type: integer, minimum: 0, maximum: 10000 }
+        disposition: { $ref: '#/components/schemas/AutopilotDisposition' }
+        reason: { type: string, maxLength: 240 }
+        evaluated_at: { type: string, format: date-time }
+    RecentAutopilotAction:
+      type: object
+      additionalProperties: false
+      required: [id, context, action_kind, subject_kind, subject_id, status, attempt_count, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        action_kind: { type: string, maxLength: 96 }
+        subject_kind: { type: string, maxLength: 64 }
+        subject_id: { type: string, format: uuid }
+        status: { type: string, enum: [awaiting_approval, queued, processing, succeeded, failed, cancelled] }
+        attempt_count: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+        last_error_kind: { type: [string, 'null'], maxLength: 96 }
+    RecentAutopilotEffect:
+      type: object
+      additionalProperties: false
+      required: [measurement_id, action_id, context, measurement_kind, assessment, delta_basis_points, baseline_value, observed_value, observed_at]
+      properties:
+        measurement_id: { type: string, format: uuid }
+        action_id: { type: string, format: uuid }
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        measurement_kind:
+          type: string
+          enum: [ticket_revenue_72h, merch_gross_proxy_7d, promotion_roas_7d]
+        assessment: { type: string, enum: [improved, neutral, worsened] }
+        delta_basis_points: { type: integer, format: int32 }
+        baseline_value: { type: number, format: double, minimum: 0 }
+        observed_value: { type: number, format: double, minimum: 0 }
+        observed_at: { type: string, format: date-time }
+    AutopilotOverview:
+      type: object
+      additionalProperties: false
+      required: [runtime_enabled, policies, promotion_budget_guardrails, needs_you, recent_decisions, recent_actions, recent_effects, queued_actions, processing_actions, succeeded_24h, failed_24h]
+      properties:
+        runtime_enabled: { type: boolean }
+        policies:
+          type: array
+          maxItems: 12
+          items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
+        promotion_budget_guardrails:
+          type: array
+          maxItems: 16
+          items: { $ref: '#/components/schemas/PromotionBudgetGuardrailSummary' }
+        needs_you:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/PendingAutopilotAction' }
+        recent_decisions:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/RecentAutopilotDecision' }
+        recent_actions:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/RecentAutopilotAction' }
+        recent_effects:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/RecentAutopilotEffect' }
+        queued_actions: { type: integer, format: int64, minimum: 0 }
+        processing_actions: { type: integer, format: int64, minimum: 0 }
+        succeeded_24h: { type: integer, format: int64, minimum: 0 }
+        failed_24h: { type: integer, format: int64, minimum: 0 }
+    AutopilotAuthorityRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled, autonomy_level, minimum_confidence_basis_points, max_actions_24h, expected_version]
+      properties:
+        enabled: { type: boolean }
+        autonomy_level: { $ref: '#/components/schemas/AutonomyLevel' }
+        minimum_confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        max_actions_24h: { type: integer, minimum: 1, maximum: 1000 }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+    BookingTargetKind:
+      type: string
+      enum: [venue, promoter, festival]
+    BookingTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [city_id, target_kind, display_name, contact_email, priority, relationship_score, active, accepts_booking, expected_version]
+      properties:
+        target_id: { type: [string, 'null'], format: uuid }
+        city_id: { type: string, format: uuid }
+        target_kind: { $ref: '#/components/schemas/BookingTargetKind' }
+        display_name: { type: string, minLength: 1, maxLength: 200 }
+        contact_email: { type: string, format: email, maxLength: 320 }
+        capacity:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 100000
+          description: Optional operator-verified venue/event capacity used for deterministic fit.
+        priority: { type: integer, minimum: 0, maximum: 100 }
+        relationship_score: { type: integer, minimum: 0, maximum: 100 }
+        active: { type: boolean }
+        accepts_booking: { type: boolean }
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Zero creates; positive values require target_id and update exactly that version.
+    BookingTargetMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, target_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+
+    BookingReplyDisposition:
+      type: string
+      enum: [received, positive, declined, booked, do_not_contact]
+    BookingReplyRequest:
+      type: object
+      additionalProperties: false
+      required: [disposition, occurred_at]
+      properties:
+        disposition: { $ref: '#/components/schemas/BookingReplyDisposition' }
+        occurred_at: { type: string, format: date-time }
+
+    OutreachTargetKind:
+      type: string
+      enum: [playlist, radio, press, creator, support_slot, endorsement]
+    OutreachReplyDisposition:
+      type: string
+      enum: [received, positive, declined, do_not_contact]
+    OutreachTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [target_kind, display_name, contact_email, priority, relationship_score, active, verified, accepts_outreach, do_not_contact, expected_version]
+      properties:
+        target_id: { type: [string, 'null'], format: uuid }
+        target_kind: { $ref: '#/components/schemas/OutreachTargetKind' }
+        display_name: { type: string, minLength: 1, maxLength: 200 }
+        contact_email: { type: string, format: email, maxLength: 320 }
+        priority: { type: integer, minimum: 0, maximum: 100 }
+        relationship_score: { type: integer, minimum: 0, maximum: 100 }
+        active: { type: boolean }
+        verified: { type: boolean }
+        accepts_outreach: { type: boolean }
+        do_not_contact: { type: boolean }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    OutreachTargetMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, target_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+    OutreachOpportunityRequest:
+      type: object
+      additionalProperties: false
+      required: [target_id, source, subject_kind, subject_key, template_key, relevance_basis_points, confidence_basis_points, active, observed_at, expires_at]
+      properties:
+        opportunity_id: { type: [string, 'null'], format: uuid }
+        target_id: { type: string, format: uuid }
+        source: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+        subject_kind: { type: string, enum: [release, event, catalogue, band] }
+        subject_key: { type: string, minLength: 1, maxLength: 200 }
+        template_key: { type: string, minLength: 1, maxLength: 160 }
+        relevance_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        active: { type: boolean }
+        observed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    OutreachOpportunityMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, opportunity_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        opportunity_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+    OutreachReplyRequest:
+      type: object
+      additionalProperties: false
+      required: [disposition, occurred_at]
+      properties:
+        opportunity_id: { type: [string, 'null'], format: uuid }
+        disposition: { $ref: '#/components/schemas/OutreachReplyDisposition' }
+        occurred_at: { type: string, format: date-time }
+
+    ContentSourceKind:
+      type: string
+      enum: [event, release, show_completed]
+    ContentSourceRequest:
+      type: object
+      additionalProperties: false
+      required: [source_kind, source_key, title, occurred_at, expires_at, metadata, expected_version]
+      properties:
+        source_id: { type: [string, 'null'], format: uuid }
+        source_kind: { $ref: '#/components/schemas/ContentSourceKind' }
+        source_key: { type: string, minLength: 1, maxLength: 200 }
+        title: { type: string, minLength: 1, maxLength: 240 }
+        occurred_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        metadata: { type: object, additionalProperties: true }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    ContentSourceMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, source_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+
+    ExperimentMetric:
+      type: string
+      enum: [conversion, revenue_per_exposure]
+    ExperimentVariantRequest:
+      type: object
+      additionalProperties: false
+      required: [key, allocation_basis_points]
+      properties:
+        key: { type: string, minLength: 1, maxLength: 128 }
+        allocation_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+    ExperimentRequest:
+      type: object
+      additionalProperties: false
+      required: [slug, metric, variants, start]
+      properties:
+        slug: { type: string, minLength: 1, maxLength: 128 }
+        metric: { $ref: '#/components/schemas/ExperimentMetric' }
+        variants:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: { $ref: '#/components/schemas/ExperimentVariantRequest' }
+        start: { type: boolean }
+    ExperimentMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, experiment_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        experiment_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+    ExperimentAssignmentRequest:
+      type: object
+      additionalProperties: false
+      required: [assignment_key]
+      properties:
+        assignment_key: { type: string, minLength: 1, maxLength: 200 }
+    ExperimentAssignment:
+      type: object
+      additionalProperties: false
+      required: [experiment_id, experiment_version, variant_id, variant_key]
+      properties:
+        experiment_id: { type: string, format: uuid }
+        experiment_version: { type: integer, format: int64, minimum: 1 }
+        variant_id: { type: string, format: uuid }
+        variant_key: { type: string, minLength: 1, maxLength: 96 }
+    ExperimentObservationRequest:
+      type: object
+      additionalProperties: false
+      required: [experiment_id, variant_id, exposures_delta, conversions_delta, value_minor_delta, observed_at]
+      properties:
+        experiment_id: { type: string, format: uuid }
+        variant_id: { type: string, format: uuid }
+        exposures_delta: { type: integer, format: int32, minimum: 0 }
+        conversions_delta: { type: integer, format: int32, minimum: 0 }
+        value_minor_delta: { type: integer, format: int64, minimum: 0 }
+        observed_at: { type: string, format: date-time }
+
+    ChiefOfStaffOpportunity:
+      type: object
+      additionalProperties: false
+      required: [context, decision_kind, subject_kind, subject_id, confidence, reason, needs_approval]
+      properties:
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        decision_kind: { type: string, maxLength: 96 }
+        subject_kind: { type: string, maxLength: 64 }
+        subject_id: { type: string, format: uuid }
+        confidence: { type: integer, minimum: 0, maximum: 10000 }
+        reason: { type: string, maxLength: 240 }
+        needs_approval: { type: boolean }
+    ChiefOfStaffShowTask:
+      type: object
+      additionalProperties: false
+      required: [event_id, event_title, task_key, status, starts_at]
+      properties:
+        event_id: { type: string, format: uuid }
+        event_title: { type: string, maxLength: 240 }
+        task_key: { type: string, maxLength: 96 }
+        status: { type: string, maxLength: 32 }
+        starts_at: { type: string, format: date-time }
+    AutopilotChiefOfStaff:
+      type: object
+      additionalProperties: false
+      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, top_opportunities, show_tasks]
+      properties:
+        executed_24h: { type: integer, format: int64, minimum: 0 }
+        failed_24h: { type: integer, format: int64, minimum: 0 }
+        needs_you: { type: integer, format: int64, minimum: 0 }
+        estimated_minutes_saved_24h: { type: integer, format: int64, minimum: 0 }
+        measured_improved_7d: { type: integer, format: int64, minimum: 0 }
+        measured_neutral_7d: { type: integer, format: int64, minimum: 0 }
+        measured_worsened_7d: { type: integer, format: int64, minimum: 0 }
+        top_opportunities:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/ChiefOfStaffOpportunity' }
+        show_tasks:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/ChiefOfStaffShowTask' }
+
+    TicketAllocationGuardrailRequest:
+      type: object
+      additionalProperties: false
+      required: [ticket_type_id, minimum_capacity, maximum_capacity, step_capacity, expected_version]
+      properties:
+        ticket_type_id: { type: string, format: uuid }
+        minimum_capacity: { type: integer, format: int32, minimum: 1, maximum: 1000000 }
+        maximum_capacity: { type: integer, format: int32, minimum: 1, maximum: 1000000 }
+        step_capacity: { type: integer, format: int32, minimum: 1, maximum: 1000000 }
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Zero creates initial guardrails; positive values update exactly that version.
+    TicketAllocationGuardrailMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, ticket_type_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        ticket_type_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+
+    MerchProductEconomicsRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, minimum_price_minor, maximum_price_minor, expected_version]
+      properties:
+        product_id: { type: string, format: uuid }
+        minimum_price_minor: { type: integer, format: int64, minimum: 0 }
+        maximum_price_minor: { type: integer, format: int64, minimum: 0 }
+        unit_cost_minor: { type: [integer, 'null'], format: int64, minimum: 0 }
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Zero creates initial economics; positive values update exactly that version.
+    MerchProductEconomicsMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, product_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+
+    CityMarketSignalKind:
+      type: string
+      enum: [streaming_momentum, search_interest, social_momentum, live_demand]
+    CityMarketSignalRequest:
+      type: object
+      additionalProperties: false
+      required: [source, city_id, signal_kind, score_basis_points, confidence_basis_points, observed_at, expires_at]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+        city_id: { type: string, format: uuid }
+        signal_kind: { $ref: '#/components/schemas/CityMarketSignalKind' }
+        score_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        observed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    CityMarketSignalMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, signal_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        signal_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+
+    PromotionBudgetGuardrailRequest:
+      type: object
+      additionalProperties: false
+      required: [currency, maximum_total_daily_budget_minor, maximum_monthly_spend_minor, expected_version]
+      properties:
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        maximum_total_daily_budget_minor: { type: integer, format: int64, minimum: 1 }
+        maximum_monthly_spend_minor: { type: integer, format: int64, minimum: 1 }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    PromotionBudgetGuardrailMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, currency, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+
+    PromotionCampaignStateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - provider
+      - external_campaign_key
+      - currency
+      - current_daily_budget_minor
+      - minimum_daily_budget_minor
+      - maximum_daily_budget_minor
+      - spend_last_7d_minor
+      - spend_month_to_date_minor
+      - attributed_revenue_last_7d_minor
+      - active
+      - observed_at
+      - expires_at
+      properties:
+        provider: { type: string, minLength: 1, maxLength: 32, pattern: '^[A-Za-z0-9_.-]+$' }
+        external_campaign_key: { type: string, minLength: 1, maxLength: 160 }
+        event_id: { type: [string, 'null'], format: uuid }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        current_daily_budget_minor: { type: integer, format: int64, minimum: 1 }
+        minimum_daily_budget_minor: { type: integer, format: int64, minimum: 1 }
+        maximum_daily_budget_minor: { type: integer, format: int64, minimum: 1 }
+        spend_last_7d_minor: { type: integer, format: int64, minimum: 0 }
+        spend_month_to_date_minor: { type: integer, format: int64, minimum: 0 }
+        attributed_revenue_last_7d_minor: { type: integer, format: int64, minimum: 0 }
+        active: { type: boolean }
+        last_budget_change_at: { type: [string, 'null'], format: date-time }
+        observed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    PromotionCampaignStateMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, campaign_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        campaign_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+
+    AutopilotMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, target_id, status, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        status: { type: string, maxLength: 64 }
+        replayed: { type: boolean }
+
     OpsQueueSummary:
       type: object
       additionalProperties: false
@@ -4080,15 +5084,28 @@ components:
         average_ms: { type: integer, format: int64, minimum: 0 }
         p50_ms: { type: integer, format: int64, minimum: 0 }
         p95_ms: { type: integer, format: int64, minimum: 0 }
+    DatabaseRuntimeSummary:
+      type: object
+      additionalProperties: false
+      required: [server_version_num, io_method, io_workers, io_max_concurrency, effective_io_concurrency, maintenance_io_concurrency, async_io_active]
+      properties:
+        server_version_num: { type: integer, minimum: 0 }
+        io_method: { type: [string, 'null'] }
+        io_workers: { type: [integer, 'null'], minimum: 0 }
+        io_max_concurrency: { type: [integer, 'null'] }
+        effective_io_concurrency: { type: [integer, 'null'], minimum: 0 }
+        maintenance_io_concurrency: { type: [integer, 'null'], minimum: 0 }
+        async_io_active: { type: boolean }
     OpsSummary:
       type: object
       additionalProperties: false
-      required: [outbox, deliveries, http, release]
+      required: [outbox, deliveries, http, database, release]
       properties:
         release: { type: string, minLength: 1, maxLength: 128 }
         outbox: { $ref: '#/components/schemas/OpsQueueSummary' }
         deliveries: { $ref: '#/components/schemas/OpsQueueSummary' }
         http: { $ref: '#/components/schemas/HttpRequestSummary' }
+        database: { $ref: '#/components/schemas/DatabaseRuntimeSummary' }
     OpsOutboxItem:
       type: object
       additionalProperties: false
