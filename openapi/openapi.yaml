@@ -5087,7 +5087,7 @@ components:
     DatabaseRuntimeSummary:
       type: object
       additionalProperties: false
-      required: [server_version_num, io_method, io_workers, io_max_concurrency, effective_io_concurrency, maintenance_io_concurrency, async_io_active]
+      required: [server_version_num, io_method, io_workers, io_max_concurrency, effective_io_concurrency, maintenance_io_concurrency, io_combine_limit_bytes, io_max_combine_limit_bytes, async_io_active]
       properties:
         server_version_num: { type: integer, minimum: 0 }
         io_method: { type: [string, 'null'] }
@@ -5095,6 +5095,8 @@ components:
         io_max_concurrency: { type: [integer, 'null'] }
         effective_io_concurrency: { type: [integer, 'null'], minimum: 0 }
         maintenance_io_concurrency: { type: [integer, 'null'], minimum: 0 }
+        io_combine_limit_bytes: { type: [integer, 'null'], minimum: 0 }
+        io_max_combine_limit_bytes: { type: [integer, 'null'], minimum: 0 }
         async_io_active: { type: boolean }
     OpsSummary:
       type: object

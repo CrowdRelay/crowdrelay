@@ -71,6 +71,8 @@ pub struct DatabaseRuntimeSummary {
     io_max_concurrency: Option<i32>,
     effective_io_concurrency: Option<i32>,
     maintenance_io_concurrency: Option<i32>,
+    io_combine_limit_bytes: Option<i64>,
+    io_max_combine_limit_bytes: Option<i64>,
     async_io_active: bool,
 }
 
@@ -82,6 +84,8 @@ struct DatabaseRuntimeRow {
     io_max_concurrency: Option<i32>,
     effective_io_concurrency: Option<i32>,
     maintenance_io_concurrency: Option<i32>,
+    io_combine_limit_bytes: Option<i64>,
+    io_max_combine_limit_bytes: Option<i64>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -971,7 +975,15 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             NULLIF(current_setting('effective_io_concurrency', true), '')::integer
                 AS effective_io_concurrency,
             NULLIF(current_setting('maintenance_io_concurrency', true), '')::integer
-                AS maintenance_io_concurrency
+                AS maintenance_io_concurrency,
+            CASE
+                WHEN NULLIF(current_setting('io_combine_limit', true), '') IS NULL THEN NULL
+                ELSE pg_size_bytes(current_setting('io_combine_limit', true))::bigint
+            END AS io_combine_limit_bytes,
+            CASE
+                WHEN NULLIF(current_setting('io_max_combine_limit', true), '') IS NULL THEN NULL
+                ELSE pg_size_bytes(current_setting('io_max_combine_limit', true))::bigint
+            END AS io_max_combine_limit_bytes
         "#,
     )
     .fetch_one(&state.pool)
@@ -987,6 +999,8 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
         io_max_concurrency: database.io_max_concurrency,
         effective_io_concurrency: database.effective_io_concurrency,
         maintenance_io_concurrency: database.maintenance_io_concurrency,
+        io_combine_limit_bytes: database.io_combine_limit_bytes,
+        io_max_combine_limit_bytes: database.io_max_combine_limit_bytes,
     };
 
     Ok(OpsSummary {

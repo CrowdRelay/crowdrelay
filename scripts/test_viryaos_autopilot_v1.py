@@ -6,7 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DOMAIN = ROOT / "crates/crowdrelay-domain/src"
 APP_ROOT = ROOT / "crates/crowdrelay-application/src"
 INFRA_ROOT = ROOT / "crates/crowdrelay-infra/src"
-MIGRATIONS = (ROOT / "migrations/0033_viryaos_autopilot.sql", ROOT / "migrations/0034_viryaos_operations.sql")
+MIGRATIONS = (
+    ROOT / "migrations/0033_viryaos_autopilot.sql",
+    ROOT / "migrations/0034_viryaos_operations.sql",
+    ROOT / "migrations/0035_viryaos_queue_index_alignment.sql",
+)
 
 def module_tree(root: Path, stem: str) -> str:
     parts = [(root / f"{stem}.rs").read_text()]
@@ -99,6 +103,15 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("postgres:18-alpine", ci)
 
 
+    def test_queue_indexes_match_workspace_scoped_hot_paths(self):
+        migration = (ROOT / "migrations/0035_viryaos_queue_index_alignment.sql").read_text()
+        self.assertIn("(workspace_id, available_at, id)", migration)
+        self.assertIn("WHERE status = 'queued' AND attempt_count < 5", migration)
+        self.assertIn("(workspace_id, due_at, available_at, id)", migration)
+        self.assertIn("WHERE status = 'pending' AND attempt_count < 3", migration)
+        self.assertIn("viryaos_autopilot_actions_processing_idx", migration)
+        self.assertIn("viryaos_autopilot_measurements_processing_idx", migration)
+
     def test_control_plane_and_pg18_runtime_are_public_contracts(self):
         openapi = OPENAPI.read_text()
         ops = OPS.read_text()
@@ -116,6 +129,10 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("runtime_enabled", openapi)
         self.assertIn("DatabaseRuntimeSummary", openapi)
         self.assertIn("current_setting('io_method', true)", ops)
+        self.assertIn("current_setting('io_combine_limit', true)", ops)
+        self.assertIn("current_setting('io_max_combine_limit', true)", ops)
+        self.assertNotIn("FROM pg_aios", ops)
+        self.assertNotIn("aio_inflight", openapi)
         self.assertIn("async_io_active", ops)
         self.assertIn("promotion_budget", openapi)
         self.assertIn("request_promotion_budget_change", openapi)
