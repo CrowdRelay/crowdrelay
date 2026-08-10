@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug, Default)]
 pub(crate) struct HttpMetrics {
     total: AtomicU64,
+    errors_4xx: AtomicU64,
     errors_5xx: AtomicU64,
     latency_micros_sum: AtomicU64,
     le_50_ms: AtomicU64,
@@ -20,6 +21,7 @@ pub(crate) struct HttpMetrics {
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct HttpMetricsSnapshot {
     pub total: u64,
+    pub errors_4xx: u64,
     pub errors_5xx: u64,
     pub latency_micros_sum: u64,
     pub le_50_ms: u64,
@@ -36,7 +38,9 @@ impl HttpMetrics {
         self.total.fetch_add(1, Ordering::Relaxed);
         self.latency_micros_sum
             .fetch_add(elapsed_micros, Ordering::Relaxed);
-        if status >= 500 {
+        if (400..500).contains(&status) {
+            self.errors_4xx.fetch_add(1, Ordering::Relaxed);
+        } else if status >= 500 {
             self.errors_5xx.fetch_add(1, Ordering::Relaxed);
         }
         let elapsed_ms = elapsed_micros / 1_000;
@@ -66,6 +70,7 @@ impl HttpMetrics {
     pub(crate) fn snapshot(&self) -> HttpMetricsSnapshot {
         HttpMetricsSnapshot {
             total: self.total.load(Ordering::Relaxed),
+            errors_4xx: self.errors_4xx.load(Ordering::Relaxed),
             errors_5xx: self.errors_5xx.load(Ordering::Relaxed),
             latency_micros_sum: self.latency_micros_sum.load(Ordering::Relaxed),
             le_50_ms: self.le_50_ms.load(Ordering::Relaxed),

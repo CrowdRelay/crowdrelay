@@ -4072,9 +4072,10 @@ components:
     HttpRequestSummary:
       type: object
       additionalProperties: false
-      required: [requests, errors_5xx, average_ms, p50_ms, p95_ms]
+      required: [requests, errors_4xx, errors_5xx, average_ms, p50_ms, p95_ms]
       properties:
         requests: { type: integer, format: int64, minimum: 0 }
+        errors_4xx: { type: integer, format: int64, minimum: 0 }
         errors_5xx: { type: integer, format: int64, minimum: 0 }
         average_ms: { type: integer, format: int64, minimum: 0 }
         p50_ms: { type: integer, format: int64, minimum: 0 }

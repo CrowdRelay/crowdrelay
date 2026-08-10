@@ -60,6 +60,7 @@ pub struct OpsSummary {
 #[derive(Debug, Default, Serialize)]
 pub struct HttpRequestSummary {
     requests: u64,
+    errors_4xx: u64,
     errors_5xx: u64,
     average_ms: u64,
     p50_ms: u64,
@@ -965,6 +966,7 @@ fn http_request_summary(snapshot: crate::http_metrics::HttpMetricsSnapshot) -> H
         / 1_000;
     HttpRequestSummary {
         requests: snapshot.total,
+        errors_4xx: snapshot.errors_4xx,
         errors_5xx: snapshot.errors_5xx,
         average_ms,
         p50_ms: percentile_bucket_ms(snapshot, 50),
