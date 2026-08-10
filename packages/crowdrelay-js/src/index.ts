@@ -571,7 +571,9 @@ export class CrowdRelayError extends Error {
     super(message)
     this.name = "CrowdRelayError"
     this.status = status
-    this.problem = problem
+    if (problem !== undefined) {
+      this.problem = problem
+    }
   }
 }
 
@@ -958,14 +960,16 @@ export class CrowdRelayClient {
         headers.set("Authorization", `Bearer ${options.bearerToken}`)
       }
 
-      const response = await this.#fetch(this.#url(path), {
+      const requestInit: RequestInit = {
         method: options.method ?? "GET",
         headers,
         credentials: "include",
         signal: controller.signal,
-        body:
-          options.body === undefined ? undefined : JSON.stringify(options.body),
-      })
+      }
+      if (options.body !== undefined) {
+        requestInit.body = JSON.stringify(options.body)
+      }
+      const response = await this.#fetch(this.#url(path), requestInit)
 
       if (!response.ok) throw await toError(response)
       if (options.expectEmpty || response.status === 204) return undefined as T
