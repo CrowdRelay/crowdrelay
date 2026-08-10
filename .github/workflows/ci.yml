@@ -187,16 +187,6 @@ jobs:
         run: |
           docker buildx bake --print >/dev/null
           docker compose config --quiet
-          CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
-          CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
-          CROWDRELAY_ENV_FILE=deploy/env.production.example \
-          CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
-          CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
-            docker compose \
-              --env-file deploy/env.production.example \
-              --file compose.production.yaml \
-              config \
-              --quiet
           production_images="$(
             CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
             CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
