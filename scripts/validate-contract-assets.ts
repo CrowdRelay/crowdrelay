@@ -7,6 +7,24 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
 const REQUIRED_PATHS = [
+  "/meta",
+  "/public/area/drops",
+  "/me/area",
+  "/me/area/challenge",
+  "/me/area/claim",
+  "/internal/area/players",
+  "/internal/area/players/{player_id}",
+  "/internal/area/players/{player_id}/wallet/import",
+  "/internal/area/players/{player_id}/vouchers",
+  "/internal/area/rewards/preview",
+  "/internal/area/rewards/reserve",
+  "/internal/area/rewards/attach",
+  "/internal/area/rewards/redeem",
+  "/internal/area/rewards/release",
+  "/internal/area/players/{player_id}/ticket-rewards",
+  "/internal/area/players/{player_id}/ticket-rewards/reserve",
+  "/internal/area/players/{player_id}/ticket-rewards/finalize",
+  "/internal/area/players/{player_id}/ticket-rewards/fail",
   "/fans",
   "/public/cities",
   "/public/events",
@@ -258,6 +276,11 @@ function validateOpenApi(): number {
   }
 
   const requiredSchemaPointers = [
+    "#/components/schemas/EcosystemMeta",
+    "#/components/schemas/AreaWallet",
+    "#/components/schemas/AreaVoucher",
+    "#/components/schemas/AreaTicketReward",
+    "#/components/schemas/AreaLegacyWalletImportRequest",
     "#/components/schemas/ReferralProgress/properties/draw_entries",
     "#/components/schemas/WeightedDrawEntry",
     "#/components/schemas/ReferralProgress/properties/physical_rewards",

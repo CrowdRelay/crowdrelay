@@ -9,6 +9,157 @@ servers:
 - url: http://localhost:8080/v1
   description: Local development.
 paths:
+  /meta:
+    get:
+      operationId: getEcosystemMeta
+      summary: Read the independently deployable ecosystem compatibility contract
+      responses:
+        '200':
+          description: API, schema, release and capability metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EcosystemMeta' }
+  /public/area/drops:
+    get:
+      operationId: listPublicAreaDrops
+      summary: List coarse public AREA drop state without exact coordinates
+      responses:
+        '200':
+          description: Public AREA catalogue and aggregate progress.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AreaPublicDrops' }
+  /me/area:
+    get:
+      operationId: getMyAreaWallet
+      summary: Read the authenticated fan AREA wallet from the canonical Postgres ledger
+      security: [{ fanSession: [] }]
+      responses:
+        '200':
+          description: Canonical AREA wallet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AreaWallet' }
+  /me/area/challenge:
+    post:
+      operationId: createMyAreaChallenge
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AreaChallengeRequest' }
+      responses:
+        '200': { description: Short-lived location proof challenge. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+  /me/area/claim:
+    post:
+      operationId: claimMyAreaDrop
+      security: [{ fanSession: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AreaClaimRequest' }
+      responses:
+        '200': { description: Claim result and awarded canonical credit. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/area/players:
+    post:
+      operationId: linkInternalAreaPlayer
+      security: [{ commerceBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '200': { description: Linked AREA player. }
+  /internal/area/players/{player_id}:
+    get:
+      operationId: getInternalAreaWallet
+      security: [{ commerceBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/AreaPlayerId' }]
+      responses:
+        '200':
+          description: Canonical AREA wallet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AreaWallet' }
+  /internal/area/players/{player_id}/wallet/import:
+    post:
+      operationId: importLegacyAreaWallet
+      summary: One-way idempotent import bridge from the former Netlify Blob wallet
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/AreaPlayerId' }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AreaLegacyWalletImportRequest' }
+      responses:
+        '200':
+          description: Imported canonical wallet.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AreaWallet' }
+  /internal/area/players/{player_id}/vouchers:
+    post:
+      operationId: createInternalAreaVoucher
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/AreaPlayerId' }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '200': { description: Idempotently issued voucher and debited wallet credit. }
+  /internal/area/rewards/preview:
+    post:
+      operationId: previewInternalAreaReward
+      security: [{ commerceBearer: [] }]
+      responses: { '200': { description: Reward-code preview. } }
+  /internal/area/rewards/reserve:
+    post:
+      operationId: reserveInternalAreaReward
+      security: [{ commerceBearer: [] }]
+      responses: { '200': { description: Leased reward-code reservation. } }
+  /internal/area/rewards/attach:
+    post:
+      operationId: attachInternalAreaRewardCheckout
+      security: [{ commerceBearer: [] }]
+      responses: { '200': { description: Reward reservation attached to checkout. } }
+  /internal/area/rewards/redeem:
+    post:
+      operationId: redeemInternalAreaReward
+      security: [{ commerceBearer: [] }]
+      responses: { '200': { description: Reward redeemed idempotently. } }
+  /internal/area/rewards/release:
+    post:
+      operationId: releaseInternalAreaReward
+      security: [{ commerceBearer: [] }]
+      responses: { '200': { description: Reward lease released. } }
+  /internal/area/players/{player_id}/ticket-rewards:
+    get:
+      operationId: listInternalAreaTicketRewards
+      security: [{ commerceBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/AreaPlayerId' }]
+      responses: { '200': { description: Ticket rewards for the player. } }
+  /internal/area/players/{player_id}/ticket-rewards/reserve:
+    post:
+      operationId: reserveInternalAreaTicketReward
+      security: [{ commerceBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/AreaPlayerId' }]
+      responses: { '200': { description: Transactional credit debit and ticket-reward lease. } }
+  /internal/area/players/{player_id}/ticket-rewards/finalize:
+    post:
+      operationId: finalizeInternalAreaTicketReward
+      security: [{ commerceBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/AreaPlayerId' }]
+      responses: { '200': { description: Ticket reward finalized. } }
+  /internal/area/players/{player_id}/ticket-rewards/fail:
+    post:
+      operationId: failInternalAreaTicketReward
+      security: [{ commerceBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/AreaPlayerId' }]
+      responses: { '200': { description: Ticket-reward failure recorded and permanently failed credits refunded. } }
   /health/live:
     get:
       operationId: live
@@ -1481,6 +1632,32 @@ paths:
               schema:
                 $ref: '#/components/schemas/OpsSummary'
         '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/operations/{request_id}:
+    get:
+      operationId: getOperationsTimeline
+      summary: Trace one request across audit, outbox, delivery and operator metadata
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/OpsRequestId'
+      responses:
+        '200':
+          description: Chronological metadata-only operation timeline. Payloads and actor details are excluded.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsOperationTimeline'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '404':
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
@@ -3801,6 +3978,11 @@ components:
         type: string
         example: crowdrelay_pass_session=opaque; Max-Age=1209600; Path=/; Secure; HttpOnly; SameSite=Lax
   parameters:
+    AreaPlayerId:
+      in: path
+      name: player_id
+      required: true
+      schema: { type: string, format: uuid }
     ReservationId:
       in: path
       name: reservation_id
@@ -3921,6 +4103,15 @@ components:
       name: action_id
       required: true
       schema: { type: string, format: uuid }
+    OpsRequestId:
+      in: path
+      name: request_id
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[!-~]+$'
     OpsStatus:
       in: query
       name: status
@@ -3975,6 +4166,109 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    EcosystemMeta:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, schemaVersion, release, buildTimestamp, minimumPostgresServerVersionNum, capabilities]
+      properties:
+        apiVersion: { type: string, const: '1' }
+        schemaVersion: { type: integer, minimum: 36 }
+        release: { type: string }
+        buildTimestamp: { type: [string, 'null'] }
+        minimumPostgresServerVersionNum: { type: integer, minimum: 180000 }
+        capabilities:
+          type: object
+          additionalProperties: { type: boolean }
+          required: [area_wallet_postgres_v2, area_vouchers_v2, area_ticket_rewards_v2, ticketing_v1]
+    AreaPublicDrop:
+      type: object
+      additionalProperties: true
+      required: [id, number, city, region, signalCitySlug, approximateLat, approximateLng, active, full, claimed]
+      properties:
+        id: { type: string }
+        number: { type: string }
+        city: { type: string }
+        region: { type: string }
+        signalCitySlug: { type: string }
+        approximateLat: { type: number }
+        approximateLng: { type: number }
+        active: { type: boolean }
+        full: { type: boolean }
+        claimed: { type: boolean }
+    AreaPublicDrops:
+      type: object
+      required: [items, community]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AreaPublicDrop' } }
+        community: { type: object, additionalProperties: true }
+    AreaVoucher:
+      type: object
+      additionalProperties: true
+      required: [requestId, code, tokens, benefit, createdAt, expiresAt, status]
+      properties:
+        requestId: { type: string, format: uuid }
+        code: { type: string }
+        tokens: { type: integer, minimum: 1 }
+        benefit: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: integer }
+        status: { type: string, enum: [issued, reserved, redeemed, failed] }
+    AreaTicketReward:
+      type: object
+      additionalProperties: true
+      required: [requestId, eventSlug, credits, status]
+      properties:
+        requestId: { type: string, format: uuid }
+        eventSlug: { type: string }
+        credits: { type: integer, minimum: 1 }
+        status: { type: string, enum: [reserved, issued, failed] }
+        publicReference: { type: [string, 'null'] }
+        issuedAt: { type: [string, 'null'], format: date-time }
+    AreaWallet:
+      type: object
+      additionalProperties: true
+      required: [authenticated, migrationRequired, legacyMigrationApplied, tokenBalance, rewardCredits, claims, vouchers, ticketRewards, drops]
+      properties:
+        authenticated: { type: boolean }
+        migrationRequired: { type: boolean }
+        legacyMigrationApplied: { type: boolean }
+        tokenBalance: { type: integer, minimum: 0 }
+        rewardCredits: { type: integer, minimum: 0 }
+        claims: { type: array, items: { type: object, additionalProperties: true } }
+        vouchers: { type: array, items: { $ref: '#/components/schemas/AreaVoucher' } }
+        ticketRewards: { type: array, items: { $ref: '#/components/schemas/AreaTicketReward' } }
+        drops: { type: array, items: { $ref: '#/components/schemas/AreaPublicDrop' } }
+    AreaChallengeRequest:
+      type: object
+      additionalProperties: false
+      required: [dropId]
+      properties: { dropId: { type: string, pattern: '^[a-z]{3}-[0-9]{3}$' } }
+    AreaPositionSample:
+      type: object
+      additionalProperties: false
+      required: [lat, lng, accuracy, capturedAt]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+        accuracy: { type: number, minimum: 0 }
+        capturedAt: { type: integer, minimum: 0 }
+    AreaClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [dropId, challenge, samples]
+      properties:
+        dropId: { type: string }
+        challenge: { type: string }
+        samples: { type: array, minItems: 3, maxItems: 8, items: { $ref: '#/components/schemas/AreaPositionSample' } }
+    AreaLegacyWalletImportRequest:
+      type: object
+      additionalProperties: false
+      required: [migrationId, tokenBalance]
+      properties:
+        migrationId: { type: string, minLength: 1, maxLength: 160 }
+        tokenBalance: { type: integer, minimum: 0 }
+        vouchers: { type: array, default: [], items: { type: object, additionalProperties: true } }
+        ticketRewards: { type: array, default: [], items: { type: object, additionalProperties: true } }
     MerchCatalog:
       type: object
       additionalProperties: false
@@ -5098,16 +5392,50 @@ components:
         io_combine_limit_bytes: { type: [integer, 'null'], minimum: 0 }
         io_max_combine_limit_bytes: { type: [integer, 'null'], minimum: 0 }
         async_io_active: { type: boolean }
+    OpsAreaRuntimeSummary:
+      type: object
+      additionalProperties: false
+      required: [credits_total, vouchers_issued, stale_voucher_reservations, ticket_rewards_issued, stale_ticket_reward_reservations, legacy_imported_players]
+      properties:
+        credits_total: { type: integer, format: int64 }
+        vouchers_issued: { type: integer, format: int64, minimum: 0 }
+        stale_voucher_reservations: { type: integer, format: int64, minimum: 0 }
+        ticket_rewards_issued: { type: integer, format: int64, minimum: 0 }
+        stale_ticket_reward_reservations: { type: integer, format: int64, minimum: 0 }
+        legacy_imported_players: { type: integer, format: int64, minimum: 0 }
+    OpsOperationTimeline:
+      type: object
+      additionalProperties: false
+      required: [request_id, events]
+      properties:
+        request_id: { type: string, minLength: 1, maxLength: 128 }
+        events:
+          type: array
+          maxItems: 250
+          items: { $ref: '#/components/schemas/OpsOperationTimelineEvent' }
+    OpsOperationTimelineEvent:
+      type: object
+      additionalProperties: false
+      required: [occurred_at, source, kind]
+      properties:
+        occurred_at: { type: string, format: date-time }
+        source: { type: string, enum: [audit, outbox, delivery, operator] }
+        kind: { type: string }
+        status: { type: [string, 'null'] }
+        target_type: { type: [string, 'null'] }
+        target_id: { type: [string, 'null'] }
     OpsSummary:
       type: object
       additionalProperties: false
-      required: [outbox, deliveries, http, database, release]
+      required: [outbox, deliveries, http, database, area, schema_version, release]
       properties:
         release: { type: string, minLength: 1, maxLength: 128 }
+        schema_version: { type: integer, minimum: 36 }
         outbox: { $ref: '#/components/schemas/OpsQueueSummary' }
         deliveries: { $ref: '#/components/schemas/OpsQueueSummary' }
         http: { $ref: '#/components/schemas/HttpRequestSummary' }
         database: { $ref: '#/components/schemas/DatabaseRuntimeSummary' }
+        area: { $ref: '#/components/schemas/OpsAreaRuntimeSummary' }
     OpsOutboxItem:
       type: object
       additionalProperties: false

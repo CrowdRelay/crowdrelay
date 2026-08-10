@@ -1,0 +1,24 @@
+{
+  "apiVersion": "1",
+  "minimumSchemaVersion": 36,
+  "minimumPostgresServerVersionNum": 180000,
+  "requiredCapabilities": [
+    "area_claims_v1",
+    "area_wallet_postgres_v2",
+    "area_vouchers_v2",
+    "area_ticket_rewards_v2",
+    "signal_fan_context_v1",
+    "signal_wallet_v1",
+    "synesthesia_runs_v1",
+    "synesthesia_rewards_v1",
+    "ticketing_v1",
+    "viryaos_ops_v1"
+  ],
+  "readOnlyProductionSmokePaths": [
+    "/v1/meta",
+    "/v1/health/live",
+    "/v1/health/ready",
+    "/v1/public/area/drops",
+    "/v1/public/events"
+  ]
+}

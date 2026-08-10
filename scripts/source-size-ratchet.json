@@ -1,0 +1,22 @@
+{
+  "policy": "ratchet-not-hard-cap",
+  "reviewThresholdLines": 1200,
+  "maxLines": {
+    "crates/crowdrelay-api/src/accounting.rs": 1210,
+    "crates/crowdrelay-api/src/audience.rs": 2209,
+    "crates/crowdrelay-api/src/commerce/campaigns.rs": 1347,
+    "crates/crowdrelay-api/src/ecosystem.rs": 1741,
+    "crates/crowdrelay-api/src/lib.rs": 2077,
+    "crates/crowdrelay-api/src/ops.rs": 1388,
+    "crates/crowdrelay-api/src/proofs.rs": 1954,
+    "crates/crowdrelay-infra/src/acquisition.rs": 2012,
+    "crates/crowdrelay-infra/src/admission.rs": 1451,
+    "crates/crowdrelay-infra/src/autopilot.rs": 1498,
+    "crates/crowdrelay-infra/src/config.rs": 1558,
+    "crates/crowdrelay-infra/src/events.rs": 1226,
+    "crates/crowdrelay-infra/src/referrals.rs": 1797,
+    "crates/crowdrelay-worker/src/draws.rs": 1497,
+    "crates/crowdrelay-worker/src/event_sync.rs": 1823,
+    "crates/crowdrelay-worker/src/retention.rs": 1419
+  }
+}

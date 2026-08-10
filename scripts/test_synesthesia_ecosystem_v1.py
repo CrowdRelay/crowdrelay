@@ -2,6 +2,8 @@
 from pathlib import Path
 import unittest
 
+from rust_source_tree import read_rust_module
+
 ROOT = Path(__file__).resolve().parents[1]
 
 class SynesthesiaEcosystemContract(unittest.TestCase):
@@ -31,7 +33,7 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
 
     def test_draw_is_fixed_to_five_equal_entries(self):
         validation = (ROOT / 'crates/crowdrelay-api/src/commerce/validation.rs').read_text()
-        worker = (ROOT / 'crates/crowdrelay-worker/src/draws.rs').read_text()
+        worker = read_rust_module(ROOT, 'crates/crowdrelay-worker/src/draws.rs')
         for text in (validation, worker):
             self.assertIn('synesthesia_completion', text)
         self.assertIn('payload.winner_count != 5', validation)

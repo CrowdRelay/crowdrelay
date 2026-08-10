@@ -1,0 +1,11 @@
+# Optional production override: resolve the exact sha-* release tag to immutable
+# registry digests with ops/resolve-image-digests.sh, then pass this file after
+# compose.production.yaml. The base compose remains compatible with the existing
+# exact-commit-tag deploy tool while this override removes registry tag mutability.
+services:
+  setup:
+    image: ${CROWDRELAY_WORKER_IMAGE_REF:?Run ops/resolve-image-digests.sh first}
+  api:
+    image: ${CROWDRELAY_API_IMAGE_REF:?Run ops/resolve-image-digests.sh first}
+  worker:
+    image: ${CROWDRELAY_WORKER_IMAGE_REF:?Run ops/resolve-image-digests.sh first}

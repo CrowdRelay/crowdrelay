@@ -270,6 +270,14 @@ pub async fn internal_import_claims(
             return temporary();
         }
     };
+    match lock_area_player(&mut transaction, workspace_id, player_id).await {
+        Ok(true) => {}
+        Ok(false) => return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "Player not found."),
+        Err(error) => {
+            tracing::error!(%error, "AREA legacy import player lock failed");
+            return temporary();
+        }
+    }
 
     for claim in claims {
         let drop = match lock_drop(&mut transaction, workspace_id, &claim.drop_id, player_id).await
@@ -341,7 +349,24 @@ pub async fn internal_import_claims(
         .execute(&mut *transaction)
         .await;
         match inserted {
-            Ok(result) if result.rows_affected() <= 1 => {}
+            Ok(result) if result.rows_affected() == 1 => {
+                let reference = format!("claim:{}", claim.drop_id);
+                if let Err(error) = insert_credit_delta(
+                    &mut transaction,
+                    workspace_id,
+                    player_id,
+                    1,
+                    "claim",
+                    &reference,
+                    Some(claimed_at),
+                )
+                .await
+                {
+                    tracing::error!(%error, drop_id = claim.drop_id, "AREA legacy credit insert failed");
+                    return temporary();
+                }
+            }
+            Ok(result) if result.rows_affected() == 0 => {}
             Ok(_) => return temporary(),
             Err(error) => {
                 tracing::error!(%error, drop_id = claim.drop_id, "AREA legacy import insert failed");

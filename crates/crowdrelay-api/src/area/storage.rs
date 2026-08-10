@@ -109,6 +109,72 @@ async fn load_claims(
         .collect())
 }
 
+
+async fn load_vouchers(
+    state: &crate::AppState,
+    player_id: Uuid,
+) -> Result<Vec<AreaVoucherPublic>, sqlx::Error> {
+    sqlx::query_as::<_, AreaVoucherPublic>(
+        r#"
+        SELECT
+            request_id,
+            code,
+            token_cost AS tokens,
+            benefit,
+            issued_at AS created_at,
+            floor(extract(epoch FROM expires_at))::bigint AS expires_at,
+            status,
+            free_product_id,
+            free_product_label,
+            redeemed_at
+        FROM area_reward_vouchers
+        WHERE workspace_id = $1
+          AND player_id = $2
+          AND status IN ('issued', 'reserved', 'redeemed')
+        ORDER BY issued_at DESC, id
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(player_id)
+    .fetch_all(state.ticketing.pool())
+    .await
+}
+
+async fn load_ticket_rewards(
+    state: &crate::AppState,
+    player_id: Uuid,
+) -> Result<Vec<AreaTicketRewardPublic>, sqlx::Error> {
+    sqlx::query_as::<_, AreaTicketRewardPublic>(
+        r#"
+        SELECT request_id, event_slug, credits, status, public_reference, issued_at
+        FROM area_ticket_rewards
+        WHERE workspace_id = $1 AND player_id = $2
+        ORDER BY created_at DESC, id
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(player_id)
+    .fetch_all(state.ticketing.pool())
+    .await
+}
+
+async fn area_credit_balance(
+    state: &crate::AppState,
+    player_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COALESCE(sum(delta), 0)::bigint
+        FROM area_credit_ledger
+        WHERE workspace_id = $1 AND player_id = $2
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(player_id)
+    .fetch_one(state.ticketing.pool())
+    .await
+}
+
 async fn wallet_for_player(
     state: &crate::AppState,
     player_id: Uuid,
@@ -123,7 +189,16 @@ async fn wallet_for_player(
     } else {
         f64::from(current) * 100.0 / f64::from(total)
     };
-    let token_balance = u32::try_from(claims.len()).unwrap_or(u32::MAX);
+    let token_balance = safe_u32(area_credit_balance(state, player_id).await?);
+    let legacy_migration_applied = sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS (SELECT 1 FROM area_legacy_wallet_imports WHERE workspace_id=$1 AND player_id=$2)"#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(player_id)
+    .fetch_one(state.ticketing.pool())
+    .await?;
+    let vouchers = load_vouchers(state, player_id).await?;
+    let ticket_rewards = load_ticket_rewards(state, player_id).await?;
     let public_drops = drops.iter().map(public_drop).collect::<Vec<_>>();
     let live_drops = public_drops
         .iter()
@@ -136,6 +211,7 @@ async fn wallet_for_player(
     Ok(AreaWallet {
         authenticated: true,
         migration_required: false,
+        legacy_migration_applied,
         token_balance,
         reward_credits: token_balance,
         reward: RewardSummary {
@@ -149,7 +225,8 @@ async fn wallet_for_player(
             percent,
         },
         claims,
-        vouchers: Vec::new(),
+        vouchers,
+        ticket_rewards,
         live_drops,
         drops: public_drops,
     })

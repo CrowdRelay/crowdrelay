@@ -18,6 +18,9 @@ use crate::config::DatabaseConfig;
 /// Migrations embedded into both binaries at compile time.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
+/// PostgreSQL 18 is a production/runtime contract, not merely a CI fixture.
+pub const MIN_POSTGRES_SERVER_VERSION_NUM: i32 = 180_000;
+
 /// Stable application-facing classification of SQLx failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SqlxErrorClass {
@@ -86,7 +89,7 @@ pub fn connect_lazy(config: &DatabaseConfig) -> Result<PgPool, DatabaseError> {
 
 /// Builds a bounded pool and establishes its initial PostgreSQL connection.
 pub async fn connect(config: &DatabaseConfig) -> Result<PgPool, DatabaseError> {
-    timeout(
+    let pool = timeout(
         config.connect_timeout,
         pool_options(config).connect(&config.url),
     )
@@ -94,7 +97,28 @@ pub async fn connect(config: &DatabaseConfig) -> Result<PgPool, DatabaseError> {
     .map_err(|_| DatabaseError::ConnectTimeout {
         timeout: config.connect_timeout,
     })?
-    .map_err(DatabaseError::Connect)
+    .map_err(DatabaseError::Connect)?;
+
+    let version = timeout(
+        config.connect_timeout,
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+            .fetch_one(&pool),
+    )
+    .await
+    .map_err(|_| DatabaseError::VersionCheckTimeout {
+        timeout: config.connect_timeout,
+    })?
+    .map_err(DatabaseError::VersionCheck)?;
+
+    if version < MIN_POSTGRES_SERVER_VERSION_NUM {
+        pool.close().await;
+        return Err(DatabaseError::UnsupportedServerVersion {
+            actual: version,
+            minimum: MIN_POSTGRES_SERVER_VERSION_NUM,
+        });
+    }
+
+    Ok(pool)
 }
 
 /// Checks database readiness within the caller-provided deadline.
@@ -137,6 +161,20 @@ pub enum DatabaseError {
     /// The initial connection attempt failed.
     #[error("failed to connect to PostgreSQL")]
     Connect(#[source] sqlx::Error),
+
+    /// The server version preflight timed out.
+    #[error("PostgreSQL server-version check timed out after {timeout:?}")]
+    VersionCheckTimeout { timeout: Duration },
+
+    /// The server version query failed.
+    #[error("failed to determine PostgreSQL server version")]
+    VersionCheck(#[source] sqlx::Error),
+
+    /// CrowdRelay requires PostgreSQL 18+ for its production runtime contract.
+    #[error(
+        "unsupported PostgreSQL server version {actual}; require server_version_num >= {minimum}"
+    )]
+    UnsupportedServerVersion { actual: i32, minimum: i32 },
 
     /// The readiness ping timed out.
     #[error("PostgreSQL readiness check timed out after {timeout:?}")]
@@ -181,6 +219,16 @@ mod tests {
     fn lazy_pool_rejects_invalid_url() {
         let result = connect_lazy(&database_config("not a PostgreSQL URL"));
         assert!(matches!(result, Err(DatabaseError::ConfigurePool(_))));
+    }
+
+    #[test]
+    fn postgres_18_is_a_runtime_contract() {
+        assert_eq!(MIN_POSTGRES_SERVER_VERSION_NUM, 180_000);
+        let error = DatabaseError::UnsupportedServerVersion {
+            actual: 160_014,
+            minimum: MIN_POSTGRES_SERVER_VERSION_NUM,
+        };
+        assert!(error.to_string().contains("180000"));
     }
 
     #[test]

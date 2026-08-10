@@ -8,7 +8,7 @@ class SourceLayoutContracts(unittest.TestCase):
         self.assertTrue((ROOT / 'crates/crowdrelay-worker/src/outbox.rs').is_file())
     def test_partitioned_contracts(self):
         specs={
-          'crates/crowdrelay-api/src/area.rs':('public_drops',5),
+          'crates/crowdrelay-api/src/area.rs':('public_drops',9),
           'crates/crowdrelay-api/src/ticketing.rs':('reserve_order',6),
           'crates/crowdrelay-api/src/commerce.rs':('reserve_inventory',5),
           'crates/crowdrelay-worker/src/bootstrap.rs':('bootstrap_admission_access',5),

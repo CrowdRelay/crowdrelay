@@ -60,7 +60,29 @@ pub struct OpsSummary {
     deliveries: QueueSummary,
     http: HttpRequestSummary,
     database: DatabaseRuntimeSummary,
+    area: AreaRuntimeSummary,
+    schema_version: u32,
     release: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct AreaRuntimeSummary {
+    credits_total: i64,
+    vouchers_issued: i64,
+    stale_voucher_reservations: i64,
+    ticket_rewards_issued: i64,
+    stale_ticket_reward_reservations: i64,
+    legacy_imported_players: i64,
+}
+
+#[derive(Debug, Default, FromRow)]
+struct AreaRuntimeRow {
+    credits_total: i64,
+    vouchers_issued: i64,
+    stale_voucher_reservations: i64,
+    ticket_rewards_issued: i64,
+    stale_ticket_reward_reservations: i64,
+    legacy_imported_players: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -310,7 +332,7 @@ struct ExistingAction {
     target_type: String,
     target_id: Uuid,
 }
-
+include!("ops_timeline.rs");
 pub async fn summary(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     match run_with_timeout(state.ops.operation_timeout, load_summary(&state.ops)).await {
         Ok(summary) => private_json(StatusCode::OK, summary),
@@ -989,6 +1011,22 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
     .fetch_one(&state.pool)
     .await
     .map_err(OpsError::sqlx)?;
+    let area = sqlx::query_as::<_, AreaRuntimeRow>(
+        r#"
+        SELECT
+            COALESCE((SELECT sum(delta)::bigint FROM area_credit_ledger WHERE workspace_id = $1), 0) AS credits_total,
+            COALESCE((SELECT count(*)::bigint FROM area_reward_vouchers WHERE workspace_id = $1 AND status = 'issued'), 0) AS vouchers_issued,
+            COALESCE((SELECT count(*)::bigint FROM area_reward_vouchers WHERE workspace_id = $1 AND status = 'reserved' AND reserved_until < now()), 0) AS stale_voucher_reservations,
+            COALESCE((SELECT count(*)::bigint FROM area_ticket_rewards WHERE workspace_id = $1 AND status = 'issued'), 0) AS ticket_rewards_issued,
+            COALESCE((SELECT count(*)::bigint FROM area_ticket_rewards WHERE workspace_id = $1 AND status = 'reserved' AND reservation_expires_at < now()), 0) AS stale_ticket_reward_reservations,
+            COALESCE((SELECT count(*)::bigint FROM area_legacy_wallet_imports WHERE workspace_id = $1), 0) AS legacy_imported_players
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_one(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)?;
+
     let database = DatabaseRuntimeSummary {
         server_version_num: database.server_version_num,
         async_io_active: database.server_version_num >= 180_000
@@ -1022,6 +1060,15 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
         },
         http: http_request_summary(crate::http_metrics().snapshot()),
         database,
+        area: AreaRuntimeSummary {
+            credits_total: area.credits_total,
+            vouchers_issued: area.vouchers_issued,
+            stale_voucher_reservations: area.stale_voucher_reservations,
+            ticket_rewards_issued: area.ticket_rewards_issued,
+            stale_ticket_reward_reservations: area.stale_ticket_reward_reservations,
+            legacy_imported_players: area.legacy_imported_players,
+        },
+        schema_version: 37,
         release: option_env!("CROWDRELAY_RELEASE")
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_owned(),

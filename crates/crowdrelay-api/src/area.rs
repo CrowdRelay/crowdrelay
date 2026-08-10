@@ -14,7 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Postgres, Transaction};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{IDEMPOTENCY_KEY, acquisition::fan_session_from_headers};
@@ -181,18 +181,182 @@ struct AreaCollectible {
     riddle: String,
 }
 
+#[derive(Clone, Debug, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct AreaVoucherPublic {
+    request_id: Uuid,
+    code: String,
+    tokens: i32,
+    benefit: String,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+    expires_at: i64,
+    status: String,
+    free_product_id: Option<String>,
+    free_product_label: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    redeemed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct AreaTicketRewardPublic {
+    request_id: Uuid,
+    event_slug: String,
+    credits: i32,
+    status: String,
+    public_reference: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    issued_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateVoucherRequest {
+    request_id: Uuid,
+    #[serde(default = "one_credit")]
+    tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewardCodeRequest {
+    code: String,
+    #[serde(default)]
+    reservation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReserveRewardRequest {
+    code: String,
+    reservation_id: String,
+    reserved_until: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachRewardCheckoutRequest {
+    code_hash: String,
+    reservation_id: String,
+    checkout_session_id: String,
+    free_product_id: String,
+    free_product_label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReconcileRewardRequest {
+    code_hash: String,
+    reservation_id: String,
+    checkout_session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseRewardRequest {
+    code_hash: String,
+    reservation_id: String,
+    #[serde(default)]
+    checkout_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyVoucherImport {
+    request_id: Uuid,
+    code: String,
+    tokens: u32,
+    benefit: String,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+    expires_at: i64,
+    status: String,
+    #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
+    reserved_until: Option<i64>,
+    #[serde(default)]
+    checkout_session_id: Option<String>,
+    #[serde(default)]
+    free_product_id: Option<String>,
+    #[serde(default)]
+    free_product_label: Option<String>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    redeemed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyTicketRewardImport {
+    request_id: Uuid,
+    event_slug: String,
+    credits: u32,
+    fan_email: String,
+    #[serde(default)]
+    public_reference: Option<String>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    issued_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportLegacyWalletRequest {
+    migration_id: String,
+    token_balance: u32,
+    #[serde(default)]
+    vouchers: Vec<LegacyVoucherImport>,
+    #[serde(default)]
+    ticket_rewards: Vec<LegacyTicketRewardImport>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReserveTicketRewardRequest {
+    request_id: Uuid,
+    event_slug: String,
+    credits: u32,
+    fan_email: String,
+    reservation_id: String,
+    reservation_expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinalizeTicketRewardRequest {
+    request_id: Uuid,
+    reservation_id: String,
+    public_reference: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FailTicketRewardRequest {
+    request_id: Uuid,
+    reservation_id: String,
+    permanent: bool,
+    #[serde(default)]
+    failure_code: Option<String>,
+}
+
+fn one_credit() -> u32 {
+    1
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AreaWallet {
     authenticated: bool,
     migration_required: bool,
+    legacy_migration_applied: bool,
     token_balance: u32,
     reward_credits: u32,
     reward: RewardSummary,
     collection_size: u32,
     community: AreaCommunity,
     claims: Vec<AreaClaim>,
-    vouchers: Vec<serde_json::Value>,
+    vouchers: Vec<AreaVoucherPublic>,
+    ticket_rewards: Vec<AreaTicketRewardPublic>,
     live_drops: Vec<LiveDrop>,
     drops: Vec<PublicDrop>,
 }
@@ -359,8 +523,12 @@ fn collectible_from_existing(row: &ExistingClaim) -> AreaCollectible {
 // Physical sections compile into this module through `include!`.
 // This preserves the established API and item visibility while keeping
 // high-risk domains small enough to review and profile independently.
+include!("area/ledger.rs");
 include!("area/storage.rs");
 include!("area/endpoints.rs");
 include!("area/challenge.rs");
 include!("area/claims.rs");
+include!("area/rewards.rs");
+include!("area/ticket_rewards.rs");
+include!("area/legacy_wallet.rs");
 include!("area/tests.rs");

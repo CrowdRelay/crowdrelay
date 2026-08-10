@@ -148,6 +148,14 @@ async fn claim_drop(
             return temporary();
         }
     };
+    match lock_area_player(&mut transaction, workspace_id, player_id).await {
+        Ok(true) => {}
+        Ok(false) => return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "Player not found."),
+        Err(error) => {
+            tracing::error!(%error, "AREA player lock failed");
+            return temporary();
+        }
+    }
     match existing_claim(&mut transaction, workspace_id, player_id, &payload.drop_id).await {
         Ok(Some(existing)) => {
             if transaction.commit().await.is_err() {
@@ -347,6 +355,21 @@ async fn claim_drop(
                 return temporary();
             }
         }
+    }
+    let credit_reference = format!("claim:{}", payload.drop_id);
+    if let Err(error) = insert_credit_delta(
+        &mut transaction,
+        workspace_id,
+        player_id,
+        1,
+        "claim",
+        &credit_reference,
+        None,
+    )
+    .await
+    {
+        tracing::error!(%error, "AREA claim credit ledger insert failed");
+        return temporary();
     }
     if let Err(error) = transaction.commit().await {
         tracing::error!(%error, "AREA claim commit failed");

@@ -10,8 +10,8 @@ MIGRATION = (ROOT / "migrations/0027_merch_inventory_reward_campaigns.sql").read
 ONBOARDING = (ROOT / "migrations/0028_inventory_onboarding.sql").read_text(encoding="utf-8")
 COMMERCE = read_rust_module(ROOT, "crates/crowdrelay-api/src/commerce.rs")
 ROUTER = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text(encoding="utf-8")
-FLAGS = (ROOT / "crates/crowdrelay-api/src/ecosystem.rs").read_text(encoding="utf-8")
-WORKER = (ROOT / "crates/crowdrelay-worker/src/draws.rs").read_text(encoding="utf-8")
+FLAGS = read_rust_module(ROOT, "crates/crowdrelay-api/src/ecosystem.rs")
+WORKER = read_rust_module(ROOT, "crates/crowdrelay-worker/src/draws.rs")
 OPENAPI = (ROOT / "openapi/openapi.yaml").read_text(encoding="utf-8")
 
 PROTECTED_TABLES = {

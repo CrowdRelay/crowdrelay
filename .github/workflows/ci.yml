@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Activate repository-pinned Rust toolchain
         run: |
@@ -69,11 +69,11 @@ jobs:
           cargo --version
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Cache pinned cargo-audit binary
         id: cargo-audit-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ runner.os }}-cargo-audit-0.22.2
@@ -89,6 +89,20 @@ jobs:
 
       - name: Run repository checks
         run: make ci
+
+      - name: Enforce ecosystem runtime contracts
+        run: |
+          python3 scripts/check-ci-policy.py
+          python3 scripts/source-size-ratchet.py
+          python3 scripts/test-modularity-contract.py
+          python3 scripts/check-postgres-major.py
+          python3 scripts/test_postgres18_runtime.py
+          python3 scripts/test_area_wallet_authority_v2.py
+          python3 scripts/test-ecosystem-contract-v2.py
+          python3 scripts/test-ops-control-plane-v2.py
+          python3 scripts/test-ecosystem-design-contract.py
+          python3 scripts/test-image-provenance-policy.py
+          python3 scripts/sync-client-contract.py --check
 
       - name: Audit Rust dependencies
         shell: bash
@@ -214,6 +228,22 @@ jobs:
           while IFS= read -r image; do
             [[ "${image##*:}" == "sha-0000000000000000000000000000000000000000" ]]
           done <<< "$production_images"
+          digest="sha256:$(printf '0%.0s' {1..64})"
+          digest_images="$(
+            CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
+            CROWDRELAY_DOCKER_NETWORK=crowdrelay-ci \
+            CROWDRELAY_ENV_FILE=deploy/env.production.example \
+            CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
+            CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
+            CROWDRELAY_API_IMAGE_REF="ghcr.io/wojciechbator/crowdrelay-api@$digest" \
+            CROWDRELAY_WORKER_IMAGE_REF="ghcr.io/wojciechbator/crowdrelay-worker@$digest" \
+              docker compose \
+                --env-file deploy/env.production.example \
+                --file compose.production.yaml \
+                --file compose.production.digest.yaml \
+                config --images
+          )"
+          [[ "$(printf '%s\n' "$digest_images" | grep -c '@sha256:')" -eq 3 ]]
           ./scripts/audit-public-tree.sh
 
       - name: Check TypeScript client
@@ -234,10 +264,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build both runtime targets once
         run: |

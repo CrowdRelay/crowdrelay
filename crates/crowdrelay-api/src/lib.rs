@@ -64,6 +64,7 @@ mod events;
 mod fan_context;
 mod fan_lifecycle;
 mod http_metrics;
+mod meta;
 mod mobile_fan;
 mod ops;
 mod proofs;
@@ -232,6 +233,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/health/live", get(live))
         .route("/v1/health/ready", get(ready))
+        .route("/v1/meta", get(meta::get))
         .route("/v1/go/{slug}", get(acquisition::redirect_smart_link))
         .route("/v1/fans", post(acquisition::signup_fan))
         .route("/v1/fans/access", post(fan_lifecycle::request_fan_access))
@@ -267,6 +269,50 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .route(
             "/v1/internal/area/players/{player_id}/claims/import",
             post(area::internal_import_claims),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/wallet/import",
+            post(area::internal_import_legacy_wallet),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/vouchers",
+            post(area::internal_create_voucher),
+        )
+        .route(
+            "/v1/internal/area/rewards/preview",
+            post(area::internal_reward_preview),
+        )
+        .route(
+            "/v1/internal/area/rewards/reserve",
+            post(area::internal_reward_reserve),
+        )
+        .route(
+            "/v1/internal/area/rewards/attach",
+            post(area::internal_reward_attach),
+        )
+        .route(
+            "/v1/internal/area/rewards/redeem",
+            post(area::internal_reward_redeem),
+        )
+        .route(
+            "/v1/internal/area/rewards/release",
+            post(area::internal_reward_release),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/ticket-rewards",
+            get(area::internal_ticket_rewards),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/ticket-rewards/reserve",
+            post(area::internal_ticket_reward_reserve),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/ticket-rewards/finalize",
+            post(area::internal_ticket_reward_finalize),
+        )
+        .route(
+            "/v1/internal/area/players/{player_id}/ticket-rewards/fail",
+            post(area::internal_ticket_reward_fail),
         )
         .route("/v1/public/cities/requests", post(mobile_fan::request_city))
         .route("/v1/public/events", get(events::list_events))
@@ -670,6 +716,10 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             post(autopilot::cancel_action),
         )
         .route("/v1/admin/ops/summary", get(ops::summary))
+        .route(
+            "/v1/admin/ops/operations/{request_id}",
+            get(ops::operation_timeline),
+        )
         .route("/v1/admin/ops/outbox", get(ops::list_outbox))
         .route("/v1/admin/ops/deliveries", get(ops::list_deliveries))
         .route(
