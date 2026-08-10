@@ -90,20 +90,6 @@ jobs:
       - name: Run repository checks
         run: make ci
 
-      - name: Enforce ecosystem runtime contracts
-        run: |
-          python3 scripts/check-ci-policy.py
-          python3 scripts/source-size-ratchet.py
-          python3 scripts/test-modularity-contract.py
-          python3 scripts/check-postgres-major.py
-          python3 scripts/test_postgres18_runtime.py
-          python3 scripts/test_area_wallet_authority_v2.py
-          python3 scripts/test-ecosystem-contract-v2.py
-          python3 scripts/test-ops-control-plane-v2.py
-          python3 scripts/test-ecosystem-design-contract.py
-          python3 scripts/test-image-provenance-policy.py
-          python3 scripts/sync-client-contract.py --check
-
       - name: Audit Rust dependencies
         shell: bash
         run: |
