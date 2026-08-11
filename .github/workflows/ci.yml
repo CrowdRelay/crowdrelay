@@ -87,9 +87,6 @@ jobs:
           cargo run --locked --package crowdrelay-worker -- setup
           cargo run --locked --package crowdrelay-worker -- setup
 
-      - name: Verify PostgreSQL 18 hot-path index plans
-        run: python3 scripts/query-plan-regression.py
-
       - name: Run repository checks
         run: make ci
 

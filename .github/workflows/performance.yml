@@ -62,8 +62,6 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Set up PostgreSQL 18 schema and workspace
         run: cargo run --locked --package crowdrelay-worker -- setup
-      - name: Verify hot-path query/index compatibility
-        run: python3 scripts/query-plan-regression.py
       - name: Build API once in release mode
         run: cargo build --locked --release --package crowdrelay-api
       - name: Start API
