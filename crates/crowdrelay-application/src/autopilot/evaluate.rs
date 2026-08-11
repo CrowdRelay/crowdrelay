@@ -5,7 +5,7 @@ use crowdrelay_domain::{
     audience_lifecycle::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
     },
-    autonomy::disposition,
+    autonomy::{PolicyDisposition, disposition},
     booking::{
         BookingFollowUpDecision, BookingFollowUpPolicy, BookingOpportunityDecision,
         BookingOutreachPhase, BookingTargetDecision, BookingTargetSelectionPolicy,
@@ -15,6 +15,10 @@ use crowdrelay_domain::{
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
     content_supply::{ContentSupplyDecision, ContentSupplySnapshot, evaluate_content_supply},
     experimentation::{ExperimentDecision, ExperimentSnapshot, evaluate_experiment},
+    funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
+    live_opportunities::{
+        LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
+    },
     merch_bundle::{MerchBundleDecision, MerchBundleSnapshot, evaluate_merch_bundle},
     merchandising::{
         MerchInventorySnapshot, MerchPriceDecision, MerchPriceDirection, MerchPriceSnapshot,
@@ -26,6 +30,7 @@ use crowdrelay_domain::{
         evaluate_ticket_allocation, evaluate_ticket_yield,
     },
     promotion::{PromotionBudgetDecision, PromotionPerformanceSnapshot, evaluate_promotion_budget},
+    release_autopilot::{ReleaseDecision, ReleaseMilestone, ReleasePlanSnapshot, evaluate_release},
     show_operations::{ShowOperationsDecision, ShowTaskSnapshot, evaluate_show_task},
 };
 use serde::Serialize;
@@ -205,6 +210,40 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = promotion_candidate(snapshot, policy, now)? {
+                            self.persist(&candidate, &mut report).await?;
+                        }
+                    }
+                }
+                AutopilotContext::Release => {
+                    let snapshots = self
+                        .repository
+                        .load_release_plan_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in snapshots {
+                        if let Some(candidate) = release_candidate(snapshot, policy, now)? {
+                            self.persist(&candidate, &mut report).await?;
+                        }
+                    }
+                }
+                AutopilotContext::LiveOpportunity => {
+                    let snapshots = self
+                        .repository
+                        .load_live_opportunity_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in snapshots {
+                        if let Some(candidate) = live_opportunity_candidate(snapshot, policy, now)?
+                        {
+                            self.persist(&candidate, &mut report).await?;
+                        }
+                    }
+                }
+                AutopilotContext::Funding => {
+                    let snapshots = self
+                        .repository
+                        .load_funding_opportunity_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in snapshots {
+                        if let Some(candidate) = funding_candidate(snapshot, policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -391,7 +430,9 @@ fn lifecycle_candidate(
         return Ok(None);
     };
     let template_key = match template {
+        LifecycleTemplate::Welcome => "viryaos.fan.welcome.v1",
         LifecycleTemplate::SynesthesiaFollowUp => "viryaos.synesthesia.follow_up.v1",
+        LifecycleTemplate::DormantReactivation => "viryaos.fan.reactivation.v1",
     };
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     let subject = ActionSubject::Fan(snapshot.fan_id);
@@ -401,7 +442,7 @@ fn lifecycle_candidate(
         decision_kind: "request_lifecycle_message",
         confidence,
         disposition,
-        reason: "consented Synesthesia completion has no paid-ticket conversion",
+        reason: "consented fan lifecycle has a deterministic communication step due",
         input_snapshot: serde_json::to_value(snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestFanLifecycleMessage {
@@ -409,17 +450,176 @@ fn lifecycle_candidate(
             template_key: template_key.to_owned(),
         },
         decision_key: format!(
-            "decision:lifecycle:v{}:{}:{}:{}",
+            "decision:lifecycle:v{}:{}:{}:{}:{}",
             policy.version,
             snapshot.fan_id,
-            snapshot
-                .synesthesia_completed_at
-                .map_or(0, OffsetDateTime::unix_timestamp),
+            template_key,
             snapshot
                 .last_marketing_touch_at
                 .map_or(0, OffsetDateTime::unix_timestamp),
+            snapshot
+                .last_event_interest_at
+                .map_or(0, OffsetDateTime::unix_timestamp),
         ),
-        action_idempotency_key: format!("action:lifecycle:{}:{template_key}", snapshot.fan_id),
+        action_idempotency_key: format!(
+            "action:lifecycle:{}:{template_key}:{}",
+            snapshot.fan_id,
+            snapshot
+                .last_marketing_touch_at
+                .map_or(0, OffsetDateTime::unix_timestamp)
+        ),
+    }))
+}
+
+fn release_candidate(
+    snapshot: ReleasePlanSnapshot,
+    policy: AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::Release(domain_policy) = policy.config else {
+        return Ok(None);
+    };
+    let ReleaseDecision::Request {
+        milestone,
+        confidence,
+    } = evaluate_release(&snapshot, domain_policy, now)
+    else {
+        return Ok(None);
+    };
+    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    let milestone_key = match milestone {
+        ReleaseMilestone::SeedCalendar => "seed_calendar",
+        ReleaseMilestone::Announcement => "announcement",
+        ReleaseMilestone::StartPress => "start_press",
+        ReleaseMilestone::FanWarmup => "fan_warmup",
+        ReleaseMilestone::Countdown => "countdown",
+        ReleaseMilestone::ReleaseDay => "release_day",
+        ReleaseMilestone::Sustain => "sustain",
+        ReleaseMilestone::Wrap => "wrap",
+    };
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::ReleasePlan(snapshot.release_id),
+        decision_kind: "execute_release_milestone",
+        confidence,
+        disposition,
+        reason: "release timeline has a deterministic milestone due",
+        input_snapshot: serde_json::to_value(&snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::ExecuteReleaseMilestone {
+            release_id: snapshot.release_id,
+            title: snapshot.title.clone(),
+            release_at: snapshot.release_at,
+            milestone,
+        },
+        decision_key: format!(
+            "decision:release:v{}:{}:{}:{}",
+            policy.version,
+            snapshot.release_id,
+            milestone_key,
+            snapshot.release_at.unix_timestamp()
+        ),
+        action_idempotency_key: format!("action:release:{}:{milestone_key}", snapshot.release_id),
+    }))
+}
+
+fn live_opportunity_candidate(
+    snapshot: LiveOpportunitySnapshot,
+    policy: AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::LiveOpportunity(domain_policy) = policy.config else {
+        return Ok(None);
+    };
+    let decision = evaluate_live_opportunity(snapshot, domain_policy, now);
+    let (score, confidence, forced_approval) = match decision {
+        LiveOpportunityDecision::Hold => return Ok(None),
+        LiveOpportunityDecision::PrepareForApproval { score, confidence } => {
+            (score, confidence, true)
+        }
+        LiveOpportunityDecision::SubmitAutomatically { score, confidence } => {
+            (score, confidence, false)
+        }
+    };
+    let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    if forced_approval && matches!(disposition, PolicyDisposition::AutoExecute) {
+        disposition = PolicyDisposition::RequireApproval;
+    }
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::TeamOpportunity(snapshot.opportunity_id),
+        decision_kind: "apply_live_opportunity",
+        confidence,
+        disposition,
+        reason: "verified live opportunity clears deterministic fit and economics gates",
+        input_snapshot: serde_json::to_value(snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::ApplyLiveOpportunity {
+            opportunity_id: snapshot.opportunity_id,
+            opportunity_kind: snapshot.kind,
+            score,
+        },
+        decision_key: format!(
+            "decision:live:v{}:{}:{score}:{}",
+            policy.version,
+            snapshot.opportunity_id,
+            snapshot.deadline.map_or(0, OffsetDateTime::unix_timestamp)
+        ),
+        action_idempotency_key: format!("action:live:{}:apply", snapshot.opportunity_id),
+    }))
+}
+
+fn funding_candidate(
+    snapshot: FundingOpportunitySnapshot,
+    policy: AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::Funding(domain_policy) = policy.config else {
+        return Ok(None);
+    };
+    let decision = evaluate_funding(snapshot, domain_policy, now);
+    let (decision_kind, confidence, action, force_approval, key) = match decision {
+        FundingDecision::Hold => return Ok(None),
+        FundingDecision::PreparePackage { confidence } => (
+            "prepare_funding_package",
+            confidence,
+            AutopilotActionPayload::PrepareFundingPackage {
+                opportunity_id: snapshot.opportunity_id,
+            },
+            false,
+            "prepare",
+        ),
+        FundingDecision::SubmitForApproval { confidence } => (
+            "submit_funding_application",
+            confidence,
+            AutopilotActionPayload::SubmitFundingApplication {
+                opportunity_id: snapshot.opportunity_id,
+            },
+            true,
+            "submit",
+        ),
+    };
+    let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    if force_approval && matches!(disposition, PolicyDisposition::AutoExecute) {
+        disposition = PolicyDisposition::RequireApproval;
+    }
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::TeamOpportunity(snapshot.opportunity_id),
+        decision_kind,
+        confidence,
+        disposition,
+        reason: "eligible funding opportunity clears deterministic value and contribution gates",
+        input_snapshot: serde_json::to_value(snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action,
+        decision_key: format!(
+            "decision:funding:v{}:{}:{key}:{}",
+            policy.version,
+            snapshot.opportunity_id,
+            snapshot.deadline.unix_timestamp()
+        ),
+        action_idempotency_key: format!("action:funding:{}:{key}", snapshot.opportunity_id),
     }))
 }
 
@@ -815,6 +1015,9 @@ fn outreach_candidate(
         crowdrelay_domain::outreach::OutreachTargetKind::Creator => "outreach.creator.v1",
         crowdrelay_domain::outreach::OutreachTargetKind::SupportSlot => "outreach.support_slot.v1",
         crowdrelay_domain::outreach::OutreachTargetKind::Endorsement => "outreach.endorsement.v1",
+        crowdrelay_domain::outreach::OutreachTargetKind::MediaPatronage => {
+            "outreach.media_patronage.v1"
+        }
     };
     Ok(Some(DecisionCandidate {
         context: policy.context,

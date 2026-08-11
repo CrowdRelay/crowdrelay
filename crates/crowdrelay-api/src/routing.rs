@@ -475,6 +475,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::upsert_outreach_opportunity),
         )
         .route(
+            "/v1/admin/autopilot/releases",
+            post(autopilot::upsert_release_plan),
+        )
+        .route(
+            "/v1/admin/autopilot/team-opportunities",
+            post(autopilot::upsert_team_opportunity),
+        )
+        .route(
+            "/v1/admin/autopilot/team-opportunities/{opportunity_id}/progress",
+            post(autopilot::record_team_opportunity_progress),
+        )
+        .route(
             "/v1/admin/autopilot/content-sources",
             post(autopilot::upsert_content_source),
         )

@@ -2,7 +2,7 @@
 
 CrowdRelay emits durable, HMAC-signed webhook events through its transactional
 outbox. n8n can be used as an optional delivery adapter for email, chat,
-social-media, AI-enrichment, and other external providers.
+social-media, Calendar, form-submission, and other external providers.
 
 Production workflow exports are intentionally **not stored in this public
 repository**. They commonly contain operator-specific details such as:
@@ -33,6 +33,21 @@ It demonstrates only the branch boundary:
 
 The example contains no production domains, IDs, credential references,
 provider names, or CrowdRelay operator data.
+
+## VIRYA OS executor events
+
+VIRYA OS keeps decisions in Rust and emits only provider-neutral execution intents. Private n8n branches may handle these events without implementing business rules:
+
+| Event | Executor responsibility |
+| --- | --- |
+| `viryaos.calendar.upsert_requested` | idempotently create/update the requested Calendar item using `calendar_key` |
+| `communication.campaign_due` | deliver the already-planned first-party communication campaign |
+| `viryaos.opportunity.application_requested` | submit the already-qualified free/reversible application, then report `submitted`; never execute a payment |
+| `viryaos.funding.package_requested` | render the application package from supplied canonical facts and report `package_ready` |
+| `viryaos.funding.submission_requested` | submit only the explicitly human-approved ready package, then report `submitted` |
+| `viryaos.autopilot.approval_requested` | notify the operator once that an action needs a decision |
+
+Executors must use the CrowdRelay event ID or supplied business key as their idempotency key. They must not rescore a lead, change pricing policy, infer authority, or silently broaden the requested action. A provider failure is a delivery failure; it is not permission for n8n to invent an alternative business action.
 
 ## Recommended private layout
 

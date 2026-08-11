@@ -113,6 +113,8 @@ typed_uuid_id!(
     ContentSourceId,
     ExperimentId,
     ExperimentVariantId,
+    ReleasePlanId,
+    TeamOpportunityId,
 );
 
 #[cfg(test)]

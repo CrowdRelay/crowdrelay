@@ -91,7 +91,11 @@ async fn schedule_effect_measurement(
         | AutopilotActionPayload::RequestContentArtifact { .. }
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
-        | AutopilotActionPayload::EscalateShowTask { .. } => None,
+        | AutopilotActionPayload::EscalateShowTask { .. }
+        | AutopilotActionPayload::ExecuteReleaseMilestone { .. }
+        | AutopilotActionPayload::ApplyLiveOpportunity { .. }
+        | AutopilotActionPayload::PrepareFundingPackage { .. }
+        | AutopilotActionPayload::SubmitFundingApplication { .. } => None,
     };
     let Some((kind, subject_id, baseline_value, due_at)) = plan else {
         return Ok(());
@@ -195,6 +199,10 @@ async fn record_execution_outcome(
             *to_minor as f64,
             Some(*from_minor as f64),
         ),
+        AutopilotActionPayload::ExecuteReleaseMilestone { .. } => ("release_milestone_executed",1.0,None),
+        AutopilotActionPayload::ApplyLiveOpportunity { score, .. } => ("live_opportunity_score",f64::from(*score),None),
+        AutopilotActionPayload::PrepareFundingPackage { .. } => ("funding_package_requested",1.0,None),
+        AutopilotActionPayload::SubmitFundingApplication { .. } => ("funding_submission_requested",1.0,None),
     };
     sqlx::query(
         r#"
@@ -587,7 +595,7 @@ async fn ensure_marketing_eligible(
     }
 }
 
-async fn emit_external_action(
+pub(super) async fn emit_external_action(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     action_id: AutopilotActionId,

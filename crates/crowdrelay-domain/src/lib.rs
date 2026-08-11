@@ -40,7 +40,9 @@ pub mod content_supply;
 pub mod events;
 pub mod experimentation;
 pub mod fan_lifecycle;
+pub mod funding;
 pub mod ids;
+pub mod live_opportunities;
 pub mod market_intelligence;
 pub mod merch_bundle;
 pub mod merchandising;
@@ -49,6 +51,7 @@ pub mod performance;
 pub mod pricing;
 pub mod promotion;
 pub mod referrals;
+pub mod release_autopilot;
 pub mod show_operations;
 pub mod values;
 
@@ -74,8 +77,9 @@ pub use ids::{
     AutopilotMeasurementId, BookingTargetId, CampaignId, CityId, ContentSourceId, EventId,
     ExperimentId, ExperimentVariantId, FanId, MarketSignalId, MerchCouponId, MerchProductId,
     MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PromotionCampaignId,
-    ReferralAttributionId, RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId, TicketTypeId,
-    VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
+    ReferralAttributionId, ReleasePlanId, RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId,
+    TeamOpportunityId, TicketTypeId, VisitorId, WorkspaceId, WorkspaceMemberId,
+    WorkspaceMemberSessionId,
 };
 pub use referrals::{
     CouponCode, CouponCodeError, CouponRedemptionResult, CouponStatus, FanSessionToken,

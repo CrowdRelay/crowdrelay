@@ -33,7 +33,7 @@ use crowdrelay_application::{
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
     EventId, FanId, MarketSignalId, MerchProductId, MerchVariantId, PromotionCampaignId,
-    TicketTypeId, WorkspaceId,
+    ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     booking::{
@@ -43,6 +43,8 @@ use crowdrelay_domain::{
     campaign_lifecycle::{EventCampaignPolicy, EventCampaignSnapshot},
     content_supply::{ContentSupplyPolicy, ContentSupplySnapshot},
     experimentation::{ExperimentPolicy, ExperimentSnapshot},
+    funding::{FundingOpportunitySnapshot, FundingPolicy},
+    live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
     market_intelligence::{CityMarketSignal, CityMarketSignalKind, aggregate_city_market_evidence},
     merch_bundle::{MerchBundlePolicy, MerchBundleSnapshot},
     merchandising::{
@@ -52,6 +54,7 @@ use crowdrelay_domain::{
     performance::{EffectAssessment, EffectResult},
     pricing::{TicketYieldPolicy, TicketYieldSnapshot},
     promotion::{PromotionBudgetPolicy, PromotionPerformanceSnapshot},
+    release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
     show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
 };
 use serde_json::{Value, json};
@@ -141,9 +144,12 @@ struct LifecycleSnapshotRow {
     fan_id: Uuid,
     active: bool,
     marketing_consent: bool,
+    created_at: OffsetDateTime,
     synesthesia_completed_at: Option<OffsetDateTime>,
     last_marketing_touch_at: Option<OffsetDateTime>,
     has_paid_ticket: bool,
+    last_paid_ticket_at: Option<OffsetDateTime>,
+    last_event_interest_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -226,6 +232,47 @@ struct PromotionSnapshotRow {
     last_budget_change_at: Option<OffsetDateTime>,
     observed_at: OffsetDateTime,
     expires_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct ReleaseSnapshotRow {
+    release_id: Uuid,
+    title: String,
+    release_at: OffsetDateTime,
+    active: bool,
+    assets_ready: bool,
+    communication_enabled: bool,
+    press_enabled: bool,
+    calendar_seeded: bool,
+    announcement_sent: bool,
+    press_started: bool,
+    fan_warmup_sent: bool,
+    countdown_sent: bool,
+    release_day_sent: bool,
+    sustain_sent: bool,
+    wrap_sent: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct TeamOpportunityRow {
+    opportunity_id: Uuid,
+    opportunity_kind: String,
+    active: bool,
+    verified_destination: bool,
+    fit_basis_points: i32,
+    reputation_basis_points: i32,
+    confidence_basis_points: i32,
+    expected_fee_minor: i64,
+    estimated_cost_minor: i64,
+    application_fee_minor: i64,
+    requires_contract: bool,
+    exclusive: bool,
+    eligible: bool,
+    funding_amount_minor: i64,
+    own_contribution_minor: i64,
+    deadline: Option<OffsetDateTime>,
+    package_status: String,
+    status: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -336,6 +383,9 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "promotion_budget" => AutopilotContext::PromotionBudget,
         "experimentation" => AutopilotContext::Experimentation,
         "show_operations" => AutopilotContext::ShowOperations,
+        "release" => AutopilotContext::Release,
+        "live_opportunity" => AutopilotContext::LiveOpportunity,
+        "funding" => AutopilotContext::Funding,
         _ => return Err(RepositoryError::Unexpected),
     };
     let autonomy_level = match row.autonomy_level.as_str() {
@@ -394,6 +444,16 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
             AutopilotContext::ShowOperations => AutopilotPolicyConfig::ShowOperations(
                 parse_config(row.config, ShowOperationsPolicy::default())?,
             ),
+            AutopilotContext::Release => AutopilotPolicyConfig::Release(parse_config(
+                row.config,
+                ReleaseAutopilotPolicy::default(),
+            )?),
+            AutopilotContext::LiveOpportunity => AutopilotPolicyConfig::LiveOpportunity(
+                parse_config(row.config, LiveOpportunityPolicy::default())?,
+            ),
+            AutopilotContext::Funding => {
+                AutopilotPolicyConfig::Funding(parse_config(row.config, FundingPolicy::default())?)
+            }
         };
     let max_actions_24h = u32::try_from(row.max_actions_24h)
         .ok()
@@ -457,9 +517,12 @@ fn lifecycle_snapshot(row: LifecycleSnapshotRow) -> Result<FanLifecycleSnapshot,
         fan_id: FanId::from_uuid(row.fan_id),
         active: row.active,
         marketing_consent: row.marketing_consent,
+        created_at: row.created_at,
         synesthesia_completed_at: row.synesthesia_completed_at,
         last_marketing_touch_at: row.last_marketing_touch_at,
         has_paid_ticket: row.has_paid_ticket,
+        last_paid_ticket_at: row.last_paid_ticket_at,
+        last_event_interest_at: row.last_event_interest_at,
     })
 }
 
@@ -802,6 +865,9 @@ fn parse_context(value: &str) -> Result<AutopilotContext, RepositoryError> {
         "promotion_budget" => Ok(AutopilotContext::PromotionBudget),
         "experimentation" => Ok(AutopilotContext::Experimentation),
         "show_operations" => Ok(AutopilotContext::ShowOperations),
+        "release" => Ok(AutopilotContext::Release),
+        "live_opportunity" => Ok(AutopilotContext::LiveOpportunity),
+        "funding" => Ok(AutopilotContext::Funding),
         _ => Err(RepositoryError::Unexpected),
     }
 }

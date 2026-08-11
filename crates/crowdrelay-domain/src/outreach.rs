@@ -19,6 +19,7 @@ pub enum OutreachTargetKind {
     Creator,
     SupportSlot,
     Endorsement,
+    MediaPatronage,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -8,12 +8,15 @@ use crowdrelay_domain::{
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::ContentSupplySnapshot,
     experimentation::ExperimentSnapshot,
+    funding::FundingOpportunitySnapshot,
+    live_opportunities::LiveOpportunitySnapshot,
     merch_bundle::MerchBundleSnapshot,
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
     outreach::OutreachSnapshot,
     performance::{EffectDirection, EffectResult, assess_effect},
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
+    release_autopilot::ReleasePlanSnapshot,
     show_operations::ShowTaskSnapshot,
 };
 use serde::{Deserialize, Serialize};
@@ -108,6 +111,24 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<PromotionPerformanceSnapshot>, RepositoryError>;
+
+    async fn load_release_plan_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ReleasePlanSnapshot>, RepositoryError>;
+
+    async fn load_live_opportunity_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<LiveOpportunitySnapshot>, RepositoryError>;
+
+    async fn load_funding_opportunity_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<FundingOpportunitySnapshot>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.

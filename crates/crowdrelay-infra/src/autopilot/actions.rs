@@ -434,6 +434,18 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::ExecuteReleaseMilestone { release_id, title, release_at, milestone } => {
+                    operations::execute_release_milestone(&mut transaction, workspace_id, action.id, *release_id, title, *release_at, *milestone, now).await?;
+                }
+                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score } => {
+                    operations::execute_live_opportunity(&mut transaction, workspace_id, action.id, *opportunity_id, *opportunity_kind, *score, now).await?;
+                }
+                AutopilotActionPayload::PrepareFundingPackage { opportunity_id } => {
+                    operations::prepare_funding_package(&mut transaction, workspace_id, action.id, *opportunity_id, now).await?;
+                }
+                AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
+                    operations::submit_funding_application(&mut transaction, workspace_id, action.id, *opportunity_id, now).await?;
+                }
             }
 
             schedule_effect_measurement(

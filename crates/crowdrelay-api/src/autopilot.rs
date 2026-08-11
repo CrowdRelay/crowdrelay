@@ -16,17 +16,20 @@ use crowdrelay_application::{
         AutopilotBookingStateRepository, AutopilotContentStateRepository, AutopilotContext,
         AutopilotControlRepository, AutopilotExperimentStateRepository,
         AutopilotMarketStateRepository, AutopilotMerchStateRepository,
-        AutopilotOutreachStateRepository, AutopilotTicketStateRepository, CreateExperiment,
-        CreateExperimentVariant, ExperimentObservation, RecordBookingReply, RecordOutreachReply,
-        SetAutopilotAuthority, UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource,
+        AutopilotOutreachStateRepository, AutopilotTeamStateRepository,
+        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
+        ExperimentObservation, RecordBookingReply, RecordOutreachReply,
+        RecordTeamOpportunityProgress, SetAutopilotAuthority, TeamOpportunityKind,
+        TeamOpportunityProgress, UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource,
         UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertTicketAllocationGuardrail, assign_experiment_variant,
+        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
+        UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
     AutopilotActionId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
-    ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId, TicketTypeId,
+    ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId, ReleasePlanId,
+    TeamOpportunityId, TicketTypeId,
     autonomy::{AutonomyLevel, Confidence},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
@@ -179,6 +182,58 @@ pub struct OutreachOpportunityRequest {
 pub struct OutreachReplyRequest {
     opportunity_id: Option<Uuid>,
     disposition: OutreachReplyDisposition,
+    occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleasePlanRequest {
+    release_id: Option<Uuid>,
+    source_key: String,
+    title: String,
+    release_at: OffsetDateTime,
+    listen_url: Option<String>,
+    active: bool,
+    assets_ready: bool,
+    communication_enabled: bool,
+    press_enabled: bool,
+    expected_version: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamOpportunityRequest {
+    opportunity_id: Option<Uuid>,
+    opportunity_kind: TeamOpportunityKind,
+    source: String,
+    external_key: String,
+    title: String,
+    organization: String,
+    destination_url: Option<String>,
+    contact_email: Option<String>,
+    verified_destination: bool,
+    fit_basis_points: u16,
+    reputation_basis_points: u16,
+    confidence_basis_points: u16,
+    currency: String,
+    expected_fee_minor: i64,
+    estimated_cost_minor: i64,
+    application_fee_minor: i64,
+    requires_contract: bool,
+    exclusive: bool,
+    eligible: bool,
+    funding_amount_minor: i64,
+    own_contribution_minor: i64,
+    deadline: Option<OffsetDateTime>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+    expected_version: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamOpportunityProgressRequest {
+    progress: TeamOpportunityProgress,
     occurred_at: OffsetDateTime,
 }
 
@@ -747,6 +802,187 @@ pub async fn record_outreach_reply(
     }
 }
 
+pub async fn upsert_release_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReleasePlanRequest>,
+) -> Response {
+    let invalid = request.expected_version < 0
+        || (request.expected_version > 0 && request.release_id.is_none())
+        || request.source_key.trim().is_empty()
+        || request.source_key.len() > 160
+        || request.title.trim().is_empty()
+        || request.title.len() > 240
+        || request
+            .listen_url
+            .as_ref()
+            .is_some_and(|url| url.trim().is_empty() || url.len() > 1000);
+    if invalid {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = UpsertReleasePlan {
+        release_id: request.release_id.map(ReleasePlanId::from_uuid),
+        source_key: request.source_key,
+        title: request.title,
+        release_at: request.release_at,
+        listen_url: request.listen_url,
+        active: request.active,
+        assets_ready: request.assets_ready,
+        communication_enabled: request.communication_enabled,
+        press_enabled: request.press_enabled,
+        expected_version: request.expected_version,
+    };
+    match state
+        .autopilot
+        .upsert_release_plan(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+pub async fn upsert_team_opportunity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TeamOpportunityRequest>,
+) -> Response {
+    let invalid = request.expected_version < 0
+        || (request.expected_version > 0 && request.opportunity_id.is_none())
+        || !valid_market_source(&request.source)
+        || request.external_key.trim().is_empty()
+        || request.external_key.len() > 240
+        || request.title.trim().is_empty()
+        || request.title.len() > 240
+        || request.organization.trim().is_empty()
+        || request.organization.len() > 240
+        || request
+            .destination_url
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 1000)
+        || request
+            .contact_email
+            .as_ref()
+            .is_some_and(|value| !valid_booking_email(value))
+        || request.fit_basis_points > 10_000
+        || request.reputation_basis_points > 10_000
+        || request.confidence_basis_points > 10_000
+        || !valid_currency(&request.currency)
+        || request.expected_fee_minor < 0
+        || request.estimated_cost_minor < 0
+        || request.application_fee_minor < 0
+        || request.funding_amount_minor < 0
+        || request.own_contribution_minor < 0
+        || !request.metadata.is_object()
+        || (matches!(request.opportunity_kind, TeamOpportunityKind::Funding)
+            && request.deadline.is_none());
+    if invalid {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let confidence = match Confidence::from_basis_points(request.confidence_basis_points) {
+        Ok(value) => value,
+        Err(_) => {
+            return Problem::bad_request(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = UpsertTeamOpportunity {
+        opportunity_id: request.opportunity_id.map(TeamOpportunityId::from_uuid),
+        kind: request.opportunity_kind,
+        source: request.source,
+        external_key: request.external_key,
+        title: request.title,
+        organization: request.organization,
+        destination_url: request.destination_url,
+        contact_email: request.contact_email,
+        verified_destination: request.verified_destination,
+        fit_basis_points: request.fit_basis_points,
+        reputation_basis_points: request.reputation_basis_points,
+        confidence,
+        currency: request.currency,
+        expected_fee_minor: request.expected_fee_minor,
+        estimated_cost_minor: request.estimated_cost_minor,
+        application_fee_minor: request.application_fee_minor,
+        requires_contract: request.requires_contract,
+        exclusive: request.exclusive,
+        eligible: request.eligible,
+        funding_amount_minor: request.funding_amount_minor,
+        own_contribution_minor: request.own_contribution_minor,
+        deadline: request.deadline,
+        metadata: request.metadata,
+        expected_version: request.expected_version,
+    };
+    match state
+        .autopilot
+        .upsert_team_opportunity(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+pub async fn record_team_opportunity_progress(
+    State(state): State<AppState>,
+    Path(opportunity_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<TeamOpportunityProgressRequest>,
+) -> Response {
+    let Ok(opportunity_id) = Uuid::parse_str(&opportunity_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = RecordTeamOpportunityProgress {
+        opportunity_id: TeamOpportunityId::from_uuid(opportunity_id),
+        progress: request.progress,
+        occurred_at: request.occurred_at,
+    };
+    match state
+        .autopilot
+        .record_team_opportunity_progress(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn upsert_content_source(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1092,6 +1328,9 @@ fn parse_context(value: &str) -> Option<AutopilotContext> {
         "promotion_budget" => Some(AutopilotContext::PromotionBudget),
         "experimentation" => Some(AutopilotContext::Experimentation),
         "show_operations" => Some(AutopilotContext::ShowOperations),
+        "release" => Some(AutopilotContext::Release),
+        "live_opportunity" => Some(AutopilotContext::LiveOpportunity),
+        "funding" => Some(AutopilotContext::Funding),
         _ => None,
     }
 }

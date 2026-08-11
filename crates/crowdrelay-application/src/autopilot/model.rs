@@ -3,18 +3,21 @@
 use crowdrelay_domain::{
     AutopilotActionId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
     ExperimentVariantId, FanId, MerchProductId, MerchVariantId, OutreachOpportunityId,
-    OutreachTargetId, PromotionCampaignId, TicketTypeId,
+    OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     booking::{BookingOpportunityPolicy, BookingOutreachPhase},
     campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
+    funding::FundingPolicy,
+    live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
     outreach::{OutreachPhase, OutreachPolicy},
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
+    release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
     show_operations::{ShowOperationsPolicy, ShowTaskKind},
 };
 use serde::{Deserialize, Serialize};
@@ -34,6 +37,9 @@ pub enum AutopilotContext {
     PromotionBudget,
     Experimentation,
     ShowOperations,
+    Release,
+    LiveOpportunity,
+    Funding,
 }
 
 impl AutopilotContext {
@@ -52,6 +58,9 @@ impl AutopilotContext {
             Self::PromotionBudget => "promotion_budget",
             Self::Experimentation => "experimentation",
             Self::ShowOperations => "show_operations",
+            Self::Release => "release",
+            Self::LiveOpportunity => "live_opportunity",
+            Self::Funding => "funding",
         }
     }
 }
@@ -71,6 +80,9 @@ pub enum AutopilotPolicyConfig {
     PromotionBudget(PromotionBudgetPolicy),
     Experimentation(ExperimentPolicy),
     ShowOperations(ShowOperationsPolicy),
+    Release(ReleaseAutopilotPolicy),
+    LiveOpportunity(LiveOpportunityPolicy),
+    Funding(FundingPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -99,6 +111,8 @@ pub enum ActionSubject {
     ContentSource(ContentSourceId),
     Experiment(ExperimentId),
     PromotionCampaign(PromotionCampaignId),
+    ReleasePlan(ReleasePlanId),
+    TeamOpportunity(TeamOpportunityId),
 }
 
 impl ActionSubject {
@@ -115,6 +129,8 @@ impl ActionSubject {
             Self::ContentSource(_) => "content_source",
             Self::Experiment(_) => "experiment",
             Self::PromotionCampaign(_) => "promotion_campaign",
+            Self::ReleasePlan(_) => "release_plan",
+            Self::TeamOpportunity(_) => "team_opportunity",
         }
     }
 
@@ -131,6 +147,8 @@ impl ActionSubject {
             Self::ContentSource(id) => id.into_uuid(),
             Self::Experiment(id) => id.into_uuid(),
             Self::PromotionCampaign(id) => id.into_uuid(),
+            Self::ReleasePlan(id) => id.into_uuid(),
+            Self::TeamOpportunity(id) => id.into_uuid(),
         }
     }
 }
@@ -225,6 +243,23 @@ pub enum AutopilotActionPayload {
         to_minor: i64,
         roas_basis_points: u32,
     },
+    ExecuteReleaseMilestone {
+        release_id: ReleasePlanId,
+        title: String,
+        release_at: time::OffsetDateTime,
+        milestone: ReleaseMilestone,
+    },
+    ApplyLiveOpportunity {
+        opportunity_id: TeamOpportunityId,
+        opportunity_kind: LiveOpportunityKind,
+        score: u16,
+    },
+    PrepareFundingPackage {
+        opportunity_id: TeamOpportunityId,
+    },
+    SubmitFundingApplication {
+        opportunity_id: TeamOpportunityId,
+    },
 }
 
 impl AutopilotActionPayload {
@@ -248,6 +283,10 @@ impl AutopilotActionPayload {
             Self::CompleteShowTask { .. } => "show.task.complete",
             Self::EscalateShowTask { .. } => "show.task.escalate",
             Self::RequestPromotionBudgetChange { .. } => "promotion.budget_change.request",
+            Self::ExecuteReleaseMilestone { .. } => "release.milestone.execute",
+            Self::ApplyLiveOpportunity { .. } => "opportunity.live.apply",
+            Self::PrepareFundingPackage { .. } => "funding.package.prepare",
+            Self::SubmitFundingApplication { .. } => "funding.application.submit",
         }
     }
 }

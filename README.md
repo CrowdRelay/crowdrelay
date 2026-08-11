@@ -30,13 +30,21 @@ The operator owns the data. Public requests never send emails or call external p
 
 ## ViryaOS Autopilot
 
-ViryaOS Autopilot is an opt-in, deterministic operations plane built on CrowdRelay. Its core loop is:
+ViryaOS Autopilot is an opt-in operations plane built on CrowdRelay. All business intelligence is deterministic Rust: explicit DDD decision services, scoring functions, state machines and versioned policies. There is no LLM or ML decision path. n8n, email, Calendar and other providers are execution adapters only; they receive typed intents and report facts, while CrowdRelay owns the decision and its audit trail.
 
-`first-party + market facts → bounded-context decision → autonomy policy → durable action → measured outcome`
+The team-facing system is intentionally described as seven programs rather than the internal bounded contexts:
 
-Business rules live in small Rust domain modules rather than n8n or provider workflows. Current bounded capabilities cover ticket yield, fan and campaign lifecycle, merch stock/pricing/bundles, booking opportunities and outreach, content supply, promotion budgets, experiments, and show operations. External market signals are typed, confidence-scored, expiring inputs; they cannot bypass first-party evidence or policy limits.
+* **Release Autopilot** — release timeline, Calendar milestones, first-party fan campaigns, press/patronage/endorsement opportunity seeding and post-release sustain;
+* **Fan Growth Autopilot** — consent-safe welcome, release follow-up, referral-oriented warm-up and dormant-fan reactivation with shared cooldowns;
+* **Press Autopilot** — relationship-aware review/interview/radio/creator outreach with verified targets, relevance thresholds and bounded follow-up;
+* **Opportunity Autopilot** — festival/showcase/review-contest/support-slot scoring and application; only free, non-exclusive, non-contractual, high-confidence applications may be sent automatically;
+* **Commerce Autopilot** — ticket yield, bounded ticket-pool expansion, first-party campaign lifecycle, merchandising and deterministic experiments; it never performs per-fan price discrimination;
+* **Patronage & Endorsement Autopilot** — media-patronage and gear-relationship outreach through the same verified relationship graph and cooldown rules as Press;
+* **Funding Autopilot** — funding discovery facts, eligibility/economics evaluation, deadline Calendar intents and deterministic application-package preparation; final submission always requires approval.
 
-The global `CROWDRELAY_AUTOPILOT_ENABLED` switch is off by default, and each capability has its own versioned authority, confidence threshold and 24-hour action quota. Durable action jobs are idempotent, bounded-retry, crash-recoverable and auditable. Financial changes use explicit operator-owned guardrails, while delayed outcome measurements keep execution evidence separate from effectiveness evidence. n8n and provider integrations remain execution adapters: they receive typed intents and report facts, but do not own business decisions.
+Every action is governed by one of three authority levels: **AUTO** for reversible operational work, **BOUNDED AUTO** for actions inside explicit operator-owned limits, and **APPROVAL** for contractual, paid or otherwise consequential actions. The global `CROWDRELAY_AUTOPILOT_ENABLED` switch remains the hard kill switch, and every bounded context also has a versioned authority, confidence threshold and 24-hour action quota. Durable actions are idempotent, bounded-retry and auditable. Approval actions emit one provider-neutral notification event so the team is interrupted only when a human decision is actually required.
+
+No Meta Ads executor is part of ViryaOS Autopilot. Promotion-budget telemetry may remain available for analysis, but paid advertising is not autonomously executed by this system.
 
 PostgreSQL 18 is the persistence baseline. The local stack uses its asynchronous I/O subsystem conservatively and exposes the active server/AIO settings through operations telemetry so tuning can be based on the production host rather than assumed defaults.
 

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, BookingTargetId, CityId, ContentSourceId, EventId,
     ExperimentId, ExperimentVariantId, MarketSignalId, MerchProductId, OutreachOpportunityId,
-    OutreachTargetId, PromotionCampaignId, WorkspaceId,
+    OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, WorkspaceId,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
@@ -413,6 +413,130 @@ pub trait AutopilotOutreachStateRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         command: RecordOutreachReply,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct UpsertReleasePlan {
+    pub release_id: Option<ReleasePlanId>,
+    pub source_key: String,
+    pub title: String,
+    pub release_at: OffsetDateTime,
+    pub listen_url: Option<String>,
+    pub active: bool,
+    pub assets_ready: bool,
+    pub communication_enabled: bool,
+    pub press_enabled: bool,
+    pub expected_version: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReleasePlanMutation {
+    pub operation_id: uuid::Uuid,
+    pub release_id: ReleasePlanId,
+    pub version: i64,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamOpportunityKind {
+    Festival,
+    Showcase,
+    ReviewContest,
+    SupportSlot,
+    Funding,
+}
+
+impl TeamOpportunityKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Festival => "festival",
+            Self::Showcase => "showcase",
+            Self::ReviewContest => "review_contest",
+            Self::SupportSlot => "support_slot",
+            Self::Funding => "funding",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UpsertTeamOpportunity {
+    pub opportunity_id: Option<TeamOpportunityId>,
+    pub kind: TeamOpportunityKind,
+    pub source: String,
+    pub external_key: String,
+    pub title: String,
+    pub organization: String,
+    pub destination_url: Option<String>,
+    pub contact_email: Option<String>,
+    pub verified_destination: bool,
+    pub fit_basis_points: u16,
+    pub reputation_basis_points: u16,
+    pub confidence: Confidence,
+    pub currency: String,
+    pub expected_fee_minor: i64,
+    pub estimated_cost_minor: i64,
+    pub application_fee_minor: i64,
+    pub requires_contract: bool,
+    pub exclusive: bool,
+    pub eligible: bool,
+    pub funding_amount_minor: i64,
+    pub own_contribution_minor: i64,
+    pub deadline: Option<OffsetDateTime>,
+    pub metadata: serde_json::Value,
+    pub expected_version: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TeamOpportunityMutation {
+    pub operation_id: uuid::Uuid,
+    pub opportunity_id: TeamOpportunityId,
+    pub version: i64,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamOpportunityProgress {
+    PackageReady,
+    Submitted,
+    Replied,
+    Won,
+    Lost,
+    Dismissed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecordTeamOpportunityProgress {
+    pub opportunity_id: TeamOpportunityId,
+    pub progress: TeamOpportunityProgress,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[async_trait]
+pub trait AutopilotTeamStateRepository: Send + Sync {
+    async fn upsert_release_plan(
+        &self,
+        workspace_id: WorkspaceId,
+        command: UpsertReleasePlan,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<ReleasePlanMutation, RepositoryError>;
+    async fn upsert_team_opportunity(
+        &self,
+        workspace_id: WorkspaceId,
+        command: UpsertTeamOpportunity,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<TeamOpportunityMutation, RepositoryError>;
+    async fn record_team_opportunity_progress(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordTeamOpportunityProgress,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

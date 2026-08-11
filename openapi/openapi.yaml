@@ -1553,6 +1553,69 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/releases:
+    post:
+      operationId: upsertAutopilotReleasePlan
+      summary: Create or update a deterministic release campaign plan
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReleasePlanRequest' }
+      responses:
+        '200': { description: Release plan accepted or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/ReleasePlanMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/team-opportunities:
+    post:
+      operationId: upsertAutopilotTeamOpportunity
+      summary: Ingest a festival, showcase, support-slot or funding opportunity
+      description: External discovery reports facts only; deterministic Rust policy decides whether to hold, prepare, request approval or apply.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamOpportunityRequest' }
+      responses:
+        '200': { description: Opportunity accepted or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/TeamOpportunityMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/team-opportunities/{opportunity_id}/progress:
+    post:
+      operationId: recordAutopilotTeamOpportunityProgress
+      summary: Record an application or funding outcome
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: opportunity_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamOpportunityProgressRequest' }
+      responses:
+        '200': { description: Progress accepted or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/content-sources:
     post:
       operationId: upsertAutopilotContentSource
@@ -4157,7 +4220,7 @@ components:
       required: true
       schema:
         type: string
-        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations]
+        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
     AutopilotActionId:
       in: path
       name: action_id
@@ -4956,7 +5019,7 @@ components:
       enum: [observe, recommend, require_approval, bounded_auto]
     AutopilotContext:
       type: string
-      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations]
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
     AutopilotDisposition:
       type: string
       enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
@@ -4987,7 +5050,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application]
       additionalProperties: true
     PendingAutopilotAction:
       type: object
@@ -5052,7 +5115,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 12
+          maxItems: 15
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array
@@ -5138,7 +5201,7 @@ components:
 
     OutreachTargetKind:
       type: string
-      enum: [playlist, radio, press, creator, support_slot, endorsement]
+      enum: [playlist, radio, press, creator, support_slot, endorsement, media_patronage]
     OutreachReplyDisposition:
       type: string
       enum: [received, positive, declined, do_not_contact]
@@ -5198,6 +5261,79 @@ components:
       properties:
         opportunity_id: { type: [string, 'null'], format: uuid }
         disposition: { $ref: '#/components/schemas/OutreachReplyDisposition' }
+        occurred_at: { type: string, format: date-time }
+
+    ReleasePlanRequest:
+      type: object
+      additionalProperties: false
+      required: [source_key, title, release_at, active, assets_ready, communication_enabled, press_enabled, expected_version]
+      properties:
+        release_id: { type: [string, 'null'], format: uuid }
+        source_key: { type: string, minLength: 1, maxLength: 160 }
+        title: { type: string, minLength: 1, maxLength: 240 }
+        release_at: { type: string, format: date-time }
+        listen_url: { type: [string, 'null'], maxLength: 1000 }
+        active: { type: boolean }
+        assets_ready: { type: boolean }
+        communication_enabled: { type: boolean }
+        press_enabled: { type: boolean }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    ReleasePlanMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, release_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        release_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+    TeamOpportunityKind:
+      type: string
+      enum: [festival, showcase, review_contest, support_slot, funding]
+    TeamOpportunityRequest:
+      type: object
+      additionalProperties: false
+      required: [opportunity_kind, source, external_key, title, organization, verified_destination, fit_basis_points, reputation_basis_points, confidence_basis_points, currency, expected_fee_minor, estimated_cost_minor, application_fee_minor, requires_contract, exclusive, eligible, funding_amount_minor, own_contribution_minor, metadata, expected_version]
+      properties:
+        opportunity_id: { type: [string, 'null'], format: uuid }
+        opportunity_kind: { $ref: '#/components/schemas/TeamOpportunityKind' }
+        source: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+        external_key: { type: string, minLength: 1, maxLength: 240 }
+        title: { type: string, minLength: 1, maxLength: 240 }
+        organization: { type: string, minLength: 1, maxLength: 240 }
+        destination_url: { type: [string, 'null'], maxLength: 1000 }
+        contact_email: { type: [string, 'null'], format: email, maxLength: 320 }
+        verified_destination: { type: boolean }
+        fit_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        reputation_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        currency: { type: string, pattern: '^[A-Z]{3}$', minLength: 3, maxLength: 3 }
+        expected_fee_minor: { type: integer, format: int64, minimum: 0 }
+        estimated_cost_minor: { type: integer, format: int64, minimum: 0 }
+        application_fee_minor: { type: integer, format: int64, minimum: 0 }
+        requires_contract: { type: boolean }
+        exclusive: { type: boolean }
+        eligible: { type: boolean }
+        funding_amount_minor: { type: integer, format: int64, minimum: 0 }
+        own_contribution_minor: { type: integer, format: int64, minimum: 0 }
+        deadline: { type: [string, 'null'], format: date-time }
+        metadata: { type: object, additionalProperties: true }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    TeamOpportunityMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, opportunity_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        opportunity_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+    TeamOpportunityProgressRequest:
+      type: object
+      additionalProperties: false
+      required: [progress, occurred_at]
+      properties:
+        progress: { type: string, enum: [package_ready, submitted, replied, won, lost, dismissed] }
         occurred_at: { type: string, format: date-time }
 
     ContentSourceKind:

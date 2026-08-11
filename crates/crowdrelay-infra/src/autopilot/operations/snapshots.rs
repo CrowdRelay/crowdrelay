@@ -579,6 +579,7 @@ pub(super) fn parse_outreach_kind(value: &str) -> Result<OutreachTargetKind, Rep
         "creator" => Ok(OutreachTargetKind::Creator),
         "support_slot" => Ok(OutreachTargetKind::SupportSlot),
         "endorsement" => Ok(OutreachTargetKind::Endorsement),
+        "media_patronage" => Ok(OutreachTargetKind::MediaPatronage),
         _ => Err(RepositoryError::Unexpected),
     }
 }

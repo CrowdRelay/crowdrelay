@@ -1068,7 +1068,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             stale_ticket_reward_reservations: area.stale_ticket_reward_reservations,
             legacy_imported_players: area.legacy_imported_players,
         },
-        schema_version: 38,
+        schema_version: 39,
         release: option_env!("CROWDRELAY_RELEASE")
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_owned(),

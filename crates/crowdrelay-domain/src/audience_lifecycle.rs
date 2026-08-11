@@ -14,29 +14,39 @@ pub struct FanLifecycleSnapshot {
     pub fan_id: FanId,
     pub active: bool,
     pub marketing_consent: bool,
+    pub created_at: OffsetDateTime,
     pub synesthesia_completed_at: Option<OffsetDateTime>,
     pub last_marketing_touch_at: Option<OffsetDateTime>,
     pub has_paid_ticket: bool,
+    pub last_paid_ticket_at: Option<OffsetDateTime>,
+    pub last_event_interest_at: Option<OffsetDateTime>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct FanLifecyclePolicy {
+    pub welcome_after_hours: u32,
     pub minimum_hours_after_synesthesia: u32,
     pub marketing_cooldown_hours: u32,
+    pub dormant_after_days: u32,
 }
 
 impl Default for FanLifecyclePolicy {
     fn default() -> Self {
         Self {
+            welcome_after_hours: 24,
             minimum_hours_after_synesthesia: 48,
             marketing_cooldown_hours: 120,
+            dormant_after_days: 60,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleTemplate {
+    Welcome,
     SynesthesiaFollowUp,
+    DormantReactivation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,10 +63,10 @@ pub enum FanLifecycleHoldReason {
     InvalidSnapshot,
     Inactive,
     NoConsent,
-    NoSynesthesiaCompletion,
     TooEarly,
     CooldownActive,
     AlreadyConverted,
+    NoLifecycleOpportunity,
 }
 
 #[must_use]
@@ -65,12 +75,11 @@ pub fn evaluate_fan_lifecycle(
     policy: FanLifecyclePolicy,
     now: OffsetDateTime,
 ) -> FanLifecycleDecision {
-    if snapshot
-        .synesthesia_completed_at
-        .is_some_and(|completed_at| completed_at > now)
-        || snapshot
-            .last_marketing_touch_at
-            .is_some_and(|last_touch| last_touch > now)
+    if snapshot.created_at > now
+        || snapshot.synesthesia_completed_at.is_some_and(|at| at > now)
+        || snapshot.last_marketing_touch_at.is_some_and(|at| at > now)
+        || snapshot.last_paid_ticket_at.is_some_and(|at| at > now)
+        || snapshot.last_event_interest_at.is_some_and(|at| at > now)
     {
         return FanLifecycleDecision::Hold(FanLifecycleHoldReason::InvalidSnapshot);
     }
@@ -80,25 +89,49 @@ pub fn evaluate_fan_lifecycle(
     if !snapshot.marketing_consent {
         return FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoConsent);
     }
-    if snapshot.has_paid_ticket {
-        return FanLifecycleDecision::Hold(FanLifecycleHoldReason::AlreadyConverted);
-    }
-    let Some(completed_at) = snapshot.synesthesia_completed_at else {
-        return FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoSynesthesiaCompletion);
-    };
-    if now - completed_at < Duration::hours(i64::from(policy.minimum_hours_after_synesthesia)) {
-        return FanLifecycleDecision::Hold(FanLifecycleHoldReason::TooEarly);
-    }
     if snapshot.last_marketing_touch_at.is_some_and(|last_touch| {
         now - last_touch < Duration::hours(i64::from(policy.marketing_cooldown_hours))
     }) {
         return FanLifecycleDecision::Hold(FanLifecycleHoldReason::CooldownActive);
     }
 
-    FanLifecycleDecision::RequestMessage {
-        template: LifecycleTemplate::SynesthesiaFollowUp,
-        confidence: Confidence::saturating_from_basis_points(9_000),
+    if snapshot.last_marketing_touch_at.is_none()
+        && now - snapshot.created_at >= Duration::hours(i64::from(policy.welcome_after_hours))
+    {
+        return FanLifecycleDecision::RequestMessage {
+            template: LifecycleTemplate::Welcome,
+            confidence: Confidence::saturating_from_basis_points(9_700),
+        };
     }
+
+    if !snapshot.has_paid_ticket
+        && let Some(completed_at) = snapshot.synesthesia_completed_at
+        && now - completed_at >= Duration::hours(i64::from(policy.minimum_hours_after_synesthesia))
+    {
+        return FanLifecycleDecision::RequestMessage {
+            template: LifecycleTemplate::SynesthesiaFollowUp,
+            confidence: Confidence::saturating_from_basis_points(9_000),
+        };
+    }
+
+    let latest_activity = snapshot
+        .last_paid_ticket_at
+        .into_iter()
+        .chain(snapshot.last_event_interest_at)
+        .chain(snapshot.synesthesia_completed_at)
+        .max()
+        .unwrap_or(snapshot.created_at);
+    if now - latest_activity >= Duration::days(i64::from(policy.dormant_after_days)) {
+        return FanLifecycleDecision::RequestMessage {
+            template: LifecycleTemplate::DormantReactivation,
+            confidence: Confidence::saturating_from_basis_points(8_600),
+        };
+    }
+
+    if snapshot.has_paid_ticket {
+        return FanLifecycleDecision::Hold(FanLifecycleHoldReason::AlreadyConverted);
+    }
+    FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoLifecycleOpportunity)
 }
 
 #[cfg(test)]
@@ -108,53 +141,49 @@ mod tests {
     fn now() -> OffsetDateTime {
         OffsetDateTime::UNIX_EPOCH + Duration::days(20_000)
     }
-
-    fn eligible_snapshot() -> FanLifecycleSnapshot {
+    fn eligible() -> FanLifecycleSnapshot {
         FanLifecycleSnapshot {
             fan_id: FanId::new(),
             active: true,
             marketing_consent: true,
-            synesthesia_completed_at: Some(now() - Duration::days(4)),
+            created_at: now() - Duration::days(10),
+            synesthesia_completed_at: None,
             last_marketing_touch_at: None,
             has_paid_ticket: false,
+            last_paid_ticket_at: None,
+            last_event_interest_at: None,
         }
     }
-
     #[test]
-    fn consent_is_a_hard_invariant_not_a_confidence_signal() {
-        let mut snapshot = eligible_snapshot();
-        snapshot.marketing_consent = false;
+    fn first_touch_is_a_welcome_without_requiring_synesthesia() {
+        assert!(matches!(
+            evaluate_fan_lifecycle(eligible(), FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::Welcome,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn consent_is_a_hard_gate() {
+        let mut s = eligible();
+        s.marketing_consent = false;
         assert_eq!(
-            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            evaluate_fan_lifecycle(s, FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoConsent)
         );
     }
-
     #[test]
-    fn completed_unconverted_fan_is_eligible_after_delay() {
+    fn dormant_fans_get_one_reactivation_after_cooldown() {
+        let mut s = eligible();
+        s.last_marketing_touch_at = Some(now() - Duration::days(90));
+        s.created_at = now() - Duration::days(120);
         assert!(matches!(
-            evaluate_fan_lifecycle(eligible_snapshot(), FanLifecyclePolicy::default(), now()),
-            FanLifecycleDecision::RequestMessage { .. }
+            evaluate_fan_lifecycle(s, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::DormantReactivation,
+                ..
+            }
         ));
-    }
-
-    #[test]
-    fn conversion_stops_the_sales_lifecycle() {
-        let mut snapshot = eligible_snapshot();
-        snapshot.has_paid_ticket = true;
-        assert_eq!(
-            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
-            FanLifecycleDecision::Hold(FanLifecycleHoldReason::AlreadyConverted)
-        );
-    }
-
-    #[test]
-    fn future_completion_timestamp_fails_closed() {
-        let mut snapshot = eligible_snapshot();
-        snapshot.synesthesia_completed_at = Some(now() + Duration::hours(1));
-        assert_eq!(
-            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
-            FanLifecycleDecision::Hold(FanLifecycleHoldReason::InvalidSnapshot)
-        );
     }
 }

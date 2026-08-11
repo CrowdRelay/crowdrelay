@@ -143,6 +143,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                     fan.id AS fan_id,
                     fan.status = 'active' AS active,
                     COALESCE(latest_consent.granted, false) AS marketing_consent,
+                    fan.created_at,
                     synesthesia.completed_at AS synesthesia_completed_at,
                     GREATEST(
                         lifecycle_touch.finished_at,
@@ -154,7 +155,20 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                         WHERE ticket_order.workspace_id = fan.workspace_id
                           AND ticket_order.buyer_email = fan.normalized_email
                           AND ticket_order.status IN ('paid', 'partially_refunded')
-                    ) AS has_paid_ticket
+                    ) AS has_paid_ticket,
+                    (
+                        SELECT max(ticket_order.paid_at)
+                        FROM ticket_orders AS ticket_order
+                        WHERE ticket_order.workspace_id = fan.workspace_id
+                          AND ticket_order.buyer_email = fan.normalized_email
+                          AND ticket_order.status IN ('paid', 'partially_refunded')
+                    ) AS last_paid_ticket_at,
+                    (
+                        SELECT max(interest.created_at)
+                        FROM event_interests AS interest
+                        WHERE interest.workspace_id = fan.workspace_id
+                          AND interest.fan_id = fan.id
+                    ) AS last_event_interest_at
                 FROM fans AS fan
                 LEFT JOIN LATERAL (
                     SELECT consent.granted
@@ -165,7 +179,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                     ORDER BY consent.recorded_at DESC, consent.id DESC
                     LIMIT 1
                 ) AS latest_consent ON true
-                JOIN LATERAL (
+                LEFT JOIN LATERAL (
                     SELECT run.completed_at
                     FROM synesthesia_reward_entries AS entry
                     JOIN synesthesia_runs AS run
@@ -209,8 +223,8 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                 ) AS campaign_touch ON true
                 WHERE fan.workspace_id = $1
                   AND fan.status = 'active'
-                  AND synesthesia.completed_at <= $2
-                ORDER BY synesthesia.completed_at, fan.id
+                  AND (synesthesia.completed_at IS NULL OR synesthesia.completed_at <= $2)
+                ORDER BY fan.created_at, fan.id
                 LIMIT $3
                 "#,
             )
@@ -724,6 +738,110 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn load_release_plan_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ReleasePlanSnapshot>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, ReleaseSnapshotRow>(r#"
+                SELECT plan.id AS release_id, plan.title, plan.release_at, plan.active,
+                       plan.assets_ready, plan.communication_enabled, plan.press_enabled,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='seed_calendar') calendar_seeded,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='announcement') announcement_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='start_press') press_started,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='fan_warmup') fan_warmup_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='countdown') countdown_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='release_day') release_day_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='sustain') sustain_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent
+                FROM viryaos_release_plans plan
+                WHERE plan.workspace_id=$1 AND plan.active
+                  AND plan.release_at BETWEEN $2 - INTERVAL '30 days' AND $2 + INTERVAL '180 days'
+                ORDER BY plan.release_at, plan.id
+                LIMIT $3
+            "#)
+            .bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
+            .fetch_all(&self.pool).await.map_err(map_sqlx)?;
+            Ok(rows.into_iter().map(|row| ReleasePlanSnapshot {
+                release_id: ReleasePlanId::from_uuid(row.release_id), title: row.title,
+                release_at: row.release_at, active: row.active, assets_ready: row.assets_ready,
+                communication_enabled: row.communication_enabled, press_enabled: row.press_enabled,
+                history: ReleaseMilestoneHistory {
+                    calendar_seeded: row.calendar_seeded, announcement_sent: row.announcement_sent,
+                    press_started: row.press_started, fan_warmup_sent: row.fan_warmup_sent,
+                    countdown_sent: row.countdown_sent, release_day_sent: row.release_day_sent,
+                    sustain_sent: row.sustain_sent, wrap_sent: row.wrap_sent,
+                },
+            }).collect())
+        }).await
+    }
+
+    async fn load_live_opportunity_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<LiveOpportunitySnapshot>, RepositoryError> {
+        self.bounded(async {
+            let rows=sqlx::query_as::<_,TeamOpportunityRow>(r#"
+                SELECT id opportunity_id, opportunity_kind, status NOT IN ('submitted','replied','won','lost','dismissed') active,
+                       verified_destination,fit_basis_points,reputation_basis_points,confidence_basis_points,
+                       expected_fee_minor,estimated_cost_minor,application_fee_minor,requires_contract,exclusive,eligible,
+                       funding_amount_minor,own_contribution_minor,deadline,package_status,status
+                FROM viryaos_team_opportunities
+                WHERE workspace_id=$1 AND opportunity_kind IN ('festival','showcase','review_contest','support_slot')
+                  AND eligible AND status IN ('new','prepared','awaiting_approval')
+                  AND (deadline IS NULL OR deadline>$2)
+                ORDER BY deadline NULLS LAST, fit_basis_points DESC, id LIMIT $3
+            "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
+              .fetch_all(&self.pool).await.map_err(map_sqlx)?;
+            rows.into_iter().map(|row| {
+                let kind=match row.opportunity_kind.as_str(){
+                    "festival"=>LiveOpportunityKind::Festival,"showcase"=>LiveOpportunityKind::Showcase,
+                    "review_contest"=>LiveOpportunityKind::ReviewContest,"support_slot"=>LiveOpportunityKind::SupportSlot,
+                    _=>return Err(RepositoryError::Unexpected),
+                };
+                Ok(LiveOpportunitySnapshot{
+                    opportunity_id:TeamOpportunityId::from_uuid(row.opportunity_id),kind,active:row.active,
+                    verified_destination:row.verified_destination,fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
+                    reputation_basis_points:u16::try_from(row.reputation_basis_points).map_err(|_|RepositoryError::Unexpected)?,
+                    evidence_confidence:parse_confidence(row.confidence_basis_points)?,expected_fee_minor:row.expected_fee_minor,
+                    estimated_cost_minor:row.estimated_cost_minor,application_fee_minor:row.application_fee_minor,
+                    requires_contract:row.requires_contract,exclusive:row.exclusive,deadline:row.deadline,
+                    already_applied:matches!(row.status.as_str(),"submitted"|"replied"|"won"|"lost"),
+                })
+            }).collect()
+        }).await
+    }
+
+    async fn load_funding_opportunity_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<FundingOpportunitySnapshot>, RepositoryError> {
+        self.bounded(async {
+            let rows=sqlx::query_as::<_,TeamOpportunityRow>(r#"
+                SELECT id opportunity_id, opportunity_kind, status NOT IN ('submitted','won','lost','dismissed') active,
+                       verified_destination,fit_basis_points,reputation_basis_points,confidence_basis_points,
+                       expected_fee_minor,estimated_cost_minor,application_fee_minor,requires_contract,exclusive,eligible,
+                       funding_amount_minor,own_contribution_minor,deadline,package_status,status
+                FROM viryaos_team_opportunities
+                WHERE workspace_id=$1 AND opportunity_kind='funding' AND eligible
+                  AND status IN ('new','prepared','awaiting_approval') AND deadline>$2
+                ORDER BY deadline, funding_amount_minor DESC, id LIMIT $3
+            "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
+              .fetch_all(&self.pool).await.map_err(map_sqlx)?;
+            rows.into_iter().map(|row| Ok(FundingOpportunitySnapshot{
+                opportunity_id:TeamOpportunityId::from_uuid(row.opportunity_id),active:row.active,eligible:row.eligible,
+                evidence_confidence:parse_confidence(row.confidence_basis_points)?,
+                fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
+                amount_minor:row.funding_amount_minor,own_contribution_minor:row.own_contribution_minor,
+                deadline:row.deadline.ok_or(RepositoryError::Unexpected)?,package_prepared:row.package_status=="ready",
+                submitted:matches!(row.status.as_str(),"submitted"|"won"|"lost"),
+            })).collect()
+        }).await
+    }
+
     async fn persist_candidate(
         &self,
         workspace_id: WorkspaceId,
@@ -858,6 +976,37 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .fetch_optional(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            if inserted.is_some() && status == "awaiting_approval" {
+                sqlx::query(
+                    r#"
+                    INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts)
+                    VALUES (
+                        $1, 'viryaos.autopilot.approval_requested', 1,
+                        jsonb_build_object(
+                            'action_id', $2::uuid,
+                            'context', $3::text,
+                            'action_kind', $4::text,
+                            'subject_kind', $5::text,
+                            'subject_id', $6::uuid,
+                            'reason', $7::text,
+                            'confidence_basis_points', $8::integer
+                        ),
+                        12
+                    )
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(action_id)
+                .bind(candidate.context.as_str())
+                .bind(candidate.action.action_kind())
+                .bind(candidate.subject.kind())
+                .bind(candidate.subject.uuid())
+                .bind(candidate.reason)
+                .bind(i32::from(candidate.confidence.basis_points()))
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(CandidatePersistence {
                 decision_created: true,
