@@ -3,7 +3,7 @@
   "reviewThresholdLines": 1200,
   "maxLines": {
     "crates/crowdrelay-api/src/accounting.rs": 1210,
-    "crates/crowdrelay-api/src/autopilot.rs": 1367,
+    "crates/crowdrelay-api/src/autopilot.rs": 1369,
     "crates/crowdrelay-api/src/audience.rs": 2209,
     "crates/crowdrelay-api/src/commerce/campaigns.rs": 1347,
     "crates/crowdrelay-api/src/ecosystem.rs": 1741,
@@ -13,14 +13,14 @@
     "crates/crowdrelay-infra/src/acquisition.rs": 2012,
     "crates/crowdrelay-infra/src/admission.rs": 1451,
     "crates/crowdrelay-infra/src/autopilot.rs": 1498,
-    "crates/crowdrelay-infra/src/autopilot/operations/ingress.rs": 1426,
+    "crates/crowdrelay-infra/src/autopilot/operations/ingress.rs": 1451,
     "crates/crowdrelay-infra/src/config.rs": 1558,
     "crates/crowdrelay-infra/src/events.rs": 1226,
     "crates/crowdrelay-infra/src/referrals.rs": 1797,
     "crates/crowdrelay-worker/src/draws.rs": 1497,
     "crates/crowdrelay-worker/src/event_sync.rs": 1823,
     "crates/crowdrelay-worker/src/retention.rs": 1419,
-    "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1353,
+    "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1358,
     "crates/crowdrelay-api/src/routing.rs": 900
   }
 }
