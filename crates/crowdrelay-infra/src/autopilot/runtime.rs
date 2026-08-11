@@ -246,6 +246,51 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn find_provider_action(
+        &self,
+        workspace_id: WorkspaceId,
+        executor_id: &str,
+        provider_reference: &str,
+    ) -> Result<Option<ProviderActionCorrelation>, RepositoryError> {
+        self.bounded(async {
+            let row = sqlx::query_as::<_, (Uuid, String, String, String, Uuid, String, String, OffsetDateTime)>(
+                r#"
+                SELECT action.id, action.context, action.action_kind, action.subject_kind,
+                       action.subject_id, report.executor_id, report.provider_reference, report.occurred_at
+                FROM viryaos_autopilot_execution_reports report
+                JOIN viryaos_autopilot_actions action
+                  ON action.workspace_id=report.workspace_id AND action.id=report.action_id
+                WHERE report.workspace_id=$1
+                  AND report.executor_id=$2
+                  AND report.provider_reference=$3
+                  AND report.status='succeeded'
+                ORDER BY report.occurred_at DESC, report.id DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(executor_id)
+            .bind(provider_reference)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            row.map(|row| {
+                Ok(ProviderActionCorrelation {
+                    action_id: AutopilotActionId::from_uuid(row.0),
+                    context: parse_context(&row.1)?,
+                    action_kind: row.2,
+                    subject_kind: row.3,
+                    subject_id: row.4,
+                    executor_id: row.5,
+                    provider_reference: row.6,
+                    occurred_at: row.7,
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
     async fn record_executor_heartbeat(
         &self,
         workspace_id: WorkspaceId,

@@ -1,5 +1,7 @@
 # CrowdRelay
 
+**Stable release: 1.0.0.** The OpenAPI 1.x document is the supported cross-team integration contract; internal Rust modules and persistence are implementation details.
+
 ## What It Does and Why It Exists
 
 CrowdRelay is a self-hosted backend for artists, events, and communities. It turns campaign traffic into a measurable flow:

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CrowdRelay API
-  version: 0.1.0
+  version: 1.0.0
   description: Open-source fan acquisition, referral, rewards, event conversion and admission API.
 servers:
 - url: https://api.example.com/v1
@@ -1251,6 +1251,31 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/provider-actions/{provider_reference}:
+    get:
+      operationId: resolveAutopilotProviderAction
+      summary: Resolve a provider-native reference to its provider-confirmed Autopilot action
+      description: Used by thin external adapters to correlate provider events without keeping durable business state outside CrowdRelay.
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: provider_reference
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 240 }
+      - in: header
+        name: X-Virya-Executor-Id
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '200':
+          description: Provider reference resolved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProviderActionCorrelation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/autopilot/release-components:
     post:
@@ -5599,6 +5624,19 @@ components:
       properties:
         capability: { type: string, minLength: 1, maxLength: 120 }
         version: { type: string, minLength: 1, maxLength: 40 }
+    ProviderActionCorrelation:
+      type: object
+      additionalProperties: false
+      required: [action_id, context, action_kind, subject_kind, subject_id, executor_id, provider_reference, occurred_at]
+      properties:
+        action_id: { type: string, format: uuid }
+        context: { type: string }
+        action_kind: { type: string }
+        subject_kind: { type: string }
+        subject_id: { type: string, format: uuid }
+        executor_id: { type: string }
+        provider_reference: { type: string }
+        occurred_at: { type: string, format: date-time }
     ExecutorHeartbeatRequest:
       type: object
       additionalProperties: false

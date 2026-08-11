@@ -162,6 +162,38 @@ pub async fn execution_report(
     }
 }
 
+pub async fn provider_action(
+    State(state): State<AppState>,
+    Path(provider_reference): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.ticketing.commerce_authorized(&headers) {
+        return Problem::unauthorized(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let executor_id = headers
+        .get("x-virya-executor-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !text_ok(executor_id, 120) || !text_ok(&provider_reference, 240) {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    match state
+        .autopilot
+        .find_provider_action(state.ops.workspace_id(), executor_id, &provider_reference)
+        .await
+    {
+        Ok(Some(result)) => private_json(StatusCode::OK, result),
+        Ok(None) => Problem::not_found(request_id(&headers))
+            .private()
+            .into_response(),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn executor_heartbeat(
     State(state): State<AppState>,
     headers: HeaderMap,

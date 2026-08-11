@@ -810,6 +810,22 @@ pub struct ExecutionReportMutation {
     pub replayed: bool,
 }
 
+/// Durable provider correlation resolved from the immutable execution-receipt ledger.
+/// External adapters use this to map provider-native identifiers (for example a
+/// Gmail thread ID) back to the CrowdRelay-owned action without keeping business
+/// state in n8n.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderActionCorrelation {
+    pub action_id: AutopilotActionId,
+    pub context: AutopilotContext,
+    pub action_kind: String,
+    pub subject_kind: String,
+    pub subject_id: uuid::Uuid,
+    pub executor_id: String,
+    pub provider_reference: String,
+    pub occurred_at: OffsetDateTime,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecutorCapability {
     pub capability: String,
@@ -896,6 +912,13 @@ pub trait AutopilotRuntimeRepository: Send + Sync {
         workspace_id: WorkspaceId,
         command: RecordExecutionReport,
     ) -> Result<ExecutionReportMutation, RepositoryError>;
+
+    async fn find_provider_action(
+        &self,
+        workspace_id: WorkspaceId,
+        executor_id: &str,
+        provider_reference: &str,
+    ) -> Result<Option<ProviderActionCorrelation>, RepositoryError>;
 
     async fn record_executor_heartbeat(
         &self,

@@ -447,6 +447,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::execution_report),
         )
         .route(
+            "/v1/internal/autopilot/provider-actions/{provider_reference}",
+            get(autopilot::provider_action),
+        )
+        .route(
             "/v1/internal/autopilot/release-components",
             post(autopilot::release_component),
         )
