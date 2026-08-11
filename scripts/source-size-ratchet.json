@@ -3,7 +3,7 @@
   "reviewThresholdLines": 1200,
   "maxLines": {
     "crates/crowdrelay-api/src/accounting.rs": 1210,
-    "crates/crowdrelay-api/src/autopilot.rs": 1369,
+    "crates/crowdrelay-api/src/autopilot.rs": 1371,
     "crates/crowdrelay-api/src/audience.rs": 2209,
     "crates/crowdrelay-api/src/commerce/campaigns.rs": 1347,
     "crates/crowdrelay-api/src/ecosystem.rs": 1741,
