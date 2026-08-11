@@ -65,10 +65,19 @@ class TeamAutopilotsContract(unittest.TestCase):
         self.assertIn("viryaos.autopilot.approval_requested", persistence)
         self.assertIn('status == "awaiting_approval"', persistence)
 
-    def test_signal_understands_new_and_existing_ticket_capacity_actions(self):
-        models = text("../virya-signal/src/models.rs")
-        for variant in ("ChangeTicketCapacity", "ExecuteReleaseMilestone", "ApplyLiveOpportunity", "PrepareFundingPackage", "SubmitFundingApplication"):
-            self.assertIn(variant, models)
+    def test_published_action_contract_includes_team_autopilot_actions(self):
+        model = text("crates/crowdrelay-application/src/autopilot/model.rs")
+        api = text("openapi/openapi.yaml")
+        variants = (
+            ("ChangeTicketCapacity", "change_ticket_capacity"),
+            ("ExecuteReleaseMilestone", "execute_release_milestone"),
+            ("ApplyLiveOpportunity", "apply_live_opportunity"),
+            ("PrepareFundingPackage", "prepare_funding_package"),
+            ("SubmitFundingApplication", "submit_funding_application"),
+        )
+        for rust_variant, wire_kind in variants:
+            self.assertIn(rust_variant, model)
+            self.assertIn(wire_kind, api)
 
     def test_no_meta_ads_executor_was_added(self):
         combined = "\n".join(p.read_text(errors="ignore") for p in ROOT.rglob("*.rs"))
