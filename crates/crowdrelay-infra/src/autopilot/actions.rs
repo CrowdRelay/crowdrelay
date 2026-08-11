@@ -493,23 +493,28 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                 }
             }
 
-            schedule_effect_measurement(
-                &mut transaction,
-                workspace_id,
-                action.id,
-                &action.payload,
-                now,
-            )
-            .await?;
+            // External intents are only *dispatched* here. Their learning/outcome
+            // evidence is committed when the executor reports provider-confirmed
+            // success, so a queued webhook can never masquerade as completed work.
+            if !payload_requires_executor(&action.payload) {
+                schedule_effect_measurement(
+                    &mut transaction,
+                    workspace_id,
+                    action.id,
+                    &action.payload,
+                    now,
+                )
+                .await?;
 
-            record_execution_outcome(
-                &mut transaction,
-                workspace_id,
-                action.id,
-                &action.payload,
-                now,
-            )
-            .await?;
+                record_execution_outcome(
+                    &mut transaction,
+                    workspace_id,
+                    action.id,
+                    &action.payload,
+                    now,
+                )
+                .await?;
+            }
 
             let completed = sqlx::query(
                 r#"

@@ -23,6 +23,7 @@ use uuid::Uuid;
 const MAX_HEARTBEAT_TTL: Duration = Duration::hours(2);
 const CLOCK_SKEW: Duration = Duration::minutes(5);
 const MAX_RUM_AGE: Duration = Duration::days(1);
+const MAX_EXECUTION_REPORT_AGE: Duration = Duration::days(7);
 const RELEASE_COMPONENTS: [&str; 6] = [
     "crowdrelay-api",
     "crowdrelay-worker",
@@ -132,7 +133,7 @@ pub async fn execution_report(
             .as_ref()
             .is_some_and(|value| value.len() > 96)
         || !object_metadata(&request.metadata)
-        || !time_is_current(request.occurred_at, now, MAX_RUM_AGE)
+        || !time_is_current(request.occurred_at, now, MAX_EXECUTION_REPORT_AGE)
         || (request.status == ExecutorReportStatus::Failed && request.error_kind.is_none())
     {
         return Problem::bad_request(request_id(&headers))

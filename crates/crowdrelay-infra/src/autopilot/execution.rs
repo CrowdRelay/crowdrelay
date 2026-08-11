@@ -1,4 +1,4 @@
-async fn schedule_effect_measurement(
+pub(super) async fn schedule_effect_measurement(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     action_id: AutopilotActionId,
@@ -160,7 +160,7 @@ async fn schedule_effect_measurement(
     .map_err(map_sqlx)?;
     Ok(())
 }
-async fn record_execution_outcome(
+pub(super) async fn record_execution_outcome(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     action_id: AutopilotActionId,
@@ -628,6 +628,23 @@ async fn ensure_marketing_eligible(
     } else {
         Err(RepositoryError::Conflict)
     }
+}
+
+pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
+    matches!(
+        payload,
+        AutopilotActionPayload::RequestFanLifecycleMessage { .. }
+            | AutopilotActionPayload::RequestMerchReorder { .. }
+            | AutopilotActionPayload::RequestBookingOutreach { .. }
+            | AutopilotActionPayload::RequestMerchBundle { .. }
+            | AutopilotActionPayload::RequestOutreach { .. }
+            | AutopilotActionPayload::RequestContentArtifact { .. }
+            | AutopilotActionPayload::EscalateShowTask { .. }
+            | AutopilotActionPayload::RequestPromotionBudgetChange { .. }
+            | AutopilotActionPayload::ApplyLiveOpportunity { .. }
+            | AutopilotActionPayload::PrepareFundingPackage { .. }
+            | AutopilotActionPayload::SubmitFundingApplication { .. }
+    )
 }
 
 fn executor_capability_for_event(event_type: &str) -> &'static str {

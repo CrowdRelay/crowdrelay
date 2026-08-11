@@ -441,7 +441,14 @@ async fn seed_deadline_calendar(
     if exists {
         return Ok(());
     }
-    crate::autopilot::ensure_executor_capability(tx, workspace_id, "calendar.upsert").await?;
+    match crate::autopilot::ensure_executor_capability(tx, workspace_id, "calendar.upsert").await {
+        Ok(()) => {}
+        // Deadline reminders enrich opportunity/funding execution but are not
+        // allowed to block the primary provider action. The dedicated release
+        // SeedCalendar milestone remains strict and surfaces missing capability.
+        Err(RepositoryError::Unavailable) => return Ok(()),
+        Err(error) => return Err(error),
+    }
     let outbox_id = Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts)

@@ -352,6 +352,13 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                   AND action.context = 'content_supply'
                   AND action.subject_id = source.id
                   AND action.status = 'succeeded'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM viryaos_autopilot_execution_reports AS report
+                      WHERE report.workspace_id = action.workspace_id
+                        AND report.action_id = action.id
+                        AND report.status = 'succeeded'
+                  )
             ), ARRAY[]::text[]) AS completed_artifacts,
             COALESCE(ARRAY(
                 SELECT DISTINCT action.payload->>'artifact'
@@ -359,7 +366,25 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 WHERE action.workspace_id = source.workspace_id
                   AND action.context = 'content_supply'
                   AND action.subject_id = source.id
-                  AND action.status IN ('awaiting_approval','queued','processing')
+                  AND (
+                      action.status IN ('awaiting_approval','queued','processing')
+                      OR (
+                          action.status = 'succeeded'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM viryaos_autopilot_action_emissions AS emission
+                              WHERE emission.workspace_id = action.workspace_id
+                                AND emission.action_id = action.id
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM viryaos_autopilot_execution_reports AS report
+                              WHERE report.workspace_id = action.workspace_id
+                                AND report.action_id = action.id
+                                AND report.status IN ('succeeded','failed')
+                          )
+                      )
+                  )
             ), ARRAY[]::text[]) AS inflight_artifacts
         FROM viryaos_content_sources AS source
         WHERE source.workspace_id = $1

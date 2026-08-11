@@ -145,15 +145,26 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let stats = sqlx::query_as::<_, ControlStatsRow>(
                 r#"
                 SELECT
-                    count(*) FILTER (WHERE status = 'queued') AS queued_actions,
-                    count(*) FILTER (WHERE status = 'processing') AS processing_actions,
+                    count(*) FILTER (WHERE action.status = 'queued') AS queued_actions,
+                    count(*) FILTER (WHERE action.status = 'processing') AS processing_actions,
                     count(*) FILTER (
-                        WHERE status = 'succeeded'
-                          AND finished_at >= now() - INTERVAL '24 hours'
+                        WHERE action.status = 'succeeded'
+                          AND action.finished_at >= now() - INTERVAL '24 hours'
+                          AND (
+                              NOT EXISTS (
+                                  SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                                  WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
+                              )
+                              OR EXISTS (
+                                  SELECT 1 FROM viryaos_autopilot_execution_reports report
+                                  WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
+                                    AND report.status='succeeded'
+                              )
+                          )
                     ) AS succeeded_24h,
                     count(*) FILTER (
-                        WHERE status = 'failed'
-                          AND finished_at >= now() - INTERVAL '24 hours'
+                        WHERE action.status = 'failed'
+                          AND action.finished_at >= now() - INTERVAL '24 hours'
                     ) AS failed_24h,
                     (SELECT count(DISTINCT report.action_id)::bigint
                      FROM viryaos_autopilot_execution_reports report
@@ -162,7 +173,12 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     (SELECT count(DISTINCT report.action_id)::bigint
                      FROM viryaos_autopilot_execution_reports report
                      WHERE report.workspace_id=$1 AND report.status='failed'
-                       AND report.occurred_at >= now() - INTERVAL '24 hours') AS executor_failed_24h,
+                       AND report.occurred_at >= now() - INTERVAL '24 hours'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM viryaos_autopilot_execution_reports success
+                           WHERE success.workspace_id=report.workspace_id
+                             AND success.action_id=report.action_id AND success.status='succeeded'
+                       )) AS executor_failed_24h,
                     (SELECT count(*)::bigint
                      FROM viryaos_autopilot_action_emissions emission
                      JOIN viryaos_autopilot_actions emitted_action
@@ -173,8 +189,13 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                            WHERE report.workspace_id=emission.workspace_id AND report.action_id=emission.action_id
                              AND report.status IN ('succeeded','failed')
                        )) AS awaiting_executor
-                FROM viryaos_autopilot_actions
-                WHERE workspace_id = $1
+                FROM viryaos_autopilot_actions action
+                WHERE action.workspace_id = $1
+                  AND (
+                      action.status IN ('queued','processing')
+                      OR (action.status IN ('succeeded','failed')
+                          AND action.finished_at >= now() - INTERVAL '24 hours')
+                  )
                 "#,
             )
             .bind(workspace_id.into_uuid())

@@ -61,6 +61,11 @@ impl AutopilotWorker {
     }
 
     async fn run_once(&self, now: OffsetDateTime) -> Result<(), RepositoryError> {
+        // Evaluation, execution and delayed measurement are intentionally isolated.
+        // A context-specific query failure must never block already-authorized work
+        // or evidence collection from a previous cycle.
+        let mut phase_failed = false;
+
         let evaluator = EvaluateAutopilot::new(&self.repository, self.workspace_id);
         match evaluator.execute(now).await {
             Ok(report)
@@ -77,92 +82,115 @@ impl AutopilotWorker {
             }
             Ok(_) => {}
             Err(error) => {
+                phase_failed = true;
                 tracing::warn!(error = %error, "ViryaOS Autopilot evaluation failed");
-                return Err(RepositoryError::Unexpected);
             }
         }
 
-        let actions = self
+        match self
             .repository
             .claim_due_actions(self.workspace_id, ACTION_BATCH_SIZE, now)
-            .await?;
-        for action in actions {
-            if let Err(error) = self
-                .repository
-                .execute_action(self.workspace_id, &action, OffsetDateTime::now_utc())
-                .await
-            {
-                let error_kind = repository_error_kind(error);
-                let retryable = repository_error_retryable(error);
-                tracing::warn!(
-                    action_id = %action.id,
-                    action_kind = action.payload.action_kind(),
-                    error_kind,
-                    "ViryaOS Autopilot action failed"
-                );
-                let _ = self
-                    .repository
-                    .fail_action(
-                        self.workspace_id,
-                        action.id,
-                        error_kind,
-                        retryable,
-                        OffsetDateTime::now_utc(),
-                    )
-                    .await;
+            .await
+        {
+            Ok(actions) => {
+                for action in actions {
+                    if let Err(error) = self
+                        .repository
+                        .execute_action(self.workspace_id, &action, OffsetDateTime::now_utc())
+                        .await
+                    {
+                        phase_failed = true;
+                        let error_kind = repository_error_kind(error);
+                        let retryable = repository_error_retryable(error);
+                        tracing::warn!(
+                            action_id = %action.id,
+                            action_kind = action.payload.action_kind(),
+                            error_kind,
+                            "ViryaOS Autopilot action failed"
+                        );
+                        let _ = self
+                            .repository
+                            .fail_action(
+                                self.workspace_id,
+                                action.id,
+                                error_kind,
+                                retryable,
+                                OffsetDateTime::now_utc(),
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS Autopilot action claim failed");
             }
         }
 
         // Delayed measurements deliberately run after action execution. They never
         // influence the side effect that created them; they only produce immutable
         // evidence for later policy calibration.
-        let measurements = self
+        match self
             .repository
             .claim_due_measurements(self.workspace_id, MEASUREMENT_BATCH_SIZE, now)
-            .await?;
-        for measurement in measurements {
-            let observed_at = OffsetDateTime::now_utc();
-            let result = async {
-                let observed = self
-                    .repository
-                    .observe_measurement(self.workspace_id, &measurement, observed_at)
-                    .await?;
-                let effect = assess_measurement_effect(&measurement, observed)
-                    .ok_or(RepositoryError::Unexpected)?;
-                self.repository
-                    .complete_measurement(
-                        self.workspace_id,
-                        &measurement,
-                        observed,
-                        effect,
-                        observed_at,
-                    )
-                    .await
-            }
-            .await;
-
-            if let Err(error) = result {
-                let error_kind = repository_error_kind(error);
-                let retryable = repository_error_retryable(error);
-                tracing::warn!(
-                    measurement_id = %measurement.id,
-                    measurement_kind = measurement.kind.as_str(),
-                    error_kind,
-                    "ViryaOS Autopilot delayed effect measurement failed"
-                );
-                let _ = self
-                    .repository
-                    .fail_measurement(
-                        self.workspace_id,
-                        measurement.id,
-                        error_kind,
-                        retryable,
-                        OffsetDateTime::now_utc(),
-                    )
+            .await
+        {
+            Ok(measurements) => {
+                for measurement in measurements {
+                    let observed_at = OffsetDateTime::now_utc();
+                    let result = async {
+                        let observed = self
+                            .repository
+                            .observe_measurement(self.workspace_id, &measurement, observed_at)
+                            .await?;
+                        let effect = assess_measurement_effect(&measurement, observed)
+                            .ok_or(RepositoryError::Unexpected)?;
+                        self.repository
+                            .complete_measurement(
+                                self.workspace_id,
+                                &measurement,
+                                observed,
+                                effect,
+                                observed_at,
+                            )
+                            .await
+                    }
                     .await;
+
+                    if let Err(error) = result {
+                        phase_failed = true;
+                        let error_kind = repository_error_kind(error);
+                        let retryable = repository_error_retryable(error);
+                        tracing::warn!(
+                            measurement_id = %measurement.id,
+                            measurement_kind = measurement.kind.as_str(),
+                            error_kind,
+                            "ViryaOS Autopilot delayed effect measurement failed"
+                        );
+                        let _ = self
+                            .repository
+                            .fail_measurement(
+                                self.workspace_id,
+                                measurement.id,
+                                error_kind,
+                                retryable,
+                                OffsetDateTime::now_utc(),
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS Autopilot measurement claim failed");
             }
         }
-        Ok(())
+
+        if phase_failed {
+            Err(RepositoryError::Unexpected)
+        } else {
+            Ok(())
+        }
     }
 }
 

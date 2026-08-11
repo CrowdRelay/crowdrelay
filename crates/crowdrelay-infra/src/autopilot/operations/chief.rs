@@ -153,16 +153,34 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
 
     let stats = sqlx::query_as::<_, ChiefStatsRow>(r#"
         SELECT
-            (SELECT count(*)::bigint FROM viryaos_autopilot_actions
-              WHERE workspace_id=$1 AND status='succeeded' AND finished_at >= $2 - INTERVAL '24 hours') executed_24h,
+            (SELECT count(*)::bigint FROM viryaos_autopilot_actions action
+              WHERE action.workspace_id=$1 AND action.status='succeeded'
+                AND action.finished_at >= $2 - INTERVAL '24 hours'
+                AND (
+                    NOT EXISTS (
+                        SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                        WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM viryaos_autopilot_execution_reports report
+                        WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
+                          AND report.status='succeeded'
+                    )
+                )) executed_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
               WHERE workspace_id=$1 AND status='failed' AND finished_at >= $2 - INTERVAL '24 hours') failed_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_action_emissions
               WHERE workspace_id=$1 AND emitted_at >= $2 - INTERVAL '24 hours') emitted_24h,
             (SELECT count(DISTINCT action_id)::bigint FROM viryaos_autopilot_execution_reports
               WHERE workspace_id=$1 AND status='succeeded' AND occurred_at >= $2 - INTERVAL '24 hours') executor_confirmed_24h,
-            (SELECT count(DISTINCT action_id)::bigint FROM viryaos_autopilot_execution_reports
-              WHERE workspace_id=$1 AND status='failed' AND occurred_at >= $2 - INTERVAL '24 hours') executor_failed_24h,
+            (SELECT count(DISTINCT report.action_id)::bigint FROM viryaos_autopilot_execution_reports report
+              WHERE report.workspace_id=$1 AND report.status='failed'
+                AND report.occurred_at >= $2 - INTERVAL '24 hours'
+                AND NOT EXISTS (
+                    SELECT 1 FROM viryaos_autopilot_execution_reports success
+                    WHERE success.workspace_id=report.workspace_id
+                      AND success.action_id=report.action_id AND success.status='succeeded'
+                )) executor_failed_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
               WHERE workspace_id=$1 AND status='awaiting_approval') awaiting_approval,
             (SELECT COALESCE(sum(CASE
@@ -174,8 +192,20 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                 WHEN action_kind IN ('show.task.complete','show.task.escalate','funding.package.prepare') THEN 8
                 WHEN action_kind='funding.application.submit' THEN 10
                 WHEN action_kind LIKE 'experiment.%' THEN 3 ELSE 2 END),0)::bigint
-             FROM viryaos_autopilot_actions
-             WHERE workspace_id=$1 AND status='succeeded' AND finished_at >= $2 - INTERVAL '24 hours') estimated_minutes_saved_24h,
+             FROM viryaos_autopilot_actions action
+             WHERE action.workspace_id=$1 AND action.status='succeeded'
+               AND action.finished_at >= $2 - INTERVAL '24 hours'
+               AND (
+                   NOT EXISTS (
+                       SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                       WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM viryaos_autopilot_execution_reports report
+                       WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
+                         AND report.status='succeeded'
+                   )
+               )) estimated_minutes_saved_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes
               WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='improved') measured_improved_7d,
             (SELECT count(*)::bigint FROM viryaos_autopilot_outcomes

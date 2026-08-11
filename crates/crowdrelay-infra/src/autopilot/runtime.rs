@@ -54,6 +54,34 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             if let Some(id) = inserted {
                 match command.status {
                     ExecutorReportStatus::Failed => {
+                        // A delayed failure receipt may drain after the same action has
+                        // already been provider-confirmed. Keep it in the immutable audit
+                        // ledger, but never let stale transport ordering reopen the circuit.
+                        let provider_already_succeeded = sqlx::query_scalar::<_, bool>(
+                            r#"
+                            SELECT EXISTS (
+                                SELECT 1 FROM viryaos_autopilot_execution_reports report
+                                WHERE report.workspace_id=$1 AND report.action_id=$2
+                                  AND report.executor_id=$3 AND report.status='succeeded'
+                            )
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .bind(&command.executor_id)
+                        .fetch_one(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                        if provider_already_succeeded {
+                            transaction.commit().await.map_err(map_sqlx)?;
+                            return Ok(ExecutionReportMutation {
+                                report_id: id,
+                                action_id: command.action_id,
+                                status: command.status,
+                                replayed: false,
+                            });
+                        }
+
                         let reason = command.error_kind.as_deref().unwrap_or("executor_failures");
                         sqlx::query(
                             r#"
@@ -95,6 +123,72 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .map_err(map_sqlx)?;
                     }
                     ExecutorReportStatus::Succeeded => {
+                        // Learning and outcome evidence for external actions is
+                        // provider-confirmed, never merely outbox-confirmed.
+                        let payload_value = sqlx::query_scalar::<_, Value>(
+                            "SELECT payload FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?
+                        .ok_or(RepositoryError::NotFound)?;
+                        let payload = serde_json::from_value::<AutopilotActionPayload>(payload_value)
+                            .map_err(|_| RepositoryError::Unexpected)?;
+                        if payload_requires_executor(&payload) {
+                            schedule_effect_measurement(
+                                &mut transaction,
+                                workspace_id,
+                                command.action_id,
+                                &payload,
+                                command.occurred_at,
+                            )
+                            .await?;
+                            record_execution_outcome(
+                                &mut transaction,
+                                workspace_id,
+                                command.action_id,
+                                &payload,
+                                command.occurred_at,
+                            )
+                            .await?;
+
+                            // The provider receipt is also the canonical completion
+                            // edge for team-opportunity state. This removes a second
+                            // n8n -> CrowdRelay progress callback and its duplicate-send
+                            // failure window. Replayed receipts never enter this branch.
+                            match &payload {
+                                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, .. }
+                                | AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
+                                    sqlx::query(
+                                        "UPDATE viryaos_team_opportunities \
+                                         SET status='submitted', version=version+1 \
+                                         WHERE workspace_id=$1 AND id=$2 AND status='submission_requested'",
+                                    )
+                                    .bind(workspace_id.into_uuid())
+                                    .bind((*opportunity_id).into_uuid())
+                                    .execute(&mut *transaction)
+                                    .await
+                                    .map_err(map_sqlx)?;
+                                }
+                                AutopilotActionPayload::PrepareFundingPackage { opportunity_id } => {
+                                    sqlx::query(
+                                        "UPDATE viryaos_team_opportunities \
+                                         SET package_status='ready', status='prepared', version=version+1 \
+                                         WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' \
+                                           AND package_status='requested'",
+                                    )
+                                    .bind(workspace_id.into_uuid())
+                                    .bind((*opportunity_id).into_uuid())
+                                    .execute(&mut *transaction)
+                                    .await
+                                    .map_err(map_sqlx)?;
+                                }
+                                _ => {}
+                            }
+                        }
+
                         sqlx::query(
                             r#"
                             UPDATE viryaos_executor_circuit_breakers
