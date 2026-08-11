@@ -72,10 +72,11 @@ where
                         .load_ticket_yield_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = ticket_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = ticket_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
-                        if let Some(candidate) = ticket_allocation_candidate(snapshot, policy, now)?
+                        if let Some(candidate) =
+                            ticket_allocation_candidate(snapshot, &policy, now)?
                         {
                             self.persist(&candidate, &mut report).await?;
                         }
@@ -87,7 +88,7 @@ where
                         .load_fan_lifecycle_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = lifecycle_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = lifecycle_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -99,7 +100,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) =
-                            campaign_lifecycle_candidate(snapshot, policy, now)?
+                            campaign_lifecycle_candidate(snapshot, &policy, now)?
                         {
                             self.persist(&candidate, &mut report).await?;
                         }
@@ -111,7 +112,7 @@ where
                         .load_merch_inventory_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = merch_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = merch_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -122,7 +123,7 @@ where
                         .load_merch_price_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = merch_price_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = merch_price_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -133,7 +134,7 @@ where
                         .load_merch_bundle_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = merch_bundle_candidate(snapshot, policy)? {
+                        if let Some(candidate) = merch_bundle_candidate(snapshot, &policy)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -148,12 +149,13 @@ where
                         .load_booking_target_snapshots(self.workspace_id, now)
                         .await?;
                     for target in &targets {
-                        if let Some(candidate) = booking_followup_candidate(target, policy, now)? {
+                        if let Some(candidate) = booking_followup_candidate(target, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
                     for snapshot in snapshots {
-                        if let Some(candidate) = booking_candidate(snapshot, &targets, policy, now)?
+                        if let Some(candidate) =
+                            booking_candidate(snapshot, &targets, &policy, now)?
                         {
                             self.persist(&candidate, &mut report).await?;
                         }
@@ -165,7 +167,7 @@ where
                         .load_outreach_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = outreach_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = outreach_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -176,7 +178,7 @@ where
                         .load_content_supply_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = content_candidate(&snapshot, policy, now)? {
+                        if let Some(candidate) = content_candidate(&snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -187,7 +189,7 @@ where
                         .load_experiment_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = experiment_candidate(&snapshot, policy)? {
+                        if let Some(candidate) = experiment_candidate(&snapshot, &policy)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -198,7 +200,8 @@ where
                         .load_show_task_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = show_operations_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = show_operations_candidate(snapshot, &policy, now)?
+                        {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -209,7 +212,7 @@ where
                         .load_promotion_performance_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = promotion_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = promotion_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -220,7 +223,7 @@ where
                         .load_release_plan_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = release_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = release_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -231,7 +234,7 @@ where
                         .load_live_opportunity_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = live_opportunity_candidate(snapshot, policy, now)?
+                        if let Some(candidate) = live_opportunity_candidate(snapshot, &policy, now)?
                         {
                             self.persist(&candidate, &mut report).await?;
                         }
@@ -243,7 +246,7 @@ where
                         .load_funding_opportunity_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = funding_candidate(snapshot, policy, now)? {
+                        if let Some(candidate) = funding_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }
@@ -307,17 +310,17 @@ fn policy_evidence<T: Serialize>(
 
 fn ticket_candidate(
     snapshot: TicketYieldSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::TicketYield(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::TicketYield(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let TicketYieldDecision::Increase {
         from_minor,
         to_minor,
         confidence,
-    } = evaluate_ticket_yield(snapshot, domain_policy, now)
+    } = evaluate_ticket_yield(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -331,7 +334,7 @@ fn ticket_candidate(
         disposition,
         reason: "paid demand exceeds bounded yield thresholds",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::ChangeTicketPrice {
             ticket_type_id: snapshot.ticket_type_id,
             from_minor,
@@ -360,10 +363,10 @@ fn ticket_candidate(
 
 fn ticket_allocation_candidate(
     snapshot: TicketYieldSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::TicketYield(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::TicketYield(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let TicketAllocationDecision::IncreaseCapacity {
@@ -371,7 +374,7 @@ fn ticket_allocation_candidate(
         to_capacity,
         guardrail_version,
         confidence,
-    } = evaluate_ticket_allocation(snapshot, domain_policy, now)
+    } = evaluate_ticket_allocation(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -385,7 +388,7 @@ fn ticket_allocation_candidate(
         disposition,
         reason: "paid tier demand is near its operator-bounded allocation ceiling",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::ChangeTicketCapacity {
             ticket_type_id: snapshot.ticket_type_id,
             from_capacity,
@@ -416,16 +419,16 @@ fn ticket_allocation_candidate(
 
 fn lifecycle_candidate(
     snapshot: FanLifecycleSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::FanLifecycle(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::FanLifecycle(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let FanLifecycleDecision::RequestMessage {
         template,
         confidence,
-    } = evaluate_fan_lifecycle(snapshot, domain_policy, now)
+    } = evaluate_fan_lifecycle(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -444,7 +447,7 @@ fn lifecycle_candidate(
         disposition,
         reason: "consented fan lifecycle has a deterministic communication step due",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestFanLifecycleMessage {
             fan_id: snapshot.fan_id,
             template_key: template_key.to_owned(),
@@ -473,16 +476,16 @@ fn lifecycle_candidate(
 
 fn release_candidate(
     snapshot: ReleasePlanSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::Release(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::Release(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let ReleaseDecision::Request {
         milestone,
         confidence,
-    } = evaluate_release(&snapshot, domain_policy, now)
+    } = evaluate_release(&snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -505,7 +508,7 @@ fn release_candidate(
         disposition,
         reason: "release timeline has a deterministic milestone due",
         input_snapshot: serde_json::to_value(&snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::ExecuteReleaseMilestone {
             release_id: snapshot.release_id,
             title: snapshot.title.clone(),
@@ -525,13 +528,13 @@ fn release_candidate(
 
 fn live_opportunity_candidate(
     snapshot: LiveOpportunitySnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::LiveOpportunity(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::LiveOpportunity(domain_policy) = &policy.config else {
         return Ok(None);
     };
-    let decision = evaluate_live_opportunity(snapshot, domain_policy, now);
+    let decision = evaluate_live_opportunity(snapshot, *domain_policy, now);
     let (score, confidence, forced_approval) = match decision {
         LiveOpportunityDecision::Hold => return Ok(None),
         LiveOpportunityDecision::PrepareForApproval { score, confidence } => {
@@ -553,7 +556,7 @@ fn live_opportunity_candidate(
         disposition,
         reason: "verified live opportunity clears deterministic fit and economics gates",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::ApplyLiveOpportunity {
             opportunity_id: snapshot.opportunity_id,
             opportunity_kind: snapshot.kind,
@@ -571,13 +574,13 @@ fn live_opportunity_candidate(
 
 fn funding_candidate(
     snapshot: FundingOpportunitySnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::Funding(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::Funding(domain_policy) = &policy.config else {
         return Ok(None);
     };
-    let decision = evaluate_funding(snapshot, domain_policy, now);
+    let decision = evaluate_funding(snapshot, *domain_policy, now);
     let (decision_kind, confidence, action, force_approval, key) = match decision {
         FundingDecision::Hold => return Ok(None),
         FundingDecision::PreparePackage { confidence } => (
@@ -611,7 +614,7 @@ fn funding_candidate(
         disposition,
         reason: "eligible funding opportunity clears deterministic value and contribution gates",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action,
         decision_key: format!(
             "decision:funding:v{}:{}:{key}:{}",
@@ -625,16 +628,16 @@ fn funding_candidate(
 
 fn merch_candidate(
     snapshot: MerchInventorySnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::Merchandising(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::Merchandising(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let MerchReorderDecision::RequestReorder {
         quantity,
         confidence,
-    } = evaluate_reorder(snapshot, domain_policy, now)
+    } = evaluate_reorder(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -648,7 +651,7 @@ fn merch_candidate(
         disposition,
         reason: "projected stock coverage is below bounded target",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestMerchReorder {
             variant_id: snapshot.variant_id,
             quantity,
@@ -676,17 +679,17 @@ fn merch_candidate(
 
 fn merch_price_candidate(
     snapshot: MerchPriceSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::MerchPricing(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::MerchPricing(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let MerchPriceDecision::ChangePrice {
         direction,
         to_minor,
         confidence,
-    } = evaluate_merch_price(snapshot, domain_policy, now)
+    } = evaluate_merch_price(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -714,7 +717,7 @@ fn merch_price_candidate(
         disposition,
         reason,
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::ChangeMerchPrice {
             product_id: snapshot.product_id,
             from_minor,
@@ -752,14 +755,14 @@ fn merch_price_candidate(
 fn booking_candidate(
     snapshot: CityOpportunitySnapshot,
     targets: &[BookingTargetSnapshot],
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::BookingOpportunity(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::BookingOpportunity(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let BookingOpportunityDecision::RequestOutreach { score, confidence } =
-        evaluate_booking_opportunity(snapshot, domain_policy, now)
+        evaluate_booking_opportunity(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -798,7 +801,7 @@ fn booking_candidate(
             "expected_attendance": expected_attendance,
         }),
         policy_snapshot: policy_evidence(
-            policy,
+            policy.clone(),
             serde_json::json!({
                 "opportunity": domain_policy,
                 "target_selection": target_policy,
@@ -849,10 +852,10 @@ fn booking_candidate(
 
 fn booking_followup_candidate(
     target: &BookingTargetSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::BookingOpportunity(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::BookingOpportunity(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let followup_policy = BookingFollowUpPolicy::default();
@@ -871,7 +874,7 @@ fn booking_followup_candidate(
         reason: "verified booking target has not replied and the bounded follow-up window is due",
         input_snapshot: serde_json::to_value(target)?,
         policy_snapshot: policy_evidence(
-            policy,
+            policy.clone(),
             serde_json::json!({"opportunity":domain_policy,"followup":followup_policy}),
         )?,
         action: AutopilotActionPayload::RequestBookingOutreach {
@@ -903,14 +906,14 @@ fn booking_followup_candidate(
 
 fn campaign_lifecycle_candidate(
     snapshot: EventCampaignSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::CampaignLifecycle(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::CampaignLifecycle(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let EventCampaignDecision::Request { phase, confidence } =
-        evaluate_event_campaign(snapshot, domain_policy, now)
+        evaluate_event_campaign(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -923,7 +926,7 @@ fn campaign_lifecycle_candidate(
         disposition,
         reason: "event lifecycle phase is due for a consented first-party audience",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestAudienceCampaign {
             event_id: snapshot.event_id,
             phase,
@@ -944,16 +947,16 @@ fn campaign_lifecycle_candidate(
 
 fn merch_bundle_candidate(
     snapshot: MerchBundleSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::MerchBundle(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::MerchBundle(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let MerchBundleDecision::Recommend {
         bundle_price_minor,
         affinity_basis_points,
         confidence,
-    } = evaluate_merch_bundle(snapshot, domain_policy)
+    } = evaluate_merch_bundle(snapshot, *domain_policy)
     else {
         return Ok(None);
     };
@@ -971,7 +974,7 @@ fn merch_bundle_candidate(
         disposition,
         reason: "repeat co-purchase evidence supports a bounded margin-safe bundle",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestMerchBundle {
             product_a,
             product_b,
@@ -996,14 +999,14 @@ fn merch_bundle_candidate(
 
 fn outreach_candidate(
     snapshot: OutreachSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::Outreach(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::Outreach(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let OutreachDecision::Request { phase, confidence } =
-        evaluate_outreach(snapshot, domain_policy, now)
+        evaluate_outreach(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -1027,7 +1030,7 @@ fn outreach_candidate(
         disposition,
         reason: "verified relationship target matches a fresh high-relevance opportunity",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestOutreach {
             opportunity_id: snapshot.opportunity_id,
             target_id: snapshot.target_id,
@@ -1055,16 +1058,16 @@ fn outreach_candidate(
 
 fn content_candidate(
     snapshot: &ContentSupplySnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::ContentSupply(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::ContentSupply(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let ContentSupplyDecision::Request {
         artifact,
         confidence,
-    } = evaluate_content_supply(snapshot, domain_policy, now)
+    } = evaluate_content_supply(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -1077,7 +1080,7 @@ fn content_candidate(
         disposition,
         reason: "trusted source is missing one required deterministic content artifact",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestContentArtifact {
             source_id: snapshot.source_id,
             source_version: snapshot.source_version,
@@ -1097,12 +1100,12 @@ fn content_candidate(
 
 fn experiment_candidate(
     snapshot: &ExperimentSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::Experimentation(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::Experimentation(domain_policy) = &policy.config else {
         return Ok(None);
     };
-    let decision = evaluate_experiment(snapshot, domain_policy);
+    let decision = evaluate_experiment(snapshot, *domain_policy);
     let (winner, allocations, complete, confidence) = match decision {
         ExperimentDecision::Reallocate {
             winner,
@@ -1150,7 +1153,7 @@ fn experiment_candidate(
         disposition,
         reason: "aggregate experiment evidence shows a bounded material winner",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::AdjustExperiment {
             experiment_id: snapshot.experiment_id,
             expected_version: snapshot.version,
@@ -1186,14 +1189,14 @@ fn experiment_candidate(
 
 fn show_operations_candidate(
     snapshot: ShowTaskSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::ShowOperations(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::ShowOperations(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let (action, decision_kind, reason, confidence) =
-        match evaluate_show_task(snapshot, domain_policy, now) {
+        match evaluate_show_task(snapshot, *domain_policy, now) {
             ShowOperationsDecision::AutoComplete { confidence } => (
                 AutopilotActionPayload::CompleteShowTask {
                     event_id: snapshot.event_id,
@@ -1223,7 +1226,7 @@ fn show_operations_candidate(
         disposition,
         reason,
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action,
         decision_key: format!(
             "decision:show:v{}:{}:{:?}:{}:{}",
@@ -1235,7 +1238,7 @@ fn show_operations_candidate(
                 .last_escalated_at
                 .map_or(0, OffsetDateTime::unix_timestamp)
         ),
-        action_idempotency_key: match evaluate_show_task(snapshot, domain_policy, now) {
+        action_idempotency_key: match evaluate_show_task(snapshot, *domain_policy, now) {
             ShowOperationsDecision::AutoComplete { .. } => format!(
                 "action:show:{}:{:?}:complete",
                 snapshot.event_id, snapshot.task
@@ -1254,10 +1257,10 @@ fn show_operations_candidate(
 
 fn promotion_candidate(
     snapshot: PromotionPerformanceSnapshot,
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::PromotionBudget(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::PromotionBudget(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let PromotionBudgetDecision::Adjust {
@@ -1266,7 +1269,7 @@ fn promotion_candidate(
         roas_basis_points,
         confidence,
         ..
-    } = evaluate_promotion_budget(snapshot, domain_policy, now)
+    } = evaluate_promotion_budget(snapshot, *domain_policy, now)
     else {
         return Ok(None);
     };
@@ -1280,7 +1283,7 @@ fn promotion_candidate(
         disposition,
         reason: "bounded promotion ROAS is outside configured performance band",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
         action: AutopilotActionPayload::RequestPromotionBudgetChange {
             campaign_id: snapshot.campaign_id,
             from_minor,
@@ -1328,6 +1331,8 @@ mod tests {
             max_actions_24h: 10,
             config: AutopilotPolicyConfig::TicketYield(TicketYieldPolicy::default()),
             version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
         };
         let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
         let candidate = ticket_candidate(
@@ -1343,7 +1348,7 @@ mod tests {
                 last_capacity_change_at: None,
                 allocation_guardrail: None,
             },
-            policy,
+            &policy,
             now,
         )?
         .ok_or_else(|| std::io::Error::other("candidate expected"))?;

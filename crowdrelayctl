@@ -13,6 +13,7 @@ CROWDRELAY_WEBHOOK_SECRETS_FILE="${CROWDRELAY_WEBHOOK_SECRETS_FILE:-deploy/webho
 CROWDRELAY_DOCKER_NETWORK="${CROWDRELAY_DOCKER_NETWORK:-crowdrelay}"
 CROWDRELAY_CREATE_NETWORK="${CROWDRELAY_CREATE_NETWORK:-false}"
 CROWDRELAY_PUBLIC_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-}"
+CROWDRELAY_LEDGER_COMMERCE_API_KEY="${CROWDRELAY_LEDGER_COMMERCE_API_KEY:-}"
 CROWDRELAY_BACKUP_BEFORE_DEPLOY="${CROWDRELAY_BACKUP_BEFORE_DEPLOY:-false}"
 CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS="${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}"
 CROWDRELAY_SSH_TARGET="${CROWDRELAY_SSH_TARGET:-}"
@@ -85,6 +86,30 @@ run_hook() {
   if declare -F "$hook" >/dev/null 2>&1; then
     "$hook" "$@"
   fi
+}
+
+report_release_ledger() {
+  [[ -n "$CROWDRELAY_LEDGER_COMMERCE_API_KEY" ]] || return 0
+  if [[ -z "$CROWDRELAY_PUBLIC_BASE_URL" ]]; then
+    echo "Release ledger reporter skipped: CROWDRELAY_PUBLIC_BASE_URL is empty." >&2
+    return 0
+  fi
+  local reporter="${ROOT_DIR}/scripts/report-release-component.sh"
+  if [[ ! -x "$reporter" ]]; then
+    echo "Release ledger reporter skipped: $reporter is missing or not executable." >&2
+    return 0
+  fi
+  local component
+  for component in crowdrelay-api crowdrelay-worker; do
+    if ! CROWDRELAY_BASE_URL="$CROWDRELAY_PUBLIC_BASE_URL" \
+      CROWDRELAY_COMMERCE_API_KEY="$CROWDRELAY_LEDGER_COMMERCE_API_KEY" \
+      COMPONENT_KEY="$component" \
+      SOURCE_SHA="$CROWDRELAY_IMAGE_SHA" \
+      DEPLOY_REF="crowdrelayctl" \
+      "$reporter"; then
+      echo "Release ledger reporter failed for $component; production deploy remains valid." >&2
+    fi
+  done
 }
 
 compose() {
@@ -217,6 +242,7 @@ deploy() {
   compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans api worker
   run_hook crowdrelay_before_verify
   verify
+  report_release_ledger
   run_hook crowdrelay_after_deploy
   run_hook crowdrelay_notify "CrowdRelay deployed: sha-${CROWDRELAY_IMAGE_SHA}"
 }
@@ -231,6 +257,11 @@ package_deploy() (
   trap 'rm -rf -- "$staging"' EXIT
   mkdir -p "$staging/deploy"
   cp crowdrelayctl "$staging/crowdrelayctl"
+  mkdir -p "$staging/scripts"
+  cp scripts/report-release-component.sh "$staging/scripts/report-release-component.sh"
+  cp scripts/production-smoke.sh "$staging/scripts/production-smoke.sh"
+  chmod 700 "$staging/scripts/report-release-component.sh" "$staging/scripts/production-smoke.sh"
+  cp -R deploy/systemd "$staging/deploy/systemd"
   cp "$(absolute_path "$CROWDRELAY_COMPOSE_FILE")" "$staging/compose.production.yaml"
   cp "$LOCAL_CONFIG" "$staging/.crowdrelay.local.sh"
   cp "$(absolute_path "$CROWDRELAY_ENV_FILE")" "$staging/deploy/.env.production"

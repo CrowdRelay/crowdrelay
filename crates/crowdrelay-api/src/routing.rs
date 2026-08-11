@@ -437,6 +437,23 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(proofs::admin_create_audit_batch),
         )
         .route("/v1/admin/signal/overview", get(ops::signal_overview))
+        .route("/v1/public/telemetry/rum", post(autopilot::rum))
+        .route(
+            "/v1/internal/autopilot/executors/heartbeat",
+            post(autopilot::executor_heartbeat),
+        )
+        .route(
+            "/v1/internal/autopilot/actions/{action_id}/execution-report",
+            post(autopilot::execution_report),
+        )
+        .route(
+            "/v1/internal/autopilot/release-components",
+            post(autopilot::release_component),
+        )
+        .route(
+            "/v1/admin/autopilot/release-ledger",
+            get(autopilot::release_ledger),
+        )
         .route("/v1/admin/autopilot/overview", get(autopilot::overview))
         .route(
             "/v1/admin/autopilot/chief-of-staff",

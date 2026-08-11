@@ -260,11 +260,14 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("recent_effects", app)
         self.assertIn("RecentAutopilotEffect", app)
         self.assertIn("recent_effects", OPENAPI.read_text())
-        # Do not manufacture learning for actions without trustworthy attribution.
+        # Do not manufacture learning where attribution is weak. Reply outcomes are
+        # first-party binary evidence and are intentionally measurable now.
         scheduling = infra[infra.index("async fn schedule_effect_measurement"):infra.index("async fn record_execution_outcome")]
         self.assertIn("RequestFanLifecycleMessage { .. }", scheduling)
         self.assertIn("RequestMerchReorder { .. }", scheduling)
-        self.assertIn("RequestBookingOutreach { .. }", scheduling)
+        self.assertIn("AutopilotMeasurementKind::BookingReply7d", scheduling)
+        self.assertIn("AutopilotMeasurementKind::OutreachReply7d", scheduling)
+        self.assertIn("AutopilotMeasurementKind::AudienceTicketRevenue72h", scheduling)
         self.assertIn("RequestContentArtifact { .. }", scheduling)
 
     def test_original_viryaos_operating_plan_is_feature_complete(self):

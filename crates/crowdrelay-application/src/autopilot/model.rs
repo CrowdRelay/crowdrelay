@@ -21,6 +21,7 @@ use crowdrelay_domain::{
     show_operations::{ShowOperationsPolicy, ShowTaskKind},
 };
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,7 +87,7 @@ pub enum AutopilotPolicyConfig {
 }
 
 /// Persisted authority configuration for one bounded context.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutopilotPolicy {
     pub context: AutopilotContext,
     pub enabled: bool,
@@ -96,6 +97,8 @@ pub struct AutopilotPolicy {
     pub config: AutopilotPolicyConfig,
     /// Monotonic configuration version used to make decision evidence immutable.
     pub version: i64,
+    pub guarded_until: Option<OffsetDateTime>,
+    pub guardrail_reason: Option<String>,
 }
 
 /// Generic subject reference used only at the application/action boundary.

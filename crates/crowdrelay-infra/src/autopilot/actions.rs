@@ -17,6 +17,19 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
             sqlx::query(
                 r#"
                 UPDATE viryaos_autopilot_actions
+                SET status='cancelled', finished_at=$2, last_error_kind='approval_expired'
+                WHERE workspace_id=$1 AND status='awaiting_approval'
+                  AND approval_expires_at IS NOT NULL AND approval_expires_at <= $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions
                 SET status = 'failed',
                     finished_at = $2,
                     last_error_kind = 'stale_retry_exhausted'
@@ -218,6 +231,15 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                         *target_version,
                     )
                     .await?;
+                    reserve_contact_window(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "booking_opportunity",
+                        &target.2,
+                        now,
+                    )
+                    .await?;
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
@@ -316,6 +338,15 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                         *opportunity_id,
                         *target_id,
                         *target_version,
+                    )
+                    .await?;
+                    reserve_contact_window(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "outreach",
+                        &target.1,
+                        now,
                     )
                     .await?;
                     emit_external_action(

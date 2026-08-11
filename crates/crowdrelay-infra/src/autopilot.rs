@@ -5,6 +5,7 @@ mod control;
 mod decisions;
 mod measurement;
 mod operations;
+mod runtime;
 mod state;
 
 use std::{collections::HashMap, future::Future, time::Duration};
@@ -18,16 +19,18 @@ use crowdrelay_application::{
         AutopilotContext, AutopilotControlMutation, AutopilotControlOverview,
         AutopilotControlRepository, AutopilotDecisionRepository, AutopilotMarketStateRepository,
         AutopilotMeasurementKind, AutopilotMeasurementRepository, AutopilotMerchStateRepository,
-        AutopilotPolicy, AutopilotPolicyConfig, AutopilotPolicySummary,
+        AutopilotPolicy, AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
         AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
         CityMarketSignalMutation, ClaimedAutopilotAction, ClaimedAutopilotMeasurement,
-        DecisionCandidate, MerchProductEconomicsMutation, PendingAutopilotAction,
+        DecisionCandidate, ExecutionReportMutation, ExecutorHeartbeatMutation,
+        ExecutorReportStatus, MerchProductEconomicsMutation, PendingAutopilotAction,
         PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, RecentAutopilotAction, RecentAutopilotDecision,
-        RecentAutopilotEffect, SetAutopilotAuthority, TicketAllocationGuardrailMutation,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertMerchProductEconomics,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertTicketAllocationGuardrail,
+        RecentAutopilotEffect, RecordExecutionReport, RecordExecutorHeartbeat, RecordRumSample,
+        ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
+        SetAutopilotAuthority, TicketAllocationGuardrailMutation, UpsertBookingTarget,
+        UpsertCityMarketSignal, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
 };
 use crowdrelay_domain::{
@@ -120,6 +123,8 @@ struct PolicyRow {
     max_actions_24h: i32,
     config: Value,
     version: i64,
+    guarded_until: Option<OffsetDateTime>,
+    guardrail_reason: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -304,6 +309,7 @@ struct PendingActionRow {
     subject_id: Uuid,
     payload: Value,
     created_at: OffsetDateTime,
+    approval_expires_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -329,6 +335,10 @@ struct RecentActionRow {
     created_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
     last_error_kind: Option<String>,
+    executor_status: Option<String>,
+    executor_id: Option<String>,
+    provider_reference: Option<String>,
+    executor_reported_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -358,6 +368,9 @@ struct ControlStatsRow {
     processing_actions: i64,
     succeeded_24h: i64,
     failed_24h: i64,
+    executor_confirmed_24h: i64,
+    executor_failed_24h: i64,
+    awaiting_executor: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -469,6 +482,8 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         max_actions_24h,
         config,
         version: row.version,
+        guarded_until: row.guarded_until,
+        guardrail_reason: row.guardrail_reason,
     })
 }
 
@@ -694,6 +709,8 @@ mod tests {
             max_actions_24h: 10,
             config: json!({}),
             version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
         };
         let result = parse_policy(row);
         assert!(result.is_ok());
@@ -723,6 +740,8 @@ fn policy_summary(row: PolicyRow) -> Result<AutopilotPolicySummary, RepositoryEr
         max_actions_24h: u32::try_from(row.max_actions_24h)
             .map_err(|_| RepositoryError::Unexpected)?,
         version: row.version,
+        guarded_until: row.guarded_until,
+        guardrail_reason: row.guardrail_reason,
     })
 }
 
@@ -735,6 +754,7 @@ fn pending_action(row: PendingActionRow) -> Result<PendingAutopilotAction, Repos
         subject_id: row.subject_id,
         payload: serde_json::from_value(row.payload).map_err(|_| RepositoryError::Unexpected)?,
         created_at: row.created_at,
+        approval_expires_at: row.approval_expires_at,
     })
 }
 
@@ -750,6 +770,10 @@ fn recent_action(row: RecentActionRow) -> Result<RecentAutopilotAction, Reposito
         created_at: row.created_at,
         finished_at: row.finished_at,
         last_error_kind: row.last_error_kind,
+        executor_status: row.executor_status,
+        executor_id: row.executor_id,
+        provider_reference: row.provider_reference,
+        executor_reported_at: row.executor_reported_at,
     })
 }
 

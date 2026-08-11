@@ -313,6 +313,7 @@ async fn seed_release_calendar(
         if exists {
             continue;
         }
+        crate::autopilot::ensure_executor_capability(tx, workspace_id, "calendar.upsert").await?;
         let outbox_id = Uuid::now_v7();
         let starts_at = release_at + time::Duration::days(days);
         sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'viryaos.calendar.upsert_requested',1,$3,$4,12)"#)
@@ -440,6 +441,7 @@ async fn seed_deadline_calendar(
     if exists {
         return Ok(());
     }
+    crate::autopilot::ensure_executor_capability(tx, workspace_id, "calendar.upsert").await?;
     let outbox_id = Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts)

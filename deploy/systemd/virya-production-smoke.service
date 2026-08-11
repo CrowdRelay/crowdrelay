@@ -1,0 +1,15 @@
+[Unit]
+Description=Virya ecosystem production smoke
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/virya/production-smoke.env
+StateDirectory=virya-production-smoke
+Environment=SMOKE_STATE_DIR=/var/lib/virya-production-smoke
+ExecStart=/srv/crowdrelay/scripts/production-smoke.sh
+User=virya
+Group=virya
+NoNewPrivileges=true
+PrivateTmp=true

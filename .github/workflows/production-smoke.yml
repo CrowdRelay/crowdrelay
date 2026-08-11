@@ -1,8 +1,6 @@
 name: Production smoke
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -26,86 +24,11 @@ jobs:
       ALERT_WEBHOOK_URL: ${{ secrets.PRODUCTION_DISCORD_WEBHOOK_URL }}
 
     steps:
+      - name: Check out smoke probe
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
       - name: Probe CrowdRelay, Virya, and signed ingress
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          request_status() {
-            curl \
-              --silent \
-              --show-error \
-              --location \
-              --connect-timeout 4 \
-              --max-time 10 \
-              --retry 1 \
-              --retry-delay 1 \
-              --retry-all-errors \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              "$@"
-          }
-
-          require_200() {
-            local label="$1"
-            local url="$2"
-            local status
-            status="$(request_status "$url")"
-            if [[ "$status" != "200" ]]; then
-              printf '%s returned HTTP %s\n' "$label" "$status" >&2
-              return 1
-            fi
-            printf '%s=ok\n' "$label"
-          }
-
-          require_200 crowdrelay_live "${CROWDRELAY_BASE_URL%/}/v1/health/live"
-          require_200 crowdrelay_ready "${CROWDRELAY_BASE_URL%/}/v1/health/ready"
-          require_200 crowdrelay_metrics "${CROWDRELAY_BASE_URL%/}/metrics"
-
-          meta_file="$(mktemp)"
-          trap 'rm -f "$meta_file"' EXIT
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --location \
-            --connect-timeout 4 \
-            --max-time 10 \
-            --retry 1 \
-            --retry-delay 1 \
-            --retry-all-errors \
-            --output "$meta_file" \
-            "${CROWDRELAY_BASE_URL%/}/v1/meta"
-          jq -e '
-            .apiVersion == "1"
-            and (.schemaVersion >= 36)
-            and (.minimumPostgresServerVersionNum >= 180000)
-            and .capabilities.area_wallet_postgres_v2
-            and .capabilities.area_vouchers_v2
-            and .capabilities.area_ticket_rewards_v2
-            and .capabilities.signal_fan_context_v1
-            and .capabilities.synesthesia_rewards_v1
-            and .capabilities.ticketing_v1
-          ' "$meta_file" >/dev/null
-          printf 'crowdrelay_meta_contract=ok\n'
-          require_200 crowdrelay_area_catalog "${CROWDRELAY_BASE_URL%/}/v1/public/area/drops"
-          require_200 crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"
-          require_200 virya_home "${VIRYA_BASE_URL%/}/"
-          require_200 synesthesia_home "${SYNESTHESIA_BASE_URL%/}/"
-          require_200 synesthesia_boot_art "${SYNESTHESIA_BASE_URL%/}/menu-eye-poster.webp"
-
-          if [[ -n "${N8N_INGRESS_URL:-}" ]]; then
-            status="$(request_status \
-              --request POST \
-              --header 'content-type: application/json' \
-              --data '{"external_smoke":true}' \
-              "$N8N_INGRESS_URL")"
-            if [[ "$status" != "400" && "$status" != "401" ]]; then
-              printf 'n8n signed ingress returned HTTP %s, expected 400 or 401\n' "$status" >&2
-              exit 1
-            fi
-            printf 'n8n_signed_ingress=ok_rejected_unsigned\n'
-          fi
+        run: ./scripts/production-smoke.sh
 
       - name: Alert Discord on failure
         if: ${{ failure() && env.ALERT_WEBHOOK_URL != '' }}

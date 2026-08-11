@@ -396,6 +396,31 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
+            if disposition == "do_not_contact" {
+                sqlx::query(
+                    r#"
+                    INSERT INTO viryaos_contact_governor (
+                    workspace_id, normalized_contact, last_context, last_action_id,
+                    last_outbound_at, next_contact_after, do_not_contact
+                )
+                SELECT $1, lower(btrim(contact_email)), 'outreach', NULL, $3, $3, true
+                FROM viryaos_outreach_targets
+                WHERE workspace_id=$1 AND id=$2
+                ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
+                SET do_not_contact=true,
+                    last_context=EXCLUDED.last_context,
+                    next_contact_after=GREATEST(viryaos_contact_governor.next_contact_after, EXCLUDED.next_contact_after),
+                    updated_at=now()
+                "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.target_id.into_uuid())
+                .bind(command.occurred_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
+
             sqlx::query(
                 r#"
                 INSERT INTO viryaos_outreach_interactions (

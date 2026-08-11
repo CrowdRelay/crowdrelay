@@ -12,7 +12,8 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let policies = sqlx::query_as::<_, PolicyRow>(
                 r#"
                 SELECT context, enabled, autonomy_level,
-                       minimum_confidence_basis_points, max_actions_24h, config, version
+                       minimum_confidence_basis_points, max_actions_24h, config, version,
+                       guarded_until, guardrail_reason
                 FROM viryaos_autopilot_policies
                 WHERE workspace_id = $1
                 ORDER BY context
@@ -49,10 +50,12 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
 
             let needs_you = sqlx::query_as::<_, PendingActionRow>(
                 r#"
-                SELECT id, context, action_kind, subject_kind, subject_id, payload, created_at
+                SELECT id, context, action_kind, subject_kind, subject_id, payload, created_at,
+                       approval_expires_at
                 FROM viryaos_autopilot_actions
                 WHERE workspace_id = $1
                   AND status = 'awaiting_approval'
+                  AND (approval_expires_at IS NULL OR approval_expires_at > now())
                 ORDER BY created_at, id
                 LIMIT 50
                 "#,
@@ -85,10 +88,21 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
 
             let recent_actions = sqlx::query_as::<_, RecentActionRow>(
                 r#"
-                SELECT id, context, action_kind, subject_kind, subject_id, status,
-                       attempt_count, created_at, finished_at, last_error_kind
-                FROM viryaos_autopilot_actions
-                WHERE workspace_id = $1
+                SELECT action.id, action.context, action.action_kind, action.subject_kind, action.subject_id, action.status,
+                       action.attempt_count, action.created_at, action.finished_at, action.last_error_kind,
+                       latest_report.status AS executor_status,
+                       latest_report.executor_id,
+                       latest_report.provider_reference,
+                       latest_report.occurred_at AS executor_reported_at
+                FROM viryaos_autopilot_actions action
+                LEFT JOIN LATERAL (
+                    SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at
+                    FROM viryaos_autopilot_execution_reports report
+                    WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
+                    ORDER BY report.occurred_at DESC, report.id DESC
+                    LIMIT 1
+                ) latest_report ON true
+                WHERE action.workspace_id = $1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 50
                 "#,
@@ -140,7 +154,25 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     count(*) FILTER (
                         WHERE status = 'failed'
                           AND finished_at >= now() - INTERVAL '24 hours'
-                    ) AS failed_24h
+                    ) AS failed_24h,
+                    (SELECT count(DISTINCT report.action_id)::bigint
+                     FROM viryaos_autopilot_execution_reports report
+                     WHERE report.workspace_id=$1 AND report.status='succeeded'
+                       AND report.occurred_at >= now() - INTERVAL '24 hours') AS executor_confirmed_24h,
+                    (SELECT count(DISTINCT report.action_id)::bigint
+                     FROM viryaos_autopilot_execution_reports report
+                     WHERE report.workspace_id=$1 AND report.status='failed'
+                       AND report.occurred_at >= now() - INTERVAL '24 hours') AS executor_failed_24h,
+                    (SELECT count(*)::bigint
+                     FROM viryaos_autopilot_action_emissions emission
+                     JOIN viryaos_autopilot_actions emitted_action
+                       ON emitted_action.workspace_id=emission.workspace_id AND emitted_action.id=emission.action_id
+                     WHERE emission.workspace_id=$1 AND emitted_action.status='succeeded'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM viryaos_autopilot_execution_reports report
+                           WHERE report.workspace_id=emission.workspace_id AND report.action_id=emission.action_id
+                             AND report.status IN ('succeeded','failed')
+                       )) AS awaiting_executor
                 FROM viryaos_autopilot_actions
                 WHERE workspace_id = $1
                 "#,
@@ -149,6 +181,20 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .fetch_one(&self.pool)
             .await
             .map_err(map_sqlx)?;
+
+            let runtime_now = OffsetDateTime::now_utc();
+            let release_ledger = AutopilotRuntimeRepository::load_release_ledger(
+                self,
+                workspace_id,
+                runtime_now,
+            )
+            .await?;
+            let rum_metrics_24h = AutopilotRuntimeRepository::load_rum_summaries(
+                self,
+                workspace_id,
+                runtime_now,
+            )
+            .await?;
 
             Ok(AutopilotControlOverview {
                 policies,
@@ -161,6 +207,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 processing_actions: stats.processing_actions,
                 succeeded_24h: stats.succeeded_24h,
                 failed_24h: stats.failed_24h,
+                executor_confirmed_24h: stats.executor_confirmed_24h,
+                executor_failed_24h: stats.executor_failed_24h,
+                awaiting_executor: stats.awaiting_executor,
+                release_ledger,
+                rum_metrics_24h,
             })
         })
         .await
@@ -223,8 +274,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     autonomy_level = $4,
                     minimum_confidence_basis_points = $5,
                     max_actions_24h = $6,
+                    guarded_until = CASE WHEN $4 <> 'bounded_auto' OR guarded_until <= now() THEN NULL ELSE guarded_until END,
+                    guardrail_reason = CASE WHEN $4 <> 'bounded_auto' OR guarded_until <= now() THEN NULL ELSE guardrail_reason END,
                     version = version + 1
                 WHERE workspace_id = $1 AND context = $2 AND version = $7
+                  AND ($4 <> 'bounded_auto' OR guarded_until IS NULL OR guarded_until <= now())
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -348,6 +402,7 @@ impl PostgresAutopilotRepository {
                     UPDATE viryaos_autopilot_actions
                     SET status = 'queued', approved_at = now(), approved_by = 'operator:admin_api_key'
                     WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
+                      AND (approval_expires_at IS NULL OR approval_expires_at > now())
                     RETURNING status
                     "#,
                 )

@@ -1200,6 +1200,87 @@ paths:
         '503':
           $ref: '#/components/responses/PrivateProblem'
 
+
+  /public/telemetry/rum:
+    post:
+      operationId: recordRumSample
+      summary: Record a privacy-bounded sampled client performance metric
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RumSampleRequest' }
+      responses:
+        '204': { description: Sample accepted. }
+        '400': { $ref: '#/components/responses/PublicProblem' }
+        '503': { $ref: '#/components/responses/PublicProblem' }
+  /internal/autopilot/executors/heartbeat:
+    post:
+      operationId: recordAutopilotExecutorHeartbeat
+      summary: Register the active n8n executor manifest and capabilities
+      security: [{ commerceBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExecutorHeartbeatRequest' }
+      responses:
+        '200': { description: Executor heartbeat recorded. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/actions/{action_id}/execution-report:
+    post:
+      operationId: recordAutopilotExecutionReport
+      summary: Record provider-confirmed executor progress for an emitted action
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: action_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExecutionReportRequest' }
+      responses:
+        '200': { description: Execution receipt recorded or idempotently replayed. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/release-components:
+    post:
+      operationId: upsertReleaseComponent
+      summary: Report one deployed ViryaOS production component
+      security: [{ commerceBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReleaseComponentRequest' }
+      responses:
+        '200': { description: Release component recorded. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/release-ledger:
+    get:
+      operationId: getAutopilotReleaseLedger
+      summary: Read production component and executor drift
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Current release ledger.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReleaseLedgerOverview' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+
   /admin/autopilot/overview:
     get:
       operationId: getAutopilotOverview
@@ -5054,6 +5135,8 @@ components:
         minimum_confidence: { type: integer, minimum: 0, maximum: 10000 }
         max_actions_24h: { type: integer, minimum: 1, maximum: 1000 }
         version: { type: integer, format: int64, minimum: 1 }
+        guarded_until: { type: [string, 'null'], format: date-time }
+        guardrail_reason: { type: [string, 'null'], maxLength: 160 }
     PromotionBudgetGuardrailSummary:
       type: object
       additionalProperties: false
@@ -5084,6 +5167,7 @@ components:
         subject_id: { type: string, format: uuid }
         payload: { $ref: '#/components/schemas/AutopilotActionPayload' }
         created_at: { type: string, format: date-time }
+        approval_expires_at: { type: [string, 'null'], format: date-time }
     RecentAutopilotDecision:
       type: object
       additionalProperties: false
@@ -5111,6 +5195,10 @@ components:
         created_at: { type: string, format: date-time }
         finished_at: { type: [string, 'null'], format: date-time }
         last_error_kind: { type: [string, 'null'], maxLength: 96 }
+        executor_status: { type: [string, 'null'], enum: [accepted, executing, succeeded, failed, null] }
+        executor_id: { type: [string, 'null'], maxLength: 120 }
+        provider_reference: { type: [string, 'null'], maxLength: 240 }
+        executor_reported_at: { type: [string, 'null'], format: date-time }
     RecentAutopilotEffect:
       type: object
       additionalProperties: false
@@ -5121,7 +5209,7 @@ components:
         context: { $ref: '#/components/schemas/AutopilotContext' }
         measurement_kind:
           type: string
-          enum: [ticket_revenue_72h, merch_gross_proxy_7d, promotion_roas_7d]
+          enum: [ticket_revenue_72h, merch_gross_proxy_7d, promotion_roas_7d, booking_reply_7d, outreach_reply_7d, audience_ticket_revenue_72h]
         assessment: { type: string, enum: [improved, neutral, worsened] }
         delta_basis_points: { type: integer, format: int32 }
         baseline_value: { type: number, format: double, minimum: 0 }
@@ -5130,7 +5218,7 @@ components:
     AutopilotOverview:
       type: object
       additionalProperties: false
-      required: [runtime_enabled, policies, promotion_budget_guardrails, needs_you, recent_decisions, recent_actions, recent_effects, queued_actions, processing_actions, succeeded_24h, failed_24h]
+      required: [runtime_enabled, policies, promotion_budget_guardrails, needs_you, recent_decisions, recent_actions, recent_effects, queued_actions, processing_actions, succeeded_24h, failed_24h, executor_confirmed_24h, executor_failed_24h, awaiting_executor, release_ledger, rum_metrics_24h]
       properties:
         runtime_enabled: { type: boolean }
         policies:
@@ -5161,6 +5249,14 @@ components:
         processing_actions: { type: integer, format: int64, minimum: 0 }
         succeeded_24h: { type: integer, format: int64, minimum: 0 }
         failed_24h: { type: integer, format: int64, minimum: 0 }
+        executor_confirmed_24h: { type: integer, format: int64, minimum: 0 }
+        executor_failed_24h: { type: integer, format: int64, minimum: 0 }
+        awaiting_executor: { type: integer, format: int64, minimum: 0 }
+        release_ledger: { $ref: '#/components/schemas/ReleaseLedgerOverview' }
+        rum_metrics_24h:
+          type: array
+          maxItems: 16
+          items: { $ref: '#/components/schemas/RumMetricSummary' }
     AutopilotAuthorityRequest:
       type: object
       additionalProperties: false
@@ -5484,6 +5580,9 @@ components:
         measured_improved_7d: { type: integer, format: int64, minimum: 0 }
         measured_neutral_7d: { type: integer, format: int64, minimum: 0 }
         measured_worsened_7d: { type: integer, format: int64, minimum: 0 }
+        emitted_24h: { type: integer, format: int64, minimum: 0 }
+        executor_confirmed_24h: { type: integer, format: int64, minimum: 0 }
+        executor_failed_24h: { type: integer, format: int64, minimum: 0 }
         top_opportunities:
           type: array
           maxItems: 10
@@ -5493,6 +5592,99 @@ components:
           maxItems: 20
           items: { $ref: '#/components/schemas/ChiefOfStaffShowTask' }
 
+    ExecutorCapability:
+      type: object
+      additionalProperties: false
+      required: [capability, version]
+      properties:
+        capability: { type: string, minLength: 1, maxLength: 120 }
+        version: { type: string, minLength: 1, maxLength: 40 }
+    ExecutorHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [executor_id, version, manifest_sha, capabilities, observed_at, expires_at]
+      properties:
+        executor_id: { type: string, minLength: 1, maxLength: 120 }
+        version: { type: string, minLength: 1, maxLength: 80 }
+        manifest_sha: { type: string, minLength: 1, maxLength: 128 }
+        capabilities: { type: array, minItems: 1, maxItems: 64, items: { $ref: '#/components/schemas/ExecutorCapability' } }
+        metadata: { type: object, additionalProperties: true, maxProperties: 24 }
+        observed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    ExecutionReportRequest:
+      type: object
+      additionalProperties: false
+      required: [receipt_key, executor_id, status, occurred_at]
+      properties:
+        receipt_key: { type: string, minLength: 1, maxLength: 200 }
+        executor_id: { type: string, minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [accepted, executing, succeeded, failed] }
+        provider_reference: { type: [string, 'null'], maxLength: 240 }
+        error_kind: { type: [string, 'null'], maxLength: 96 }
+        metadata: { type: object, additionalProperties: true, maxProperties: 24 }
+        occurred_at: { type: string, format: date-time }
+    ReleaseComponentRequest:
+      type: object
+      additionalProperties: false
+      required: [component_key, source_sha, observed_at]
+      properties:
+        component_key: { type: string, enum: [crowdrelay-api, crowdrelay-worker, virya-www, synesthesia, virya-signal, n8n] }
+        environment: { type: string, enum: [production], default: production }
+        source_sha: { type: string, minLength: 1, maxLength: 128 }
+        artifact_digest: { type: [string, 'null'], maxLength: 200 }
+        deploy_ref: { type: [string, 'null'], maxLength: 240 }
+        version: { type: [string, 'null'], maxLength: 80 }
+        manifest_sha: { type: [string, 'null'], maxLength: 128 }
+        metadata: { type: object, additionalProperties: true, maxProperties: 24 }
+        observed_at: { type: string, format: date-time }
+    ReleaseComponentSummary:
+      type: object
+      additionalProperties: false
+      required: [component_key, environment, source_sha, observed_at, stale]
+      properties:
+        component_key: { type: string }
+        environment: { type: string }
+        source_sha: { type: string }
+        artifact_digest: { type: [string, 'null'] }
+        deploy_ref: { type: [string, 'null'] }
+        version: { type: [string, 'null'] }
+        manifest_sha: { type: [string, 'null'] }
+        observed_at: { type: string, format: date-time }
+        stale: { type: boolean }
+    ReleaseLedgerOverview:
+      type: object
+      additionalProperties: false
+      required: [components, missing_components, backend_sha_drift, active_executor_count, guarded_executor_count, active_executor_manifest_shas]
+      properties:
+        components: { type: array, maxItems: 6, items: { $ref: '#/components/schemas/ReleaseComponentSummary' } }
+        missing_components: { type: array, maxItems: 6, items: { type: string } }
+        backend_sha_drift: { type: boolean }
+        active_executor_count: { type: integer, format: int64, minimum: 0 }
+        guarded_executor_count: { type: integer, format: int64, minimum: 0 }
+        active_executor_manifest_shas: { type: array, maxItems: 64, items: { type: string } }
+    RumMetricSummary:
+      type: object
+      additionalProperties: false
+      required: [surface, metric_key, samples_24h, p75, p95]
+      properties:
+        surface: { type: string, enum: [virya_www, synesthesia, virya_signal] }
+        metric_key: { type: string, maxLength: 80 }
+        samples_24h: { type: integer, format: int64, minimum: 3 }
+        p75: { type: number, format: double, minimum: 0 }
+        p95: { type: number, format: double, minimum: 0 }
+    RumSampleRequest:
+      type: object
+      additionalProperties: false
+      required: [surface, metric_key, value, observed_at]
+      properties:
+        surface: { type: string, enum: [virya_www, synesthesia, virya_signal] }
+        metric_key: { type: string, maxLength: 80 }
+        value: { type: number, format: double, minimum: 0 }
+        route: { type: [string, 'null'], maxLength: 160 }
+        device_class: { type: [string, 'null'], maxLength: 40 }
+        release: { type: [string, 'null'], maxLength: 128 }
+        metadata: { type: object, additionalProperties: true, maxProperties: 24 }
+        observed_at: { type: string, format: date-time }
     TicketAllocationGuardrailRequest:
       type: object
       additionalProperties: false

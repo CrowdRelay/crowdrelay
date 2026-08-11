@@ -12,7 +12,7 @@ use crowdrelay_domain::{
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{
@@ -29,6 +29,8 @@ pub struct AutopilotPolicySummary {
     pub minimum_confidence: Confidence,
     pub max_actions_24h: u32,
     pub version: i64,
+    pub guarded_until: Option<OffsetDateTime>,
+    pub guardrail_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -49,6 +51,7 @@ pub struct PendingAutopilotAction {
     pub subject_id: uuid::Uuid,
     pub payload: AutopilotActionPayload,
     pub created_at: OffsetDateTime,
+    pub approval_expires_at: Option<OffsetDateTime>,
 }
 
 /// Compact immutable decision trail shown in the operator cockpit.
@@ -77,6 +80,10 @@ pub struct RecentAutopilotAction {
     pub created_at: OffsetDateTime,
     pub finished_at: Option<OffsetDateTime>,
     pub last_error_kind: Option<String>,
+    pub executor_status: Option<String>,
+    pub executor_id: Option<String>,
+    pub provider_reference: Option<String>,
+    pub executor_reported_at: Option<OffsetDateTime>,
 }
 
 /// A delayed, measured effect of one successfully executed Autopilot action.
@@ -99,6 +106,15 @@ pub struct RecentAutopilotEffect {
 /// decisions/actions and measured effects exist as evidence, not as another dashboard
 /// operators must watch.
 #[derive(Clone, Debug, Serialize)]
+pub struct RumMetricSummary {
+    pub surface: String,
+    pub metric_key: String,
+    pub samples_24h: i64,
+    pub p75: f64,
+    pub p95: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AutopilotControlOverview {
     pub policies: Vec<AutopilotPolicySummary>,
     pub promotion_budget_guardrails: Vec<PromotionBudgetGuardrailSummary>,
@@ -110,6 +126,11 @@ pub struct AutopilotControlOverview {
     pub processing_actions: i64,
     pub succeeded_24h: i64,
     pub failed_24h: i64,
+    pub executor_confirmed_24h: i64,
+    pub executor_failed_24h: i64,
+    pub awaiting_executor: i64,
+    pub release_ledger: ReleaseLedgerOverview,
+    pub rum_metrics_24h: Vec<RumMetricSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,6 +164,9 @@ pub struct AutopilotChiefOfStaff {
     pub measured_improved_7d: i64,
     pub measured_neutral_7d: i64,
     pub measured_worsened_7d: i64,
+    pub emitted_24h: i64,
+    pub executor_confirmed_24h: i64,
+    pub executor_failed_24h: i64,
     pub top_opportunities: Vec<ChiefOfStaffOpportunity>,
     pub show_tasks: Vec<ChiefOfStaffShowTask>,
 }
@@ -743,4 +767,163 @@ pub trait AutopilotControlRepository: Send + Sync {
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorReportStatus {
+    Accepted,
+    Executing,
+    Succeeded,
+    Failed,
+}
+
+impl ExecutorReportStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Executing => "executing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordExecutionReport {
+    pub action_id: AutopilotActionId,
+    pub receipt_key: String,
+    pub executor_id: String,
+    pub status: ExecutorReportStatus,
+    pub provider_reference: Option<String>,
+    pub error_kind: Option<String>,
+    pub metadata: serde_json::Value,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutionReportMutation {
+    pub report_id: uuid::Uuid,
+    pub action_id: AutopilotActionId,
+    pub status: ExecutorReportStatus,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExecutorCapability {
+    pub capability: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordExecutorHeartbeat {
+    pub executor_id: String,
+    pub version: String,
+    pub manifest_sha: String,
+    pub capabilities: Vec<ExecutorCapability>,
+    pub metadata: serde_json::Value,
+    pub observed_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutorHeartbeatMutation {
+    pub executor_id: String,
+    pub capability_count: usize,
+    pub expires_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpsertReleaseComponent {
+    pub component_key: String,
+    pub environment: String,
+    pub source_sha: String,
+    pub artifact_digest: Option<String>,
+    pub deploy_ref: Option<String>,
+    pub version: Option<String>,
+    pub manifest_sha: Option<String>,
+    pub metadata: serde_json::Value,
+    pub observed_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReleaseComponentSummary {
+    pub component_key: String,
+    pub environment: String,
+    pub source_sha: String,
+    pub artifact_digest: Option<String>,
+    pub deploy_ref: Option<String>,
+    pub version: Option<String>,
+    pub manifest_sha: Option<String>,
+    pub observed_at: OffsetDateTime,
+    pub stale: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReleaseLedgerOverview {
+    pub components: Vec<ReleaseComponentSummary>,
+    pub missing_components: Vec<String>,
+    pub backend_sha_drift: bool,
+    pub active_executor_count: i64,
+    pub guarded_executor_count: i64,
+    pub active_executor_manifest_shas: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReleaseComponentMutation {
+    pub component_key: String,
+    pub environment: String,
+    pub observed_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordRumSample {
+    pub surface: String,
+    pub metric_key: String,
+    pub value: f64,
+    pub route: Option<String>,
+    pub device_class: Option<String>,
+    pub release: Option<String>,
+    pub metadata: serde_json::Value,
+    pub observed_at: OffsetDateTime,
+}
+
+#[async_trait]
+pub trait AutopilotRuntimeRepository: Send + Sync {
+    async fn record_execution_report(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordExecutionReport,
+    ) -> Result<ExecutionReportMutation, RepositoryError>;
+
+    async fn record_executor_heartbeat(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordExecutorHeartbeat,
+    ) -> Result<ExecutorHeartbeatMutation, RepositoryError>;
+
+    async fn upsert_release_component(
+        &self,
+        workspace_id: WorkspaceId,
+        command: UpsertReleaseComponent,
+    ) -> Result<ReleaseComponentMutation, RepositoryError>;
+
+    async fn load_release_ledger(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<ReleaseLedgerOverview, RepositoryError>;
+
+    async fn record_rum_sample(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordRumSample,
+    ) -> Result<(), RepositoryError>;
+
+    async fn load_rum_summaries(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<RumMetricSummary>, RepositoryError>;
 }

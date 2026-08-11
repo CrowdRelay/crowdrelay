@@ -88,3 +88,7 @@ in the deployment secret store or protected n8n credentials.
 For workflows that process email addresses, checkout tokens, claim links, QR
 payloads, or access tokens, disable successful, failed, and manual execution
 data persistence unless a carefully redacted audit trail is explicitly needed.
+
+## ViryaOS executor runtime
+
+See [`viryaos-executor-contract.md`](./viryaos-executor-contract.md) for heartbeat capabilities, provider execution receipts, blue/green safety and release-ledger behavior.

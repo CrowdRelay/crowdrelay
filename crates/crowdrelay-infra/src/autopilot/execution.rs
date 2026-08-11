@@ -81,13 +81,48 @@ async fn schedule_effect_measurement(
             f64::from(*roas_basis_points),
             now + time::Duration::days(7),
         )),
+        AutopilotActionPayload::RequestBookingOutreach { target_id, .. } => Some((
+            AutopilotMeasurementKind::BookingReply7d,
+            target_id.into_uuid(),
+            0.0,
+            now + time::Duration::days(7),
+        )),
+        AutopilotActionPayload::RequestOutreach { target_id, .. } => Some((
+            AutopilotMeasurementKind::OutreachReply7d,
+            target_id.into_uuid(),
+            0.0,
+            now + time::Duration::days(7),
+        )),
+        AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => {
+            let baseline = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
+                FROM ticket_orders ticket_order
+                JOIN ticket_sales sale
+                  ON sale.workspace_id=ticket_order.workspace_id AND sale.id=ticket_order.ticket_sale_id
+                WHERE ticket_order.workspace_id=$1 AND sale.event_id=$2
+                  AND ticket_order.status IN ('paid','partially_refunded','refunded')
+                  AND ticket_order.paid_at >= $3 - INTERVAL '72 hours'
+                  AND ticket_order.paid_at < $3
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(now)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            Some((
+                AutopilotMeasurementKind::AudienceTicketRevenue72h,
+                event_id.into_uuid(),
+                baseline,
+                now + time::Duration::hours(72),
+            ))
+        }
         AutopilotActionPayload::ChangeTicketCapacity { .. }
         | AutopilotActionPayload::RequestFanLifecycleMessage { .. }
         | AutopilotActionPayload::RequestMerchReorder { .. }
-        | AutopilotActionPayload::RequestBookingOutreach { .. }
-        | AutopilotActionPayload::RequestAudienceCampaign { .. }
         | AutopilotActionPayload::RequestMerchBundle { .. }
-        | AutopilotActionPayload::RequestOutreach { .. }
         | AutopilotActionPayload::RequestContentArtifact { .. }
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
@@ -595,6 +630,116 @@ async fn ensure_marketing_eligible(
     }
 }
 
+fn executor_capability_for_event(event_type: &str) -> &'static str {
+    match event_type {
+        "viryaos.fan_lifecycle.message_requested" => "fan.lifecycle.message",
+        "viryaos.merch.reorder_requested" => "merch.reorder",
+        "viryaos.booking.outreach_requested" => "booking.outreach",
+        "viryaos.merch.bundle_requested" => "merch.bundle",
+        "viryaos.outreach.requested" => "outreach.send",
+        "viryaos.content.artifact_requested" => "content.artifact",
+        "viryaos.show.task_attention_required" => "show.escalation",
+        "viryaos.promotion.budget_change_requested" => "promotion.budget",
+        "viryaos.opportunity.application_requested" => "opportunity.application",
+        "viryaos.funding.package_requested" => "funding.package",
+        "viryaos.funding.submission_requested" => "funding.submit",
+        "viryaos.calendar.upsert_requested" => "calendar.upsert",
+        _ => "unknown",
+    }
+}
+
+pub(in crate::autopilot) async fn ensure_executor_capability(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    capability: &str,
+) -> Result<(), RepositoryError> {
+    let registry_enabled = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1)",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if !registry_enabled {
+        return Ok(());
+    }
+    let available = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM viryaos_executor_capabilities capability
+            JOIN viryaos_executor_instances executor
+              ON executor.workspace_id=capability.workspace_id
+             AND executor.executor_id=capability.executor_id
+            LEFT JOIN viryaos_executor_circuit_breakers breaker
+              ON breaker.workspace_id=executor.workspace_id
+             AND breaker.executor_id=executor.executor_id
+            WHERE capability.workspace_id=$1
+              AND capability.capability=$2
+              AND capability.expires_at>now()
+              AND executor.expires_at>now()
+              AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(capability)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if available {
+        Ok(())
+    } else {
+        Err(RepositoryError::Unavailable)
+    }
+}
+
+pub(in crate::autopilot) async fn reserve_contact_window(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    context: &'static str,
+    contact: &str,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let normalized = contact.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized.len() > 320 {
+        return Err(RepositoryError::Conflict);
+    }
+    let reserved = sqlx::query_scalar::<_, String>(
+        r#"
+        INSERT INTO viryaos_contact_governor (
+            workspace_id, normalized_contact, last_context, last_action_id,
+            last_outbound_at, next_contact_after
+        ) VALUES ($1,$2,$3,$4,$5,$5 + INTERVAL '7 days')
+        ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
+        SET last_context=EXCLUDED.last_context,
+            last_action_id=EXCLUDED.last_action_id,
+            last_outbound_at=EXCLUDED.last_outbound_at,
+            next_contact_after=EXCLUDED.next_contact_after
+        WHERE NOT viryaos_contact_governor.do_not_contact
+          AND (
+              viryaos_contact_governor.next_contact_after <= EXCLUDED.last_outbound_at
+              OR viryaos_contact_governor.last_action_id = EXCLUDED.last_action_id
+          )
+        RETURNING normalized_contact
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&normalized)
+    .bind(context)
+    .bind(action_id.into_uuid())
+    .bind(now)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if reserved.is_some() {
+        Ok(())
+    } else {
+        Err(RepositoryError::Conflict)
+    }
+}
+
 pub(super) async fn emit_external_action(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -602,6 +747,12 @@ pub(super) async fn emit_external_action(
     event_type: &'static str,
     payload: Value,
 ) -> Result<(), RepositoryError> {
+    ensure_executor_capability(
+        transaction,
+        workspace_id,
+        executor_capability_for_event(event_type),
+    )
+    .await?;
     let emission_key = format!("autopilot-action:{}", action_id);
     let outbox_id = Uuid::now_v7();
     let inserted = sqlx::query_scalar::<_, Uuid>(

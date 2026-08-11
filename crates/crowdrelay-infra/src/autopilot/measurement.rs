@@ -181,6 +181,54 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         (values.1 as f64 / values.0 as f64) * 10_000.0
                     }
                 }
+                AutopilotMeasurementKind::BookingReply7d => sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM viryaos_booking_interactions
+                        WHERE workspace_id=$1 AND target_id=$2 AND direction='inbound'
+                          AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '7 days'
+                    ) THEN 1.0 ELSE 0.0 END
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx)?,
+                AutopilotMeasurementKind::OutreachReply7d => sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM viryaos_outreach_interactions
+                        WHERE workspace_id=$1 AND target_id=$2 AND direction='inbound'
+                          AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '7 days'
+                    ) THEN 1.0 ELSE 0.0 END
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx)?,
+                AutopilotMeasurementKind::AudienceTicketRevenue72h => sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
+                    FROM ticket_orders ticket_order
+                    JOIN ticket_sales sale
+                      ON sale.workspace_id=ticket_order.workspace_id AND sale.id=ticket_order.ticket_sale_id
+                    WHERE ticket_order.workspace_id=$1 AND sale.event_id=$2
+                      AND ticket_order.status IN ('paid','partially_refunded','refunded')
+                      AND ticket_order.paid_at >= $3
+                      AND ticket_order.paid_at < $3 + INTERVAL '72 hours'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx)?,
             };
             if observed.is_finite() && observed >= 0.0 {
                 Ok(observed)
@@ -252,6 +300,66 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             if updated.rows_affected() != 1 {
                 return Err(RepositoryError::Conflict);
+            }
+            if effect.assessment == EffectAssessment::Worsened {
+                let demoted_context = sqlx::query_scalar::<_, String>(
+                    r#"
+                    WITH action_context AS (
+                        SELECT context
+                        FROM viryaos_autopilot_actions
+                        WHERE workspace_id=$1 AND id=$2
+                    ), recent AS (
+                        SELECT outcome.effect_assessment
+                        FROM viryaos_autopilot_outcomes outcome
+                        JOIN viryaos_autopilot_actions action
+                          ON action.workspace_id=outcome.workspace_id AND action.id=outcome.action_id
+                        JOIN action_context ON action.context=action_context.context
+                        WHERE outcome.workspace_id=$1 AND outcome.measurement_id IS NOT NULL
+                        ORDER BY outcome.observed_at DESC, outcome.id DESC
+                        LIMIT 2
+                    ), qualifies AS (
+                        SELECT count(*)=2 AND bool_and(effect_assessment='worsened') AS should_guard
+                        FROM recent
+                    )
+                    UPDATE viryaos_autopilot_policies policy
+                    SET autonomy_level='require_approval',
+                        guarded_until=$3 + INTERVAL '7 days',
+                        guardrail_reason='two_consecutive_worsened_effects',
+                        version=version+1
+                    FROM action_context, qualifies
+                    WHERE policy.workspace_id=$1
+                      AND policy.context=action_context.context
+                      AND policy.enabled
+                      AND policy.autonomy_level='bounded_auto'
+                      AND qualifies.should_guard
+                    RETURNING policy.context
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.action_id.into_uuid())
+                .bind(now)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if let Some(context) = demoted_context {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,max_attempts)
+                        VALUES ($1,'viryaos.autopilot.authority_demoted',1,
+                            jsonb_build_object(
+                                'context',$2::text,
+                                'reason','two_consecutive_worsened_effects',
+                                'guarded_until',$3::timestamptz + INTERVAL '7 days'
+                            ),12)
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(context)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
             }
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(())

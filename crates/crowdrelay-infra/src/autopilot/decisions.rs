@@ -12,7 +12,8 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             let rows = sqlx::query_as::<_, PolicyRow>(
                 r#"
                 SELECT context, enabled, autonomy_level,
-                       minimum_confidence_basis_points, max_actions_24h, config, version
+                       minimum_confidence_basis_points, max_actions_24h, config, version,
+                       guarded_until, guardrail_reason
                 FROM viryaos_autopilot_policies
                 WHERE workspace_id = $1
                 ORDER BY context
@@ -974,12 +975,13 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                 INSERT INTO viryaos_autopilot_actions (
                     id, workspace_id, decision_id, context, action_kind,
                     subject_kind, subject_id, idempotency_key, payload, status,
-                    approved_at, approved_by
+                    approved_at, approved_by, approval_expires_at
                 )
                 VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
                     CASE WHEN $10 = 'queued' THEN now() ELSE NULL END,
-                    CASE WHEN $10 = 'queued' THEN 'policy:bounded_auto' ELSE NULL END
+                    CASE WHEN $10 = 'queued' THEN 'policy:bounded_auto' ELSE NULL END,
+                    CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING id
@@ -1011,7 +1013,8 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                             'subject_kind', $5::text,
                             'subject_id', $6::uuid,
                             'reason', $7::text,
-                            'confidence_basis_points', $8::integer
+                            'confidence_basis_points', $8::integer,
+                            'approval_expires_at', now() + INTERVAL '72 hours'
                         ),
                         12
                     )

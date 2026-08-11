@@ -68,6 +68,31 @@ pub(in crate::autopilot) async fn record_booking_reply(
         .await
         .map_err(map_sqlx)?;
 
+        if disposition == "do_not_contact" {
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_contact_governor (
+                    workspace_id, normalized_contact, last_context, last_action_id,
+                    last_outbound_at, next_contact_after, do_not_contact
+                )
+                SELECT $1, lower(btrim(contact_email)), 'booking', NULL, $3, $3, true
+                FROM viryaos_booking_targets
+                WHERE workspace_id=$1 AND id=$2
+                ON CONFLICT (workspace_id, normalized_contact) DO UPDATE
+                SET do_not_contact=true,
+                    last_context=EXCLUDED.last_context,
+                    next_contact_after=GREATEST(viryaos_contact_governor.next_contact_after, EXCLUDED.next_contact_after),
+                    updated_at=now()
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.target_id.into_uuid())
+            .bind(command.occurred_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        }
+
         sqlx::query(
             "INSERT INTO viryaos_booking_interactions(workspace_id,target_id,direction,phase,disposition,source_key,occurred_at) VALUES($1,$2,'inbound','reply',$3,$4,$5)",
         )
@@ -87,6 +112,9 @@ pub(in crate::autopilot) async fn record_booking_reply(
 struct ChiefStatsRow {
     executed_24h: i64,
     failed_24h: i64,
+    emitted_24h: i64,
+    executor_confirmed_24h: i64,
+    executor_failed_24h: i64,
     awaiting_approval: i64,
     estimated_minutes_saved_24h: i64,
     measured_improved_7d: i64,
@@ -129,6 +157,12 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
               WHERE workspace_id=$1 AND status='succeeded' AND finished_at >= $2 - INTERVAL '24 hours') executed_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
               WHERE workspace_id=$1 AND status='failed' AND finished_at >= $2 - INTERVAL '24 hours') failed_24h,
+            (SELECT count(*)::bigint FROM viryaos_autopilot_action_emissions
+              WHERE workspace_id=$1 AND emitted_at >= $2 - INTERVAL '24 hours') emitted_24h,
+            (SELECT count(DISTINCT action_id)::bigint FROM viryaos_autopilot_execution_reports
+              WHERE workspace_id=$1 AND status='succeeded' AND occurred_at >= $2 - INTERVAL '24 hours') executor_confirmed_24h,
+            (SELECT count(DISTINCT action_id)::bigint FROM viryaos_autopilot_execution_reports
+              WHERE workspace_id=$1 AND status='failed' AND occurred_at >= $2 - INTERVAL '24 hours') executor_failed_24h,
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
               WHERE workspace_id=$1 AND status='awaiting_approval') awaiting_approval,
             (SELECT COALESCE(sum(CASE
@@ -220,6 +254,9 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
     Ok(AutopilotChiefOfStaff {
         executed_24h: stats.executed_24h,
         failed_24h: stats.failed_24h,
+        emitted_24h: stats.emitted_24h,
+        executor_confirmed_24h: stats.executor_confirmed_24h,
+        executor_failed_24h: stats.executor_failed_24h,
         needs_you,
         estimated_minutes_saved_24h: stats.estimated_minutes_saved_24h,
         measured_improved_7d: stats.measured_improved_7d,

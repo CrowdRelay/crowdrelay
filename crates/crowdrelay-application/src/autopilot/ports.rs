@@ -173,6 +173,9 @@ pub enum AutopilotMeasurementKind {
     TicketRevenue72h,
     MerchGrossProxy7d,
     PromotionRoas7d,
+    BookingReply7d,
+    OutreachReply7d,
+    AudienceTicketRevenue72h,
 }
 
 impl AutopilotMeasurementKind {
@@ -182,6 +185,9 @@ impl AutopilotMeasurementKind {
             Self::TicketRevenue72h => "ticket_revenue_72h",
             Self::MerchGrossProxy7d => "merch_gross_proxy_7d",
             Self::PromotionRoas7d => "promotion_roas_7d",
+            Self::BookingReply7d => "booking_reply_7d",
+            Self::OutreachReply7d => "outreach_reply_7d",
+            Self::AudienceTicketRevenue72h => "audience_ticket_revenue_72h",
         }
     }
 

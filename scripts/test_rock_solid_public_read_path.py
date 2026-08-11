@@ -28,13 +28,15 @@ class RockSolidPublicReadPath(unittest.TestCase):
         self.assertIn("/v1/health/live", compose)
     def test_external_production_smoke_includes_synesthesia_without_retrying_alert_post(self):
         smoke = (ROOT / ".github/workflows/production-smoke.yml").read_text()
+        probe_script = (ROOT / "scripts/production-smoke.sh").read_text()
         self.assertIn("SYNESTHESIA_BASE_URL", smoke)
-        self.assertIn("require_200 synesthesia_home", smoke)
-        self.assertIn("require_200 synesthesia_boot_art", smoke)
-        probe = smoke.split("request_status()", 1)[1].split("require_200()", 1)[0]
-        self.assertIn("--connect-timeout 4", probe)
-        self.assertIn("--max-time 10", probe)
-        self.assertIn("--retry 1", probe)
+        self.assertIn("require_200 synesthesia_home", probe_script)
+        self.assertIn("require_200 synesthesia_boot_art", probe_script)
+        self.assertIn("--connect-timeout 4", probe_script)
+        self.assertIn("--max-time 10", probe_script)
+        self.assertIn("--retry 1", probe_script)
+        self.assertNotIn("schedule:", smoke)
+        self.assertIn("./scripts/production-smoke.sh", smoke)
         alert = smoke.split("- name: Alert Discord on failure", 1)[1]
         self.assertNotIn("--retry 2", alert)
         self.assertNotIn("--retry-all-errors", alert)

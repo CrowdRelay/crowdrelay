@@ -43,7 +43,9 @@ use uuid::Uuid;
 const PRIVATE_NO_STORE: &str = "private, no-store";
 
 mod discovery;
+mod runtime;
 pub use discovery::discover_team_opportunity;
+pub use runtime::{execution_report, executor_heartbeat, release_component, release_ledger, rum};
 
 #[derive(Debug, Serialize)]
 struct OverviewResponse<T> {

@@ -102,6 +102,8 @@ cp .crowdrelay.local.sh.example .crowdrelay.local.sh
 
 `.crowdrelay.local.sh`, the production environment file, bootstrap data, and webhook secrets are ignored by Git. The local configuration file stores the pinned SHA, paths, SSH target, and optional `crowdrelay_before_deploy`, `crowdrelay_after_deploy`, `crowdrelay_after_verify`, `crowdrelay_backup`, and `crowdrelay_notify` functions.
 
+If `CROWDRELAY_LEDGER_COMMERCE_API_KEY` and `CROWDRELAY_PUBLIC_BASE_URL` are configured locally, a verified deploy reports both `crowdrelay-api` and `crowdrelay-worker` to the ViryaOS release ledger. Reporting is intentionally fail-open and can never turn a healthy production deploy into a failed deploy.
+
 The reverse proxy must join the same Docker network and route traffic to `crowdrelay-api:8080`. Minimal Caddy and Nginx examples are available under `deploy/reverse-proxy/`.
 
 ## License
