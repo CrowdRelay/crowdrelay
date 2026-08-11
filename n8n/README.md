@@ -46,6 +46,11 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 | `viryaos.funding.package_requested` | render the application package from supplied canonical facts and report `package_ready` |
 | `viryaos.funding.submission_requested` | submit only the explicitly human-approved ready package, then report `submitted` |
 | `viryaos.autopilot.approval_requested` | notify the operator once that an action needs a decision |
+| `viryaos.fan_lifecycle.message_requested` | deliver deterministic welcome/follow-up/reactivation copy to the already consented fan identity supplied by CrowdRelay |
+| `viryaos.booking.outreach_requested` | deliver the already-authorized booking initial/follow-up message |
+| `viryaos.outreach.requested` | deliver the already-authorized press, review, patronage or endorsement message |
+
+For Gmail-backed booking/outreach, the private executor also keeps a small provider-correlation map from Gmail `threadId` to the CrowdRelay target/opportunity. A later inbound message in a known thread is reported back as the deterministic `received` disposition; n8n does not infer positive/negative intent. This exists only to stop further follow-ups and surface the reply to the operator.
 
 Executors must use the CrowdRelay event ID or supplied business key as their idempotency key. They must not rescore a lead, change pricing policy, infer authority, or silently broaden the requested action. A provider failure is a delivery failure; it is not permission for n8n to invent an alternative business action.
 

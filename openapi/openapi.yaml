@@ -1572,6 +1572,26 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/team-opportunities/discover:
+    post:
+      operationId: discoverAutopilotTeamOpportunity
+      summary: Submit raw public festival/showcase discovery facts for deterministic Rust scoring
+      description: Discovery adapters supply source facts only. The Rust domain decides relevance, fit, confidence and safety flags; discovered destinations remain unverified.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamOpportunityDiscoveryRequest' }
+      responses:
+        '200': { description: Candidate ignored or accepted into the opportunity pipeline }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/team-opportunities:
     post:
       operationId: upsertAutopilotTeamOpportunity
@@ -5290,6 +5310,16 @@ components:
     TeamOpportunityKind:
       type: string
       enum: [festival, showcase, review_contest, support_slot, funding]
+    TeamOpportunityDiscoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [source, external_key, title, summary]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+        external_key: { type: string, minLength: 1, maxLength: 240 }
+        title: { type: string, minLength: 1, maxLength: 240 }
+        destination_url: { type: [string, 'null'], maxLength: 1000 }
+        summary: { type: string, maxLength: 8000 }
     TeamOpportunityRequest:
       type: object
       additionalProperties: false

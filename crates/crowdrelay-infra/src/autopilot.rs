@@ -259,6 +259,8 @@ struct TeamOpportunityRow {
     opportunity_kind: String,
     active: bool,
     verified_destination: bool,
+    contact_email: Option<String>,
+    metadata: Value,
     fit_basis_points: i32,
     reputation_basis_points: i32,
     confidence_basis_points: i32,

@@ -24,6 +24,7 @@ pub struct LiveOpportunitySnapshot {
     pub kind: LiveOpportunityKind,
     pub active: bool,
     pub verified_destination: bool,
+    pub auto_submission_capable: bool,
     pub fit_basis_points: u16,
     pub reputation_basis_points: u16,
     pub evidence_confidence: Confidence,
@@ -34,6 +35,44 @@ pub struct LiveOpportunitySnapshot {
     pub exclusive: bool,
     pub deadline: Option<OffsetDateTime>,
     pub already_applied: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveOpportunityDiscovery<'a> {
+    pub title: &'a str,
+    pub summary: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveOpportunityDiscoveryAssessment {
+    pub kind: LiveOpportunityKind,
+    pub fit_basis_points: u16,
+    pub reputation_basis_points: u16,
+    pub confidence: Confidence,
+}
+
+#[must_use]
+pub fn evaluate_live_opportunity_discovery(
+    discovery: &LiveOpportunityDiscovery<'_>,
+) -> Option<LiveOpportunityDiscoveryAssessment> {
+    let text = format!("{} {}", discovery.title, discovery.summary).to_lowercase();
+    let kind = if text.contains("festival") {
+        LiveOpportunityKind::Festival
+    } else if text.contains("showcase") || text.contains("przegląd") {
+        LiveOpportunityKind::Showcase
+    } else if text.contains("support") {
+        LiveOpportunityKind::SupportSlot
+    } else if text.contains("review") || text.contains("contest") || text.contains("konkurs") {
+        LiveOpportunityKind::ReviewContest
+    } else {
+        return None;
+    };
+    Some(LiveOpportunityDiscoveryAssessment {
+        kind,
+        fit_basis_points: 7_000,
+        reputation_basis_points: 5_000,
+        confidence: Confidence::saturating_from_basis_points(6_500),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -133,6 +172,7 @@ fn may_auto_submit(
     score: u16,
 ) -> bool {
     score >= policy.minimum_auto_score
+        && snapshot.auto_submission_capable
         && snapshot.application_fee_minor <= policy.max_auto_application_fee_minor
         && net_margin_minor(snapshot) >= -policy.max_auto_negative_margin_minor
         && !snapshot.requires_contract
@@ -170,6 +210,7 @@ mod tests {
             kind: LiveOpportunityKind::Festival,
             active: true,
             verified_destination: true,
+            auto_submission_capable: true,
             fit_basis_points: 9_500,
             reputation_basis_points: 9_000,
             evidence_confidence: Confidence::saturating_from_basis_points(9_000),
@@ -200,6 +241,17 @@ mod tests {
             evaluate_live_opportunity(candidate, LiveOpportunityPolicy::default(), now()),
             LiveOpportunityDecision::PrepareForApproval { .. }
         ));
+    }
+
+    #[test]
+    fn discovery_ignores_unrelated_public_text() {
+        assert!(
+            evaluate_live_opportunity_discovery(&LiveOpportunityDiscovery {
+                title: "Newsletter",
+                summary: "General music news",
+            })
+            .is_none()
+        );
     }
 
     #[test]

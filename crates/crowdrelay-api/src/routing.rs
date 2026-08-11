@@ -479,6 +479,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::upsert_release_plan),
         )
         .route(
+            "/v1/admin/autopilot/team-opportunities/discover",
+            post(autopilot::discover_team_opportunity),
+        )
+        .route(
             "/v1/admin/autopilot/team-opportunities",
             post(autopilot::upsert_team_opportunity),
         )

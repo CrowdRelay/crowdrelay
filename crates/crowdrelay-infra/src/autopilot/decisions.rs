@@ -785,7 +785,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.bounded(async {
             let rows=sqlx::query_as::<_,TeamOpportunityRow>(r#"
                 SELECT id opportunity_id, opportunity_kind, status NOT IN ('submitted','replied','won','lost','dismissed') active,
-                       verified_destination,fit_basis_points,reputation_basis_points,confidence_basis_points,
+                       verified_destination,contact_email,metadata,fit_basis_points,reputation_basis_points,confidence_basis_points,
                        expected_fee_minor,estimated_cost_minor,application_fee_minor,requires_contract,exclusive,eligible,
                        funding_amount_minor,own_contribution_minor,deadline,package_status,status
                 FROM viryaos_team_opportunities
@@ -803,7 +803,29 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                 };
                 Ok(LiveOpportunitySnapshot{
                     opportunity_id:TeamOpportunityId::from_uuid(row.opportunity_id),kind,active:row.active,
-                    verified_destination:row.verified_destination,fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
+                    verified_destination:row.verified_destination,
+                    auto_submission_capable: (row
+                        .contact_email
+                        .as_ref()
+                        .is_some_and(|email| !email.trim().is_empty())
+                        || row
+                            .metadata
+                            .get("submission_adapter")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| value == "email"))
+                        && !row
+                            .metadata
+                            .get("discovery")
+                            .and_then(|value| value.get("fee_unverified"))
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                        && !row
+                            .metadata
+                            .get("discovery")
+                            .and_then(|value| value.get("terms_unverified"))
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     reputation_basis_points:u16::try_from(row.reputation_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     evidence_confidence:parse_confidence(row.confidence_basis_points)?,expected_fee_minor:row.expected_fee_minor,
                     estimated_cost_minor:row.estimated_cost_minor,application_fee_minor:row.application_fee_minor,
@@ -822,7 +844,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.bounded(async {
             let rows=sqlx::query_as::<_,TeamOpportunityRow>(r#"
                 SELECT id opportunity_id, opportunity_kind, status NOT IN ('submitted','won','lost','dismissed') active,
-                       verified_destination,fit_basis_points,reputation_basis_points,confidence_basis_points,
+                       verified_destination,contact_email,metadata,fit_basis_points,reputation_basis_points,confidence_basis_points,
                        expected_fee_minor,estimated_cost_minor,application_fee_minor,requires_contract,exclusive,eligible,
                        funding_amount_minor,own_contribution_minor,deadline,package_status,status
                 FROM viryaos_team_opportunities

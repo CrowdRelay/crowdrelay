@@ -142,6 +142,15 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     template_key,
                 } => {
                     ensure_marketing_eligible(&mut transaction, workspace_id, *fan_id).await?;
+                    let fan = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                        "SELECT normalized_email, display_name, locale FROM fans WHERE workspace_id=$1 AND id=$2 AND status='active' FOR SHARE",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(fan_id.into_uuid())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?
+                    .ok_or(RepositoryError::Conflict)?;
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
@@ -151,6 +160,11 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                             "action_id": action.id,
                             "fan_id": fan_id,
                             "template_key": template_key,
+                            "fan": {
+                                "email": fan.0,
+                                "display_name": fan.1,
+                                "locale": fan.2,
+                            },
                         }),
                     )
                     .await?;

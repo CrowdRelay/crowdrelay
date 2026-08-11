@@ -3,7 +3,7 @@
 //! HTTP handlers only validate transport input and delegate to the application
 //! control port implemented by PostgreSQL infrastructure. Decision rules remain
 //! inside bounded contexts and are never reimplemented here.
-
+use crate::{AppState, IDEMPOTENCY_KEY, Problem, request_id};
 use axum::{
     Json,
     extract::{Path, State},
@@ -40,10 +40,10 @@ use crowdrelay_domain::{
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-
-use crate::{AppState, IDEMPOTENCY_KEY, Problem, request_id};
-
 const PRIVATE_NO_STORE: &str = "private, no-store";
+
+mod discovery;
+pub use discovery::discover_team_opportunity;
 
 #[derive(Debug, Serialize)]
 struct OverviewResponse<T> {

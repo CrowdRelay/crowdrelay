@@ -92,6 +92,31 @@ class TeamAutopilotsContract(unittest.TestCase):
         self.assertIn("currency: { type: string", api)
         self.assertIn('"currency": row.', executor)
 
+    def test_festival_scout_facts_are_scored_in_rust_domain(self):
+        domain = text("crates/crowdrelay-domain/src/live_opportunities.rs")
+        api = text("crates/crowdrelay-api/src/autopilot.rs")
+        discovery = text("crates/crowdrelay-api/src/autopilot/discovery.rs")
+        routing = text("crates/crowdrelay-api/src/routing.rs")
+        self.assertIn("evaluate_live_opportunity_discovery", domain)
+        self.assertIn("discover_team_opportunity", api)
+        self.assertIn("/v1/admin/autopilot/team-opportunities/discover", routing)
+        self.assertIn('"destination_unverified": true', discovery)
+
+    def test_live_auto_submit_requires_a_real_executor_destination(self):
+        domain = text("crates/crowdrelay-domain/src/live_opportunities.rs")
+        decisions = text("crates/crowdrelay-infra/src/autopilot/decisions.rs")
+        self.assertIn("auto_submission_capable", domain)
+        self.assertIn("snapshot.auto_submission_capable", domain)
+        self.assertIn("submission_adapter", decisions)
+        self.assertIn("contact_email", decisions)
+
+    def test_fan_message_intent_contains_verified_delivery_identity(self):
+        actions = text("crates/crowdrelay-infra/src/autopilot/actions.rs")
+        self.assertIn("viryaos.fan_lifecycle.message_requested", actions)
+        self.assertIn('"email": fan.0', actions)
+        self.assertIn('"display_name": fan.1', actions)
+        self.assertIn('"locale": fan.2', actions)
+
     def test_query_plan_regression_script_is_gone(self):
         self.assertFalse((ROOT / "scripts/query-plan-regression.py").exists())
         workflows = text(".github/workflows/ci.yml") + text(".github/workflows/performance.yml")
