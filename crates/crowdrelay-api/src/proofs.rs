@@ -74,19 +74,24 @@ pub struct ProofBatchView {
     status: String,
     attempts: i32,
     max_attempts: i32,
+    #[serde(with = "time::serde::rfc3339")]
     available_at: OffsetDateTime,
     anchor_kind: Option<String>,
     anchor_url: Option<String>,
     anchor_entry_id: Option<String>,
     anchor_sequence: Option<i64>,
+    #[serde(with = "time::serde::rfc3339::option")]
     anchor_integrated_at: Option<OffsetDateTime>,
     anchor_log_id: Option<String>,
     anchor_receipt: Option<Value>,
     signer_fingerprint: Option<String>,
     signed_payload_sha256: Option<String>,
     last_error_kind: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     confirmed_at: Option<OffsetDateTime>,
 }
 
@@ -293,6 +298,7 @@ pub struct RelayerBatch {
     leaf_count: i32,
     tree_algorithm: String,
     attempt: i32,
+    #[serde(with = "time::serde::rfc3339")]
     lease_expires_at: OffsetDateTime,
 }
 

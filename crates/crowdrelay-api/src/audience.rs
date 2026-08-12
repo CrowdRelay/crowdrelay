@@ -49,7 +49,9 @@ pub struct FanCard {
     display_name: Option<String>,
     locale: Option<String>,
     status: String,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
     qualified_referrals: i64,
     event_interests: i64,
@@ -62,6 +64,7 @@ pub struct FanCard {
 pub struct AcquisitionTouch {
     source: String,
     campaign_name: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }
 
@@ -69,6 +72,7 @@ pub struct AcquisitionTouch {
 pub struct EventInterestTouch {
     event_slug: String,
     event_title: String,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
 }
 
@@ -77,6 +81,7 @@ pub struct AttendanceTouch {
     event_slug: String,
     event_title: String,
     status: String,
+    #[serde(with = "time::serde::rfc3339::option")]
     redeemed_at: Option<OffsetDateTime>,
 }
 
@@ -89,6 +94,7 @@ pub struct TicketPurchase {
     currency: String,
     amount_gross_minor: i64,
     amount_refunded_minor: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
     paid_at: Option<OffsetDateTime>,
 }
 
@@ -97,13 +103,16 @@ pub struct RewardTouch {
     reward_name: String,
     reward_type: String,
     status: String,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
 }
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct SynesthesiaTouch {
     campaign_slug: String,
+    #[serde(with = "time::serde::rfc3339")]
     entered_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     completed_at: Option<OffsetDateTime>,
     client_total_elapsed_ms: Option<i64>,
 }
@@ -191,7 +200,9 @@ pub struct AudienceSegment {
     description: Option<String>,
     filter: Value,
     active: bool,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 
@@ -238,14 +249,19 @@ pub struct CommunicationCampaign {
     subject: Option<String>,
     content: Value,
     status: String,
+    #[serde(with = "time::serde::rfc3339::option")]
     scheduled_at: Option<OffsetDateTime>,
     dispatch_event_id: Option<Uuid>,
     recipient_count: Option<i32>,
     delivered_count: Option<i32>,
     failed_count: Option<i32>,
+    #[serde(with = "time::serde::rfc3339::option")]
     completed_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     cancelled_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 
@@ -285,7 +301,9 @@ pub struct CampaignDeliveryState {
     status: String,
     provider_reference: Option<String>,
     error_code: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     claimed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     completed_at: Option<OffsetDateTime>,
 }
 

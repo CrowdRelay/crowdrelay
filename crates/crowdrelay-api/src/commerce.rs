@@ -101,6 +101,7 @@ impl CommerceError {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct MerchCatalogView {
+    #[serde(with = "time::serde::rfc3339")]
     generated_at: OffsetDateTime,
     products: Vec<MerchProductView>,
 }
@@ -241,6 +242,7 @@ struct InventoryStocktakeItemRequest {
 pub struct InventoryStocktakeView {
     id: Uuid,
     replayed: bool,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     items: Vec<InventoryStocktakeItemView>,
 }
@@ -265,6 +267,7 @@ struct ExistingStocktake {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InventoryOverviewView {
+    #[serde(with = "time::serde::rfc3339")]
     generated_at: OffsetDateTime,
     items: Vec<InventoryOverviewItemView>,
 }
@@ -281,6 +284,7 @@ struct InventoryOverviewItemView {
     low_stock_threshold: i32,
     sell_without_stock: bool,
     counted: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
     last_counted_at: Option<OffsetDateTime>,
     on_hand: i64,
     order_reserved: i64,
@@ -300,7 +304,9 @@ pub struct InventoryActivationView {
     ready: bool,
     fully_enabled: bool,
     catalog_seed_version: i32,
+    #[serde(with = "time::serde::rfc3339::option")]
     catalog_seeded_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     ready_at: Option<OffsetDateTime>,
     ready_by: Option<String>,
     version: i64,
@@ -357,6 +363,7 @@ pub struct InventoryReservationView {
     id: Uuid,
     external_reference: String,
     status: String,
+    #[serde(with = "time::serde::rfc3339::option")]
     expires_at: Option<OffsetDateTime>,
     items: Vec<InventoryReservationItemView>,
 }
@@ -541,7 +548,9 @@ pub struct RewardFulfillmentView {
     prize_variant: String,
     quantity: i32,
     status: String,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 

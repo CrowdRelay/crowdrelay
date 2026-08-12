@@ -40,6 +40,7 @@ pub struct ApplyEventCopyResponse {
     stale: bool,
     event_id: Uuid,
     enrichment_id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 

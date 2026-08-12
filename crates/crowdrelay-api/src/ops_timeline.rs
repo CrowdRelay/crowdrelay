@@ -9,6 +9,7 @@ pub struct OperationTimeline {
 }
 #[derive(Debug, Serialize, FromRow)]
 pub struct OperationTimelineEvent {
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
     source: String,
     kind: String,

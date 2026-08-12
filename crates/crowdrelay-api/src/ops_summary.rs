@@ -19,6 +19,7 @@ pub(crate) struct QueueSummary {
 pub(crate) struct WatchdogSummary {
     active_alerts: i64,
     critical_alerts: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
     last_observed_at: Option<OffsetDateTime>,
 }
 

@@ -68,6 +68,7 @@ pub struct AccountingProfileView {
     city: String,
     country_code: String,
     document_prefix: String,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 
@@ -75,6 +76,7 @@ pub struct AccountingProfileView {
 pub struct AccountingSaleLine {
     event_id: Uuid,
     event_title: String,
+    #[serde(with = "time::serde::rfc3339")]
     event_starts_at: OffsetDateTime,
     ticket_type_slug: String,
     ticket_type_name: String,
@@ -91,6 +93,7 @@ pub struct AccountingSaleLine {
 pub struct AccountingAdjustmentLine {
     event_id: Uuid,
     event_title: String,
+    #[serde(with = "time::serde::rfc3339")]
     event_starts_at: OffsetDateTime,
     entry_kind: String,
     entry_count: i64,
@@ -107,6 +110,7 @@ pub struct AccountingAdjustmentLine {
 pub struct InvoiceRequestView {
     order_id: Uuid,
     order_reference: String,
+    #[serde(with = "time::serde::rfc3339")]
     paid_at: OffsetDateTime,
     event_title: String,
     buyer_type: String,
@@ -125,6 +129,7 @@ pub struct InvoiceRequestView {
     amount_net_minor: i64,
     amount_vat_minor: i64,
     vat_rate_basis_points: i32,
+    #[serde(with = "time::serde::rfc3339::option")]
     refunded_at: Option<OffsetDateTime>,
 }
 
@@ -167,6 +172,7 @@ pub struct AccountingDocumentSummary {
     vat_minor: i64,
     stripe_fee_minor: i64,
     stripe_net_minor: i64,
+    #[serde(with = "time::serde::rfc3339")]
     finalized_at: OffsetDateTime,
 }
 

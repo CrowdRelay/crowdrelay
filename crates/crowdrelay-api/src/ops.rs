@@ -202,11 +202,16 @@ pub struct OutboxItem {
     status: String,
     attempts: i32,
     max_attempts: i32,
+    #[serde(with = "time::serde::rfc3339")]
     available_at: OffsetDateTime,
     last_error_kind: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     delivered_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     dead_at: Option<OffsetDateTime>,
 }
 
@@ -220,19 +225,26 @@ pub struct DeliveryItem {
     status: String,
     attempt_count: i32,
     max_attempts: i32,
+    #[serde(with = "time::serde::rfc3339")]
     available_at: OffsetDateTime,
     last_response_status: Option<i16>,
     last_error_kind: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     delivered_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     dead_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct DeliveryAttempt {
     attempt_number: i32,
+    #[serde(with = "time::serde::rfc3339")]
     started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     finished_at: OffsetDateTime,
     outcome: String,
     response_status: Option<i16>,

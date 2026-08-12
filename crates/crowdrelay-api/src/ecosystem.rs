@@ -69,6 +69,7 @@ pub struct FeatureFlag {
     enabled: bool,
     reason: Option<String>,
     version: i64,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 
@@ -102,7 +103,9 @@ pub struct ReconciliationRun {
     status: String,
     trigger: String,
     finding_count: i32,
+    #[serde(with = "time::serde::rfc3339")]
     started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     finished_at: Option<OffsetDateTime>,
 }
 
@@ -118,7 +121,9 @@ pub struct ReconciliationFinding {
     summary: String,
     suggested_action: Option<String>,
     metadata: Value,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     resolved_at: Option<OffsetDateTime>,
 }
 
@@ -141,6 +146,7 @@ pub struct ChecklistItem {
     item_key: String,
     status: String,
     note: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 
@@ -156,6 +162,7 @@ pub struct ShowChecklist {
     event_id: Uuid,
     event_slug: String,
     event_title: String,
+    #[serde(with = "time::serde::rfc3339")]
     starts_at: OffsetDateTime,
     items: Vec<ChecklistItem>,
 }
@@ -180,6 +187,7 @@ pub struct OverviewEvent {
     slug: String,
     title: String,
     venue: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     starts_at: OffsetDateTime,
 }
 

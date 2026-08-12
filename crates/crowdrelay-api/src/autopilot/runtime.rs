@@ -43,6 +43,7 @@ pub struct ExecutionReportRequest {
     error_kind: Option<String>,
     #[serde(default = "empty_metadata")]
     metadata: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }
 
@@ -55,7 +56,9 @@ pub struct ExecutorHeartbeatRequest {
     capabilities: Vec<ExecutorCapability>,
     #[serde(default = "empty_metadata")]
     metadata: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 
@@ -72,6 +75,7 @@ pub struct ReleaseComponentRequest {
     manifest_sha: Option<String>,
     #[serde(default = "empty_metadata")]
     metadata: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
 }
 
@@ -86,6 +90,7 @@ pub struct RumRequest {
     release: Option<String>,
     #[serde(default = "empty_metadata")]
     metadata: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
 }
 

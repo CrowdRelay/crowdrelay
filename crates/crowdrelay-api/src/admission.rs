@@ -252,6 +252,7 @@ pub async fn my_pass(State(state): State<crate::AppState>, headers: HeaderMap) -
 #[derive(Debug, Serialize)]
 pub struct AdmissionQrResponse {
     token: String,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 

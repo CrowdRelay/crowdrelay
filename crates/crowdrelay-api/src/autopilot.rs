@@ -116,8 +116,11 @@ pub struct PromotionCampaignStateRequest {
     spend_month_to_date_minor: i64,
     attributed_revenue_last_7d_minor: i64,
     active: bool,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     last_budget_change_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 
@@ -138,7 +141,9 @@ pub struct CityMarketSignalRequest {
     signal_kind: CityMarketSignalKind,
     score_basis_points: u16,
     confidence_basis_points: u16,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 
@@ -146,6 +151,7 @@ pub struct CityMarketSignalRequest {
 #[serde(deny_unknown_fields)]
 pub struct BookingReplyRequest {
     disposition: BookingReplyDisposition,
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }
 
@@ -177,7 +183,9 @@ pub struct OutreachOpportunityRequest {
     relevance_basis_points: u16,
     confidence_basis_points: u16,
     active: bool,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 
@@ -186,6 +194,7 @@ pub struct OutreachOpportunityRequest {
 pub struct OutreachReplyRequest {
     opportunity_id: Option<Uuid>,
     disposition: OutreachReplyDisposition,
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }
 
@@ -195,6 +204,7 @@ pub struct ReleasePlanRequest {
     release_id: Option<Uuid>,
     source_key: String,
     title: String,
+    #[serde(with = "time::serde::rfc3339")]
     release_at: OffsetDateTime,
     listen_url: Option<String>,
     active: bool,
@@ -228,6 +238,7 @@ pub struct TeamOpportunityRequest {
     eligible: bool,
     funding_amount_minor: i64,
     own_contribution_minor: i64,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     deadline: Option<OffsetDateTime>,
     #[serde(default)]
     metadata: serde_json::Value,
@@ -238,6 +249,7 @@ pub struct TeamOpportunityRequest {
 #[serde(deny_unknown_fields)]
 pub struct TeamOpportunityProgressRequest {
     progress: TeamOpportunityProgress,
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }
 
@@ -248,7 +260,9 @@ pub struct ContentSourceRequest {
     source_kind: ContentSourceKind,
     source_key: String,
     title: String,
+    #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
     metadata: serde_json::Value,
     expected_version: i64,
@@ -278,6 +292,7 @@ pub struct ExperimentObservationRequest {
     exposures_delta: u32,
     conversions_delta: u32,
     value_minor_delta: i64,
+    #[serde(with = "time::serde::rfc3339")]
     observed_at: OffsetDateTime,
 }
 
