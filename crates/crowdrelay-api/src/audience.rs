@@ -265,6 +265,47 @@ pub struct CompleteCampaignRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ClaimCampaignDeliveryRequest {
+    attempt_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportCampaignDeliveryRequest {
+    attempt_key: String,
+    status: String,
+    provider_reference: Option<String>,
+    error_code: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct CampaignDeliveryState {
+    fan_id: Uuid,
+    attempt_key: String,
+    status: String,
+    provider_reference: Option<String>,
+    error_code: Option<String>,
+    claimed_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct DeliveryProgress {
+    eligible_count: i64,
+    pending_count: i64,
+    claimed_count: i64,
+    delivered_count: i64,
+    failed_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CampaignDeliveryClaim {
+    delivery: CampaignDeliveryState,
+    send_allowed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryPlanQuery {
     limit: Option<i64>,
     after_fan_id: Option<Uuid>,
@@ -275,6 +316,7 @@ pub struct DeliveryPlan {
     campaign: CommunicationCampaign,
     recipients: Vec<DeliveryRecipient>,
     next_after_fan_id: Option<Uuid>,
+    delivery: DeliveryProgress,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -304,6 +346,7 @@ pub struct RevenueRow {
 }
 
 include!("audience/engagement_handlers.rs");
+include!("audience/delivery_handlers.rs");
 pub async fn funnel(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let result = sqlx::query_as::<_, FunnelRow>(
         r#"
@@ -729,8 +772,13 @@ async fn delivery_recipients(
         JOIN fans fan
           ON fan.workspace_id = snapshot.workspace_id
          AND fan.id = snapshot.fan_id
+        LEFT JOIN communication_campaign_deliveries delivery
+          ON delivery.workspace_id = snapshot.workspace_id
+         AND delivery.campaign_id = snapshot.campaign_id
+         AND delivery.fan_id = snapshot.fan_id
         WHERE snapshot.workspace_id = $1
           AND snapshot.campaign_id = $2
+          AND delivery.fan_id IS NULL
           AND fan.status = 'active'
           AND ($3::boolean = false OR EXISTS (
               SELECT 1

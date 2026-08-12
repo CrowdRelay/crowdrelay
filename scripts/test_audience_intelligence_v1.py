@@ -68,6 +68,8 @@ class AudienceIntelligenceContracts(unittest.TestCase):
             "/v1/admin/audience/segments",
             "/v1/admin/communications/campaigns",
             "/v1/internal/communications/campaigns/{campaign_id}/delivery-plan",
+            "/v1/internal/communications/campaigns/{campaign_id}/deliveries/{fan_id}/claim",
+            "/v1/internal/communications/campaigns/{campaign_id}/deliveries/{fan_id}/result",
             "/v1/internal/communications/campaigns/{campaign_id}/complete",
             "/v1/admin/analytics/funnel",
             "/v1/admin/analytics/revenue",

@@ -50,7 +50,7 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 | `viryaos.booking.outreach_requested` | deliver the already-authorized booking initial/follow-up message |
 | `viryaos.outreach.requested` | deliver the already-authorized press, review, patronage or endorsement message |
 
-For Gmail-backed booking/outreach, the private executor also keeps a small provider-correlation map from Gmail `threadId` to the CrowdRelay target/opportunity. A later inbound message in a known thread is reported back as the deterministic `received` disposition; n8n does not infer positive/negative intent. This exists only to stop further follow-ups and surface the reply to the operator.
+For Gmail-backed booking/outreach, provider correlation is durable in CrowdRelay's execution-report ledger. The private executor writes the Gmail `threadId` as `provider_reference`, and inbound monitoring resolves that reference through CrowdRelay before reporting the deterministic `received` disposition. n8n keeps no durable business-correlation map and does not infer positive/negative intent.
 
 Executors must use the CrowdRelay event ID or supplied business key as their idempotency key. They must not rescore a lead, change pricing policy, infer authority, or silently broaden the requested action. A provider failure is a delivery failure; it is not permission for n8n to invent an alternative business action.
 
@@ -61,8 +61,9 @@ Keep production exports locally, for example:
 ```text
 n8n/
   crowdrelay-*.json
-  workflow-manifest.tsv
-  import-workflows.sh
+  private-workflow-manifest.tsv
+  ingress-routes.json
+  deploy-production.sh
 ```
 
 These paths are ignored by Git. Existing local files remain available after
@@ -91,4 +92,4 @@ data persistence unless a carefully redacted audit trail is explicitly needed.
 
 ## ViryaOS executor runtime
 
-See [`viryaos-executor-contract.md`](./viryaos-executor-contract.md) for heartbeat capabilities, provider execution receipts, blue/green safety and release-ledger behavior.
+See [`viryaos-executor-contract.md`](./viryaos-executor-contract.md) and [`viryaos-executor-manifest.tsv`](./viryaos-executor-manifest.tsv) for heartbeat capabilities, pre-send claims, provider execution receipts, campaign delivery safety, blue/green safety and release-ledger behavior. The concrete release mapping is [`viryaos-production-workflow-manifest.tsv`](./viryaos-production-workflow-manifest.tsv); its checked SHA is the release-ledger/heartbeat parity key. The legacy `import-workflows.sh` is deliberately fail-closed and is not a production deployment path.

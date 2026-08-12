@@ -399,6 +399,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(audience::delivery_plan),
         )
         .route(
+            "/v1/internal/communications/campaigns/{campaign_id}/deliveries/{fan_id}/claim",
+            post(audience::claim_campaign_delivery),
+        )
+        .route(
+            "/v1/internal/communications/campaigns/{campaign_id}/deliveries/{fan_id}/result",
+            post(audience::report_campaign_delivery),
+        )
+        .route(
             "/v1/internal/communications/campaigns/{campaign_id}/complete",
             post(audience::complete_campaign),
         )

@@ -4061,7 +4061,7 @@ paths:
         schema:
           type: integer
           minimum: 1
-          maximum: 2000
+          maximum: 500
       - in: query
         name: after_fan_id
         description: Stable fan-id cursor returned by the previous delivery-plan page.
@@ -4070,11 +4070,34 @@ paths:
           format: uuid
       responses:
         '200':
-          description: Late-bound, consent-filtered delivery plan.
+          description: Late-bound, consent-filtered pending delivery plan plus authoritative progress.
           content:
             application/json:
               schema:
                 type: object
+                required: [campaign, recipients, next_after_fan_id, delivery]
+                properties:
+                  campaign: { type: object }
+                  recipients:
+                    type: array
+                    items:
+                      type: object
+                      required: [fan_id, email]
+                      properties:
+                        fan_id: { type: string, format: uuid }
+                        email: { type: string, format: email }
+                        display_name: { type: [string, 'null'] }
+                        locale: { type: [string, 'null'] }
+                  next_after_fan_id: { type: [string, 'null'], format: uuid }
+                  delivery:
+                    type: object
+                    required: [eligible_count, pending_count, claimed_count, delivered_count, failed_count]
+                    properties:
+                      eligible_count: { type: integer, format: int64, minimum: 0, description: 'Current pending recipients plus all already claimed delivery attempts; completed attempts remain counted after later opt-out.' }
+                      pending_count: { type: integer, format: int64, minimum: 0 }
+                      claimed_count: { type: integer, format: int64, minimum: 0 }
+                      delivered_count: { type: integer, format: int64, minimum: 0 }
+                      failed_count: { type: integer, format: int64, minimum: 0 }
         '401':
           $ref: '#/components/responses/Problem'
         '404':
@@ -4083,6 +4106,83 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /internal/communications/campaigns/{campaign_id}/deliveries/{fan_id}/claim:
+    post:
+      operationId: claimInternalCommunicationDelivery
+      summary: Atomically claim one recipient before a non-idempotent provider send
+      description: >
+        First claim returns send_allowed=true. Replaying the same attempt is fail-closed
+        with send_allowed=false so an ambiguous provider send is never automatically duplicated.
+      security:
+      - commerceBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: fan_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [attempt_key]
+              properties:
+                attempt_key: { type: string, minLength: 1, maxLength: 160 }
+      responses:
+        '200':
+          description: Claim created or safely replayed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery, send_allowed]
+                properties:
+                  delivery: { type: object }
+                  send_allowed: { type: boolean }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /internal/communications/campaigns/{campaign_id}/deliveries/{fan_id}/result:
+    post:
+      operationId: reportInternalCommunicationDelivery
+      summary: Persist the provider result for a previously claimed recipient
+      security:
+      - commerceBearer: []
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: fan_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [attempt_key, status]
+              properties:
+                attempt_key: { type: string, minLength: 1, maxLength: 160 }
+                status: { type: string, enum: [delivered, failed] }
+                provider_reference: { type: [string, 'null'], maxLength: 240 }
+                error_code: { type: [string, 'null'], maxLength: 120 }
+      responses:
+        '200': { description: Delivery result stored or idempotently replayed. }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
   /internal/communications/campaigns/{campaign_id}/complete:
     post:
       operationId: completeInternalCommunicationCampaign
@@ -4115,7 +4215,7 @@ paths:
                   minimum: 0
       responses:
         '200':
-          description: Delivery counters persisted or idempotently replayed.
+          description: Delivery counters verified against the durable recipient ledger and persisted or idempotently replayed.
         '400':
           $ref: '#/components/responses/Problem'
         '401':
@@ -4164,6 +4264,376 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/ecosystem/overview:
+    get:
+      operationId: getEcosystemOverview
+      summary: Read the metadata-only ecosystem operating overview
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Ecosystem feature flags, reconciliation state and next-event metadata. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/flags:
+    get:
+      operationId: listEcosystemFlags
+      summary: List fail-closed ecosystem feature flags
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Current feature-flag state.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [key, enabled, version, updated_at]
+                  properties:
+                    key: { type: string }
+                    enabled: { type: boolean }
+                    reason: { type: [string, 'null'], maxLength: 500 }
+                    version: { type: integer, format: int64 }
+                    updated_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/flags/{key}:
+    post:
+      operationId: updateEcosystemFlag
+      summary: Idempotently update one known ecosystem feature flag
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: key
+        required: true
+        schema: { type: string, maxLength: 128 }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+                reason: { type: [string, 'null'], maxLength: 500 }
+      responses:
+        '200': { description: Updated flag plus replay marker. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/reconcile:
+    post:
+      operationId: reconcileEcosystem
+      summary: Run an idempotent ecosystem reconciliation
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                trigger:
+                  type: string
+                  enum: [manual, scheduled, deploy, restore_drill]
+                  default: manual
+      responses:
+        '200': { description: Reconciliation run, findings and replay marker. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/reconciliation:
+    get:
+      operationId: listEcosystemReconciliationFindings
+      summary: List recent ecosystem reconciliation findings
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: query
+        name: limit
+        schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      - in: query
+        name: open_only
+        schema: { type: boolean, default: true }
+      responses:
+        '200': { description: Reconciliation findings newest first. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/checklists/emit-due:
+    post:
+      operationId: emitDueEcosystemChecklists
+      summary: Idempotently emit due show-checklist notifications
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Number of newly emitted checklist notifications.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [emitted]
+                properties:
+                  emitted: { type: integer, format: int64, minimum: 0 }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/checklists/{event_slug}:
+    get:
+      operationId: getEcosystemShowChecklist
+      summary: Read the canonical operational checklist for one show
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/EventSlug' }]
+      responses:
+        '200': { description: Show identity and checklist items. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/ecosystem/checklists/{event_slug}/{item_key}:
+    post:
+      operationId: updateEcosystemShowChecklistItem
+      summary: Idempotently update one show-checklist item
+      security: [{ adminBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/EventSlug' }
+      - in: path
+        name: item_key
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 64 }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [pending, done, blocked, skipped] }
+                note: { type: [string, 'null'], maxLength: 1000 }
+      responses:
+        '200': { description: Updated canonical checklist. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/ops/show-snapshot/{event_slug}:
+    get:
+      operationId: getStaffShowSnapshot
+      summary: Read a metadata-only offline show snapshot for staff operations
+      description: Does not expose raw ticket QR values or unmasked buyer e-mail addresses.
+      security: [{ staffBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/EventSlug' }]
+      responses:
+        '200': { description: Bounded operational show snapshot. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/cities/requests:
+    post:
+      operationId: requestPublicCity
+      summary: Request moderation of a city not yet in the public catalogue
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, country_code]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                region: { type: [string, 'null'], maxLength: 120 }
+                country_code: { type: string, pattern: '^[A-Z]{2}$' }
+      responses:
+        '200': { description: Existing approved city matched. }
+        '202':
+          description: City request accepted for moderation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [city_slug, display_name, status]
+                properties:
+                  city_slug: { type: string }
+                  display_name: { type: string }
+                  status: { type: string, enum: [pending] }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/cities/{city_id}/geocode:
+    post:
+      operationId: geocodeInternalCity
+      summary: Attach moderated coordinates to a pending or approved city
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: city_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [latitude, longitude]
+              properties:
+                latitude: { type: number, minimum: -90, maximum: 90 }
+                longitude: { type: number, minimum: -180, maximum: 180 }
+                canonical_name: { type: [string, 'null'], maxLength: 120 }
+                region: { type: [string, 'null'], maxLength: 120 }
+      responses:
+        '200': { description: City coordinates updated. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/nearby-gigs/emit-due:
+    post:
+      operationId: emitDueNearbyGigs
+      summary: Queue first-party nearby-gig notifications that became due
+      security: [{ commerceBearer: [] }]
+      responses:
+        '200':
+          description: Number of newly queued notifications.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queued]
+                properties:
+                  queued: { type: integer, format: int64, minimum: 0 }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/releases/announce:
+    post:
+      operationId: announceInternalRelease
+      summary: Validate, deduplicate and fan out a trusted provider release announcement
+      description: Resolves the currently eligible Signal audience inside CrowdRelay and appends durable outbox events; n8n never receives the fan list.
+      security: [{ commerceBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [source, source_release_id, title, release_type, release_date, listen_url]
+              properties:
+                source: { type: string, enum: [spotify] }
+                source_release_id: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9_-]+$' }
+                title: { type: string, minLength: 1, maxLength: 200 }
+                release_type: { type: string, enum: [single, ep, album] }
+                release_date: { type: string, format: date }
+                listen_url: { type: string, format: uri }
+                image_url: { type: [string, 'null'], format: uri }
+                site_url: { type: [string, 'null'], format: uri }
+                artist_name: { type: [string, 'null'], maxLength: 120 }
+                total_tracks: { type: [integer, 'null'], minimum: 1, maximum: 500 }
+      responses:
+        '202':
+          description: Announcement accepted or deduplicated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, duplicate, source_release_id, recipient_count]
+                properties:
+                  accepted: { type: boolean }
+                  duplicate: { type: boolean }
+                  source_release_id: { type: string }
+                  recipient_count: { type: integer, format: int64, minimum: 0 }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/area/players/{player_id}/challenge:
+    post:
+      operationId: createInternalAreaChallenge
+      summary: Issue a short-lived location-proof challenge for an AREA player
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/AreaPlayerId' }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AreaChallengeRequest' }
+      responses:
+        '200': { description: Short-lived location-proof challenge. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '429': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/area/players/{player_id}/claim:
+    post:
+      operationId: claimInternalAreaDrop
+      summary: Verify a location proof and idempotently claim an AREA drop
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/AreaPlayerId' }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AreaClaimRequest' }
+      responses:
+        '200': { description: Claim result and awarded canonical credit. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/area/players/{player_id}/claims/import:
+    post:
+      operationId: importInternalAreaClaims
+      summary: Idempotently import bounded legacy AREA claims
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/AreaPlayerId' }
+      - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [claims]
+              properties:
+                claims:
+                  type: array
+                  maxItems: 12
+                  uniqueItems: true
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [dropId]
+                    properties:
+                      dropId: { type: string }
+                      claimedAt: { type: [string, 'null'], format: date-time }
+                      editionNumber: { type: [integer, 'null'], minimum: 1, maximum: 500 }
+      responses:
+        '200': { description: Imported claims reflected in the canonical AREA wallet. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
 components:
   headers:
     RequestId:
@@ -5692,11 +6162,14 @@ components:
     ReleaseLedgerOverview:
       type: object
       additionalProperties: false
-      required: [components, missing_components, backend_sha_drift, active_executor_count, guarded_executor_count, active_executor_manifest_shas]
+      required: [components, missing_components, backend_sha_drift, executor_manifest_drift, active_executor_count, guarded_executor_count, active_executor_manifest_shas]
       properties:
         components: { type: array, maxItems: 6, items: { $ref: '#/components/schemas/ReleaseComponentSummary' } }
         missing_components: { type: array, maxItems: 6, items: { type: string } }
         backend_sha_drift: { type: boolean }
+        executor_manifest_drift:
+          type: boolean
+          description: True when a live executor heartbeat manifest differs from the deployed n8n release-component manifest, or no deployed n8n manifest was reported.
         active_executor_count: { type: integer, format: int64, minimum: 0 }
         guarded_executor_count: { type: integer, format: int64, minimum: 0 }
         active_executor_manifest_shas: { type: array, maxItems: 64, items: { type: string } }

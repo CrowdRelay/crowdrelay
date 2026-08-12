@@ -881,6 +881,7 @@ pub struct ReleaseLedgerOverview {
     pub components: Vec<ReleaseComponentSummary>,
     pub missing_components: Vec<String>,
     pub backend_sha_drift: bool,
+    pub executor_manifest_drift: bool,
     pub active_executor_count: i64,
     pub guarded_executor_count: i64,
     pub active_executor_manifest_shas: Vec<String>,

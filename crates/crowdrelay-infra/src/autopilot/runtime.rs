@@ -496,6 +496,11 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .fetch_one(&self.pool)
             .await
             .map_err(map_sqlx)?;
+            let n8n_release_manifest_sha = components
+                .iter()
+                .find(|item| item.component_key == "n8n")
+                .and_then(|item| item.manifest_sha.as_deref())
+                .map(str::to_owned);
             let active_executor_manifest_shas = sqlx::query_scalar::<_, String>(
                 r#"SELECT DISTINCT executor.manifest_sha
                    FROM viryaos_executor_instances executor
@@ -510,10 +515,17 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
+            let executor_manifest_drift = !active_executor_manifest_shas.is_empty()
+                && n8n_release_manifest_sha.as_ref().is_none_or(|expected| {
+                    active_executor_manifest_shas
+                        .iter()
+                        .any(|observed| observed != expected)
+                });
             Ok(ReleaseLedgerOverview {
                 components,
                 missing_components,
                 backend_sha_drift,
+                executor_manifest_drift,
                 active_executor_count,
                 guarded_executor_count,
                 active_executor_manifest_shas,
