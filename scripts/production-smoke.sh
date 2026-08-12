@@ -54,7 +54,7 @@ require_200 crowdrelay_metrics "${CROWDRELAY_BASE_URL%/}/metrics"
 meta_file="$(mktemp)"
 curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
   --retry 1 --retry-delay 1 --retry-all-errors --output "$meta_file" "${CROWDRELAY_BASE_URL%/}/v1/meta"
-jq -e '.apiVersion == "1" and (.schemaVersion >= 44) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1' "$meta_file" >/dev/null
+jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1' "$meta_file" >/dev/null
 printf 'crowdrelay_meta_contract=ok\n'
 require_200 crowdrelay_area_catalog "${CROWDRELAY_BASE_URL%/}/v1/public/area/drops"
 require_200 crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"

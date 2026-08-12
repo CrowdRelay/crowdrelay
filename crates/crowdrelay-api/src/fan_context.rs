@@ -18,6 +18,7 @@ use crate::{Problem, acquisition::fan_session_from_headers, request_id};
 const PRIVATE_REVALIDATE: &str = "private, max-age=20, stale-if-error=600";
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const SCHEMA_VERSION: u32 = 1;
+const SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
 
 #[derive(Debug, FromRow)]
 struct FanIdentity {
@@ -53,6 +54,10 @@ pub struct FanHomeSynesthesia {
     completed: bool,
     rooms_completed: i16,
     client_total_elapsed_ms: Option<i64>,
+    best_elapsed_ms: Option<i64>,
+    completed_runs: i64,
+    leaderboard_published: bool,
+    leaderboard_rank: Option<i64>,
     #[serde(with = "time::serde::rfc3339::option")]
     linked_at: Option<OffsetDateTime>,
     reward_entered: bool,
@@ -301,22 +306,60 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
             Option<i64>,
             Option<OffsetDateTime>,
             bool,
+            Option<i64>,
+            i64,
+            bool,
+            Option<i64>,
         ),
     >(
         r#"
-        SELECT run.next_room_index, run.completed_at, run.client_total_elapsed_ms, run.linked_at,
+        WITH latest AS (
+            SELECT run.id, run.workspace_id, run.next_room_index, run.completed_at,
+                   run.client_total_elapsed_ms, run.linked_at
+            FROM synesthesia_runs AS run
+            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3
+            ORDER BY run.updated_at DESC, run.id DESC
+            LIMIT 1
+        ), stats AS (
+            SELECT
+                MIN(run.client_total_elapsed_ms) FILTER (
+                    WHERE run.completed_at IS NOT NULL AND run.client_total_elapsed_ms IS NOT NULL
+                )::bigint AS best_elapsed_ms,
+                COUNT(*) FILTER (WHERE run.completed_at IS NOT NULL)::bigint AS completed_runs,
+                COALESCE(BOOL_OR(run.leaderboard_name IS NOT NULL), false) AS leaderboard_published
+            FROM synesthesia_runs AS run
+            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3
+        ), public_best AS (
+            SELECT DISTINCT ON (run.fan_id)
+                run.fan_id, run.client_total_elapsed_ms AS elapsed_ms, run.completed_at, run.id
+            FROM synesthesia_runs AS run
+            WHERE run.workspace_id = $1
+              AND run.campaign_slug = $3
+              AND run.fan_id IS NOT NULL
+              AND run.completed_at IS NOT NULL
+              AND run.client_total_elapsed_ms IS NOT NULL
+              AND run.leaderboard_name IS NOT NULL
+            ORDER BY run.fan_id, run.client_total_elapsed_ms, run.completed_at, run.id
+        ), ranked AS (
+            SELECT fan_id,
+                   ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
+            FROM public_best
+        )
+        SELECT latest.next_room_index, latest.completed_at, latest.client_total_elapsed_ms,
+               latest.linked_at,
                EXISTS(
                    SELECT 1 FROM synesthesia_reward_entries AS reward
-                   WHERE reward.workspace_id = run.workspace_id AND reward.run_id = run.id
-               ) AS reward_entered
-        FROM synesthesia_runs AS run
-        WHERE run.workspace_id = $1 AND run.fan_id = $2
-        ORDER BY run.completed_at DESC NULLS LAST, run.updated_at DESC, run.id DESC
-        LIMIT 1
+                   WHERE reward.workspace_id = latest.workspace_id AND reward.run_id = latest.id
+               ) AS reward_entered,
+               stats.best_elapsed_ms, stats.completed_runs, stats.leaderboard_published, ranked.rank
+        FROM latest
+        CROSS JOIN stats
+        LEFT JOIN ranked ON ranked.fan_id = $2
         "#,
     )
     .bind(workspace_id)
     .bind(fan.id)
+    .bind(SYNESTHESIA_CAMPAIGN_SLUG)
     .fetch_optional(state.ticketing.pool());
 
     let referral = sqlx::query_as::<_, (i64, i64)>(
@@ -361,11 +404,25 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
         };
 
     let synesthesia = match synesthesia {
-        Some((rooms, completed_at, elapsed, linked_at, reward_entered)) => FanHomeSynesthesia {
+        Some((
+            rooms,
+            completed_at,
+            elapsed,
+            linked_at,
+            reward_entered,
+            best_elapsed_ms,
+            completed_runs,
+            leaderboard_published,
+            leaderboard_rank,
+        )) => FanHomeSynesthesia {
             started: true,
             completed: completed_at.is_some(),
             rooms_completed: rooms,
             client_total_elapsed_ms: elapsed,
+            best_elapsed_ms,
+            completed_runs,
+            leaderboard_published,
+            leaderboard_rank,
             linked_at,
             reward_entered,
         },

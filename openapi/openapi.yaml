@@ -726,7 +726,7 @@ paths:
     get:
       operationId: listSynesthesiaLeaderboard
       summary: Read the public Synesthesia best-time leaderboard
-      description: Returns only rank, opted-in display name and the best completed elapsed time per pseudonymous installation. No run, install, fan or e-mail identifier is exposed.
+      description: Returns only rank, a server-generated masked e-mail alias and the best completed elapsed time per linked fan who explicitly opted in. No run, install, fan or full e-mail identifier is exposed.
       parameters:
       - in: query
         name: limit
@@ -745,17 +745,12 @@ paths:
   /public/synesthesia/runs/{run_id}/leaderboard:
     post:
       operationId: publishSynesthesiaLeaderboardResult
-      summary: Opt a completed Synesthesia installation into the public leaderboard
-      description: Authenticates with the completed run token, stores one bounded public display name for completed attempts on the same pseudonymous installation, and returns the installation's current best rank. E-mail and fan identity are never published.
+      summary: Opt a linked completed Synesthesia run into the public leaderboard
+      description: Authenticates with the completed run token, derives a bounded masked alias from the already-linked fan e-mail, publishes only the fan's best completed attempt, and returns the current rank. The client never supplies a public name and the full e-mail is never returned.
       security:
       - synesthesiaRunBearer: []
       parameters:
       - $ref: '#/components/parameters/SynesthesiaRunId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/SynesthesiaLeaderboardPublishRequest' }
       responses:
         '200':
           description: Publication accepted and current best rank returned.
@@ -5475,6 +5470,21 @@ components:
         has_pass: { type: boolean }
         has_paid_ticket: { type: boolean }
         ticket_sale_active: { type: boolean }
+    FanHomeSynesthesia:
+      type: object
+      additionalProperties: false
+      required: [started, completed, rooms_completed, client_total_elapsed_ms, best_elapsed_ms, completed_runs, leaderboard_published, leaderboard_rank, linked_at, reward_entered]
+      properties:
+        started: { type: boolean }
+        completed: { type: boolean }
+        rooms_completed: { type: integer, minimum: 0, maximum: 11 }
+        client_total_elapsed_ms: { type: [integer, 'null'], format: int64, minimum: 0 }
+        best_elapsed_ms: { type: [integer, 'null'], format: int64, minimum: 0 }
+        completed_runs: { type: integer, format: int64, minimum: 0 }
+        leaderboard_published: { type: boolean }
+        leaderboard_rank: { type: [integer, 'null'], format: int64, minimum: 1 }
+        linked_at: { type: [string, 'null'], format: date-time }
+        reward_entered: { type: boolean }
     FanHomeSnapshot:
       type: object
       additionalProperties: false
@@ -5487,7 +5497,7 @@ components:
           oneOf:
             - { $ref: '#/components/schemas/FanHomeEvent' }
             - { type: 'null' }
-        synesthesia: { type: object, additionalProperties: true }
+        synesthesia: { $ref: '#/components/schemas/FanHomeSynesthesia' }
         referral: { type: object, additionalProperties: true }
         counts: { type: object, additionalProperties: true }
         recommended_action:
@@ -5535,7 +5545,11 @@ components:
       required: [rank, display_name, elapsed_ms]
       properties:
         rank: { type: integer, minimum: 1, maximum: 50 }
-        display_name: { type: string, minLength: 2, maxLength: 20 }
+        display_name:
+          type: string
+          minLength: 2
+          maxLength: 20
+          description: Server-generated masked e-mail alias, for example `woj••••`.
         elapsed_ms: { type: integer, format: int64, minimum: 11000, maximum: 86400000 }
     SynesthesiaLeaderboardResponse:
       type: object
@@ -5546,12 +5560,6 @@ components:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/SynesthesiaLeaderboardEntry' }
-    SynesthesiaLeaderboardPublishRequest:
-      type: object
-      additionalProperties: false
-      required: [display_name]
-      properties:
-        display_name: { type: string, minLength: 2, maxLength: 20 }
     SynesthesiaLeaderboardPublishResponse:
       type: object
       additionalProperties: false

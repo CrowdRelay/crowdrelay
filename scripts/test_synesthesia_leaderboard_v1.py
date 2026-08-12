@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source contract for replayable Synesthesia attempts and public opt-in scores."""
+"""Source contract for replayable Synesthesia attempts and privacy-safe public scores."""
 from pathlib import Path
 import unittest
 
@@ -20,19 +20,29 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
     def test_public_entries_do_not_expose_identity_material(self):
         api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
         start = api.index("struct LeaderboardEntryResponse")
-        end = api.index("struct LeaderboardPublishResponse")
+        end = api.index("struct LeaderboardResponse")
         public_entry = api[start:end]
         for forbidden in ("install_hash", "run_id", "fan_id", "email", "normalized_email"):
             self.assertNotIn(forbidden, public_entry)
         self.assertIn("display_name: String", public_entry)
         self.assertIn("elapsed_ms: i64", public_entry)
 
-    def test_only_best_attempt_per_install_is_ranked(self):
+    def test_alias_is_server_made_from_linked_email(self):
         api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
-        self.assertGreaterEqual(api.count("SELECT DISTINCT ON (run.install_hash)"), 2)
+        publish = api.split("pub async fn publish_leaderboard", 1)[1].split("pub async fn enter_reward_draw", 1)[0]
+        self.assertIn("fan.normalized_email", publish)
+        self.assertIn("masked_email_alias(&normalized_email)", publish)
+        self.assertNotIn("LeaderboardPublishRequest", api)
+        self.assertIn("woj••••", api)
+
+    def test_only_best_attempt_per_fan_is_ranked_and_indexed(self):
+        api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
+        migration = (ROOT / "migrations/0045_synesthesia_fan_leaderboard.sql").read_text()
+        self.assertGreaterEqual(api.count("SELECT DISTINCT ON (run.fan_id)"), 2)
         self.assertIn("ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)", api)
-        self.assertIn("pub async fn list_leaderboard", api)
-        self.assertIn("pub async fn publish_leaderboard", api)
+        self.assertIn("synesthesia_runs_leaderboard_fan_best_idx", migration)
+        self.assertIn("fan_id", migration)
+        self.assertIn("DROP INDEX IF EXISTS synesthesia_runs_leaderboard_best_idx", migration)
 
     def test_routes_openapi_and_meta_ship_together(self):
         routes = (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
@@ -43,8 +53,9 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("/public/synesthesia/leaderboard:", spec)
         self.assertIn("/public/synesthesia/runs/{run_id}/leaderboard:", spec)
         self.assertIn("SynesthesiaLeaderboardResponse:", spec)
-        self.assertIn("SynesthesiaLeaderboardPublishRequest:", spec)
-        self.assertIn("SCHEMA_VERSION: u32 = 44", meta)
+        self.assertIn("SynesthesiaLeaderboardPublishResponse:", spec)
+        self.assertNotIn("SynesthesiaLeaderboardPublishRequest:", spec)
+        self.assertIn("SCHEMA_VERSION: u32 = 45", meta)
         self.assertIn('"synesthesia_leaderboard_v1"', meta)
 
 

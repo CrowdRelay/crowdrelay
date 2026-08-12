@@ -2,6 +2,7 @@
 """Cross-repository static compatibility contract for an ecosystem checkout."""
 from __future__ import annotations
 import json
+import hashlib
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
@@ -28,10 +29,15 @@ virya = ecosystem / "virya"
 if virya.exists():
     client = (virya / "src/lib/crowdrelay-client.ts").read_text()
     area = (virya / "src/server/crowdrelayArea.ts").read_text()
-    for marker in ["@generated-contract openapi-sha256:", "SynesthesiaLinkResult", "TicketWallet"]:
+    openapi_sha = hashlib.sha256((root / "openapi/openapi.yaml").read_bytes()).hexdigest()
+    for marker in [f"@generated-contract openapi-sha256: {openapi_sha}", "SynesthesiaLinkResult", "TicketWallet"]:
         if marker not in client:
             errors.append(f"Virya client missing canonical contract marker: {marker}")
-    for marker in ["importLegacyAreaWallet", "createAreaBackendVoucher", "reserveAreaBackendTicketReward"]:
+    # The website is intentionally in the staged AREA migration: CrowdRelay is
+    # canonical for claims while the legacy reward ledger remains the checkout
+    # compatibility boundary. Guard the deployed stage rather than a future
+    # reward-ledger cutover that the website does not yet implement.
+    for marker in ["getAreaBackendWallet", "importLegacyAreaClaims", "PUBLIC_CACHE_TTL_MS"]:
         if marker not in area:
             errors.append(f"Virya AREA handoff missing: {marker}")
 

@@ -21,12 +21,12 @@ if signal.is_dir() and virya.is_dir() and synesthesia.is_dir():
     signal_css = (signal / "styles.css").read_text()
     virya_css = (virya / "src/styles/global.css").read_text()
     syn_hud = (synesthesia / "scripts/ui/app_hud.gd").read_text()
-    fan_home = (signal / "src/app/fan_home.rs").read_text()
+    fan_home = (signal / "src/app/fan.rs").read_text()
     checks.update({
         "signal token adoption": tokens["palette"]["signal"] in signal_css,
         "virya token adoption": "--virya-signal: #f3c51a" in virya_css,
         "synesthesia art-first HUD": all(token in syn_hud for token in ("enter_completion_beat", "subtitle_label.visible = false", "palette_row.visible = false", "brush_label.visible = false")),
-        "participation without XP": "participation-history" in fan_home and all(word not in fan_home.lower() for word in ("experience points", " xp ", "level-up", "streak")),
+        "participation without XP": all(token in fan_home for token in ("FanSynesthesiaCard", "completed_runs")) and all(word not in fan_home.lower() for word in ("experience points", " xp ", "level-up", "streak")),
     })
 for label, ok in checks.items():
     if not ok:

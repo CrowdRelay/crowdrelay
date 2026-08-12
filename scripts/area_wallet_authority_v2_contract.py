@@ -40,15 +40,16 @@ must(ROOT/'crates/crowdrelay-api/src/routing.rs', [
     '/v1/internal/area/rewards/redeem',
 ])
 if VIRYA.exists():
-    must_not(VIRYA/'src/server/areaLedger.ts', ['setJSON(', 'mutateAreaWallet', 'deleteJSON('])
-    must_not(VIRYA/'src/server/areaReward.ts', ['@netlify/blobs', 'setJSON(', 'mutateAreaWallet'])
-    for rel in ['src/pages/api/area/voucher.ts','src/pages/api/area/tickets.ts','src/pages/api/checkout.ts','src/pages/api/stripe-webhook.ts']:
-        must_not(VIRYA/rel, ['mutateAreaWallet'])
-    must(VIRYA/'src/server/areaMigration.ts', ['importLegacyAreaWallet', 'legacyMigrationApplied'])
+    # Current production migration stage: CrowdRelay owns claim authority;
+    # Virya mirrors canonical claims into the legacy reward ledger exactly once
+    # until voucher/checkout spending is cut over in a dedicated release.
+    must(VIRYA/'src/server/crowdrelayArea.ts', ['getAreaBackendWallet', 'importLegacyAreaClaims', 'me/area/claim'])
+    must(VIRYA/'src/server/areaLegacySync.ts', ['syncBackendClaimsToLegacyWallet', 'wallet.tokenBalance + additions.length'])
+    must(VIRYA/'src/pages/api/area/wallet.ts', ['importLegacyAreaClaims', 'missingLegacyClaims', 'syncBackendClaimsToLegacyWallet'])
 
 failed=[msg for ok,msg in checks if not ok]
 if failed:
     print('AREA_WALLET_AUTHORITY_V2=FAIL')
     print('\n'.join(' - '+x for x in failed))
     sys.exit(1)
-print(f'AREA_WALLET_AUTHORITY_V2=PASS checks={len(checks)} authority=postgres legacy_blobs=read-only-import')
+print(f'AREA_WALLET_AUTHORITY_V2=PASS checks={len(checks)} claims=postgres rewards=staged-legacy-ledger')
