@@ -44,8 +44,8 @@ if VIRYA.exists():
     # Virya mirrors canonical claims into the legacy reward ledger exactly once
     # until voucher/checkout spending is cut over in a dedicated release.
     must(VIRYA/'src/server/crowdrelayArea.ts', ['getAreaBackendWallet', 'importLegacyAreaClaims', 'me/area/claim'])
-    must(VIRYA/'src/server/areaLegacySync.ts', ['syncBackendClaimsToLegacyWallet', 'wallet.tokenBalance + additions.length'])
-    must(VIRYA/'src/pages/api/area/wallet.ts', ['importLegacyAreaClaims', 'missingLegacyClaims', 'syncBackendClaimsToLegacyWallet'])
+    must(VIRYA/'src/server/areaMigration.ts', ['ensureLegacyAreaImported', 'wallet.tokenBalance +', 'missingClaims'])
+    must(VIRYA/'src/pages/api/area/wallet.ts', ['ensureLegacyAreaImported'])
 
 failed=[msg for ok,msg in checks if not ok]
 if failed:
