@@ -113,6 +113,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/public/events", get(events::list_events))
         .route("/v1/public/synesthesia/runs", post(synesthesia::start_run))
         .route(
+            "/v1/public/synesthesia/leaderboard",
+            get(synesthesia::list_leaderboard),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/leaderboard",
+            post(synesthesia::publish_leaderboard),
+        )
+        .route(
             "/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}",
             post(synesthesia::record_room),
         )

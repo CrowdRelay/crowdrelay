@@ -6,7 +6,10 @@
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL},
@@ -41,6 +44,9 @@ const MIN_ROOM_ELAPSED_MS: i64 = 1_000;
 const MAX_ROOM_ELAPSED_MS: i64 = 7_200_000;
 const MAX_TOTAL_ELAPSED_MS: i64 = 24 * 60 * 60 * 1000;
 const HANDOFF_TTL_MINUTES: i64 = 15;
+const LEADERBOARD_DEFAULT_LIMIT: u16 = 10;
+const LEADERBOARD_MAX_LIMIT: u16 = 50;
+const PUBLIC_LEADERBOARD_CACHE: &str = "public, max-age=15, s-maxage=30, stale-while-revalidate=60";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +54,7 @@ pub struct StartRunRequest {
     campaign_slug: String,
     install_id: String,
     app_version: String,
+    attempt_id: Option<String>,
     locale: Option<String>,
 }
 
@@ -128,6 +135,38 @@ struct RewardEntryResponse {
     draw_size: u8,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaderboardQuery {
+    limit: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaderboardPublishRequest {
+    display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaderboardEntryResponse {
+    rank: u16,
+    display_name: String,
+    elapsed_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaderboardResponse {
+    items: Vec<LeaderboardEntryResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaderboardPublishResponse {
+    published: bool,
+    display_name: String,
+    rank: i64,
+    best_elapsed_ms: i64,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum SynesthesiaError {
     Invalid,
@@ -187,9 +226,9 @@ pub async fn start_run(
         r#"
         INSERT INTO synesthesia_runs (
             workspace_id, campaign_slug, install_hash, run_token_hash,
-            app_version, locale
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (workspace_id, campaign_slug, install_hash) DO UPDATE
+            app_version, attempt_id, locale
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (workspace_id, campaign_slug, install_hash, attempt_id) DO UPDATE
         SET run_token_hash = EXCLUDED.run_token_hash,
             app_version = EXCLUDED.app_version,
             locale = EXCLUDED.locale,
@@ -202,6 +241,7 @@ pub async fn start_run(
     .bind(install_hash)
     .bind(token_hash)
     .bind(payload.app_version.trim())
+    .bind(clean_attempt_id(payload.attempt_id.as_deref()).unwrap_or_else(|| "legacy".to_owned()))
     .bind(clean_locale(payload.locale.as_deref()))
     .fetch_one(state.ticketing.pool())
     .await;
@@ -418,7 +458,7 @@ pub async fn complete_run(
     };
     if completed_at.is_none() {
         if usize::try_from(next_room_index).ok() != Some(ROOM_IDS.len())
-            || payload.client_total_elapsed_ms < recorded_elapsed_ms
+            || payload.client_total_elapsed_ms != recorded_elapsed_ms
         {
             return SynesthesiaError::Conflict.response(request_id_value);
         }
@@ -600,6 +640,194 @@ pub async fn link_completed_run_to_fan(
             run_id,
             rooms_completed,
             client_total_elapsed_ms,
+        }),
+    )
+        .into_response()
+}
+
+pub async fn list_leaderboard(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    query: Result<Query<LeaderboardQuery>, QueryRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let limit = query.limit.unwrap_or(LEADERBOARD_DEFAULT_LIMIT);
+    if limit == 0 || limit > LEADERBOARD_MAX_LIMIT {
+        return SynesthesiaError::Invalid.response(request_id_value);
+    }
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        WITH best AS (
+            SELECT DISTINCT ON (run.install_hash)
+                run.leaderboard_name AS display_name,
+                run.client_total_elapsed_ms AS elapsed_ms,
+                run.completed_at,
+                run.id
+            FROM synesthesia_runs AS run
+            WHERE run.workspace_id = $1
+              AND run.campaign_slug = $2
+              AND run.completed_at IS NOT NULL
+              AND run.client_total_elapsed_ms IS NOT NULL
+              AND run.leaderboard_name IS NOT NULL
+            ORDER BY run.install_hash, run.client_total_elapsed_ms, run.completed_at, run.id
+        )
+        SELECT display_name, elapsed_ms
+        FROM best
+        ORDER BY elapsed_ms, completed_at, id
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(CAMPAIGN_SLUG)
+    .bind(i64::from(limit))
+    .fetch_all(state.ticketing.pool())
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let items = rows
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, (display_name, elapsed_ms))| LeaderboardEntryResponse {
+                        rank: u16::try_from(index + 1).unwrap_or(u16::MAX),
+                        display_name,
+                        elapsed_ms,
+                    },
+                )
+                .collect();
+            (
+                StatusCode::OK,
+                [(
+                    CACHE_CONTROL,
+                    HeaderValue::from_static(PUBLIC_LEADERBOARD_CACHE),
+                )],
+                Json(LeaderboardResponse { items }),
+            )
+                .into_response()
+        }
+        Err(error) => SynesthesiaError::sqlx(error).response(request_id_value),
+    }
+}
+
+pub async fn publish_leaderboard(
+    State(state): State<crate::AppState>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<LeaderboardPublishRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let display_name = match clean_leaderboard_name(&payload.display_name) {
+        Some(name) => name,
+        None => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let mut transaction = match state.ticketing.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+
+    let authorized = sqlx::query_as::<_, (String, Vec<u8>)>(
+        r#"
+        SELECT campaign_slug, install_hash
+        FROM synesthesia_runs
+        WHERE workspace_id = $1 AND id = $2 AND run_token_hash = $3
+          AND completed_at IS NOT NULL
+        FOR SHARE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(&token_hash)
+    .fetch_optional(&mut *transaction)
+    .await;
+    let (campaign_slug, install_hash) = match authorized {
+        Ok(Some(value)) => value,
+        Ok(None) => return SynesthesiaError::Unauthorized.response(request_id_value),
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+    if campaign_slug != CAMPAIGN_SLUG {
+        return SynesthesiaError::Conflict.response(request_id_value);
+    }
+
+    if let Err(error) = sqlx::query(
+        r#"
+        UPDATE synesthesia_runs
+        SET leaderboard_name = $4,
+            leaderboard_published_at = COALESCE(leaderboard_published_at, now()),
+            updated_at = now()
+        WHERE workspace_id = $1 AND campaign_slug = $2 AND install_hash = $3
+          AND completed_at IS NOT NULL AND client_total_elapsed_ms IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(CAMPAIGN_SLUG)
+    .bind(&install_hash)
+    .bind(&display_name)
+    .execute(&mut *transaction)
+    .await
+    {
+        return SynesthesiaError::sqlx(error).response(request_id_value);
+    }
+
+    let ranked = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        WITH best AS (
+            SELECT DISTINCT ON (run.install_hash)
+                run.install_hash,
+                run.client_total_elapsed_ms AS elapsed_ms,
+                run.completed_at,
+                run.id
+            FROM synesthesia_runs AS run
+            WHERE run.workspace_id = $1
+              AND run.campaign_slug = $2
+              AND run.completed_at IS NOT NULL
+              AND run.client_total_elapsed_ms IS NOT NULL
+              AND run.leaderboard_name IS NOT NULL
+            ORDER BY run.install_hash, run.client_total_elapsed_ms, run.completed_at, run.id
+        ), ranked AS (
+            SELECT install_hash, elapsed_ms,
+                   ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
+            FROM best
+        )
+        SELECT rank, elapsed_ms FROM ranked WHERE install_hash = $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(CAMPAIGN_SLUG)
+    .bind(&install_hash)
+    .fetch_optional(&mut *transaction)
+    .await;
+    let (rank, best_elapsed_ms) = match ranked {
+        Ok(Some(value)) => value,
+        Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    };
+    if let Err(error) = transaction.commit().await {
+        return SynesthesiaError::sqlx(error).response(request_id_value);
+    }
+
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+        Json(LeaderboardPublishResponse {
+            published: true,
+            display_name,
+            rank,
+            best_elapsed_ms,
         }),
     )
         .into_response()
@@ -796,11 +1024,41 @@ fn validate_start(payload: &StartRunRequest) -> Result<(), ()> {
             .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
         || payload.app_version.trim().is_empty()
         || payload.app_version.len() > 64
+        || (payload.attempt_id.is_some()
+            && clean_attempt_id(payload.attempt_id.as_deref()).is_none())
         || (payload.locale.is_some() && clean_locale(payload.locale.as_deref()).is_none())
     {
         return Err(());
     }
     Ok(())
+}
+
+fn clean_attempt_id(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn clean_leaderboard_name(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let length = normalized.chars().count();
+    if !(2..=20).contains(&length)
+        || !normalized.chars().all(|character| {
+            character.is_alphanumeric()
+                || character == ' '
+                || matches!(character, '_' | '-' | '.' | '\'')
+        })
+    {
+        return None;
+    }
+    Some(normalized)
 }
 
 fn clean_locale(value: Option<&str>) -> Option<String> {
@@ -850,5 +1108,21 @@ mod tests {
     fn public_identifiers_are_bounded() {
         assert!(clean_locale(Some("pl-PL")).is_some());
         assert!(clean_locale(Some("pl/PL")).is_none());
+        assert_eq!(
+            clean_attempt_id(Some("attempt_01-A")),
+            Some("attempt_01-A".to_owned())
+        );
+        assert!(clean_attempt_id(Some("bad/attempt")).is_none());
+    }
+
+    #[test]
+    fn leaderboard_names_are_public_safe_and_human() {
+        assert_eq!(
+            clean_leaderboard_name("  Wojtek   B. "),
+            Some("Wojtek B.".to_owned())
+        );
+        assert_eq!(clean_leaderboard_name("Żółw-7"), Some("Żółw-7".to_owned()));
+        assert!(clean_leaderboard_name("<script>").is_none());
+        assert!(clean_leaderboard_name("x").is_none());
     }
 }

@@ -698,8 +698,8 @@ paths:
   /public/synesthesia/runs:
     post:
       operationId: startSynesthesiaRun
-      summary: Start or resume a pseudonymous Synesthesia album run
-      description: Rotates the bearer run token for the same installation and campaign while preserving ordered progress. No fan identity or marketing consent is created.
+      summary: Start or resume one pseudonymous Synesthesia album attempt
+      description: Rotates the bearer run token for the same installation, campaign and attempt_id while preserving ordered progress. A fresh attempt_id creates a replay that can improve the installation's leaderboard best. No fan identity or marketing consent is created.
       requestBody:
         required: true
         content:
@@ -722,6 +722,53 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /public/synesthesia/leaderboard:
+    get:
+      operationId: listSynesthesiaLeaderboard
+      summary: Read the public Synesthesia best-time leaderboard
+      description: Returns only rank, opted-in display name and the best completed elapsed time per pseudonymous installation. No run, install, fan or e-mail identifier is exposed.
+      parameters:
+      - in: query
+        name: limit
+        schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        '200':
+          description: Best completed public runs ordered by elapsed time.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: 'public, max-age=15, s-maxage=30, stale-while-revalidate=60' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaLeaderboardResponse' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/synesthesia/runs/{run_id}/leaderboard:
+    post:
+      operationId: publishSynesthesiaLeaderboardResult
+      summary: Opt a completed Synesthesia installation into the public leaderboard
+      description: Authenticates with the completed run token, stores one bounded public display name for completed attempts on the same pseudonymous installation, and returns the installation's current best rank. E-mail and fan identity are never published.
+      security:
+      - synesthesiaRunBearer: []
+      parameters:
+      - $ref: '#/components/parameters/SynesthesiaRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SynesthesiaLeaderboardPublishRequest' }
+      responses:
+        '200':
+          description: Publication accepted and current best rank returned.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaLeaderboardPublishResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/synesthesia/runs/{run_id}/rooms/{room_id}:
     post:
       operationId: recordSynesthesiaRoom
@@ -759,6 +806,7 @@ paths:
     post:
       operationId: completeSynesthesiaRun
       summary: Seal a fully recorded eleven-room Synesthesia run
+      description: The submitted total must exactly match the sum of the eleven recorded room elapsed times; the public leaderboard never affects reward-draw eligibility.
       security:
       - synesthesiaRunBearer: []
       parameters:
@@ -5342,6 +5390,7 @@ components:
         campaign_slug: { type: string, const: virya-synesthesia-album-v1 }
         install_id: { type: string, minLength: 24, maxLength: 128 }
         app_version: { type: string, minLength: 1, maxLength: 64 }
+        attempt_id: { type: [string, 'null'], minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
         locale: { type: [string, 'null'], maxLength: 35 }
     SynesthesiaRunStartResponse:
       type: object
@@ -5480,6 +5529,38 @@ components:
         passes_issued: { type: integer, format: int64, minimum: 0 }
         passes_claimed: { type: integer, format: int64, minimum: 0 }
         passes_redeemed: { type: integer, format: int64, minimum: 0 }
+    SynesthesiaLeaderboardEntry:
+      type: object
+      additionalProperties: false
+      required: [rank, display_name, elapsed_ms]
+      properties:
+        rank: { type: integer, minimum: 1, maximum: 50 }
+        display_name: { type: string, minLength: 2, maxLength: 20 }
+        elapsed_ms: { type: integer, format: int64, minimum: 11000, maximum: 86400000 }
+    SynesthesiaLeaderboardResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/SynesthesiaLeaderboardEntry' }
+    SynesthesiaLeaderboardPublishRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      properties:
+        display_name: { type: string, minLength: 2, maxLength: 20 }
+    SynesthesiaLeaderboardPublishResponse:
+      type: object
+      additionalProperties: false
+      required: [published, display_name, rank, best_elapsed_ms]
+      properties:
+        published: { type: boolean, const: true }
+        display_name: { type: string, minLength: 2, maxLength: 20 }
+        rank: { type: integer, format: int64, minimum: 1 }
+        best_elapsed_ms: { type: integer, format: int64, minimum: 11000, maximum: 86400000 }
     SynesthesiaRewardEntryRequest:
       type: object
       additionalProperties: false

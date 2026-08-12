@@ -16,6 +16,8 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
             '/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}',
             '/v1/public/synesthesia/runs/{run_id}/complete',
             '/v1/public/synesthesia/reward-claims',
+            '/v1/public/synesthesia/leaderboard',
+            '/v1/public/synesthesia/runs/{run_id}/leaderboard',
         ):
             self.assertIn(path, router)
         self.assertIn('synesthesia_runs', migration)
@@ -30,6 +32,10 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         self.assertIn('opens_at <= now()', api)
         self.assertIn('closes_at > now()', api)
         self.assertIn('reward_draws_synesthesia_live_ref_uidx', migration)
+        leaderboard_migration = (ROOT / 'migrations/0044_synesthesia_leaderboard.sql').read_text()
+        self.assertIn('attempt_id', leaderboard_migration)
+        self.assertIn('leaderboard_name', leaderboard_migration)
+        self.assertNotIn('normalized_email', leaderboard_migration)
 
     def test_draw_is_fixed_to_five_equal_entries(self):
         validation = (ROOT / 'crates/crowdrelay-api/src/commerce/validation.rs').read_text()
@@ -65,6 +71,8 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         spec = (ROOT / 'openapi/openapi.yaml').read_text()
         self.assertIn('/public/synesthesia/runs:', spec)
         self.assertIn('/public/synesthesia/reward-claims:', spec)
+        self.assertIn('/public/synesthesia/leaderboard:', spec)
+        self.assertIn('SynesthesiaLeaderboardResponse:', spec)
         self.assertIn('SynesthesiaRewardEntryRequest:', spec)
         self.assertIn('synesthesia_completion', spec)
         self.assertIn('eligibility_ref:', spec)
