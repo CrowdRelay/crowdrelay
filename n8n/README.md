@@ -46,6 +46,7 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 | `viryaos.funding.package_requested` | render the application package from supplied canonical facts and report `package_ready` |
 | `viryaos.funding.submission_requested` | submit only the explicitly human-approved ready package, then report `submitted` |
 | `viryaos.autopilot.approval_requested` | notify the operator once that an action needs a decision |
+| `viryaos.ops.status_changed` | deliver the already-deduplicated operational open/recovered status; do not implement queue thresholds or retry policy |
 | `viryaos.fan_lifecycle.message_requested` | deliver deterministic welcome/follow-up/reactivation copy to the already consented fan identity supplied by CrowdRelay |
 | `viryaos.booking.outreach_requested` | deliver the already-authorized booking initial/follow-up message |
 | `viryaos.outreach.requested` | deliver the already-authorized press, review, patronage or endorsement message |

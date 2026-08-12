@@ -656,6 +656,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.outreach.requested" => "outreach.send",
         "viryaos.content.artifact_requested" => "content.artifact",
         "viryaos.show.task_attention_required" => "show.escalation",
+        "viryaos.ops.status_changed" => "ops.alert",
         "viryaos.promotion.budget_change_requested" => "promotion.budget",
         "viryaos.opportunity.application_requested" => "opportunity.application",
         "viryaos.funding.package_requested" => "funding.package",

@@ -55,7 +55,7 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("SynesthesiaLeaderboardResponse:", spec)
         self.assertIn("SynesthesiaLeaderboardPublishResponse:", spec)
         self.assertNotIn("SynesthesiaLeaderboardPublishRequest:", spec)
-        self.assertIn("SCHEMA_VERSION: u32 = 45", meta)
+        self.assertIn("SCHEMA_VERSION: u32 = 46", meta)
         self.assertIn('"synesthesia_leaderboard_v1"', meta)
 
 

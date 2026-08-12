@@ -19,7 +19,11 @@ use time::OffsetDateTime;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::{IDEMPOTENCY_KEY, Problem, request_id};
+use crate::{
+    IDEMPOTENCY_KEY, Problem,
+    ops_summary::{QueueSummary, WatchdogSummary},
+    request_id,
+};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const DEFAULT_PAGE_SIZE: i64 = 50;
@@ -58,6 +62,7 @@ impl OpsState {
 pub struct OpsSummary {
     outbox: QueueSummary,
     deliveries: QueueSummary,
+    watchdog: WatchdogSummary,
     http: HttpRequestSummary,
     database: DatabaseRuntimeSummary,
     area: AreaRuntimeSummary,
@@ -97,7 +102,6 @@ pub struct DatabaseRuntimeSummary {
     io_max_combine_limit_bytes: Option<i64>,
     async_io_active: bool,
 }
-
 #[derive(Debug, FromRow)]
 struct DatabaseRuntimeRow {
     server_version_num: i32,
@@ -118,16 +122,6 @@ pub struct HttpRequestSummary {
     average_ms: u64,
     p50_ms: u64,
     p95_ms: u64,
-}
-
-#[derive(Debug, Serialize, FromRow)]
-pub struct QueueSummary {
-    pending: i64,
-    processing: i64,
-    delivered_24h: i64,
-    dead: i64,
-    cancelled: i64,
-    oldest_pending_seconds: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -986,6 +980,10 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
     .fetch_one(&state.pool)
     .await
     .map_err(OpsError::sqlx)?;
+    let watchdog =
+        crate::ops_summary::load_watchdog_summary(&state.pool, state.workspace_id.into_uuid())
+            .await
+            .map_err(OpsError::sqlx)?;
 
     let database = sqlx::query_as::<_, DatabaseRuntimeRow>(
         r#"
@@ -1058,6 +1056,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             cancelled: row.delivery_cancelled,
             oldest_pending_seconds: row.delivery_oldest_pending_seconds,
         },
+        watchdog,
         http: http_request_summary(crate::http_metrics().snapshot()),
         database,
         area: AreaRuntimeSummary {
@@ -1068,7 +1067,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             stale_ticket_reward_reservations: area.stale_ticket_reward_reservations,
             legacy_imported_players: area.legacy_imported_players,
         },
-        schema_version: 45,
+        schema_version: 46,
         release: option_env!("CROWDRELAY_RELEASE")
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_owned(),

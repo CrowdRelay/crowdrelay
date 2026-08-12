@@ -44,7 +44,7 @@ checks = {
     ),
     "meta": (
         ROOT / "crates/crowdrelay-api/src/meta.rs",
-        ["SCHEMA_VERSION: u32 = 45", '"staff_device_sessions_v2"'],
+        ["SCHEMA_VERSION: u32 = 46", '"staff_device_sessions_v2"'],
     ),
     "metrics": (
         ROOT / "crates/crowdrelay-api/src/lib.rs",

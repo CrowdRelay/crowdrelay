@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 const API_VERSION: &str = "1";
-const SCHEMA_VERSION: u32 = 45;
+const SCHEMA_VERSION: u32 = 46;
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
 
 #[derive(Debug, Serialize)]
@@ -55,6 +55,6 @@ mod tests {
 
     #[test]
     fn compatibility_contract_tracks_latest_migration() {
-        assert_eq!(SCHEMA_VERSION, 45);
+        assert_eq!(SCHEMA_VERSION, 46);
     }
 }
