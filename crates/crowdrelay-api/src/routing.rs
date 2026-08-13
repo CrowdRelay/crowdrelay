@@ -471,6 +471,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::executor_heartbeat),
         )
         .route(
+            "/v1/internal/autopilot/actions/{action_id}/execution-claim",
+            post(autopilot::execution_claim),
+        )
+        .route(
             "/v1/internal/autopilot/actions/{action_id}/execution-report",
             post(autopilot::execution_report),
         )

@@ -166,7 +166,8 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::ExecuteReleaseMilestone { .. }
         | AutopilotActionPayload::ApplyLiveOpportunity { .. }
         | AutopilotActionPayload::PrepareFundingPackage { .. }
-        | AutopilotActionPayload::SubmitFundingApplication { .. } => None,
+        | AutopilotActionPayload::SubmitFundingApplication { .. }
+        | AutopilotActionPayload::SendTeamAssignmentEmail { .. } => None,
     };
     let Some((kind, subject_id, baseline_value, due_at)) = plan else {
         return Ok(());
@@ -277,6 +278,9 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::ApplyLiveOpportunity { score, .. } => ("live_opportunity_score",f64::from(*score),None),
         AutopilotActionPayload::PrepareFundingPackage { .. } => ("funding_package_requested",1.0,None),
         AutopilotActionPayload::SubmitFundingApplication { .. } => ("funding_submission_requested",1.0,None),
+        AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {
+            ("team_assignment_email_requested", 1.0, None)
+        }
     };
     sqlx::query(
         r#"
@@ -687,6 +691,7 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::ApplyLiveOpportunity { .. }
                 | AutopilotActionPayload::PrepareFundingPackage { .. }
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
+                | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
         ),
     }
 }
@@ -709,6 +714,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.funding.package_requested" => "funding.package",
         "viryaos.funding.submission_requested" => "funding.submit",
         "viryaos.calendar.upsert_requested" => "calendar.upsert",
+        "viryaos.team.assignment_email_requested" => "team.email",
         _ => "unknown",
     }
 }
@@ -757,6 +763,41 @@ pub(in crate::autopilot) async fn ensure_executor_capability(
     } else {
         Err(RepositoryError::Unavailable)
     }
+}
+
+/// Strict capability gate for new external features. Unlike the backwards-
+/// compatible gate above, absence of the registry is unavailable: a task must
+/// never be committed unless an active executor explicitly advertises it.
+pub(in crate::autopilot) async fn ensure_executor_capability_strict(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    capability: &str,
+) -> Result<(), RepositoryError> {
+    let available = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM viryaos_executor_capabilities capability
+            JOIN viryaos_executor_instances executor
+              ON executor.workspace_id=capability.workspace_id
+             AND executor.executor_id=capability.executor_id
+            LEFT JOIN viryaos_executor_circuit_breakers breaker
+              ON breaker.workspace_id=executor.workspace_id
+             AND breaker.executor_id=executor.executor_id
+            WHERE capability.workspace_id=$1
+              AND capability.capability=$2
+              AND capability.expires_at>now()
+              AND executor.expires_at>now()
+              AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(capability)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if available { Ok(()) } else { Err(RepositoryError::Unavailable) }
 }
 
 pub(in crate::autopilot) async fn reserve_contact_window(

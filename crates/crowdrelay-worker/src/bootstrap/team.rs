@@ -32,7 +32,6 @@ pub async fn bootstrap_team_operations(
                     workspace_id, normalized_email, display_name, role, status
                 ) VALUES ($1, $2, $3, 'staff', 'active')
                 ON CONFLICT (workspace_id, normalized_email) DO UPDATE SET
-                    display_name = EXCLUDED.display_name,
                     status = 'active'
                 RETURNING id
                 "#,
@@ -76,23 +75,31 @@ pub async fn bootstrap_team_operations(
 }
 
 fn team_member_profile(member_key: &str) -> Option<(&'static str, Vec<String>)> {
+    // Stable slot-to-skill mapping only. Human names stay in runtime member data.
     match member_key {
-        "wojtek" => Some((
-            "Wojtek",
-            ["general", "operations", "booking", "approval", "technical", "people"].into_iter().map(str::to_owned).collect(),
+        "member_1" => Some((
+            "Team Member 1",
+            ["general", "operations", "booking", "approval", "technical", "people"]
+                .into_iter().map(str::to_owned).collect(),
         )),
-        "lubek" => Some((
-            "Lubek",
-            ["visual", "video", "photography", "social"].into_iter().map(str::to_owned).collect(),
+        "member_2" => Some((
+            "Team Member 2",
+            ["visual", "video", "photography", "social"]
+                .into_iter().map(str::to_owned).collect(),
         )),
-        "kuba" => Some(("Kuba", ["english_copy", "polish_copy"].into_iter().map(str::to_owned).collect())),
-        "marcin" => Some((
-            "Marcin",
-            ["operations", "booking", "approval", "people"].into_iter().map(str::to_owned).collect(),
+        "member_3" => Some((
+            "Team Member 3",
+            ["english_copy", "polish_copy"].into_iter().map(str::to_owned).collect(),
         )),
-        "marek" => Some((
-            "Marek",
-            ["operations", "approval", "people", "polish_copy"].into_iter().map(str::to_owned).collect(),
+        "member_4" => Some((
+            "Team Member 4",
+            ["operations", "booking", "approval", "people"]
+                .into_iter().map(str::to_owned).collect(),
+        )),
+        "member_5" => Some((
+            "Team Member 5",
+            ["operations", "approval", "people", "polish_copy"]
+                .into_iter().map(str::to_owned).collect(),
         )),
         _ => None,
     }

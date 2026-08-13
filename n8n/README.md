@@ -53,10 +53,12 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 | `viryaos.beacon.discovery_requested` | scout public local sources for the requested event/market and return only source-backed Beacon candidates through the admin Beacon upsert; Gemini may summarize, never invent/verify a destination |
 | `viryaos.beacon.outreach_requested` | deliver the already-authorized local Beacon pitch/follow-up; personalize tone/local hook only from supplied verified facts |
 | `viryaos.show_growth.requested` | execute one already-selected external attendance lever; verify free listings/distribution, configure free audience-capture surfaces, use provider-native free fan pushes (Bandsintown Posts/free-quota Email Builder + Spotify Artist Pick manual step), run verified-Beacon partner cross-promo and factual social proof; return public receipts or explicit human `manual_steps`, never buy placement or invent proof |
-| `viryaos.team.assignment_notification_requested` | send the assigned band member one friendly what/why/deadline/link notification |
-| `viryaos.team.assignment_reminder_requested` | remind the current owner about the same canonical task; never create a second task or change its owner |
+| `viryaos.team.assignment_email_requested` | send the assigned band member one friendly what/why/deadline/link email; initial notification and reminders share the same provider-confirmed execution contract |
 
 For Gmail-backed booking/outreach, provider correlation is durable in CrowdRelay's execution-report ledger. The private executor writes the Gmail `threadId` as `provider_reference`, and inbound monitoring resolves that reference through CrowdRelay before reporting the deterministic `received` disposition. n8n keeps no durable business-correlation map and does not infer positive/negative intent.
+
+
+For non-idempotent provider calls (Gmail, Discord, Drive), the executor must first claim the exact action through `/v1/internal/autopilot/actions/{action_id}/execution-claim`. Only a `claimed` disposition may perform the provider call. `in_flight` or `ambiguous` is fail-closed: do not resend automatically. A successful provider call reports the returned `claim_token` with its terminal execution receipt. Calendar uses a deterministic provider event ID and remains safely replayable, but still reports provider completion.
 
 Executors must use the CrowdRelay event ID or supplied business key as their idempotency key. They must not rescore a lead, change pricing policy, infer authority, or silently broaden the requested action. A provider failure is a delivery failure; it is not permission for n8n to invent an alternative business action.
 

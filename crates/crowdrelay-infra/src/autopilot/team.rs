@@ -1,7 +1,8 @@
-//! Thin human-handoff index for Autopilot approvals.
+//! Thin human-handoff index for work that genuinely needs a band member.
 //!
-//! Domain actions remain authoritative. This adapter only assigns an owner and
-//! emits bounded notification/reminder intents; it never invents a second task.
+//! Domain actions and show checklist rows remain authoritative. This adapter
+//! only assigns an owner, schedules bounded reminders, and queues provider-
+//! confirmed email actions through the existing Autopilot execution plane.
 
 use super::*;
 use crowdrelay_domain::{
@@ -30,17 +31,27 @@ struct UnassignedApprovalRow {
     id: Uuid,
     context: String,
     action_kind: String,
-    subject_kind: String,
     subject_id: Uuid,
     approval_expires_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
+struct UnassignedShowTaskRow {
+    event_id: Uuid,
+    event_title: String,
+    task_key: String,
+    starts_at: OffsetDateTime,
+    due_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
 struct ReminderRow {
     assignment_id: Uuid,
-    action_id: Option<Uuid>,
     action_kind: Option<String>,
     context: Option<String>,
+    source_kind: String,
+    source_ref: Option<String>,
+    event_title: Option<String>,
     display_name: String,
     normalized_email: String,
     due_at: Option<OffsetDateTime>,
@@ -48,8 +59,10 @@ struct ReminderRow {
 }
 
 impl PostgresAutopilotRepository {
-    /// Assigns new approval handoffs to a suitable, least-loaded team member.
-    /// Returns the number of newly assigned items.
+    /// Reconciles approvals and genuinely manual show-checklist work into one
+    /// owner index. An assignment is committed only when the `team.email`
+    /// executor capability is live, so production cannot silently create work
+    /// without a notification path.
     pub async fn reconcile_team_handoffs(
         &self,
         workspace_id: WorkspaceId,
@@ -58,42 +71,18 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
             configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
-            // The assignment is a handoff index only. As soon as the underlying
-            // approval leaves `awaiting_approval`, stop reminders and close it.
-            sqlx::query(
-                r#"
-                UPDATE viryaos_team_assignments assignment
-                SET status = CASE
-                        WHEN action.status IN ('queued','processing','succeeded') THEN 'done'
-                        ELSE 'cancelled'
-                    END,
-                    completed_at = CASE
-                        WHEN action.status IN ('queued','processing','succeeded') THEN $2
-                        ELSE NULL
-                    END,
-                    next_reminder_at = NULL
-                FROM viryaos_autopilot_actions action
-                WHERE assignment.workspace_id=$1
-                  AND assignment.workspace_id=action.workspace_id
-                  AND assignment.action_id=action.id
-                  AND assignment.status='open'
-                  AND action.status <> 'awaiting_approval'
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx)?;
+
+            close_resolved_assignments(&mut tx, workspace_id, now).await?;
             let team = load_team_routing(&mut tx, workspace_id, now).await?;
             if team.is_empty() {
                 tx.commit().await.map_err(map_sqlx)?;
                 return Ok(0);
             }
+            super::ensure_executor_capability_strict(&mut tx, workspace_id, "team.email").await?;
 
-            let actions = sqlx::query_as::<_, UnassignedApprovalRow>(
+            let approvals = sqlx::query_as::<_, UnassignedApprovalRow>(
                 r#"
-                SELECT action.id, action.context, action.action_kind, action.subject_kind,
+                SELECT action.id, action.context, action.action_kind,
                        action.subject_id, action.approval_expires_at
                 FROM viryaos_autopilot_actions action
                 LEFT JOIN viryaos_team_assignments assignment
@@ -114,43 +103,65 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
+            let show_tasks = sqlx::query_as::<_, UnassignedShowTaskRow>(
+                r#"
+                WITH task(item_key) AS (VALUES
+                    ('staff_assigned'),('offline_snapshot_ready'),('gate_device_charged'),
+                    ('backup_device_ready'),('network_tested'),('guestlist_checked'),
+                    ('post_show_reconciliation'),('post_show_report')
+                )
+                SELECT event.id event_id, event.title event_title, task.item_key task_key,
+                       event.starts_at,
+                       CASE WHEN task.item_key IN ('post_show_reconciliation','post_show_report')
+                            THEN event.starts_at + INTERVAL '36 hours'
+                            ELSE event.starts_at - INTERVAL '2 hours' END due_at
+                FROM events event CROSS JOIN task
+                LEFT JOIN show_checklist_items checklist
+                  ON checklist.workspace_id=event.workspace_id
+                 AND checklist.event_id=event.id AND checklist.item_key=task.item_key
+                LEFT JOIN viryaos_team_assignments assignment
+                  ON assignment.workspace_id=event.workspace_id
+                 AND assignment.source_kind='show_task'
+                 AND assignment.source_id=event.id
+                 AND assignment.source_ref=task.item_key
+                WHERE event.workspace_id=$1
+                  AND event.status IN ('published','completed')
+                  AND COALESCE(checklist.status,'pending') <> 'done'
+                  AND assignment.id IS NULL
+                  AND event.starts_at BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '7 days'
+                  AND CASE
+                      WHEN task.item_key IN ('post_show_reconciliation','post_show_report')
+                          THEN $2 >= event.starts_at + INTERVAL '6 hours'
+                      ELSE $2 >= event.starts_at - INTERVAL '72 hours'
+                  END
+                ORDER BY due_at, event.id, task.item_key
+                FOR UPDATE OF event SKIP LOCKED
+                LIMIT 32
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+
             let mut mutable_team = team;
             let mut assigned = 0_u32;
-            for action in actions {
+            for action in approvals {
                 let need = assignment_need(&action.context, &action.action_kind);
-                let snapshots = mutable_team
-                    .iter()
-                    .map(|member| TeamMemberRoutingSnapshot {
-                        member_id: WorkspaceMemberId::from_uuid(member.member_id),
-                        member_key: member.member_key.clone(),
-                        active: member.active,
-                        skills: member
-                            .skills
-                            .iter()
-                            .filter_map(|skill| parse_team_skill(skill))
-                            .collect(),
-                        open_assignments: bounded_u16(member.open_assignments),
-                        recent_assignments: bounded_u16(member.recent_assignments),
-                        capacity_basis_points: bounded_u16(i64::from(member.capacity_basis_points)),
-                    })
-                    .collect::<Vec<_>>();
-                let Some(decision) = select_team_assignee(&snapshots, need) else {
+                let Some(member_index) = select_member_index(&mutable_team, need) else {
                     continue;
                 };
-                let Some(member) = mutable_team
-                    .iter_mut()
-                    .find(|member| member.member_id == decision.member_id.into_uuid())
-                else {
-                    continue;
-                };
+                let member = mutable_team
+                    .get_mut(member_index)
+                    .ok_or(RepositoryError::Unexpected)?;
                 let assignment_id = Uuid::now_v7();
-                let next_reminder_at = first_reminder_at(now, action.approval_expires_at);
                 let inserted = sqlx::query_scalar::<_, Uuid>(
                     r#"
                     INSERT INTO viryaos_team_assignments (
-                        id, workspace_id, action_id, source_kind, source_id,
+                        id, workspace_id, action_id, source_kind, source_id, source_ref,
                         assignee_member_id, required_skill, due_at, next_reminder_at
-                    ) VALUES ($1,$2,$3,'autopilot_action',$4,$5,$6,$7,$8)
+                    ) VALUES ($1,$2,$3,'autopilot_action',$4,NULL,$5,$6,$7,$8)
                     ON CONFLICT (workspace_id, action_id) DO NOTHING
                     RETURNING id
                     "#,
@@ -162,7 +173,7 @@ impl PostgresAutopilotRepository {
                 .bind(member.member_id)
                 .bind(need.primary_skill.as_str())
                 .bind(action.approval_expires_at)
-                .bind(next_reminder_at)
+                .bind(first_reminder_at(now, action.approval_expires_at))
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(map_sqlx)?;
@@ -170,44 +181,90 @@ impl PostgresAutopilotRepository {
                     continue;
                 }
 
-                emit_team_notification(
+                queue_team_email_action(
                     &mut tx,
                     workspace_id,
-                    "viryaos.team.assignment_notification_requested",
-                    json!({
-                        "assignment_id": assignment_id,
-                        "action_id": action.id,
-                        "context": action.context,
-                        "action_kind": action.action_kind,
-                        "subject_kind": action.subject_kind,
-                        "subject_id": action.subject_id,
-                        "assignee": {
-                            "member_key": member.member_key,
-                            "display_name": member.display_name,
-                            "email": member.normalized_email,
-                        },
-                        "due_at": action.approval_expires_at,
-                        "action_url_path": "/staff/control/",
-                        "message_contract": {
-                            "tone": "friendly_concise_human",
-                            "include": ["what_to_do", "why_it_matters", "deadline", "action_link"],
-                            "do_not_invent_business_facts": true
-                        }
-                    }),
+                    assignment_id,
+                    &action.context,
+                    &member.normalized_email,
+                    &member.display_name,
+                    friendly_action_title(&action.action_kind),
+                    format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.action_kind),
+                    action.approval_expires_at,
+                    0,
+                    now,
                 )
                 .await?;
                 member.open_assignments = member.open_assignments.saturating_add(1);
                 member.recent_assignments = member.recent_assignments.saturating_add(1);
                 assigned = assigned.saturating_add(1);
             }
+
+            for task in show_tasks {
+                let need = assignment_need("show_operations", &task.task_key);
+                let Some(member_index) = select_member_index(&mutable_team, need) else {
+                    continue;
+                };
+                let member = mutable_team
+                    .get_mut(member_index)
+                    .ok_or(RepositoryError::Unexpected)?;
+                let assignment_id = Uuid::now_v7();
+                let inserted = sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO viryaos_team_assignments (
+                        id, workspace_id, action_id, source_kind, source_id, source_ref,
+                        assignee_member_id, required_skill, due_at, next_reminder_at
+                    ) VALUES ($1,$2,NULL,'show_task',$3,$4,$5,$6,$7,$8)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    "#,
+                )
+                .bind(assignment_id)
+                .bind(workspace_id.into_uuid())
+                .bind(task.event_id)
+                .bind(&task.task_key)
+                .bind(member.member_id)
+                .bind(need.primary_skill.as_str())
+                .bind(task.due_at)
+                .bind(first_reminder_at(now, Some(task.due_at)))
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx)?;
+                if inserted.is_none() {
+                    continue;
+                }
+
+                queue_team_email_action(
+                    &mut tx,
+                    workspace_id,
+                    assignment_id,
+                    "show_operations",
+                    &member.normalized_email,
+                    &member.display_name,
+                    friendly_show_task_title(&task.task_key),
+                    format!(
+                        "Koncert: {}. Termin koncertu: {}.",
+                        task.event_title, task.starts_at
+                    ),
+                    Some(task.due_at),
+                    0,
+                    now,
+                )
+                .await?;
+                member.open_assignments = member.open_assignments.saturating_add(1);
+                member.recent_assignments = member.recent_assignments.saturating_add(1);
+                assigned = assigned.saturating_add(1);
+            }
+
             tx.commit().await.map_err(map_sqlx)?;
             Ok(assigned)
         })
         .await
     }
 
-    /// Emits friendly reminders only after their durable schedule becomes due.
-    /// Returns the number of reminders emitted in this bounded cycle.
+    /// Queues friendly reminders only after their durable schedule becomes due.
+    /// The actual email is still an Autopilot action and is only complete after
+    /// a provider-confirmed Gmail receipt.
     pub async fn dispatch_team_handoff_reminders(
         &self,
         workspace_id: WorkspaceId,
@@ -216,10 +273,12 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
             configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
+            super::ensure_executor_capability_strict(&mut tx, workspace_id, "team.email").await?;
             let rows = sqlx::query_as::<_, ReminderRow>(
                 r#"
-                SELECT assignment.id assignment_id, assignment.action_id,
-                       action.action_kind, action.context,
+                SELECT assignment.id assignment_id,
+                       action.action_kind, action.context, assignment.source_kind,
+                       assignment.source_ref, event.title event_title,
                        member.display_name, member.normalized_email,
                        assignment.due_at, assignment.reminder_count
                 FROM viryaos_team_assignments assignment
@@ -229,6 +288,10 @@ impl PostgresAutopilotRepository {
                 LEFT JOIN viryaos_autopilot_actions action
                   ON action.workspace_id=assignment.workspace_id
                  AND action.id=assignment.action_id
+                LEFT JOIN events event
+                  ON assignment.source_kind='show_task'
+                 AND event.workspace_id=assignment.workspace_id
+                 AND event.id=assignment.source_id
                 WHERE assignment.workspace_id=$1
                   AND assignment.status='open'
                   AND assignment.next_reminder_at IS NOT NULL
@@ -246,17 +309,41 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
-            let mut emitted = 0_u32;
+            let mut queued = 0_u32;
             for row in rows {
+                let reminder_number = row.reminder_count.saturating_add(1);
                 let next = next_reminder_at(now, row.due_at, row.reminder_count);
+                let title = if row.source_kind == "show_task" {
+                    friendly_show_task_title(row.source_ref.as_deref().unwrap_or("show_task"))
+                } else {
+                    friendly_action_title(row.action_kind.as_deref().unwrap_or("approval"))
+                };
+                let detail = if let Some(event_title) = row.event_title.as_deref() {
+                    format!(
+                        "To zadanie dotyczące koncertu {event_title} nadal czeka na domknięcie."
+                    )
+                } else {
+                    "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned()
+                };
+                queue_team_email_action(
+                    &mut tx,
+                    workspace_id,
+                    row.assignment_id,
+                    row.context.as_deref().unwrap_or("show_operations"),
+                    &row.normalized_email,
+                    &row.display_name,
+                    title,
+                    detail,
+                    row.due_at,
+                    u8::try_from(reminder_number.clamp(1, 12)).unwrap_or(12),
+                    now,
+                )
+                .await?;
                 sqlx::query(
-                    r#"
-                    UPDATE viryaos_team_assignments
-                    SET last_reminded_at=$3,
-                        next_reminder_at=$4,
-                        reminder_count=reminder_count+1
-                    WHERE workspace_id=$1 AND id=$2 AND status='open'
-                    "#,
+                    r#"UPDATE viryaos_team_assignments
+                       SET last_reminded_at=$3, next_reminder_at=$4,
+                           reminder_count=reminder_count+1
+                       WHERE workspace_id=$1 AND id=$2 AND status='open'"#,
                 )
                 .bind(workspace_id.into_uuid())
                 .bind(row.assignment_id)
@@ -265,37 +352,152 @@ impl PostgresAutopilotRepository {
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx)?;
-                emit_team_notification(
-                    &mut tx,
-                    workspace_id,
-                    "viryaos.team.assignment_reminder_requested",
-                    json!({
-                        "assignment_id": row.assignment_id,
-                        "action_id": row.action_id,
-                        "context": row.context,
-                        "action_kind": row.action_kind,
-                        "assignee": {
-                            "display_name": row.display_name,
-                            "email": row.normalized_email,
-                        },
-                        "due_at": row.due_at,
-                        "action_url_path": "/staff/control/",
-                        "reminder_number": row.reminder_count.saturating_add(1),
-                        "message_contract": {
-                            "tone": "friendly_concise_human",
-                            "include": ["what_is_still_needed", "deadline", "action_link"],
-                            "avoid_guilt_or_pressure": true
-                        }
-                    }),
-                )
-                .await?;
-                emitted = emitted.saturating_add(1);
+                queued = queued.saturating_add(1);
             }
             tx.commit().await.map_err(map_sqlx)?;
-            Ok(emitted)
+            Ok(queued)
         })
         .await
     }
+}
+
+async fn close_resolved_assignments(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"UPDATE viryaos_team_assignments assignment
+           SET status = CASE WHEN action.status IN ('queued','processing','succeeded') THEN 'done' ELSE 'cancelled' END,
+               completed_at = CASE WHEN action.status IN ('queued','processing','succeeded') THEN $2 ELSE NULL END,
+               next_reminder_at = NULL
+           FROM viryaos_autopilot_actions action
+           WHERE assignment.workspace_id=$1 AND assignment.workspace_id=action.workspace_id
+             AND assignment.action_id=action.id AND assignment.status='open'
+             AND action.status <> 'awaiting_approval'"#,
+    )
+    .bind(workspace_id.into_uuid()).bind(now)
+    .execute(&mut **tx).await.map_err(map_sqlx)?;
+
+    sqlx::query(
+        r#"UPDATE viryaos_team_assignments assignment
+           SET status='done', completed_at=$2, next_reminder_at=NULL
+           FROM show_checklist_items checklist
+           WHERE assignment.workspace_id=$1 AND assignment.status='open'
+             AND assignment.source_kind='show_task'
+             AND checklist.workspace_id=assignment.workspace_id
+             AND checklist.event_id=assignment.source_id
+             AND checklist.item_key=assignment.source_ref
+             AND checklist.status='done'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    sqlx::query(
+        r#"UPDATE viryaos_team_assignments assignment
+           SET status='cancelled', completed_at=NULL, next_reminder_at=NULL
+           FROM events event
+           WHERE assignment.workspace_id=$1 AND assignment.status='open'
+             AND assignment.source_kind='show_task'
+             AND event.workspace_id=assignment.workspace_id
+             AND event.id=assignment.source_id
+             AND event.status NOT IN ('published','completed')"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn queue_team_email_action(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    assignment_id: Uuid,
+    context: &str,
+    recipient_email: &str,
+    recipient_name: &str,
+    task_title: String,
+    task_detail: String,
+    due_at: Option<OffsetDateTime>,
+    reminder_number: u8,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let suffix = if reminder_number == 0 {
+        "initial".to_owned()
+    } else {
+        format!("reminder-{reminder_number}")
+    };
+    let decision_key = format!("team-email-decision:{assignment_id}:{suffix}");
+    let idempotency_key = format!("team-email:{assignment_id}:{suffix}");
+    let decision_id =
+        if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+            r#"INSERT INTO viryaos_autopilot_decisions (
+               id, workspace_id, decision_key, context, subject_kind, subject_id,
+               decision_kind, confidence_basis_points, disposition, reason,
+               input_snapshot, policy_snapshot, recommendation, evaluated_at
+           ) VALUES ($1,$2,$3,$4,'team_assignment',$5,'team.email.route',10000,
+                     'auto_execute','Durable human handoff notification',
+                     $6,$7,$8,$9)
+           ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id"#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(&decision_key)
+        .bind(context)
+        .bind(assignment_id)
+        .bind(json!({"assignment_id":assignment_id,"reminder_number":reminder_number}))
+        .bind(json!({"provider_completion_required":true,"capability":"team.email"}))
+        .bind(json!({"send_friendly_email":true}))
+        .bind(now)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx)?
+        {
+            id
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM viryaos_autopilot_decisions WHERE workspace_id=$1 AND decision_key=$2",
+        ).bind(workspace_id.into_uuid()).bind(&decision_key)
+        .fetch_one(&mut **tx).await.map_err(map_sqlx)?
+        };
+
+    let payload = serde_json::to_value(AutopilotActionPayload::SendTeamAssignmentEmail {
+        assignment_id,
+        recipient_email: recipient_email.to_owned(),
+        recipient_name: recipient_name.to_owned(),
+        task_title,
+        task_detail,
+        due_at,
+        action_url_path: "/staff/control/".to_owned(),
+        reminder_number,
+    })
+    .map_err(|_| RepositoryError::Unexpected)?;
+
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions (
+               id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+               idempotency_key, payload, status, approved_at, approved_by, available_at
+           ) VALUES ($1,$2,$3,$4,'team.assignment.email','team_assignment',$5,$6,$7,
+                     'queued',$8,'system:team-router',$8)
+           ON CONFLICT (workspace_id, idempotency_key) DO NOTHING"#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(context)
+    .bind(assignment_id)
+    .bind(idempotency_key)
+    .bind(payload)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }
 
 async fn load_team_routing(
@@ -304,32 +506,45 @@ async fn load_team_routing(
     now: OffsetDateTime,
 ) -> Result<Vec<TeamRoutingRow>, RepositoryError> {
     sqlx::query_as::<_, TeamRoutingRow>(
-        r#"
-        SELECT profile.member_id, profile.member_key, member.display_name,
-               member.normalized_email, profile.active, profile.skills,
-               profile.capacity_basis_points,
-               COUNT(assignment.id) FILTER (WHERE assignment.status='open') open_assignments,
-               COUNT(assignment.id) FILTER (
-                   WHERE assignment.assigned_at >= $2 - INTERVAL '30 days'
-               ) recent_assignments
-        FROM viryaos_team_profiles profile
-        JOIN workspace_members member
-          ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
-        LEFT JOIN viryaos_team_assignments assignment
-          ON assignment.workspace_id=profile.workspace_id
-         AND assignment.assignee_member_id=profile.member_id
-        WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
-        GROUP BY profile.member_id, profile.member_key, member.display_name,
-                 member.normalized_email, profile.active, profile.skills,
-                 profile.capacity_basis_points
-        ORDER BY profile.member_key
-        "#,
+        r#"SELECT profile.member_id, profile.member_key, member.display_name,
+                  member.normalized_email, profile.active, profile.skills,
+                  profile.capacity_basis_points,
+                  COUNT(assignment.id) FILTER (WHERE assignment.status='open') open_assignments,
+                  COUNT(assignment.id) FILTER (WHERE assignment.assigned_at >= $2 - INTERVAL '30 days') recent_assignments
+           FROM viryaos_team_profiles profile
+           JOIN workspace_members member
+             ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
+           LEFT JOIN viryaos_team_assignments assignment
+             ON assignment.workspace_id=profile.workspace_id AND assignment.assignee_member_id=profile.member_id
+           WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
+           GROUP BY profile.member_id, profile.member_key, member.display_name,
+                    member.normalized_email, profile.active, profile.skills, profile.capacity_basis_points
+           ORDER BY profile.member_key"#,
     )
-    .bind(workspace_id.into_uuid())
-    .bind(now)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(map_sqlx)
+    .bind(workspace_id.into_uuid()).bind(now)
+    .fetch_all(&mut **tx).await.map_err(map_sqlx)
+}
+
+fn select_member_index(team: &[TeamRoutingRow], need: TeamAssignmentNeed) -> Option<usize> {
+    let snapshots = team
+        .iter()
+        .map(|member| TeamMemberRoutingSnapshot {
+            member_id: WorkspaceMemberId::from_uuid(member.member_id),
+            member_key: member.member_key.clone(),
+            active: member.active,
+            skills: member
+                .skills
+                .iter()
+                .filter_map(|skill| parse_team_skill(skill))
+                .collect(),
+            open_assignments: bounded_u16(member.open_assignments),
+            recent_assignments: bounded_u16(member.recent_assignments),
+            capacity_basis_points: bounded_u16(i64::from(member.capacity_basis_points)),
+        })
+        .collect::<Vec<_>>();
+    let decision = select_team_assignee(&snapshots, need)?;
+    team.iter()
+        .position(|member| member.member_id == decision.member_id.into_uuid())
 }
 
 pub(super) fn assignment_need(context: &str, action_kind: &str) -> TeamAssignmentNeed {
@@ -385,6 +600,29 @@ pub(super) fn assignment_need(context: &str, action_kind: &str) -> TeamAssignmen
     }
 }
 
+pub(super) fn friendly_action_title(action_kind: &str) -> String {
+    match action_kind {
+        "opportunity.live.apply" => "Sprawdź i zatwierdź zgłoszenie koncertowe".into(),
+        "funding.application.submit" => "Sprawdź i zatwierdź wysłanie wniosku".into(),
+        "promotion.budget_change.request" => "Sprawdź zmianę budżetu promocji".into(),
+        other => format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
+    }
+}
+
+fn friendly_show_task_title(task_key: &str) -> String {
+    match task_key {
+        "staff_assigned" => "Potwierdź obsadę koncertu".into(),
+        "offline_snapshot_ready" => "Przygotuj offline snapshot na koncert".into(),
+        "gate_device_charged" => "Naładuj urządzenie wejściowe".into(),
+        "backup_device_ready" => "Przygotuj urządzenie zapasowe".into(),
+        "network_tested" => "Przetestuj internet na wejściu".into(),
+        "guestlist_checked" => "Sprawdź guestlistę".into(),
+        "post_show_reconciliation" => "Zrób rozliczenie po koncercie".into(),
+        "post_show_report" => "Domknij raport po koncercie".into(),
+        other => format!("Domknij zadanie koncertowe: {}", other.replace('_', " ")),
+    }
+}
+
 fn parse_team_skill(value: &str) -> Option<TeamSkill> {
     match value {
         "general" => Some(TeamSkill::General),
@@ -432,26 +670,4 @@ fn next_reminder_at(
     };
     let candidate = now + TimeDuration::hours(hours);
     due.and_then(|due_at| (candidate < due_at).then_some(candidate))
-}
-
-pub(super) async fn emit_team_notification(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    event_type: &'static str,
-    payload: Value,
-) -> Result<(), RepositoryError> {
-    sqlx::query(
-        r#"
-        INSERT INTO outbox_events (
-            workspace_id, event_type, event_version, payload, max_attempts
-        ) VALUES ($1,$2,1,$3,12)
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(event_type)
-    .bind(payload)
-    .execute(&mut **tx)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(())
 }

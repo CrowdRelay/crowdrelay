@@ -1343,6 +1343,33 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/actions/{action_id}/execution-claim:
+    post:
+      operationId: claimAutopilotExecution
+      summary: Claim a provider execution attempt before a non-idempotent external call
+      description: A stale claimed attempt is intentionally returned as ambiguous rather than reissued, preventing duplicate provider side effects after an uncertain crash.
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: action_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExecutionClaimRequest' }
+      responses:
+        '200':
+          description: Execution claim state returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExecutionClaimMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/autopilot/actions/{action_id}/execution-report:
     post:
       operationId: recordAutopilotExecutionReport
@@ -6537,6 +6564,24 @@ components:
         metadata: { type: object, additionalProperties: true, maxProperties: 24 }
         observed_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
+    ExecutionClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [executor_id, occurred_at]
+      properties:
+        executor_id: { type: string, minLength: 1, maxLength: 120 }
+        occurred_at: { type: string, format: date-time }
+    ExecutionClaimMutation:
+      type: object
+      additionalProperties: false
+      required: [action_id, executor_id, disposition, attempt_number]
+      properties:
+        action_id: { type: string, format: uuid }
+        executor_id: { type: string }
+        disposition: { type: string, enum: [claimed, already_succeeded, in_flight, ambiguous] }
+        claim_token: { type: [string, 'null'], format: uuid }
+        attempt_number: { type: integer, format: int32, minimum: 1 }
+        provider_reference: { type: [string, 'null'], maxLength: 240 }
     ExecutionReportRequest:
       type: object
       additionalProperties: false
@@ -6545,6 +6590,7 @@ components:
         receipt_key: { type: string, minLength: 1, maxLength: 200 }
         executor_id: { type: string, minLength: 1, maxLength: 120 }
         status: { type: string, enum: [accepted, executing, succeeded, failed] }
+        claim_token: { type: [string, 'null'], format: uuid }
         provider_reference: { type: [string, 'null'], maxLength: 240 }
         error_kind: { type: [string, 'null'], maxLength: 96 }
         metadata: { type: object, additionalProperties: true, maxProperties: 24 }

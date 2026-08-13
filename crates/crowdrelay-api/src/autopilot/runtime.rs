@@ -11,8 +11,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::autopilot::{
-    AutopilotRuntimeRepository, ExecutorCapability, ExecutorReportStatus, RecordExecutionReport,
-    RecordExecutorHeartbeat, RecordRumSample, UpsertReleaseComponent,
+    AutopilotRuntimeRepository, ClaimExecution, ExecutorCapability, ExecutorReportStatus,
+    RecordExecutionReport, RecordExecutorHeartbeat, RecordRumSample, UpsertReleaseComponent,
 };
 use crowdrelay_domain::AutopilotActionId;
 use serde::Deserialize;
@@ -39,10 +39,19 @@ pub struct ExecutionReportRequest {
     receipt_key: String,
     executor_id: String,
     status: ExecutorReportStatus,
+    claim_token: Option<Uuid>,
     provider_reference: Option<String>,
     error_kind: Option<String>,
     #[serde(default = "empty_metadata")]
     metadata: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
+    occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionClaimRequest {
+    executor_id: String,
     #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }
@@ -115,6 +124,42 @@ fn time_is_current(value: OffsetDateTime, now: OffsetDateTime, max_age: Duration
     value >= now - max_age && value <= now + CLOCK_SKEW
 }
 
+pub async fn execution_claim(
+    State(state): State<AppState>,
+    Path(action_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ExecutionClaimRequest>,
+) -> Response {
+    if !state.ticketing.commerce_authorized(&headers) {
+        return Problem::unauthorized(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let now = OffsetDateTime::now_utc();
+    if !text_ok(&request.executor_id, 120)
+        || !time_is_current(request.occurred_at, now, MAX_EXECUTION_REPORT_AGE)
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    match state
+        .autopilot
+        .claim_execution(
+            state.ops.workspace_id(),
+            ClaimExecution {
+                action_id: AutopilotActionId::from_uuid(action_id),
+                executor_id: request.executor_id,
+                occurred_at: request.occurred_at,
+            },
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn execution_report(
     State(state): State<AppState>,
     Path(action_id): Path<Uuid>,
@@ -154,6 +199,7 @@ pub async fn execution_report(
                 receipt_key: request.receipt_key,
                 executor_id: request.executor_id,
                 status: request.status,
+                claim_token: request.claim_token,
                 provider_reference: request.provider_reference,
                 error_kind: request.error_kind,
                 metadata: request.metadata,

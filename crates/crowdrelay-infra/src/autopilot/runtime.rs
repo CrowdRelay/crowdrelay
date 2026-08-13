@@ -13,6 +13,135 @@ const RELEASE_COMPONENTS: [&str; 6] = [
 
 #[async_trait]
 impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
+    async fn claim_execution(
+        &self,
+        workspace_id: WorkspaceId,
+        command: ClaimExecution,
+    ) -> Result<ExecutionClaimMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
+                .await?;
+            let emitted = sqlx::query_scalar::<_, bool>(
+                r#"SELECT EXISTS (
+                    SELECT 1 FROM viryaos_autopilot_action_emissions
+                    WHERE workspace_id=$1 AND action_id=$2 AND outbox_event_id IS NOT NULL
+                )"#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.action_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if !emitted {
+                return Err(RepositoryError::NotFound);
+            }
+
+            let existing =
+                sqlx::query_as::<_, (String, Uuid, i32, Option<String>, OffsetDateTime)>(
+                    r#"SELECT status, claim_token, attempt_number, provider_reference, claimed_at
+                   FROM viryaos_autopilot_execution_claims
+                   WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3
+                   FOR UPDATE"#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.action_id.into_uuid())
+                .bind(&command.executor_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+
+            let mutation = match existing {
+                None => {
+                    let token = Uuid::now_v7();
+                    sqlx::query(
+                        r#"INSERT INTO viryaos_autopilot_execution_claims (
+                            workspace_id, action_id, executor_id, claim_token, status,
+                            attempt_number, claimed_at
+                        ) VALUES ($1,$2,$3,$4,'claimed',1,$5)"#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(command.action_id.into_uuid())
+                    .bind(&command.executor_id)
+                    .bind(token)
+                    .bind(command.occurred_at)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    ExecutionClaimMutation {
+                        action_id: command.action_id,
+                        executor_id: command.executor_id.clone(),
+                        disposition: "claimed".into(),
+                        claim_token: Some(token),
+                        attempt_number: 1,
+                        provider_reference: None,
+                    }
+                }
+                Some((status, _token, attempt, provider_reference, _claimed_at))
+                    if status == "succeeded" =>
+                {
+                    ExecutionClaimMutation {
+                        action_id: command.action_id,
+                        executor_id: command.executor_id.clone(),
+                        disposition: "already_succeeded".into(),
+                        claim_token: None,
+                        attempt_number: u32::try_from(attempt).unwrap_or(u32::MAX),
+                        provider_reference,
+                    }
+                }
+                Some((status, _token, attempt, provider_reference, claimed_at))
+                    if status == "claimed" =>
+                {
+                    let disposition =
+                        if command.occurred_at - claimed_at <= time::Duration::minutes(15) {
+                            "in_flight"
+                        } else {
+                            "ambiguous"
+                        };
+                    ExecutionClaimMutation {
+                        action_id: command.action_id,
+                        executor_id: command.executor_id.clone(),
+                        disposition: disposition.into(),
+                        claim_token: None,
+                        attempt_number: u32::try_from(attempt).unwrap_or(u32::MAX),
+                        provider_reference,
+                    }
+                }
+                Some((_status, _token, attempt, _provider_reference, _claimed_at)) => {
+                    let token = Uuid::now_v7();
+                    let next_attempt = attempt.saturating_add(1);
+                    sqlx::query(
+                        r#"UPDATE viryaos_autopilot_execution_claims
+                           SET claim_token=$4, status='claimed', attempt_number=$5,
+                               provider_reference=NULL, error_kind=NULL,
+                               claimed_at=$6, completed_at=NULL
+                           WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3"#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(command.action_id.into_uuid())
+                    .bind(&command.executor_id)
+                    .bind(token)
+                    .bind(next_attempt)
+                    .bind(command.occurred_at)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    ExecutionClaimMutation {
+                        action_id: command.action_id,
+                        executor_id: command.executor_id.clone(),
+                        disposition: "claimed".into(),
+                        claim_token: Some(token),
+                        attempt_number: u32::try_from(next_attempt).unwrap_or(u32::MAX),
+                        provider_reference: None,
+                    }
+                }
+            };
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(mutation)
+        })
+        .await
+    }
+
     async fn record_execution_report(
         &self,
         workspace_id: WorkspaceId,
@@ -21,6 +150,23 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
+            if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed) {
+                let claim = sqlx::query_as::<_, (Uuid, String)>(
+                    "SELECT claim_token, status FROM viryaos_autopilot_execution_claims \
+                     WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3 FOR UPDATE",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.action_id.into_uuid())
+                .bind(&command.executor_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if let Some((expected_token, _status)) = claim
+                    && command.claim_token != Some(expected_token)
+                {
+                    return Err(RepositoryError::Conflict);
+                }
+            }
             let report_id = Uuid::now_v7();
             let inserted = sqlx::query_scalar::<_, Uuid>(
                 r#"
@@ -52,6 +198,27 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
             if let Some(id) = inserted {
+                if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed)
+                    && let Some(token) = command.claim_token
+                {
+                        let terminal_status = command.status.as_str();
+                        sqlx::query(
+                            r#"UPDATE viryaos_autopilot_execution_claims
+                               SET status=$5, provider_reference=$6, error_kind=$7, completed_at=$8
+                               WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3 AND claim_token=$4"#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .bind(&command.executor_id)
+                        .bind(token)
+                        .bind(terminal_status)
+                        .bind(&command.provider_reference)
+                        .bind(&command.error_kind)
+                        .bind(command.occurred_at)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                }
                 match command.status {
                     ExecutorReportStatus::Failed => {
                         // A delayed failure receipt may drain after the same action has

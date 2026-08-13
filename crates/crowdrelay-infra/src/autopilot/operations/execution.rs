@@ -317,7 +317,7 @@ async fn seed_release_calendar(
         let outbox_id = Uuid::now_v7();
         let starts_at = release_at + time::Duration::days(days);
         sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'viryaos.calendar.upsert_requested',1,$3,$4,12)"#)
-          .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"calendar_key":calendar_key,"title":format!("VIRYA · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
+          .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("VIRYA · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
           .execute(&mut **tx).await.map_err(map_sqlx)?;
         sqlx::query(r#"INSERT INTO viryaos_calendar_requests(workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id) VALUES($1,'release',$2,$3,$4,$5,$6,$7)"#)
           .bind(workspace_id.into_uuid()).bind(release_id.into_uuid()).bind(&calendar_key).bind(format!("VIRYA · {title} · {label}")).bind(starts_at).bind(action_id.into_uuid()).bind(outbox_id)
@@ -457,6 +457,7 @@ async fn seed_deadline_calendar(
     .bind(outbox_id)
     .bind(workspace_id.into_uuid())
     .bind(json!({
+        "action_id": action_id,
         "calendar_key": calendar_key,
         "title": title,
         "starts_at": starts_at,

@@ -963,10 +963,28 @@ pub struct RecordExecutionReport {
     pub receipt_key: String,
     pub executor_id: String,
     pub status: ExecutorReportStatus,
+    pub claim_token: Option<uuid::Uuid>,
     pub provider_reference: Option<String>,
     pub error_kind: Option<String>,
     pub metadata: serde_json::Value,
     pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimExecution {
+    pub action_id: AutopilotActionId,
+    pub executor_id: String,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutionClaimMutation {
+    pub action_id: AutopilotActionId,
+    pub executor_id: String,
+    pub disposition: String,
+    pub claim_token: Option<uuid::Uuid>,
+    pub attempt_number: u32,
+    pub provider_reference: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1075,6 +1093,12 @@ pub struct RecordRumSample {
 
 #[async_trait]
 pub trait AutopilotRuntimeRepository: Send + Sync {
+    async fn claim_execution(
+        &self,
+        workspace_id: WorkspaceId,
+        command: ClaimExecution,
+    ) -> Result<ExecutionClaimMutation, RepositoryError>;
+
     async fn record_execution_report(
         &self,
         workspace_id: WorkspaceId,

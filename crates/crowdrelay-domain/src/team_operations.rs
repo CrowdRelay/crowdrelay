@@ -138,9 +138,13 @@ mod tests {
     #[test]
     fn skill_fit_beats_random_assignment() {
         let members = vec![
-            member("wojtek", vec![TeamSkill::General, TeamSkill::Technical], 0),
             member(
-                "lubek",
+                "member_1",
+                vec![TeamSkill::General, TeamSkill::Technical],
+                0,
+            ),
+            member(
+                "member_2",
                 vec![TeamSkill::Visual, TeamSkill::Video, TeamSkill::Social],
                 1,
             ),
@@ -154,14 +158,14 @@ mod tests {
             },
         )
         .expect("suitable member");
-        assert_eq!(selected.member_key, "lubek");
+        assert_eq!(selected.member_key, "member_2");
     }
 
     #[test]
     fn fair_load_balancing_avoids_overusing_generalist() {
         let members = vec![
-            member("wojtek", vec![TeamSkill::General, TeamSkill::Booking], 5),
-            member("marcin", vec![TeamSkill::Booking, TeamSkill::People], 1),
+            member("member_1", vec![TeamSkill::General, TeamSkill::Booking], 5),
+            member("member_4", vec![TeamSkill::Booking, TeamSkill::People], 1),
         ];
         let selected = select_team_assignee(
             &members,
@@ -172,6 +176,6 @@ mod tests {
             },
         )
         .expect("suitable member");
-        assert_eq!(selected.member_key, "marcin");
+        assert_eq!(selected.member_key, "member_4");
     }
 }

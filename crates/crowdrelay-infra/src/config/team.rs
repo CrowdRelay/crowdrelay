@@ -2,49 +2,49 @@
 
 use super::*;
 
-pub(super) const VIRYA_TEAM_WOJTEK_EMAIL_KEY: &str = "VIRYA_TEAM_WOJTEK_EMAIL";
-pub(super) const VIRYA_TEAM_LUBEK_EMAIL_KEY: &str = "VIRYA_TEAM_LUBEK_EMAIL";
-pub(super) const VIRYA_TEAM_KUBA_EMAIL_KEY: &str = "VIRYA_TEAM_KUBA_EMAIL";
-pub(super) const VIRYA_TEAM_MARCIN_EMAIL_KEY: &str = "VIRYA_TEAM_MARCIN_EMAIL";
-pub(super) const VIRYA_TEAM_MAREK_EMAIL_KEY: &str = "VIRYA_TEAM_MAREK_EMAIL";
+pub(super) const VIRYA_TEAM_MEMBER_1_EMAIL_KEY: &str = "VIRYA_TEAM_MEMBER_1_EMAIL";
+pub(super) const VIRYA_TEAM_MEMBER_2_EMAIL_KEY: &str = "VIRYA_TEAM_MEMBER_2_EMAIL";
+pub(super) const VIRYA_TEAM_MEMBER_3_EMAIL_KEY: &str = "VIRYA_TEAM_MEMBER_3_EMAIL";
+pub(super) const VIRYA_TEAM_MEMBER_4_EMAIL_KEY: &str = "VIRYA_TEAM_MEMBER_4_EMAIL";
+pub(super) const VIRYA_TEAM_MEMBER_5_EMAIL_KEY: &str = "VIRYA_TEAM_MEMBER_5_EMAIL";
 
 /// Secret-backed operator contacts for the human handoff router.
 ///
-/// Empty values are valid so a rollout can deploy code before production secrets.
-/// Actual addresses never belong in Git, logs or API read models.
+/// Slot identifiers are deliberately generic. Human identity belongs to
+/// runtime member data, not source-level environment contracts.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TeamOperationsConfig {
-    pub wojtek_email: Option<String>,
-    pub lubek_email: Option<String>,
-    pub kuba_email: Option<String>,
-    pub marcin_email: Option<String>,
-    pub marek_email: Option<String>,
+    pub member_1_email: Option<String>,
+    pub member_2_email: Option<String>,
+    pub member_3_email: Option<String>,
+    pub member_4_email: Option<String>,
+    pub member_5_email: Option<String>,
 }
 
 impl TeamOperationsConfig {
     pub fn configured_members(&self) -> impl Iterator<Item = (&'static str, &str)> {
         [
-            ("wojtek", self.wojtek_email.as_deref()),
-            ("lubek", self.lubek_email.as_deref()),
-            ("kuba", self.kuba_email.as_deref()),
-            ("marcin", self.marcin_email.as_deref()),
-            ("marek", self.marek_email.as_deref()),
+            ("member_1", self.member_1_email.as_deref()),
+            ("member_2", self.member_2_email.as_deref()),
+            ("member_3", self.member_3_email.as_deref()),
+            ("member_4", self.member_4_email.as_deref()),
+            ("member_5", self.member_5_email.as_deref()),
         ]
         .into_iter()
         .filter_map(|(key, email)| email.map(|email| (key, email)))
     }
 
     /// Returns the first missing deploy-secret contact. Production Autopilot
-    /// fails closed on this so approvals never look healthy while silently
+    /// fails closed on this so handoffs never look healthy while silently
     /// lacking an owner notification path.
     #[must_use]
     pub fn first_missing_contact_key(&self) -> Option<&'static str> {
         [
-            (VIRYA_TEAM_WOJTEK_EMAIL_KEY, self.wojtek_email.as_ref()),
-            (VIRYA_TEAM_LUBEK_EMAIL_KEY, self.lubek_email.as_ref()),
-            (VIRYA_TEAM_KUBA_EMAIL_KEY, self.kuba_email.as_ref()),
-            (VIRYA_TEAM_MARCIN_EMAIL_KEY, self.marcin_email.as_ref()),
-            (VIRYA_TEAM_MAREK_EMAIL_KEY, self.marek_email.as_ref()),
+            (VIRYA_TEAM_MEMBER_1_EMAIL_KEY, self.member_1_email.as_ref()),
+            (VIRYA_TEAM_MEMBER_2_EMAIL_KEY, self.member_2_email.as_ref()),
+            (VIRYA_TEAM_MEMBER_3_EMAIL_KEY, self.member_3_email.as_ref()),
+            (VIRYA_TEAM_MEMBER_4_EMAIL_KEY, self.member_4_email.as_ref()),
+            (VIRYA_TEAM_MEMBER_5_EMAIL_KEY, self.member_5_email.as_ref()),
         ]
         .into_iter()
         .find_map(|(name, value)| value.is_none().then_some(name))
@@ -56,24 +56,24 @@ impl fmt::Debug for TeamOperationsConfig {
         formatter
             .debug_struct("TeamOperationsConfig")
             .field(
-                "wojtek_email",
-                &self.wojtek_email.as_ref().map(|_| "[REDACTED]"),
+                "member_1_email",
+                &self.member_1_email.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
-                "lubek_email",
-                &self.lubek_email.as_ref().map(|_| "[REDACTED]"),
+                "member_2_email",
+                &self.member_2_email.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
-                "kuba_email",
-                &self.kuba_email.as_ref().map(|_| "[REDACTED]"),
+                "member_3_email",
+                &self.member_3_email.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
-                "marcin_email",
-                &self.marcin_email.as_ref().map(|_| "[REDACTED]"),
+                "member_4_email",
+                &self.member_4_email.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
-                "marek_email",
-                &self.marek_email.as_ref().map(|_| "[REDACTED]"),
+                "member_5_email",
+                &self.member_5_email.as_ref().map(|_| "[REDACTED]"),
             )
             .finish()
     }
@@ -97,25 +97,25 @@ pub(super) fn parse_team_operations(
     values: &HashMap<String, String>,
 ) -> Result<TeamOperationsConfig, ConfigError> {
     Ok(TeamOperationsConfig {
-        wojtek_email: parse_optional_member_email(
-            values.get(VIRYA_TEAM_WOJTEK_EMAIL_KEY),
-            VIRYA_TEAM_WOJTEK_EMAIL_KEY,
+        member_1_email: parse_optional_member_email(
+            values.get(VIRYA_TEAM_MEMBER_1_EMAIL_KEY),
+            VIRYA_TEAM_MEMBER_1_EMAIL_KEY,
         )?,
-        lubek_email: parse_optional_member_email(
-            values.get(VIRYA_TEAM_LUBEK_EMAIL_KEY),
-            VIRYA_TEAM_LUBEK_EMAIL_KEY,
+        member_2_email: parse_optional_member_email(
+            values.get(VIRYA_TEAM_MEMBER_2_EMAIL_KEY),
+            VIRYA_TEAM_MEMBER_2_EMAIL_KEY,
         )?,
-        kuba_email: parse_optional_member_email(
-            values.get(VIRYA_TEAM_KUBA_EMAIL_KEY),
-            VIRYA_TEAM_KUBA_EMAIL_KEY,
+        member_3_email: parse_optional_member_email(
+            values.get(VIRYA_TEAM_MEMBER_3_EMAIL_KEY),
+            VIRYA_TEAM_MEMBER_3_EMAIL_KEY,
         )?,
-        marcin_email: parse_optional_member_email(
-            values.get(VIRYA_TEAM_MARCIN_EMAIL_KEY),
-            VIRYA_TEAM_MARCIN_EMAIL_KEY,
+        member_4_email: parse_optional_member_email(
+            values.get(VIRYA_TEAM_MEMBER_4_EMAIL_KEY),
+            VIRYA_TEAM_MEMBER_4_EMAIL_KEY,
         )?,
-        marek_email: parse_optional_member_email(
-            values.get(VIRYA_TEAM_MAREK_EMAIL_KEY),
-            VIRYA_TEAM_MAREK_EMAIL_KEY,
+        member_5_email: parse_optional_member_email(
+            values.get(VIRYA_TEAM_MEMBER_5_EMAIL_KEY),
+            VIRYA_TEAM_MEMBER_5_EMAIL_KEY,
         )?,
     })
 }
@@ -147,22 +147,22 @@ mod tests {
 
     fn configured_team() -> TeamOperationsConfig {
         TeamOperationsConfig {
-            wojtek_email: Some(test_email("member1")),
-            lubek_email: Some(test_email("member2")),
-            kuba_email: Some(test_email("member3")),
-            marcin_email: Some(test_email("member4")),
-            marek_email: Some(test_email("member5")),
+            member_1_email: Some(test_email("member1")),
+            member_2_email: Some(test_email("member2")),
+            member_3_email: Some(test_email("member3")),
+            member_4_email: Some(test_email("member4")),
+            member_5_email: Some(test_email("member5")),
         }
     }
 
     #[test]
     fn production_autopilot_fails_closed_without_every_contact() {
         let mut team = configured_team();
-        team.wojtek_email = None;
+        team.member_1_email = None;
         assert!(matches!(
             validate_production_team_contacts(&team, true, true),
             Err(ConfigError::MissingProductionTeamContact {
-                name: VIRYA_TEAM_WOJTEK_EMAIL_KEY
+                name: VIRYA_TEAM_MEMBER_1_EMAIL_KEY
             })
         ));
     }
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn disabled_or_non_production_autopilot_does_not_require_contacts() {
         let mut team = configured_team();
-        team.marek_email = None;
+        team.member_5_email = None;
         assert!(validate_production_team_contacts(&team, true, false).is_ok());
         assert!(validate_production_team_contacts(&team, false, true).is_ok());
     }

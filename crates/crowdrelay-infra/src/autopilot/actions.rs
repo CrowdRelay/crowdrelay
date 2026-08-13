@@ -683,6 +683,29 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                 AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
                     operations::submit_funding_application(&mut transaction, workspace_id, action.id, *opportunity_id, now).await?;
                 }
+                AutopilotActionPayload::SendTeamAssignmentEmail {
+                    assignment_id, recipient_email, recipient_name, task_title, task_detail,
+                    due_at, action_url_path, reminder_number,
+                } => {
+                    emit_external_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "viryaos.team.assignment_email_requested",
+                        json!({
+                            "action_id": action.id,
+                            "assignment_id": assignment_id,
+                            "recipient_email": recipient_email,
+                            "recipient_name": recipient_name,
+                            "task_title": task_title,
+                            "task_detail": task_detail,
+                            "due_at": due_at,
+                            "action_url_path": action_url_path,
+                            "reminder_number": reminder_number,
+                        }),
+                    )
+                    .await?;
+                }
             }
 
             // External intents are only *dispatched* here. Their learning/outcome

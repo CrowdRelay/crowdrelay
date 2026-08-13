@@ -23,11 +23,11 @@ The current VIRYA defaults are 15 normal / 20 stretch, weekend one-shots preferr
 
 Real team e-mail addresses are deployment secrets and are intentionally absent from source control. The worker reads only these variable names:
 
-- `VIRYA_TEAM_WOJTEK_EMAIL`
-- `VIRYA_TEAM_LUBEK_EMAIL`
-- `VIRYA_TEAM_KUBA_EMAIL`
-- `VIRYA_TEAM_MARCIN_EMAIL`
-- `VIRYA_TEAM_MAREK_EMAIL`
+- `VIRYA_TEAM_MEMBER_1_EMAIL`
+- `VIRYA_TEAM_MEMBER_2_EMAIL`
+- `VIRYA_TEAM_MEMBER_3_EMAIL`
+- `VIRYA_TEAM_MEMBER_4_EMAIL`
+- `VIRYA_TEAM_MEMBER_5_EMAIL`
 
 When `CROWDRELAY_ENV=production` and `CROWDRELAY_AUTOPILOT_ENABLED=true`, all five contact secrets are required. Production therefore fails closed instead of accepting approvals that cannot notify their assigned owner.
 

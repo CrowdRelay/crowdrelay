@@ -644,31 +644,22 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
-            super::team::emit_team_notification(
+            // An operator reassignment is still a real external handoff. Do not
+            // commit it unless the provider-confirmed team-email executor is live.
+            super::ensure_executor_capability_strict(&mut transaction, workspace_id, "team.email")
+                .await?;
+            super::team::queue_team_email_action(
                 &mut transaction,
                 workspace_id,
-                "viryaos.team.assignment_notification_requested",
-                json!({
-                    "assignment_id": persisted_assignment_id,
-                    "action_id": action_id.into_uuid(),
-                    "context": action.0,
-                    "action_kind": action.1,
-                    "subject_kind": action.2,
-                    "subject_id": action.3,
-                    "assignee": {
-                        "member_key": member.1,
-                        "display_name": member.2,
-                        "email": member.3,
-                    },
-                    "due_at": due_at,
-                    "action_url_path": "/staff/control/",
-                    "assignment_source": "operator_override",
-                    "message_contract": {
-                        "tone": "friendly_concise_human",
-                        "include": ["what_to_do", "why_it_matters", "deadline", "action_link"],
-                        "do_not_invent_business_facts": true
-                    }
-                }),
+                persisted_assignment_id,
+                &action.0,
+                &member.3,
+                &member.2,
+                super::team::friendly_action_title(&action.1),
+                format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.1),
+                due_at,
+                0,
+                OffsetDateTime::now_utc(),
             )
             .await?;
             transaction.commit().await.map_err(map_sqlx)?;

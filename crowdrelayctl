@@ -292,8 +292,27 @@ set -euo pipefail
 install_dir="$1"
 archive="$2"
 mkdir -p "$install_dir"
+
+# Production secrets/config are server-owned. A code/image ship must never
+# silently replace them with the packager machine's local copies.
+preserve_dir="$(mktemp -d)"
+cleanup() { rm -rf -- "$preserve_dir"; }
+trap cleanup EXIT
+for rel in .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json deploy/webhook-secrets.production.json; do
+  if [[ -f "$install_dir/$rel" ]]; then
+    mkdir -p "$preserve_dir/$(dirname "$rel")"
+    cp -a "$install_dir/$rel" "$preserve_dir/$rel"
+  fi
+done
+
 tar -xzf "$archive" -C "$install_dir"
 rm -f -- "$archive"
+for rel in .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json deploy/webhook-secrets.production.json; do
+  if [[ -f "$preserve_dir/$rel" ]]; then
+    mkdir -p "$install_dir/$(dirname "$rel")"
+    cp -a "$preserve_dir/$rel" "$install_dir/$rel"
+  fi
+done
 cd "$install_dir"
 chmod 700 crowdrelayctl
 chmod 600 .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json

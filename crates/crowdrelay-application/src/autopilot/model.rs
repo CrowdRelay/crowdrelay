@@ -290,6 +290,16 @@ pub enum AutopilotActionPayload {
     SubmitFundingApplication {
         opportunity_id: TeamOpportunityId,
     },
+    SendTeamAssignmentEmail {
+        assignment_id: uuid::Uuid,
+        recipient_email: String,
+        recipient_name: String,
+        task_title: String,
+        task_detail: String,
+        due_at: Option<time::OffsetDateTime>,
+        action_url_path: String,
+        reminder_number: u8,
+    },
 }
 
 impl AutopilotActionPayload {
@@ -320,6 +330,7 @@ impl AutopilotActionPayload {
             Self::ApplyLiveOpportunity { .. } => "opportunity.live.apply",
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
+            Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
         }
     }
 }
