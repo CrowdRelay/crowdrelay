@@ -784,16 +784,44 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<LiveOpportunitySnapshot>, RepositoryError> {
         self.bounded(async {
-            let rows=sqlx::query_as::<_,TeamOpportunityRow>(r#"
-                SELECT id opportunity_id, opportunity_kind, status NOT IN ('submitted','replied','won','lost','dismissed') active,
-                       verified_destination,contact_email,metadata,fit_basis_points,reputation_basis_points,confidence_basis_points,
-                       expected_fee_minor,estimated_cost_minor,application_fee_minor,requires_contract,exclusive,eligible,
-                       funding_amount_minor,own_contribution_minor,deadline,package_status,status
-                FROM viryaos_team_opportunities
-                WHERE workspace_id=$1 AND opportunity_kind IN ('festival','showcase','review_contest','support_slot')
-                  AND eligible AND status IN ('new','prepared','awaiting_approval')
-                  AND (deadline IS NULL OR deadline>$2)
-                ORDER BY deadline NULLS LAST, fit_basis_points DESC, id LIMIT $3
+            let rows=sqlx::query_as::<_,LiveOpportunityRow>(r#"
+                SELECT opportunity.id opportunity_id, opportunity.opportunity_kind,
+                       opportunity.status NOT IN ('submitted','replied','won','lost','dismissed') active,
+                       opportunity.verified_destination, opportunity.contact_email, opportunity.metadata,
+                       opportunity.fit_basis_points, opportunity.reputation_basis_points,
+                       opportunity.confidence_basis_points, opportunity.expected_fee_minor,
+                       opportunity.estimated_cost_minor, opportunity.application_fee_minor,
+                       opportunity.requires_contract, opportunity.exclusive, opportunity.deadline,
+                       opportunity.status, opportunity.event_starts_at, opportunity.travel_band,
+                       (
+                           SELECT COUNT(*)
+                           FROM events event
+                           WHERE event.workspace_id=opportunity.workspace_id
+                             AND event.status IN ('published','completed')
+                             AND EXTRACT(YEAR FROM event.starts_at)=EXTRACT(
+                                 YEAR FROM COALESCE(opportunity.event_starts_at,$2)
+                             )
+                       ) committed_shows_year,
+                       COALESCE((manager.value->>'annual_target')::integer,15) annual_target,
+                       COALESCE((manager.value->>'annual_stretch')::integer,20) annual_stretch,
+                       COALESCE((manager.value->>'stretch_minimum_score_basis_points')::integer,9000)
+                           stretch_minimum_score_basis_points,
+                       COALESCE((manager.value->>'far_shot_minimum_score_basis_points')::integer,9000)
+                           far_shot_minimum_score_basis_points,
+                       COALESCE((manager.value->>'prefer_weekend_one_shots')::boolean,true)
+                           prefer_weekend_one_shots
+                FROM viryaos_team_opportunities opportunity
+                LEFT JOIN viryaos_manager_config manager
+                  ON manager.workspace_id=opportunity.workspace_id
+                 AND manager.config_key='booking_policy'
+                WHERE opportunity.workspace_id=$1
+                  AND opportunity.opportunity_kind IN ('festival','showcase','review_contest','support_slot')
+                  AND opportunity.eligible
+                  AND opportunity.status IN ('new','prepared','awaiting_approval')
+                  AND (opportunity.deadline IS NULL OR opportunity.deadline>$2)
+                ORDER BY opportunity.deadline NULLS LAST,
+                         opportunity.fit_basis_points DESC, opportunity.id
+                LIMIT $3
             "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
               .fetch_all(&self.pool).await.map_err(map_sqlx)?;
             rows.into_iter().map(|row| {
@@ -802,35 +830,33 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                     "review_contest"=>LiveOpportunityKind::ReviewContest,"support_slot"=>LiveOpportunityKind::SupportSlot,
                     _=>return Err(RepositoryError::Unexpected),
                 };
+                let travel_band=match row.travel_band.as_deref(){
+                    Some("poland")=>Some(LiveTravelBand::Poland),
+                    Some("east_germany")=>Some(LiveTravelBand::EastGermany),
+                    Some("czechia_slovakia")=>Some(LiveTravelBand::CzechiaSlovakia),
+                    Some("far_shot")=>Some(LiveTravelBand::FarShot),
+                    None=>None,
+                    Some(_)=>return Err(RepositoryError::Unexpected),
+                };
                 Ok(LiveOpportunitySnapshot{
                     opportunity_id:TeamOpportunityId::from_uuid(row.opportunity_id),kind,active:row.active,
                     verified_destination:row.verified_destination,
-                    auto_submission_capable: (row
-                        .contact_email
-                        .as_ref()
-                        .is_some_and(|email| !email.trim().is_empty())
-                        || row
-                            .metadata
-                            .get("submission_adapter")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|value| value == "email"))
-                        && !row
-                            .metadata
-                            .get("discovery")
-                            .and_then(|value| value.get("fee_unverified"))
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false)
-                        && !row
-                            .metadata
-                            .get("discovery")
-                            .and_then(|value| value.get("terms_unverified"))
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
+                    auto_submission_capable: (row.contact_email.as_ref().is_some_and(|email| !email.trim().is_empty())
+                        || row.metadata.get("submission_adapter").and_then(serde_json::Value::as_str).is_some_and(|value| value=="email"))
+                        && !row.metadata.get("discovery").and_then(|value|value.get("fee_unverified")).and_then(serde_json::Value::as_bool).unwrap_or(false)
+                        && !row.metadata.get("discovery").and_then(|value|value.get("terms_unverified")).and_then(serde_json::Value::as_bool).unwrap_or(false),
                     fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     reputation_basis_points:u16::try_from(row.reputation_basis_points).map_err(|_|RepositoryError::Unexpected)?,
-                    evidence_confidence:parse_confidence(row.confidence_basis_points)?,expected_fee_minor:row.expected_fee_minor,
-                    estimated_cost_minor:row.estimated_cost_minor,application_fee_minor:row.application_fee_minor,
-                    requires_contract:row.requires_contract,exclusive:row.exclusive,deadline:row.deadline,
+                    evidence_confidence:parse_confidence(row.confidence_basis_points)?,
+                    expected_fee_minor:row.expected_fee_minor, estimated_cost_minor:row.estimated_cost_minor,
+                    application_fee_minor:row.application_fee_minor, requires_contract:row.requires_contract,
+                    exclusive:row.exclusive, deadline:row.deadline, event_starts_at:row.event_starts_at,
+                    travel_band, committed_shows_year:u16::try_from(row.committed_shows_year).unwrap_or(u16::MAX),
+                    annual_target:u16::try_from(row.annual_target).map_err(|_|RepositoryError::Unexpected)?,
+                    annual_stretch:u16::try_from(row.annual_stretch).map_err(|_|RepositoryError::Unexpected)?,
+                    stretch_minimum_score_basis_points:u16::try_from(row.stretch_minimum_score_basis_points).map_err(|_|RepositoryError::Unexpected)?,
+                    far_shot_minimum_score_basis_points:u16::try_from(row.far_shot_minimum_score_basis_points).map_err(|_|RepositoryError::Unexpected)?,
+                    prefer_weekend_one_shots:row.prefer_weekend_one_shots,
                     already_applied:matches!(row.status.as_str(),"submitted"|"replied"|"won"|"lost"),
                 })
             }).collect()
@@ -863,6 +889,45 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
                 submitted:matches!(row.status.as_str(),"submitted"|"won"|"lost"),
             })).collect()
         }).await
+    }
+
+    async fn load_beacon_discovery_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconDiscoverySnapshot>, RepositoryError> {
+        self.bounded(operations::load_beacon_discovery_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
+    async fn load_beacon_campaign_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconCampaignSnapshot>, RepositoryError> {
+        self.bounded(operations::load_beacon_campaign_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
+    async fn load_show_growth_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ShowGrowthSnapshot>, RepositoryError> {
+        self.bounded(operations::load_show_growth_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
     }
 
     async fn persist_candidate(

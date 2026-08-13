@@ -89,6 +89,31 @@ impl AutopilotWorker {
 
         match self
             .repository
+            .reconcile_team_handoffs(self.workspace_id, now)
+            .await
+        {
+            Ok(count) if count > 0 => tracing::info!(count, "assigned ViryaOS human handoffs"),
+            Ok(_) => {}
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS team handoff reconciliation failed");
+            }
+        }
+        match self
+            .repository
+            .dispatch_team_handoff_reminders(self.workspace_id, now)
+            .await
+        {
+            Ok(count) if count > 0 => tracing::info!(count, "emitted ViryaOS team reminders"),
+            Ok(_) => {}
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS team reminder dispatch failed");
+            }
+        }
+
+        match self
+            .repository
             .claim_due_actions(self.workspace_id, ACTION_BATCH_SIZE, now)
             .await
         {

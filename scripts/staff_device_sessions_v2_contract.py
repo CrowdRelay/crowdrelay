@@ -44,7 +44,7 @@ checks = {
     ),
     "meta": (
         ROOT / "crates/crowdrelay-api/src/meta.rs",
-        ["SCHEMA_VERSION: u32 = 46", '"staff_device_sessions_v2"'],
+        [f"SCHEMA_VERSION: u32 = {max(int(path.name[:4]) for path in (ROOT / 'migrations').glob('[0-9][0-9][0-9][0-9]_*.sql'))}", '"staff_device_sessions_v2"'],
     ),
     "metrics": (
         ROOT / "crates/crowdrelay-api/src/lib.rs",

@@ -11,10 +11,32 @@ class SourceLayoutContracts(unittest.TestCase):
           'crates/crowdrelay-api/src/area.rs':('public_drops',9),
           'crates/crowdrelay-api/src/ticketing.rs':('reserve_order',6),
           'crates/crowdrelay-api/src/commerce.rs':('reserve_inventory',5),
-          'crates/crowdrelay-worker/src/bootstrap.rs':('bootstrap_admission_access',5),
         }
         for rel,(contract,count) in specs.items():
             entry=(ROOT/rel).read_text()
             self.assertEqual(entry.count('include!("'),count,rel)
             self.assertIn(contract,read_rust_module(ROOT,rel),rel)
+
+    def test_worker_bootstrap_partitions_are_explicit(self):
+        rel = 'crates/crowdrelay-worker/src/bootstrap.rs'
+        entry = (ROOT / rel).read_text()
+        includes = {
+            line.split('\"')[1]
+            for line in entry.splitlines()
+            if line.startswith('include!(\"bootstrap/')
+        }
+        self.assertEqual(
+            includes,
+            {
+                'bootstrap/persistence.rs',
+                'bootstrap/validation.rs',
+                'bootstrap/specifications.rs',
+                'bootstrap/admission.rs',
+                'bootstrap/team.rs',
+                'bootstrap/tests.rs',
+            },
+            rel,
+        )
+        self.assertIn('bootstrap_admission_access', read_rust_module(ROOT, rel), rel)
+
 if __name__=='__main__': unittest.main()

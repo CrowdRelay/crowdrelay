@@ -25,7 +25,7 @@ class ReleaseContract(unittest.TestCase):
         meta = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
         ops = (ROOT / "crates/crowdrelay-api/src/ops.rs").read_text()
         self.assertIn(f"const SCHEMA_VERSION: u32 = {latest};", meta)
-        self.assertIn(f"schema_version: {latest},", ops)
+        self.assertIn("schema_version: crate::meta::SCHEMA_VERSION,", ops)
         self.assertIn('"communication_delivery_ledger_v1"', meta)
 
     def test_release_ledger_exposes_n8n_executor_manifest_drift(self):

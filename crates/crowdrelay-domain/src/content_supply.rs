@@ -119,6 +119,10 @@ pub fn evaluate_content_supply(
 fn required_artifacts(kind: ContentSourceKind) -> &'static [ContentArtifactKind] {
     const EVENT: &[ContentArtifactKind] = &[
         ContentArtifactKind::LiveListing,
+        // Every published show should also produce a media-ready local hook.
+        // Beacons then receive a concrete story/interview angle instead of a
+        // generic EPK blast. The artifact is provider-neutral and fact-only.
+        ContentArtifactKind::PressHook,
         ContentArtifactKind::SignalPush,
         ContentArtifactKind::SocialFeed,
         ContentArtifactKind::SocialStory,
@@ -173,6 +177,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn event_builds_press_hook_after_canonical_listing() {
+        let snapshot = ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::Event,
+            source_version: 1,
+            occurred_at: now() - Duration::days(1),
+            expires_at: now() + Duration::days(10),
+            completed_artifacts: vec![ContentArtifactKind::LiveListing],
+            in_flight_artifacts: Vec::new(),
+        };
+
+        assert_eq!(
+            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
+            ContentSupplyDecision::Request {
+                artifact: ContentArtifactKind::PressHook,
+                confidence: Confidence::saturating_from_basis_points(9_500),
+            }
+        );
+    }
     #[test]
     fn release_requests_artifacts_one_at_a_time_and_respects_inflight() {
         let snapshot = ContentSupplySnapshot {

@@ -129,6 +129,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(synesthesia::complete_run),
         )
         .route(
+            "/v1/public/synesthesia/runs/{run_id}/recover",
+            post(synesthesia::recover_run),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/context",
+            get(synesthesia::completion_context),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/handoff",
+            post(synesthesia::issue_handoff),
+        )
+        .route(
             "/v1/public/synesthesia/reward-claims",
             post(synesthesia::enter_reward_draw),
         )
@@ -480,6 +492,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::chief_of_staff),
         )
         .route(
+            "/v1/admin/autopilot/manager-config/booking-policy",
+            get(autopilot::manager_booking_policy).post(autopilot::set_manager_booking_policy),
+        )
+        .route(
             "/v1/admin/autopilot/policies/{context}",
             post(autopilot::set_authority),
         )
@@ -498,6 +514,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/booking-targets/{target_id}/reply",
             post(autopilot::record_booking_reply),
+        )
+        .route(
+            "/v1/admin/autopilot/beacons",
+            post(autopilot::upsert_beacon),
+        )
+        .route(
+            "/v1/admin/autopilot/beacons/{beacon_id}/reply",
+            post(autopilot::record_beacon_reply),
         )
         .route(
             "/v1/admin/autopilot/outreach-targets",
@@ -554,6 +578,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/market-signals/city",
             post(autopilot::upsert_city_market_signal),
+        )
+        .route(
+            "/v1/admin/autopilot/actions/{action_id}/assign",
+            post(autopilot::assign_action),
         )
         .route(
             "/v1/admin/autopilot/actions/{action_id}/approve",

@@ -31,11 +31,15 @@ class OpsWatchdogContract(unittest.TestCase):
         self.assertIn("active_alerts", watchdog)
         self.assertIn("critical_alerts", watchdog)
 
-    def test_latest_schema_is_46(self):
+    def test_public_schema_tracks_latest_migration(self):
         meta = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
         ops = (ROOT / "crates/crowdrelay-api/src/ops.rs").read_text()
-        self.assertIn("SCHEMA_VERSION: u32 = 46", meta)
-        self.assertIn("schema_version: 46", ops)
+        latest = max(
+            int(path.name.split("_", 1)[0])
+            for path in (ROOT / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql")
+        )
+        self.assertIn(f"SCHEMA_VERSION: u32 = {latest}", meta)
+        self.assertIn("schema_version: crate::meta::SCHEMA_VERSION", ops)
 
 
 if __name__ == "__main__":

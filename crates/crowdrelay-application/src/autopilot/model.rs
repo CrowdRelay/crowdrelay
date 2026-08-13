@@ -1,11 +1,12 @@
 //! Stable application-boundary types for ViryaOS Autopilot.
 
 use crowdrelay_domain::{
-    AutopilotActionId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
+    AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
     ExperimentVariantId, FanId, MerchProductId, MerchVariantId, OutreachOpportunityId,
     OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
+    beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
     booking::{BookingOpportunityPolicy, BookingOutreachPhase},
     campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
@@ -18,6 +19,7 @@ use crowdrelay_domain::{
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
+    show_growth::{ShowGrowthLever, ShowGrowthPolicy},
     show_operations::{ShowOperationsPolicy, ShowTaskKind},
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,8 @@ pub enum AutopilotContext {
     Release,
     LiveOpportunity,
     Funding,
+    Beacon,
+    ShowGrowth,
 }
 
 impl AutopilotContext {
@@ -62,6 +66,8 @@ impl AutopilotContext {
             Self::Release => "release",
             Self::LiveOpportunity => "live_opportunity",
             Self::Funding => "funding",
+            Self::Beacon => "beacon",
+            Self::ShowGrowth => "show_growth",
         }
     }
 }
@@ -84,6 +90,8 @@ pub enum AutopilotPolicyConfig {
     Release(ReleaseAutopilotPolicy),
     LiveOpportunity(LiveOpportunityPolicy),
     Funding(FundingPolicy),
+    Beacon(BeaconCampaignPolicy),
+    ShowGrowth(ShowGrowthPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -116,6 +124,7 @@ pub enum ActionSubject {
     PromotionCampaign(PromotionCampaignId),
     ReleasePlan(ReleasePlanId),
     TeamOpportunity(TeamOpportunityId),
+    Beacon(BeaconId),
 }
 
 impl ActionSubject {
@@ -134,6 +143,7 @@ impl ActionSubject {
             Self::PromotionCampaign(_) => "promotion_campaign",
             Self::ReleasePlan(_) => "release_plan",
             Self::TeamOpportunity(_) => "team_opportunity",
+            Self::Beacon(_) => "beacon",
         }
     }
 
@@ -152,6 +162,7 @@ impl ActionSubject {
             Self::PromotionCampaign(id) => id.into_uuid(),
             Self::ReleasePlan(id) => id.into_uuid(),
             Self::TeamOpportunity(id) => id.into_uuid(),
+            Self::Beacon(id) => id.into_uuid(),
         }
     }
 }
@@ -219,6 +230,22 @@ pub enum AutopilotActionPayload {
         phase: OutreachPhase,
         template_key: String,
     },
+    RequestBeaconDiscovery {
+        event_id: EventId,
+        target_count: u16,
+    },
+    RequestBeaconOutreach {
+        beacon_id: BeaconId,
+        event_id: EventId,
+        beacon_version: i64,
+        phase: BeaconOutreachPhase,
+        template_key: String,
+    },
+    RequestShowGrowth {
+        event_id: EventId,
+        lever: ShowGrowthLever,
+        template_key: String,
+    },
     RequestContentArtifact {
         source_id: ContentSourceId,
         source_version: i64,
@@ -278,6 +305,9 @@ impl AutopilotActionPayload {
             Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
+            Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
+            Self::RequestBeaconOutreach { .. } => "beacon.outreach.request",
+            Self::RequestShowGrowth { .. } => "show.growth.request",
             Self::RequestContentArtifact { .. } => "content.artifact.request",
             Self::AdjustExperiment {
                 complete: false, ..

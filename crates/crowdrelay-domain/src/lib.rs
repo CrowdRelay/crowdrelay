@@ -34,6 +34,7 @@ pub mod acquisition;
 pub mod admission;
 pub mod audience_lifecycle;
 pub mod autonomy;
+pub mod beacons;
 pub mod booking;
 pub mod campaign_lifecycle;
 pub mod content_supply;
@@ -52,7 +53,9 @@ pub mod pricing;
 pub mod promotion;
 pub mod referrals;
 pub mod release_autopilot;
+pub mod show_growth;
 pub mod show_operations;
+pub mod team_operations;
 pub mod values;
 
 pub use acquisition::{
@@ -74,12 +77,12 @@ pub use fan_lifecycle::{
 };
 pub use ids::{
     AdmissionPassId, AdmissionPoolId, AutopilotActionId, AutopilotDecisionId,
-    AutopilotMeasurementId, BookingTargetId, CampaignId, CityId, ContentSourceId, EventId,
-    ExperimentId, ExperimentVariantId, FanId, MarketSignalId, MerchCouponId, MerchProductId,
-    MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PromotionCampaignId,
-    ReferralAttributionId, ReleasePlanId, RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId,
-    TeamOpportunityId, TicketTypeId, VisitorId, WorkspaceId, WorkspaceMemberId,
-    WorkspaceMemberSessionId,
+    AutopilotMeasurementId, BeaconId, BookingTargetId, CampaignId, CityId, ContentSourceId,
+    EventId, ExperimentId, ExperimentVariantId, FanId, MarketSignalId, MerchCouponId,
+    MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId,
+    PromotionCampaignId, ReferralAttributionId, ReleasePlanId, RewardDrawId, RewardGrantId,
+    RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId, TicketTypeId, VisitorId,
+    WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
 };
 pub use referrals::{
     CouponCode, CouponCodeError, CouponRedemptionResult, CouponStatus, FanSessionToken,

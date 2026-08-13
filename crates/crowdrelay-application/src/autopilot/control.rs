@@ -2,13 +2,16 @@
 
 use async_trait::async_trait;
 use crowdrelay_domain::{
-    AutopilotActionId, AutopilotMeasurementId, BookingTargetId, CityId, ContentSourceId, EventId,
-    ExperimentId, ExperimentVariantId, MarketSignalId, MerchProductId, OutreachOpportunityId,
-    OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, WorkspaceId,
+    AutopilotActionId, AutopilotMeasurementId, BeaconId, BookingTargetId, CityId, ContentSourceId,
+    EventId, ExperimentId, ExperimentVariantId, MarketSignalId, MerchProductId,
+    OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
+    WorkspaceId,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
+    beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::{ExperimentAllocationSlot, ExperimentMetric, assign_variant},
+    live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
 };
@@ -41,6 +44,15 @@ pub struct PromotionBudgetGuardrailSummary {
     pub version: i64,
 }
 
+/// Non-sensitive owner shown consistently across staff surfaces. Contact email
+/// stays private in the notification executor payload.
+#[derive(Clone, Debug, Serialize)]
+pub struct TeamAssigneeSummary {
+    pub member_id: uuid::Uuid,
+    pub member_key: String,
+    pub display_name: String,
+}
+
 /// Human-actionable Autopilot job waiting in the approval queue.
 #[derive(Clone, Debug, Serialize)]
 pub struct PendingAutopilotAction {
@@ -52,6 +64,8 @@ pub struct PendingAutopilotAction {
     pub payload: AutopilotActionPayload,
     pub created_at: OffsetDateTime,
     pub approval_expires_at: Option<OffsetDateTime>,
+    pub assignee: Option<TeamAssigneeSummary>,
+    pub assignment_due_at: Option<OffsetDateTime>,
 }
 
 /// Compact immutable decision trail shown in the operator cockpit.
@@ -64,6 +78,18 @@ pub struct RecentAutopilotDecision {
     pub disposition: PolicyDisposition,
     pub reason: String,
     pub evaluated_at: OffsetDateTime,
+}
+
+/// A bounded human-only step returned by an executor when a free distribution
+/// surface cannot be automated safely (for example CAPTCHA/login verification).
+/// Only public destination data is exposed to staff surfaces; arbitrary executor
+/// metadata remains private to the execution ledger.
+#[derive(Clone, Debug, Serialize)]
+pub struct AutopilotManualStep {
+    pub destination: String,
+    pub url: String,
+    pub what_to_do: String,
+    pub why_it_matters: String,
 }
 
 /// Recent action execution evidence. This is deliberately compact and contains
@@ -84,6 +110,7 @@ pub struct RecentAutopilotAction {
     pub executor_id: Option<String>,
     pub provider_reference: Option<String>,
     pub executor_reported_at: Option<OffsetDateTime>,
+    pub manual_steps: Vec<AutopilotManualStep>,
 }
 
 /// A delayed, measured effect of one successfully executed Autopilot action.
@@ -119,6 +146,9 @@ pub struct AutopilotControlOverview {
     pub policies: Vec<AutopilotPolicySummary>,
     pub promotion_budget_guardrails: Vec<PromotionBudgetGuardrailSummary>,
     pub needs_you: Vec<PendingAutopilotAction>,
+    /// Active human owners eligible for an explicit operator re-assignment.
+    /// No contact PII is exposed on staff read models.
+    pub available_assignees: Vec<TeamAssigneeSummary>,
     pub recent_decisions: Vec<RecentAutopilotDecision>,
     pub recent_actions: Vec<RecentAutopilotAction>,
     pub recent_effects: Vec<RecentAutopilotEffect>,
@@ -316,6 +346,61 @@ pub trait AutopilotBookingStateRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         command: RecordBookingReply,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct UpsertBeacon {
+    pub beacon_id: Option<BeaconId>,
+    pub city_id: Option<CityId>,
+    pub kind: BeaconKind,
+    pub display_name: String,
+    pub contact_email: Option<String>,
+    pub destination_url: Option<String>,
+    pub source_url: Option<String>,
+    pub active: bool,
+    pub verified: bool,
+    pub accepts_outreach: bool,
+    pub do_not_contact: bool,
+    pub relationship_score: u16,
+    pub relevance_basis_points: u16,
+    pub confidence: Confidence,
+    pub metadata: serde_json::Value,
+    pub expected_version: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BeaconMutation {
+    pub operation_id: uuid::Uuid,
+    pub beacon_id: BeaconId,
+    pub version: i64,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RecordBeaconReply {
+    pub beacon_id: BeaconId,
+    pub event_id: EventId,
+    pub disposition: BeaconReplyDisposition,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[async_trait]
+pub trait AutopilotBeaconStateRepository: Send + Sync {
+    async fn upsert_beacon(
+        &self,
+        workspace_id: WorkspaceId,
+        command: UpsertBeacon,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<BeaconMutation, RepositoryError>;
+
+    async fn record_beacon_reply(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordBeaconReply,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
@@ -526,6 +611,9 @@ pub struct UpsertTeamOpportunity {
     pub funding_amount_minor: i64,
     pub own_contribution_minor: i64,
     pub deadline: Option<OffsetDateTime>,
+    pub event_starts_at: Option<OffsetDateTime>,
+    pub country_code: Option<String>,
+    pub travel_band: Option<LiveTravelBand>,
     pub metadata: serde_json::Value,
     pub expected_version: i64,
 }
@@ -746,6 +834,48 @@ pub trait AutopilotMarketStateRepository: Send + Sync {
     ) -> Result<CityMarketSignalMutation, RepositoryError>;
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagerConfigSource {
+    GoogleSheets,
+    Operator,
+}
+
+impl ManagerConfigSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GoogleSheets => "google_sheets",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SetManagerBookingPolicy {
+    pub policy: BookingManagerPolicy,
+    pub source: ManagerConfigSource,
+    pub source_revision: Option<String>,
+    pub expected_version: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ManagerConfigMutation {
+    pub operation_id: uuid::Uuid,
+    pub config_key: String,
+    pub version: i64,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ManagerBookingPolicySummary {
+    pub policy: BookingManagerPolicy,
+    pub source: String,
+    pub source_revision: Option<String>,
+    pub version: i64,
+    pub synced_at: Option<OffsetDateTime>,
+}
+
 #[async_trait]
 pub trait AutopilotControlRepository: Send + Sync {
     async fn load_control_overview(
@@ -759,10 +889,32 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<AutopilotChiefOfStaff, RepositoryError>;
 
+    async fn load_manager_booking_policy(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<ManagerBookingPolicySummary, RepositoryError>;
+
+    async fn set_manager_booking_policy(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetManagerBookingPolicy,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<ManagerConfigMutation, RepositoryError>;
+
     async fn set_authority(
         &self,
         workspace_id: WorkspaceId,
         command: SetAutopilotAuthority,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    async fn assign_action(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: AutopilotActionId,
+        member_key: &str,
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

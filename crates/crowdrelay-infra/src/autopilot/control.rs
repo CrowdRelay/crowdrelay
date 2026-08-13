@@ -50,13 +50,28 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
 
             let needs_you = sqlx::query_as::<_, PendingActionRow>(
                 r#"
-                SELECT id, context, action_kind, subject_kind, subject_id, payload, created_at,
-                       approval_expires_at
-                FROM viryaos_autopilot_actions
-                WHERE workspace_id = $1
-                  AND status = 'awaiting_approval'
-                  AND (approval_expires_at IS NULL OR approval_expires_at > now())
-                ORDER BY created_at, id
+                SELECT action.id, action.context, action.action_kind, action.subject_kind,
+                       action.subject_id, action.payload, action.created_at,
+                       action.approval_expires_at,
+                       assignment.assignee_member_id,
+                       profile.member_key AS assignee_member_key,
+                       member.display_name AS assignee_display_name,
+                       assignment.due_at AS assignment_due_at
+                FROM viryaos_autopilot_actions action
+                LEFT JOIN viryaos_team_assignments assignment
+                  ON assignment.workspace_id=action.workspace_id
+                 AND assignment.action_id=action.id
+                 AND assignment.status='open'
+                LEFT JOIN viryaos_team_profiles profile
+                  ON profile.workspace_id=assignment.workspace_id
+                 AND profile.member_id=assignment.assignee_member_id
+                LEFT JOIN workspace_members member
+                  ON member.workspace_id=assignment.workspace_id
+                 AND member.id=assignment.assignee_member_id
+                WHERE action.workspace_id = $1
+                  AND action.status = 'awaiting_approval'
+                  AND (action.approval_expires_at IS NULL OR action.approval_expires_at > now())
+                ORDER BY action.created_at, action.id
                 LIMIT 50
                 "#,
             )
@@ -67,6 +82,28 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .into_iter()
             .map(pending_action)
             .collect::<Result<Vec<_>, _>>()?;
+
+            let available_assignees = sqlx::query_as::<_, (Uuid, String, String)>(
+                r#"
+                SELECT profile.member_id, profile.member_key, member.display_name
+                FROM viryaos_team_profiles profile
+                JOIN workspace_members member
+                  ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
+                WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
+                ORDER BY member.display_name, profile.member_key
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?
+            .into_iter()
+            .map(|(member_id, member_key, display_name)| TeamAssigneeSummary {
+                member_id,
+                member_key,
+                display_name,
+            })
+            .collect::<Vec<_>>();
 
             let recent_decisions = sqlx::query_as::<_, RecentDecisionRow>(
                 r#"
@@ -93,10 +130,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                        latest_report.status AS executor_status,
                        latest_report.executor_id,
                        latest_report.provider_reference,
-                       latest_report.occurred_at AS executor_reported_at
+                       latest_report.occurred_at AS executor_reported_at,
+                       latest_report.metadata AS executor_metadata
                 FROM viryaos_autopilot_actions action
                 LEFT JOIN LATERAL (
-                    SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at
+                    SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at, report.metadata
                     FROM viryaos_autopilot_execution_reports report
                     WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
                     ORDER BY report.occurred_at DESC, report.id DESC
@@ -221,6 +259,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 policies,
                 promotion_budget_guardrails,
                 needs_you,
+                available_assignees,
                 recent_decisions,
                 recent_actions,
                 recent_effects,
@@ -245,6 +284,167 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
     ) -> Result<crowdrelay_application::autopilot::AutopilotChiefOfStaff, RepositoryError> {
         self.bounded(operations::load_chief_of_staff(self, workspace_id, now))
             .await
+    }
+
+    async fn load_manager_booking_policy(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<ManagerBookingPolicySummary, RepositoryError> {
+        self.bounded(async {
+            let row = sqlx::query_as::<
+                _,
+                (
+                    serde_json::Value,
+                    String,
+                    Option<String>,
+                    i64,
+                    OffsetDateTime,
+                ),
+            >(
+                r#"
+                SELECT value, source, source_revision, version, synced_at
+                FROM viryaos_manager_config
+                WHERE workspace_id=$1 AND config_key='booking_policy'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            match row {
+                Some((value, source, source_revision, version, synced_at)) => {
+                    let policy = serde_json::from_value::<BookingManagerPolicy>(value)
+                        .map_err(|_| RepositoryError::Unexpected)?;
+                    if !policy.is_valid() || version <= 0 {
+                        return Err(RepositoryError::Unexpected);
+                    }
+                    Ok(ManagerBookingPolicySummary {
+                        policy,
+                        source,
+                        source_revision,
+                        version,
+                        synced_at: Some(synced_at),
+                    })
+                }
+                None => Ok(ManagerBookingPolicySummary {
+                    policy: BookingManagerPolicy::default(),
+                    source: "database".to_owned(),
+                    source_revision: None,
+                    version: 0,
+                    synced_at: None,
+                }),
+            }
+        })
+        .await
+    }
+
+    async fn set_manager_booking_policy(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetManagerBookingPolicy,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<ManagerConfigMutation, RepositoryError> {
+        self.bounded(async {
+            if command.expected_version < 0
+                || !command.policy.is_valid()
+                || command.source_revision.as_ref().is_some_and(|value| value.len() > 200)
+            {
+                return Err(RepositoryError::Unexpected);
+            }
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
+            let operation_id = Uuid::now_v7();
+            let details = json!({
+                "config_key": "booking_policy",
+                "policy": command.policy,
+                "source": command.source.as_str(),
+                "source_revision": command.source_revision,
+                "expected_version": command.expected_version,
+            });
+            if let Some(existing) = insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "set_manager_booking_policy",
+                "manager_config",
+                workspace_id.into_uuid(),
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?
+            {
+                let version = sqlx::query_scalar::<_, i64>(
+                    "SELECT version FROM viryaos_manager_config WHERE workspace_id=$1 AND config_key='booking_policy'",
+                )
+                .bind(workspace_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?
+                .ok_or(RepositoryError::Conflict)?;
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(ManagerConfigMutation {
+                    operation_id: existing,
+                    config_key: "booking_policy".into(),
+                    version,
+                    replayed: true,
+                });
+            }
+            let policy_json = serde_json::to_value(&command.policy)
+                .map_err(|_| RepositoryError::Unexpected)?;
+            let version = if command.expected_version == 0 {
+                sqlx::query_scalar::<_, i64>(
+                    r#"
+                    INSERT INTO viryaos_manager_config(
+                        workspace_id,config_key,value,source,source_revision,version,synced_at
+                    ) VALUES($1,'booking_policy',$2,$3,$4,1,now())
+                    ON CONFLICT (workspace_id,config_key) DO UPDATE SET
+                        value=EXCLUDED.value,
+                        source=EXCLUDED.source,
+                        source_revision=EXCLUDED.source_revision,
+                        synced_at=now(),
+                        version=viryaos_manager_config.version+1
+                    RETURNING version
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(policy_json)
+                .bind(command.source.as_str())
+                .bind(command.source_revision.as_deref())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?
+            } else {
+                sqlx::query_scalar::<_, i64>(
+                    r#"
+                    UPDATE viryaos_manager_config
+                    SET value=$2, source=$3, source_revision=$4,
+                        synced_at=now(), version=version+1
+                    WHERE workspace_id=$1 AND config_key='booking_policy' AND version=$5
+                    RETURNING version
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(policy_json)
+                .bind(command.source.as_str())
+                .bind(command.source_revision.as_deref())
+                .bind(command.expected_version)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?
+                .ok_or(RepositoryError::Conflict)?
+            };
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(ManagerConfigMutation {
+                operation_id,
+                config_key: "booking_policy".into(),
+                version,
+                replayed: false,
+            })
+        })
+        .await
     }
 
     async fn set_authority(
@@ -328,6 +528,154 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 operation_id,
                 target_id: workspace_id.into_uuid(),
                 status: "policy_updated".to_owned(),
+                replayed: false,
+            })
+        })
+        .await
+    }
+
+    async fn assign_action(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: AutopilotActionId,
+        member_key: &str,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let member_key = member_key.trim().to_ascii_lowercase();
+            if member_key.len() < 2
+                || member_key.len() > 48
+                || !member_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(RepositoryError::Unexpected);
+            }
+
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
+            let operation_id = Uuid::now_v7();
+            let details = json!({"member_key": member_key.clone()});
+            if let Some(existing) = insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "assign_autopilot_action",
+                "autopilot_action",
+                action_id.into_uuid(),
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?
+            {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: action_id.into_uuid(),
+                    status: "assignment_updated".to_owned(),
+                    replayed: true,
+                });
+            }
+
+            let action = sqlx::query_as::<_, (String, String, String, Uuid, Option<OffsetDateTime>)>(
+                r#"
+                SELECT context, action_kind, subject_kind, subject_id, approval_expires_at
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id=$1 AND id=$2 AND status='awaiting_approval'
+                  AND (approval_expires_at IS NULL OR approval_expires_at > now())
+                FOR UPDATE
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?
+            .ok_or(RepositoryError::Conflict)?;
+
+            let member = sqlx::query_as::<_, (Uuid, String, String, String)>(
+                r#"
+                SELECT profile.member_id, profile.member_key, member.display_name, member.normalized_email
+                FROM viryaos_team_profiles profile
+                JOIN workspace_members member
+                  ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
+                WHERE profile.workspace_id=$1 AND profile.member_key=$2
+                  AND profile.active AND member.status='active'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&member_key)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?
+            .ok_or(RepositoryError::NotFound)?;
+
+            let need = super::team::assignment_need(&action.0, &action.1);
+            let assignment_id = Uuid::now_v7();
+            let due_at = action.4;
+            let next_reminder_at = super::team::first_reminder_at(OffsetDateTime::now_utc(), due_at);
+            let persisted_assignment_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO viryaos_team_assignments (
+                    id, workspace_id, action_id, source_kind, source_id,
+                    assignee_member_id, required_skill, due_at, next_reminder_at
+                ) VALUES ($1,$2,$3,'autopilot_action',$4,$5,$6,$7,$8)
+                ON CONFLICT (workspace_id, action_id) DO UPDATE
+                SET assignee_member_id=EXCLUDED.assignee_member_id,
+                    required_skill=EXCLUDED.required_skill,
+                    status='open', due_at=EXCLUDED.due_at,
+                    assigned_at=now(), last_reminded_at=NULL,
+                    next_reminder_at=EXCLUDED.next_reminder_at,
+                    reminder_count=0, completed_at=NULL
+                RETURNING id
+                "#,
+            )
+            .bind(assignment_id)
+            .bind(workspace_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .bind(action.3)
+            .bind(member.0)
+            .bind(need.primary_skill.as_str())
+            .bind(due_at)
+            .bind(next_reminder_at)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            super::team::emit_team_notification(
+                &mut transaction,
+                workspace_id,
+                "viryaos.team.assignment_notification_requested",
+                json!({
+                    "assignment_id": persisted_assignment_id,
+                    "action_id": action_id.into_uuid(),
+                    "context": action.0,
+                    "action_kind": action.1,
+                    "subject_kind": action.2,
+                    "subject_id": action.3,
+                    "assignee": {
+                        "member_key": member.1,
+                        "display_name": member.2,
+                        "email": member.3,
+                    },
+                    "due_at": due_at,
+                    "action_url_path": "/staff/control/",
+                    "assignment_source": "operator_override",
+                    "message_contract": {
+                        "tone": "friendly_concise_human",
+                        "include": ["what_to_do", "why_it_matters", "deadline", "action_link"],
+                        "do_not_invent_business_facts": true
+                    }
+                }),
+            )
+            .await?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: action_id.into_uuid(),
+                status: "assignment_updated".to_owned(),
                 replayed: false,
             })
         })
@@ -448,6 +796,33 @@ impl PostgresAutopilotRepository {
                 .map_err(map_sqlx)?
             };
             let status = updated.ok_or(RepositoryError::Conflict)?;
+            if target_status == "queued" {
+                sqlx::query(
+                    r#"
+                    UPDATE viryaos_team_assignments
+                    SET status='done', completed_at=now(), next_reminder_at=NULL
+                    WHERE workspace_id=$1 AND action_id=$2 AND status='open'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(action_id.into_uuid())
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            } else {
+                sqlx::query(
+                    r#"
+                    UPDATE viryaos_team_assignments
+                    SET status='cancelled', completed_at=NULL, next_reminder_at=NULL
+                    WHERE workspace_id=$1 AND action_id=$2 AND status='open'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(action_id.into_uuid())
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(AutopilotControlMutation {
                 operation_id,

@@ -18,7 +18,7 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("payload.client_total_elapsed_ms != recorded_elapsed_ms", api)
 
     def test_public_entries_do_not_expose_identity_material(self):
-        api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
+        api = (ROOT / "crates/crowdrelay-api/src/synesthesia/leaderboard.rs").read_text()
         start = api.index("struct LeaderboardEntryResponse")
         end = api.index("struct LeaderboardResponse")
         public_entry = api[start:end]
@@ -28,15 +28,17 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("elapsed_ms: i64", public_entry)
 
     def test_alias_is_server_made_from_linked_email(self):
-        api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
-        publish = api.split("pub async fn publish_leaderboard", 1)[1].split("pub async fn enter_reward_draw", 1)[0]
+        api = (ROOT / "crates/crowdrelay-api/src/synesthesia/leaderboard.rs").read_text()
+        publish = api.split("pub async fn publish_leaderboard", 1)[1]
         self.assertIn("fan.normalized_email", publish)
         self.assertIn("masked_email_alias(&normalized_email)", publish)
         self.assertNotIn("LeaderboardPublishRequest", api)
-        self.assertIn("woj••••", api)
+        self.assertIn("local.chars().take(3)", api)
+        self.assertIn('format!("{local_prefix}••••")', api)
+        self.assertNotIn("domain}", api)
 
     def test_only_best_attempt_per_fan_is_ranked_and_indexed(self):
-        api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
+        api = (ROOT / "crates/crowdrelay-api/src/synesthesia/leaderboard.rs").read_text()
         migration = (ROOT / "migrations/0045_synesthesia_fan_leaderboard.sql").read_text()
         self.assertGreaterEqual(api.count("SELECT DISTINCT ON (run.fan_id)"), 2)
         self.assertIn("ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)", api)
@@ -55,7 +57,7 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("SynesthesiaLeaderboardResponse:", spec)
         self.assertIn("SynesthesiaLeaderboardPublishResponse:", spec)
         self.assertNotIn("SynesthesiaLeaderboardPublishRequest:", spec)
-        self.assertIn("SCHEMA_VERSION: u32 = 46", meta)
+        self.assertIn("SCHEMA_VERSION: u32 = 49", meta)
         self.assertIn('"synesthesia_leaderboard_v1"', meta)
 
 

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, WorkspaceId,
     audience_lifecycle::FanLifecycleSnapshot,
+    beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::ContentSupplySnapshot,
@@ -17,6 +18,7 @@ use crowdrelay_domain::{
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
     release_autopilot::ReleasePlanSnapshot,
+    show_growth::ShowGrowthSnapshot,
     show_operations::ShowTaskSnapshot,
 };
 use serde::{Deserialize, Serialize};
@@ -130,6 +132,24 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<FundingOpportunitySnapshot>, RepositoryError>;
 
+    async fn load_beacon_discovery_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconDiscoverySnapshot>, RepositoryError>;
+
+    async fn load_beacon_campaign_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconCampaignSnapshot>, RepositoryError>;
+
+    async fn load_show_growth_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ShowGrowthSnapshot>, RepositoryError>;
+
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.
     async fn persist_candidate(
@@ -176,6 +196,7 @@ pub enum AutopilotMeasurementKind {
     BookingReply7d,
     OutreachReply7d,
     AudienceTicketRevenue72h,
+    ShowTicketRevenue7d,
 }
 
 impl AutopilotMeasurementKind {
@@ -188,6 +209,7 @@ impl AutopilotMeasurementKind {
             Self::BookingReply7d => "booking_reply_7d",
             Self::OutreachReply7d => "outreach_reply_7d",
             Self::AudienceTicketRevenue72h => "audience_ticket_revenue_72h",
+            Self::ShowTicketRevenue7d => "show_ticket_revenue_7d",
         }
     }
 

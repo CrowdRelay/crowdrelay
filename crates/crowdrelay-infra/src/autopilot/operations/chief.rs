@@ -195,7 +195,8 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
             (SELECT count(*)::bigint FROM viryaos_autopilot_actions
               WHERE workspace_id=$1 AND status='awaiting_approval') awaiting_approval,
             (SELECT COALESCE(sum(CASE
-                WHEN action_kind IN ('booking.outreach.request','outreach.request','opportunity.live.apply') THEN 10
+                WHEN action_kind IN ('booking.outreach.request','outreach.request','beacon.outreach.request','beacon.discovery.request','opportunity.live.apply') THEN 10
+                WHEN action_kind='show.growth.request' THEN 9
                 WHEN action_kind='content.artifact.request' THEN 8
                 WHEN action_kind IN ('fan.lifecycle.message.request','audience.campaign.request','release.milestone.execute') THEN 5
                 WHEN action_kind IN ('merch.reorder.request','merch.bundle.request') THEN 5
@@ -232,7 +233,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         WHERE decision.workspace_id=$1
           AND decision.evaluated_at >= $2 - INTERVAL '48 hours'
           AND decision.disposition IN ('recommend_only','require_approval','auto_execute')
-          AND decision.context IN ('booking_opportunity','outreach','promotion_budget','merch_bundle','merch_pricing','ticket_yield','release','live_opportunity','funding')
+          AND decision.context IN ('booking_opportunity','outreach','promotion_budget','merch_bundle','merch_pricing','ticket_yield','release','live_opportunity','funding','beacon','show_growth')
           AND NOT EXISTS (
               SELECT 1 FROM viryaos_autopilot_actions action
               WHERE action.workspace_id=decision.workspace_id AND action.decision_id=decision.id

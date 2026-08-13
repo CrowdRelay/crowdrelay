@@ -3,8 +3,11 @@
 use std::collections::HashMap;
 
 use crowdrelay_domain::{
-    ContentSourceId, EventId, ExperimentId, ExperimentVariantId, MerchProductId,
+    BeaconId, ContentSourceId, EventId, ExperimentId, ExperimentVariantId, MerchProductId,
     OutreachOpportunityId, OutreachTargetId, WorkspaceId,
+    beacons::{
+        BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconKind, BeaconReplyDisposition,
+    },
     booking::BookingReplyDisposition,
     campaign_lifecycle::{EventCampaignHistory, EventCampaignSnapshot},
     content_supply::{ContentArtifactKind, ContentSourceKind, ContentSupplySnapshot},
@@ -29,10 +32,14 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 mod chief;
 mod execution;
 mod ingress;
+mod show_growth;
+mod show_growth_execution;
 mod snapshots;
 
 pub(super) use chief::*;
 pub(super) use execution::*;
+pub(super) use show_growth::*;
+pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;
 
 const fn booking_reply_str(value: BookingReplyDisposition) -> &'static str {

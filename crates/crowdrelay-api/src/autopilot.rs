@@ -13,27 +13,31 @@ use axum::{
 use crowdrelay_application::{
     IdempotencyKey, RepositoryError, RequestId,
     autopilot::{
-        AutopilotBookingStateRepository, AutopilotContentStateRepository, AutopilotContext,
-        AutopilotControlRepository, AutopilotExperimentStateRepository,
-        AutopilotMarketStateRepository, AutopilotMerchStateRepository,
-        AutopilotOutreachStateRepository, AutopilotTeamStateRepository,
-        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
-        ExperimentObservation, RecordBookingReply, RecordOutreachReply,
-        RecordTeamOpportunityProgress, SetAutopilotAuthority, TeamOpportunityKind,
-        TeamOpportunityProgress, UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource,
-        UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
-        UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
+        AutopilotBeaconStateRepository, AutopilotBookingStateRepository,
+        AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
+        AutopilotExperimentStateRepository, AutopilotMarketStateRepository,
+        AutopilotMerchStateRepository, AutopilotOutreachStateRepository,
+        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
+        CreateExperimentVariant, ExperimentObservation, ManagerConfigSource, RecordBeaconReply,
+        RecordBookingReply, RecordOutreachReply, RecordTeamOpportunityProgress,
+        SetAutopilotAuthority, SetManagerBookingPolicy, TeamOpportunityKind,
+        TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal,
+        UpsertContentSource, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
+        UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
+        UpsertReleasePlan, UpsertTeamOpportunity, UpsertTicketAllocationGuardrail,
+        assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
-    AutopilotActionId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
+    AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
     ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId, ReleasePlanId,
     TeamOpportunityId, TicketTypeId,
     autonomy::{AutonomyLevel, Confidence},
+    beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::ExperimentMetric,
+    live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
 };
@@ -43,6 +47,7 @@ use uuid::Uuid;
 const PRIVATE_NO_STORE: &str = "private, no-store";
 
 mod discovery;
+include!("autopilot/requests.rs");
 mod runtime;
 pub use discovery::discover_team_opportunity;
 pub use runtime::{
@@ -55,256 +60,6 @@ struct OverviewResponse<T> {
     #[serde(flatten)]
     overview: T,
 }
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthorityRequest {
-    enabled: bool,
-    autonomy_level: AutonomyLevel,
-    minimum_confidence_basis_points: u16,
-    max_actions_24h: u32,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MerchProductEconomicsRequest {
-    product_id: Uuid,
-    minimum_price_minor: i64,
-    maximum_price_minor: i64,
-    unit_cost_minor: Option<i64>,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BookingTargetRequest {
-    target_id: Option<Uuid>,
-    city_id: Uuid,
-    target_kind: BookingTargetKind,
-    display_name: String,
-    contact_email: String,
-    capacity: Option<u32>,
-    priority: u16,
-    relationship_score: u16,
-    active: bool,
-    accepts_booking: bool,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TicketAllocationGuardrailRequest {
-    ticket_type_id: Uuid,
-    minimum_capacity: u32,
-    maximum_capacity: u32,
-    step_capacity: u32,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromotionCampaignStateRequest {
-    provider: String,
-    external_campaign_key: String,
-    event_id: Option<Uuid>,
-    currency: String,
-    current_daily_budget_minor: i64,
-    minimum_daily_budget_minor: i64,
-    maximum_daily_budget_minor: i64,
-    spend_last_7d_minor: i64,
-    spend_month_to_date_minor: i64,
-    attributed_revenue_last_7d_minor: i64,
-    active: bool,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    last_budget_change_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339")]
-    observed_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromotionBudgetGuardrailRequest {
-    currency: String,
-    maximum_total_daily_budget_minor: i64,
-    maximum_monthly_spend_minor: i64,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CityMarketSignalRequest {
-    source: String,
-    city_id: Uuid,
-    signal_kind: CityMarketSignalKind,
-    score_basis_points: u16,
-    confidence_basis_points: u16,
-    #[serde(with = "time::serde::rfc3339")]
-    observed_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BookingReplyRequest {
-    disposition: BookingReplyDisposition,
-    #[serde(with = "time::serde::rfc3339")]
-    occurred_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OutreachTargetRequest {
-    target_id: Option<Uuid>,
-    target_kind: OutreachTargetKind,
-    display_name: String,
-    contact_email: String,
-    priority: u16,
-    relationship_score: u16,
-    active: bool,
-    verified: bool,
-    accepts_outreach: bool,
-    do_not_contact: bool,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OutreachOpportunityRequest {
-    opportunity_id: Option<Uuid>,
-    target_id: Uuid,
-    source: String,
-    subject_kind: String,
-    subject_key: String,
-    template_key: String,
-    relevance_basis_points: u16,
-    confidence_basis_points: u16,
-    active: bool,
-    #[serde(with = "time::serde::rfc3339")]
-    observed_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OutreachReplyRequest {
-    opportunity_id: Option<Uuid>,
-    disposition: OutreachReplyDisposition,
-    #[serde(with = "time::serde::rfc3339")]
-    occurred_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReleasePlanRequest {
-    release_id: Option<Uuid>,
-    source_key: String,
-    title: String,
-    #[serde(with = "time::serde::rfc3339")]
-    release_at: OffsetDateTime,
-    listen_url: Option<String>,
-    active: bool,
-    assets_ready: bool,
-    communication_enabled: bool,
-    press_enabled: bool,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TeamOpportunityRequest {
-    opportunity_id: Option<Uuid>,
-    opportunity_kind: TeamOpportunityKind,
-    source: String,
-    external_key: String,
-    title: String,
-    organization: String,
-    destination_url: Option<String>,
-    contact_email: Option<String>,
-    verified_destination: bool,
-    fit_basis_points: u16,
-    reputation_basis_points: u16,
-    confidence_basis_points: u16,
-    currency: String,
-    expected_fee_minor: i64,
-    estimated_cost_minor: i64,
-    application_fee_minor: i64,
-    requires_contract: bool,
-    exclusive: bool,
-    eligible: bool,
-    funding_amount_minor: i64,
-    own_contribution_minor: i64,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    deadline: Option<OffsetDateTime>,
-    #[serde(default)]
-    metadata: serde_json::Value,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TeamOpportunityProgressRequest {
-    progress: TeamOpportunityProgress,
-    #[serde(with = "time::serde::rfc3339")]
-    occurred_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContentSourceRequest {
-    source_id: Option<Uuid>,
-    source_kind: ContentSourceKind,
-    source_key: String,
-    title: String,
-    #[serde(with = "time::serde::rfc3339")]
-    occurred_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
-    metadata: serde_json::Value,
-    expected_version: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExperimentVariantRequest {
-    key: String,
-    allocation_basis_points: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExperimentRequest {
-    slug: String,
-    metric: ExperimentMetric,
-    variants: Vec<ExperimentVariantRequest>,
-    start: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExperimentObservationRequest {
-    experiment_id: Uuid,
-    variant_id: Uuid,
-    exposures_delta: u32,
-    conversions_delta: u32,
-    value_minor_delta: i64,
-    #[serde(with = "time::serde::rfc3339")]
-    observed_at: OffsetDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExperimentAssignmentRequest {
-    assignment_key: String,
-}
-
-const PROMOTION_STATE_MAX_TTL: Duration = Duration::hours(24);
-const PROMOTION_STATE_CLOCK_SKEW: Duration = Duration::minutes(5);
-const MARKET_SIGNAL_MAX_TTL: Duration = Duration::days(7);
 
 pub async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match state
@@ -330,6 +85,58 @@ pub async fn chief_of_staff(State(state): State<AppState>, headers: HeaderMap) -
         .await
     {
         Ok(brief) => private_json(StatusCode::OK, brief),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+pub async fn manager_booking_policy(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_manager_booking_policy(state.ops.workspace_id())
+        .await
+    {
+        Ok(policy) => private_json(StatusCode::OK, policy),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+pub async fn set_manager_booking_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ManagerBookingPolicyRequest>,
+) -> Response {
+    if request.expected_version < 0
+        || !request.policy.is_valid()
+        || request
+            .source_revision
+            .as_ref()
+            .is_some_and(|value| value.len() > 200)
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .set_manager_booking_policy(
+            state.ops.workspace_id(),
+            SetManagerBookingPolicy {
+                policy: request.policy,
+                source: request.source,
+                source_revision: request.source_revision,
+                expected_version: request.expected_version,
+            },
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }
@@ -670,6 +477,119 @@ pub async fn record_booking_reply(
     }
 }
 
+pub async fn upsert_beacon(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BeaconRequest>,
+) -> Response {
+    let invalid = request.expected_version < 0
+        || (request.expected_version > 0 && request.beacon_id.is_none())
+        || request.display_name.trim().is_empty()
+        || request.display_name.len() > 240
+        || request.relationship_score > 100
+        || request.relevance_basis_points > 10_000
+        || request.confidence_basis_points > 10_000
+        || request
+            .contact_email
+            .as_ref()
+            .is_some_and(|value| !valid_booking_email(value))
+        || request
+            .destination_url
+            .as_ref()
+            .is_some_and(|value| value.len() > 2048)
+        || request
+            .source_url
+            .as_ref()
+            .is_some_and(|value| value.len() > 2048)
+        || !request.metadata.is_object();
+    if invalid {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let confidence = match Confidence::from_basis_points(request.confidence_basis_points) {
+        Ok(value) => value,
+        Err(_) => {
+            return Problem::bad_request(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = UpsertBeacon {
+        beacon_id: request.beacon_id.map(BeaconId::from_uuid),
+        city_id: request.city_id.map(CityId::from_uuid),
+        kind: request.beacon_kind,
+        display_name: request.display_name,
+        contact_email: request.contact_email,
+        destination_url: request.destination_url,
+        source_url: request.source_url,
+        active: request.active,
+        verified: request.verified,
+        accepts_outreach: request.accepts_outreach,
+        do_not_contact: request.do_not_contact,
+        relationship_score: request.relationship_score,
+        relevance_basis_points: request.relevance_basis_points,
+        confidence,
+        metadata: request.metadata,
+        expected_version: request.expected_version,
+    };
+    match state
+        .autopilot
+        .upsert_beacon(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+pub async fn record_beacon_reply(
+    State(state): State<AppState>,
+    Path(beacon_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<BeaconReplyRequest>,
+) -> Response {
+    let Ok(beacon_id) = Uuid::parse_str(&beacon_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = RecordBeaconReply {
+        beacon_id: BeaconId::from_uuid(beacon_id),
+        event_id: EventId::from_uuid(request.event_id),
+        disposition: request.disposition,
+        occurred_at: request.occurred_at,
+    };
+    match state
+        .autopilot
+        .record_beacon_reply(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn upsert_outreach_target(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -904,6 +824,9 @@ pub async fn upsert_team_opportunity(
         || request.application_fee_minor < 0
         || request.funding_amount_minor < 0
         || request.own_contribution_minor < 0
+        || request.country_code.as_ref().is_some_and(|code| {
+            code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase())
+        })
         || !request.metadata.is_object()
         || (matches!(request.opportunity_kind, TeamOpportunityKind::Funding)
             && request.deadline.is_none());
@@ -948,6 +871,9 @@ pub async fn upsert_team_opportunity(
         funding_amount_minor: request.funding_amount_minor,
         own_contribution_minor: request.own_contribution_minor,
         deadline: request.deadline,
+        event_starts_at: request.event_starts_at,
+        country_code: request.country_code,
+        travel_band: request.travel_band,
         metadata: request.metadata,
         expected_version: request.expected_version,
     };
@@ -1165,6 +1091,60 @@ pub async fn record_experiment_observation(
     }
 }
 
+pub async fn assign_action(
+    State(state): State<AppState>,
+    Path(action_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<AssignActionRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let action_id = match Uuid::parse_str(&action_id) {
+        Ok(value) => AutopilotActionId::from_uuid(value),
+        Err(_) => {
+            return Problem::not_found(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => {
+            return Problem::unprocessable(request_id(&headers))
+                .private()
+                .into_response();
+        }
+    };
+    let member_key = payload.member_key.trim().to_ascii_lowercase();
+    if member_key.len() < 2
+        || member_key.len() > 48
+        || !member_key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return Problem::unprocessable(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .assign_action(
+            state.ops.workspace_id(),
+            action_id,
+            &member_key,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn approve_action(
     State(state): State<AppState>,
     Path(action_id): Path<String>,
@@ -1350,6 +1330,7 @@ fn parse_context(value: &str) -> Option<AutopilotContext> {
         "release" => Some(AutopilotContext::Release),
         "live_opportunity" => Some(AutopilotContext::LiveOpportunity),
         "funding" => Some(AutopilotContext::Funding),
+        "beacon" => Some(AutopilotContext::Beacon),
         _ => None,
     }
 }

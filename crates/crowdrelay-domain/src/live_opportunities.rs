@@ -18,6 +18,27 @@ pub enum LiveOpportunityKind {
     SupportSlot,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveTravelBand {
+    Poland,
+    EastGermany,
+    CzechiaSlovakia,
+    FarShot,
+}
+
+impl LiveTravelBand {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Poland => "poland",
+            Self::EastGermany => "east_germany",
+            Self::CzechiaSlovakia => "czechia_slovakia",
+            Self::FarShot => "far_shot",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct LiveOpportunitySnapshot {
     pub opportunity_id: TeamOpportunityId,
@@ -34,6 +55,16 @@ pub struct LiveOpportunitySnapshot {
     pub requires_contract: bool,
     pub exclusive: bool,
     pub deadline: Option<OffsetDateTime>,
+    /// Calendar/travel facts and manager policy are folded into the snapshot by
+    /// the infrastructure adapter so the domain owns the actual booking gate.
+    pub event_starts_at: Option<OffsetDateTime>,
+    pub travel_band: Option<LiveTravelBand>,
+    pub committed_shows_year: u16,
+    pub annual_target: u16,
+    pub annual_stretch: u16,
+    pub stretch_minimum_score_basis_points: u16,
+    pub far_shot_minimum_score_basis_points: u16,
+    pub prefer_weekend_one_shots: bool,
     pub already_applied: bool,
 }
 
@@ -73,6 +104,52 @@ pub fn evaluate_live_opportunity_discovery(
         reputation_basis_points: 5_000,
         confidence: Confidence::saturating_from_basis_points(6_500),
     })
+}
+
+/// Operator-owned live calendar guardrails. Google Sheets may be the editing
+/// surface, but this validated value is persisted in CrowdRelay before use.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BookingManagerPolicy {
+    pub annual_target: u16,
+    pub annual_stretch: u16,
+    pub stretch_minimum_score_basis_points: u16,
+    pub prefer_weekend_one_shots: bool,
+    pub priority_markets: Vec<String>,
+    pub far_shot_minimum_score_basis_points: u16,
+}
+
+impl Default for BookingManagerPolicy {
+    fn default() -> Self {
+        Self {
+            annual_target: 15,
+            annual_stretch: 20,
+            stretch_minimum_score_basis_points: 9_000,
+            prefer_weekend_one_shots: true,
+            priority_markets: vec!["PL".into(), "DE-EAST".into(), "CZ".into(), "SK".into()],
+            far_shot_minimum_score_basis_points: 9_000,
+        }
+    }
+}
+
+impl BookingManagerPolicy {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.annual_target > 0
+            && self.annual_target <= 60
+            && self.annual_stretch >= self.annual_target
+            && self.annual_stretch <= 60
+            && self.stretch_minimum_score_basis_points <= 10_000
+            && self.far_shot_minimum_score_basis_points <= 10_000
+            && !self.priority_markets.is_empty()
+            && self.priority_markets.len() <= 12
+            && self.priority_markets.iter().all(|market| {
+                !market.trim().is_empty()
+                    && market.len() <= 24
+                    && market.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -130,7 +207,7 @@ pub fn evaluate_live_opportunity(
     }
 
     let score = live_opportunity_score(snapshot);
-    if score < policy.minimum_score {
+    if score < policy.minimum_score || !passes_show_budget(snapshot, score) {
         return LiveOpportunityDecision::Hold;
     }
 
@@ -172,11 +249,51 @@ fn may_auto_submit(
     score: u16,
 ) -> bool {
     score >= policy.minimum_auto_score
+        && schedule_allows_auto_submit(snapshot, score)
         && snapshot.auto_submission_capable
         && snapshot.application_fee_minor <= policy.max_auto_application_fee_minor
         && net_margin_minor(snapshot) >= -policy.max_auto_negative_margin_minor
         && !snapshot.requires_contract
         && !snapshot.exclusive
+}
+
+#[must_use]
+fn passes_show_budget(snapshot: LiveOpportunitySnapshot, score: u16) -> bool {
+    if snapshot.annual_target == 0
+        || snapshot.annual_stretch < snapshot.annual_target
+        || snapshot.committed_shows_year >= snapshot.annual_stretch
+    {
+        return false;
+    }
+    let score_basis_points = score.saturating_mul(100);
+    if snapshot.committed_shows_year >= snapshot.annual_target
+        && score_basis_points < snapshot.stretch_minimum_score_basis_points
+    {
+        return false;
+    }
+    if matches!(snapshot.travel_band, Some(LiveTravelBand::FarShot))
+        && score_basis_points < snapshot.far_shot_minimum_score_basis_points
+    {
+        return false;
+    }
+    true
+}
+
+#[must_use]
+fn schedule_allows_auto_submit(snapshot: LiveOpportunitySnapshot, score: u16) -> bool {
+    let Some(starts_at) = snapshot.event_starts_at else {
+        // Unknown calendar date is safe to prepare, but not safe to commit to automatically.
+        return false;
+    };
+    if !snapshot.prefer_weekend_one_shots {
+        return true;
+    }
+    let weekday = starts_at.weekday();
+    let weekend = matches!(
+        weekday,
+        time::Weekday::Friday | time::Weekday::Saturday | time::Weekday::Sunday
+    );
+    weekend || score.saturating_mul(100) >= snapshot.stretch_minimum_score_basis_points
 }
 
 #[must_use]
@@ -220,6 +337,14 @@ mod tests {
             requires_contract: false,
             exclusive: false,
             deadline: Some(now() + Duration::days(20)),
+            event_starts_at: Some(now() + Duration::days(24)),
+            travel_band: Some(LiveTravelBand::Poland),
+            committed_shows_year: 8,
+            annual_target: 15,
+            annual_stretch: 20,
+            stretch_minimum_score_basis_points: 9_000,
+            far_shot_minimum_score_basis_points: 9_000,
+            prefer_weekend_one_shots: false,
             already_applied: false,
         }
     }
@@ -241,6 +366,30 @@ mod tests {
             evaluate_live_opportunity(candidate, LiveOpportunityPolicy::default(), now()),
             LiveOpportunityDecision::PrepareForApproval { .. }
         ));
+    }
+
+    #[test]
+    fn annual_target_only_allows_exceptional_stretch_shows() {
+        let mut candidate = snapshot();
+        candidate.committed_shows_year = 15;
+        candidate.fit_basis_points = 7_000;
+        candidate.reputation_basis_points = 6_000;
+        assert_eq!(
+            evaluate_live_opportunity(candidate, LiveOpportunityPolicy::default(), now()),
+            LiveOpportunityDecision::Hold
+        );
+    }
+
+    #[test]
+    fn far_shot_requires_exceptional_score() {
+        let mut candidate = snapshot();
+        candidate.travel_band = Some(LiveTravelBand::FarShot);
+        candidate.fit_basis_points = 7_500;
+        candidate.reputation_basis_points = 7_500;
+        assert_eq!(
+            evaluate_live_opportunity(candidate, LiveOpportunityPolicy::default(), now()),
+            LiveOpportunityDecision::Hold
+        );
     }
 
     #[test]

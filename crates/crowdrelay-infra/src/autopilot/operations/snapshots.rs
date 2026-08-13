@@ -322,6 +322,183 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
 }
 
 #[derive(Debug, FromRow)]
+struct BeaconDiscoveryRow {
+    event_id: Uuid,
+    event_starts_at: OffsetDateTime,
+    known_local_beacons: i64,
+    last_discovery_at: Option<OffsetDateTime>,
+    in_flight: bool,
+}
+
+pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Vec<BeaconDiscoverySnapshot>, RepositoryError> {
+    let rows = sqlx::query_as::<_, BeaconDiscoveryRow>(
+        r#"
+        SELECT event.id AS event_id, event.starts_at AS event_starts_at,
+               (SELECT count(*)::bigint
+                FROM viryaos_beacons beacon
+                WHERE beacon.workspace_id=event.workspace_id
+                  AND beacon.city_id=event.city_id
+                  AND beacon.active AND beacon.verified AND beacon.accepts_outreach
+                  AND NOT beacon.do_not_contact
+                  AND beacon.contact_email IS NOT NULL) AS known_local_beacons,
+               (SELECT max(action.finished_at)
+                FROM viryaos_autopilot_actions action
+                WHERE action.workspace_id=event.workspace_id
+                  AND action.context='beacon'
+                  AND action.subject_kind='event'
+                  AND action.subject_id=event.id
+                  AND action.action_kind='beacon.discovery.request'
+                  AND action.status='succeeded') AS last_discovery_at,
+               EXISTS (
+                   SELECT 1 FROM viryaos_autopilot_actions action
+                   WHERE action.workspace_id=event.workspace_id
+                     AND action.context='beacon'
+                     AND action.subject_kind='event'
+                     AND action.subject_id=event.id
+                     AND action.action_kind='beacon.discovery.request'
+                     AND action.status IN ('awaiting_approval','queued','processing')
+               ) AS in_flight
+        FROM events event
+        WHERE event.workspace_id=$1
+          AND event.status='published'
+          AND event.city_id IS NOT NULL
+          AND event.starts_at BETWEEN $2 AND $2 + INTERVAL '60 days'
+        ORDER BY event.starts_at, event.id
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(MAX_SNAPSHOTS_PER_CONTEXT)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(BeaconDiscoverySnapshot {
+                event_id: EventId::from_uuid(row.event_id),
+                event_starts_at: row.event_starts_at,
+                known_local_beacons: u16::try_from(row.known_local_beacons)
+                    .map_err(|_| RepositoryError::Unexpected)?,
+                last_discovery_at: row.last_discovery_at,
+                in_flight: row.in_flight,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, FromRow)]
+struct BeaconCampaignRow {
+    beacon_id: Uuid,
+    beacon_version: i64,
+    event_id: Uuid,
+    beacon_kind: String,
+    active: bool,
+    verified: bool,
+    accepts_outreach: bool,
+    do_not_contact: bool,
+    relationship_score: i32,
+    relevance_basis_points: i32,
+    confidence_basis_points: i32,
+    event_starts_at: OffsetDateTime,
+    last_outreach_at: Option<OffsetDateTime>,
+    followup_count: i32,
+    last_reply_disposition: String,
+    in_flight: bool,
+}
+
+pub(in crate::autopilot) async fn load_beacon_campaign_snapshots(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Vec<BeaconCampaignSnapshot>, RepositoryError> {
+    let rows = sqlx::query_as::<_, BeaconCampaignRow>(
+        r#"
+        SELECT
+            beacon.id AS beacon_id,
+            beacon.version AS beacon_version,
+            event.id AS event_id,
+            beacon.beacon_kind,
+            beacon.active,
+            beacon.verified,
+            beacon.accepts_outreach,
+            beacon.do_not_contact,
+            beacon.relationship_score,
+            beacon.relevance_basis_points,
+            beacon.confidence_basis_points,
+            event.starts_at AS event_starts_at,
+            campaign.last_outreach_at,
+            COALESCE(campaign.followup_count, 0) AS followup_count,
+            COALESCE(campaign.last_reply_disposition, 'none') AS last_reply_disposition,
+            EXISTS (
+                SELECT 1
+                FROM viryaos_autopilot_actions AS action
+                WHERE action.workspace_id = beacon.workspace_id
+                  AND action.context = 'beacon'
+                  AND action.subject_id = beacon.id
+                  AND action.status IN ('awaiting_approval','queued','processing')
+            ) AS in_flight
+        FROM viryaos_beacons AS beacon
+        JOIN events AS event
+          ON event.workspace_id = beacon.workspace_id
+         AND event.status IN ('published','completed')
+         AND event.starts_at BETWEEN $2 - INTERVAL '5 days' AND $2 + INTERVAL '60 days'
+         AND (
+             beacon.city_id IS NULL
+             OR beacon.city_id = event.city_id
+         )
+        LEFT JOIN viryaos_beacon_campaigns AS campaign
+          ON campaign.workspace_id = beacon.workspace_id
+         AND campaign.beacon_id = beacon.id
+         AND campaign.event_id = event.id
+        WHERE beacon.workspace_id = $1
+          AND beacon.active
+          AND COALESCE(campaign.status, 'candidate') NOT IN ('declined','suppressed','closed')
+        ORDER BY event.starts_at, beacon.relevance_basis_points DESC,
+                 beacon.relationship_score DESC, beacon.id
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(MAX_SNAPSHOTS_PER_CONTEXT)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(BeaconCampaignSnapshot {
+                beacon_id: BeaconId::from_uuid(row.beacon_id),
+                beacon_version: row.beacon_version,
+                event_id: EventId::from_uuid(row.event_id),
+                kind: parse_beacon_kind(&row.beacon_kind)?,
+                active: row.active,
+                verified: row.verified,
+                accepts_outreach: row.accepts_outreach,
+                do_not_contact: row.do_not_contact,
+                relationship_score: u16::try_from(row.relationship_score)
+                    .map_err(|_| RepositoryError::Unexpected)?,
+                relevance_basis_points: u16::try_from(row.relevance_basis_points)
+                    .map_err(|_| RepositoryError::Unexpected)?,
+                evidence_confidence: parse_confidence(row.confidence_basis_points)?,
+                event_starts_at: row.event_starts_at,
+                last_outreach_at: row.last_outreach_at,
+                followup_count: u16::try_from(row.followup_count)
+                    .map_err(|_| RepositoryError::Unexpected)?,
+                last_reply: parse_beacon_reply(&row.last_reply_disposition)?,
+                in_flight: row.in_flight,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, FromRow)]
 struct ContentRow {
     source_id: Uuid,
     source_kind: String,
@@ -594,6 +771,35 @@ pub(in crate::autopilot) async fn load_show_task_snapshots(
             })
         })
         .collect()
+}
+
+pub(in crate::autopilot) fn parse_beacon_kind(value: &str) -> Result<BeaconKind, RepositoryError> {
+    match value {
+        "radio" => Ok(BeaconKind::Radio),
+        "local_press" => Ok(BeaconKind::LocalPress),
+        "television" => Ok(BeaconKind::Television),
+        "reviewer" => Ok(BeaconKind::Reviewer),
+        "creator" => Ok(BeaconKind::Creator),
+        "photographer" => Ok(BeaconKind::Photographer),
+        "promoter" => Ok(BeaconKind::Promoter),
+        "venue" => Ok(BeaconKind::Venue),
+        "scene_partner" => Ok(BeaconKind::ScenePartner),
+        "patron" => Ok(BeaconKind::Patron),
+        "community" => Ok(BeaconKind::Community),
+        _ => Err(RepositoryError::Unexpected),
+    }
+}
+
+pub(super) fn parse_beacon_reply(value: &str) -> Result<BeaconReplyDisposition, RepositoryError> {
+    match value {
+        "none" => Ok(BeaconReplyDisposition::None),
+        "received" => Ok(BeaconReplyDisposition::Received),
+        "interested" => Ok(BeaconReplyDisposition::Interested),
+        "partner" => Ok(BeaconReplyDisposition::Partner),
+        "declined" => Ok(BeaconReplyDisposition::Declined),
+        "do_not_contact" => Ok(BeaconReplyDisposition::DoNotContact),
+        _ => Err(RepositoryError::Unexpected),
+    }
 }
 
 pub(super) fn parse_outreach_kind(value: &str) -> Result<OutreachTargetKind, RepositoryError> {

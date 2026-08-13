@@ -119,11 +119,47 @@ pub(super) async fn schedule_effect_measurement(
                 now + time::Duration::hours(72),
             ))
         }
+        AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. }
+            if !matches!(
+                lever,
+                crowdrelay_domain::show_growth::ShowGrowthLever::MerchBuyerOffer
+                    | crowdrelay_domain::show_growth::ShowGrowthLever::PostShowMerchFollowUp
+            ) => {
+            let baseline = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
+                FROM ticket_orders AS ticket_order
+                JOIN ticket_sales AS sale
+                  ON sale.workspace_id=ticket_order.workspace_id
+                 AND sale.id=ticket_order.ticket_sale_id
+                WHERE ticket_order.workspace_id=$1
+                  AND sale.event_id=$2
+                  AND ticket_order.status IN ('paid','partially_refunded','refunded')
+                  AND ticket_order.paid_at >= $3 - INTERVAL '7 days'
+                  AND ticket_order.paid_at < $3
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(now)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            Some((
+                AutopilotMeasurementKind::ShowTicketRevenue7d,
+                event_id.into_uuid(),
+                baseline,
+                now + time::Duration::days(7),
+            ))
+        }
+        AutopilotActionPayload::RequestShowGrowth { .. } => None,
         AutopilotActionPayload::ChangeTicketCapacity { .. }
         | AutopilotActionPayload::RequestFanLifecycleMessage { .. }
         | AutopilotActionPayload::RequestMerchReorder { .. }
         | AutopilotActionPayload::RequestMerchBundle { .. }
         | AutopilotActionPayload::RequestContentArtifact { .. }
+        | AutopilotActionPayload::RequestBeaconDiscovery { .. }
+        | AutopilotActionPayload::RequestBeaconOutreach { .. }
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
         | AutopilotActionPayload::EscalateShowTask { .. }
@@ -211,6 +247,9 @@ pub(super) async fn record_execution_outcome(
             bundle_price_minor, ..
         } => ("merch_bundle_price_minor", *bundle_price_minor as f64, None),
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
+        AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
+        AutopilotActionPayload::RequestBeaconOutreach { .. } => ("beacon_outreach_requested", 1.0, None),
+        AutopilotActionPayload::RequestShowGrowth { .. } => ("show_growth_lever_requested", 1.0, None),
         AutopilotActionPayload::RequestContentArtifact { .. } => {
             ("content_artifact_requested", 1.0, None)
         }
@@ -631,20 +670,25 @@ async fn ensure_marketing_eligible(
 }
 
 pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
-    matches!(
-        payload,
-        AutopilotActionPayload::RequestFanLifecycleMessage { .. }
-            | AutopilotActionPayload::RequestMerchReorder { .. }
-            | AutopilotActionPayload::RequestBookingOutreach { .. }
-            | AutopilotActionPayload::RequestMerchBundle { .. }
-            | AutopilotActionPayload::RequestOutreach { .. }
-            | AutopilotActionPayload::RequestContentArtifact { .. }
-            | AutopilotActionPayload::EscalateShowTask { .. }
-            | AutopilotActionPayload::RequestPromotionBudgetChange { .. }
-            | AutopilotActionPayload::ApplyLiveOpportunity { .. }
-            | AutopilotActionPayload::PrepareFundingPackage { .. }
-            | AutopilotActionPayload::SubmitFundingApplication { .. }
-    )
+    match payload {
+        AutopilotActionPayload::RequestShowGrowth { lever, .. } => !lever.is_first_party_campaign(),
+        _ => matches!(
+            payload,
+            AutopilotActionPayload::RequestFanLifecycleMessage { .. }
+                | AutopilotActionPayload::RequestMerchReorder { .. }
+                | AutopilotActionPayload::RequestBookingOutreach { .. }
+                | AutopilotActionPayload::RequestMerchBundle { .. }
+                | AutopilotActionPayload::RequestOutreach { .. }
+                | AutopilotActionPayload::RequestBeaconDiscovery { .. }
+                | AutopilotActionPayload::RequestBeaconOutreach { .. }
+                | AutopilotActionPayload::RequestContentArtifact { .. }
+                | AutopilotActionPayload::EscalateShowTask { .. }
+                | AutopilotActionPayload::RequestPromotionBudgetChange { .. }
+                | AutopilotActionPayload::ApplyLiveOpportunity { .. }
+                | AutopilotActionPayload::PrepareFundingPackage { .. }
+                | AutopilotActionPayload::SubmitFundingApplication { .. }
+        ),
+    }
 }
 
 fn executor_capability_for_event(event_type: &str) -> &'static str {
@@ -654,6 +698,9 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.booking.outreach_requested" => "booking.outreach",
         "viryaos.merch.bundle_requested" => "merch.bundle",
         "viryaos.outreach.requested" => "outreach.send",
+        "viryaos.beacon.discovery_requested" => "beacon.discovery",
+        "viryaos.beacon.outreach_requested" => "beacon.outreach",
+        "viryaos.show_growth.requested" => "show.growth",
         "viryaos.content.artifact_requested" => "content.artifact",
         "viryaos.show.task_attention_required" => "show.escalation",
         "viryaos.ops.status_changed" => "ops.alert",

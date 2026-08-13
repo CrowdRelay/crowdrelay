@@ -229,6 +229,25 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .fetch_one(&self.pool)
                 .await
                 .map_err(map_sqlx)?,
+                AutopilotMeasurementKind::ShowTicketRevenue7d => sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
+                    FROM ticket_orders AS ticket_order
+                    JOIN ticket_sales AS sale
+                      ON sale.workspace_id=ticket_order.workspace_id
+                     AND sale.id=ticket_order.ticket_sale_id
+                    WHERE ticket_order.workspace_id=$1 AND sale.event_id=$2
+                      AND ticket_order.status IN ('paid','partially_refunded','refunded')
+                      AND ticket_order.paid_at >= $3
+                      AND ticket_order.paid_at < $3 + INTERVAL '7 days'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.subject_id)
+                .bind(measurement.action_finished_at)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx)?,
             };
             if observed.is_finite() && observed >= 0.0 {
                 Ok(observed)

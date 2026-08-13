@@ -6,10 +6,7 @@
 
 use axum::{
     Json,
-    extract::{
-        Path, Query, State,
-        rejection::{JsonRejection, QueryRejection},
-    },
+    extract::{Path, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL},
@@ -48,6 +45,9 @@ const LEADERBOARD_DEFAULT_LIMIT: u16 = 10;
 const LEADERBOARD_MAX_LIMIT: u16 = 50;
 const PUBLIC_LEADERBOARD_CACHE: &str = "public, max-age=15, s-maxage=30, stale-while-revalidate=60";
 
+mod leaderboard;
+pub use leaderboard::{list_leaderboard, publish_leaderboard};
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartRunRequest {
@@ -81,6 +81,12 @@ struct RecordRoomResponse {
 #[serde(deny_unknown_fields)]
 pub struct CompleteRunRequest {
     client_total_elapsed_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverRunRequest {
+    completed_room_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,32 +139,6 @@ struct RewardEntryResponse {
     status: &'static str,
     message: &'static str,
     draw_size: u8,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LeaderboardQuery {
-    limit: Option<u16>,
-}
-
-#[derive(Debug, Serialize)]
-struct LeaderboardEntryResponse {
-    rank: u16,
-    display_name: String,
-    elapsed_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
-struct LeaderboardResponse {
-    items: Vec<LeaderboardEntryResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct LeaderboardPublishResponse {
-    published: bool,
-    display_name: String,
-    rank: i64,
-    best_elapsed_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -473,7 +453,68 @@ pub async fn complete_run(
         }
     }
 
-    match completion_response(&state, workspace_id, run_id).await {
+    match completion_response(&state, workspace_id, run_id, true).await {
+        Ok(response) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(response),
+        )
+            .into_response(),
+        Err(error) => error.response(request_id_value),
+    }
+}
+
+/// Mark a locally complete legacy save as non-competitive.
+///
+/// This compatibility path exists only for builds affected by the historical
+/// room-timing capture bug. It never writes an elapsed time, so it cannot create
+/// or improve a leaderboard result.
+pub async fn recover_run(
+    State(state): State<crate::AppState>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<RecoverRunRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let complete_room_set = payload.completed_room_ids.len() == ROOM_IDS.len()
+        && ROOM_IDS.iter().all(|room_id| {
+            payload
+                .completed_room_ids
+                .iter()
+                .any(|value| value == room_id)
+        });
+    if !complete_room_set {
+        return SynesthesiaError::Invalid.response(request_id_value);
+    }
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let updated = sqlx::query(
+        r#"
+        UPDATE synesthesia_runs
+        SET recovery_completed_at = COALESCE(recovery_completed_at, now()), updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND run_token_hash = $3
+          AND campaign_slug = $4
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(&token_hash)
+    .bind(CAMPAIGN_SLUG)
+    .execute(state.ticketing.pool())
+    .await;
+    match updated {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => return SynesthesiaError::Unauthorized.response(request_id_value),
+        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+    }
+    match completion_response(&state, workspace_id, run_id, true).await {
         Ok(response) => (
             StatusCode::OK,
             [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
@@ -488,12 +529,14 @@ async fn completion_response(
     state: &crate::AppState,
     workspace_id: Uuid,
     run_id: Uuid,
+    issue_handoff: bool,
 ) -> Result<CompleteRunResponse, SynesthesiaError> {
     let linked_to_fan = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT fan_id IS NOT NULL
         FROM synesthesia_runs
-        WHERE workspace_id = $1 AND id = $2 AND completed_at IS NOT NULL
+        WHERE workspace_id = $1 AND id = $2
+          AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
         "#,
     )
     .bind(workspace_id)
@@ -503,7 +546,7 @@ async fn completion_response(
     .map_err(SynesthesiaError::sqlx)?
     .ok_or(SynesthesiaError::Conflict)?;
 
-    let (handoff_code, handoff_expires_at) = if linked_to_fan {
+    let (handoff_code, handoff_expires_at) = if linked_to_fan || !issue_handoff {
         (None, None)
     } else {
         let code = random_token().map_err(|()| SynesthesiaError::Unavailable)?;
@@ -514,7 +557,8 @@ async fn completion_response(
             r#"
             UPDATE synesthesia_runs
             SET handoff_token_hash = $3, handoff_expires_at = $4, updated_at = now()
-            WHERE workspace_id = $1 AND id = $2 AND fan_id IS NULL AND completed_at IS NOT NULL
+            WHERE workspace_id = $1 AND id = $2 AND fan_id IS NULL
+              AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
             "#,
         )
         .bind(workspace_id)
@@ -551,6 +595,90 @@ async fn completion_response(
         handoff_expires_at,
         next_event,
     })
+}
+
+/// Read mutable completion/link state without rotating the short-lived handoff.
+///
+/// This endpoint exists specifically so Synesthesia can discover that My Signal
+/// consumed a handoff after the player returns to the game. A read must never
+/// invalidate the code another surface is currently using.
+pub async fn completion_context(
+    State(state): State<crate::AppState>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match authorize_completed_run(&state, workspace_id, run_id, &token_hash).await {
+        Ok(true) => {}
+        Ok(false) => return SynesthesiaError::Unauthorized.response(request_id_value),
+        Err(error) => return error.response(request_id_value),
+    }
+    match completion_response(&state, workspace_id, run_id, false).await {
+        Ok(response) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(response),
+        )
+            .into_response(),
+        Err(error) => error.response(request_id_value),
+    }
+}
+
+/// Explicitly issue a fresh short-lived handoff for My Signal. Token rotation is
+/// a user action, never a side effect of refreshing status.
+pub async fn issue_handoff(
+    State(state): State<crate::AppState>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let token_hash = match bearer_hash(&headers) {
+        Some(hash) => hash,
+        None => return SynesthesiaError::Unauthorized.response(request_id_value),
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match authorize_completed_run(&state, workspace_id, run_id, &token_hash).await {
+        Ok(true) => {}
+        Ok(false) => return SynesthesiaError::Unauthorized.response(request_id_value),
+        Err(error) => return error.response(request_id_value),
+    }
+    match completion_response(&state, workspace_id, run_id, true).await {
+        Ok(response) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(response),
+        )
+            .into_response(),
+        Err(error) => error.response(request_id_value),
+    }
+}
+
+async fn authorize_completed_run(
+    state: &crate::AppState,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    token_hash: &[u8],
+) -> Result<bool, SynesthesiaError> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM synesthesia_runs
+            WHERE workspace_id = $1 AND id = $2 AND run_token_hash = $3
+              AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .bind(token_hash)
+    .fetch_one(state.ticketing.pool())
+    .await
+    .map_err(SynesthesiaError::sqlx)
 }
 
 pub async fn link_completed_run_to_fan(
@@ -608,7 +736,7 @@ pub async fn link_completed_run_to_fan(
         WHERE workspace_id = $1
           AND handoff_token_hash = $2
           AND handoff_expires_at > now()
-          AND completed_at IS NOT NULL
+          AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
           AND (fan_id IS NULL OR fan_id = $3)
         RETURNING id, next_room_index, COALESCE(client_total_elapsed_ms, 0)
         "#,
@@ -634,193 +762,6 @@ pub async fn link_completed_run_to_fan(
             run_id,
             rooms_completed,
             client_total_elapsed_ms,
-        }),
-    )
-        .into_response()
-}
-
-pub async fn list_leaderboard(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-    query: Result<Query<LeaderboardQuery>, QueryRejection>,
-) -> Response {
-    let request_id_value = request_id(&headers);
-    let Query(query) = match query {
-        Ok(query) => query,
-        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
-    };
-    let limit = query.limit.unwrap_or(LEADERBOARD_DEFAULT_LIMIT);
-    if limit == 0 || limit > LEADERBOARD_MAX_LIMIT {
-        return SynesthesiaError::Invalid.response(request_id_value);
-    }
-    let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let rows = sqlx::query_as::<_, (String, i64)>(
-        r#"
-        WITH best AS (
-            SELECT DISTINCT ON (run.fan_id)
-                run.leaderboard_name AS display_name,
-                run.client_total_elapsed_ms AS elapsed_ms,
-                run.completed_at,
-                run.id
-            FROM synesthesia_runs AS run
-            WHERE run.workspace_id = $1
-              AND run.campaign_slug = $2
-              AND run.fan_id IS NOT NULL
-              AND run.completed_at IS NOT NULL
-              AND run.client_total_elapsed_ms IS NOT NULL
-              AND run.leaderboard_name IS NOT NULL
-            ORDER BY run.fan_id, run.client_total_elapsed_ms, run.completed_at, run.id
-        )
-        SELECT display_name, elapsed_ms
-        FROM best
-        ORDER BY elapsed_ms, completed_at, id
-        LIMIT $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(CAMPAIGN_SLUG)
-    .bind(i64::from(limit))
-    .fetch_all(state.ticketing.pool())
-    .await;
-
-    match rows {
-        Ok(rows) => {
-            let items = rows
-                .into_iter()
-                .enumerate()
-                .map(
-                    |(index, (display_name, elapsed_ms))| LeaderboardEntryResponse {
-                        rank: u16::try_from(index + 1).unwrap_or(u16::MAX),
-                        display_name,
-                        elapsed_ms,
-                    },
-                )
-                .collect();
-            (
-                StatusCode::OK,
-                [(
-                    CACHE_CONTROL,
-                    HeaderValue::from_static(PUBLIC_LEADERBOARD_CACHE),
-                )],
-                Json(LeaderboardResponse { items }),
-            )
-                .into_response()
-        }
-        Err(error) => SynesthesiaError::sqlx(error).response(request_id_value),
-    }
-}
-
-pub async fn publish_leaderboard(
-    State(state): State<crate::AppState>,
-    Path(run_id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Response {
-    let request_id_value = request_id(&headers);
-    let token_hash = match bearer_hash(&headers) {
-        Some(hash) => hash,
-        None => return SynesthesiaError::Unauthorized.response(request_id_value),
-    };
-    let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let mut transaction = match state.ticketing.pool().begin().await {
-        Ok(transaction) => transaction,
-        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
-    };
-
-    let authorized = sqlx::query_as::<_, (String, Uuid, String)>(
-        r#"
-        SELECT run.campaign_slug, run.fan_id, fan.normalized_email
-        FROM synesthesia_runs AS run
-        INNER JOIN fans AS fan
-          ON fan.workspace_id = run.workspace_id AND fan.id = run.fan_id
-        WHERE run.workspace_id = $1 AND run.id = $2 AND run.run_token_hash = $3
-          AND run.completed_at IS NOT NULL
-        FOR SHARE OF run, fan
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(run_id)
-    .bind(&token_hash)
-    .fetch_optional(&mut *transaction)
-    .await;
-    let (campaign_slug, fan_id, normalized_email) = match authorized {
-        Ok(Some(value)) => value,
-        Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
-        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
-    };
-    if campaign_slug != CAMPAIGN_SLUG {
-        return SynesthesiaError::Conflict.response(request_id_value);
-    }
-    let display_name = match masked_email_alias(&normalized_email) {
-        Some(alias) => alias,
-        None => return SynesthesiaError::Conflict.response(request_id_value),
-    };
-
-    if let Err(error) = sqlx::query(
-        r#"
-        UPDATE synesthesia_runs
-        SET leaderboard_name = $4,
-            leaderboard_published_at = COALESCE(leaderboard_published_at, now()),
-            updated_at = now()
-        WHERE workspace_id = $1 AND campaign_slug = $2 AND fan_id = $3
-          AND completed_at IS NOT NULL AND client_total_elapsed_ms IS NOT NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(CAMPAIGN_SLUG)
-    .bind(fan_id)
-    .bind(&display_name)
-    .execute(&mut *transaction)
-    .await
-    {
-        return SynesthesiaError::sqlx(error).response(request_id_value);
-    }
-
-    let ranked = sqlx::query_as::<_, (i64, i64)>(
-        r#"
-        WITH best AS (
-            SELECT DISTINCT ON (run.fan_id)
-                run.fan_id,
-                run.client_total_elapsed_ms AS elapsed_ms,
-                run.completed_at,
-                run.id
-            FROM synesthesia_runs AS run
-            WHERE run.workspace_id = $1
-              AND run.campaign_slug = $2
-              AND run.fan_id IS NOT NULL
-              AND run.completed_at IS NOT NULL
-              AND run.client_total_elapsed_ms IS NOT NULL
-              AND run.leaderboard_name IS NOT NULL
-            ORDER BY run.fan_id, run.client_total_elapsed_ms, run.completed_at, run.id
-        ), ranked AS (
-            SELECT fan_id, elapsed_ms,
-                   ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
-            FROM best
-        )
-        SELECT rank, elapsed_ms FROM ranked WHERE fan_id = $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(CAMPAIGN_SLUG)
-    .bind(fan_id)
-    .fetch_optional(&mut *transaction)
-    .await;
-    let (rank, best_elapsed_ms) = match ranked {
-        Ok(Some(value)) => value,
-        Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
-        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
-    };
-    if let Err(error) = transaction.commit().await {
-        return SynesthesiaError::sqlx(error).response(request_id_value);
-    }
-
-    (
-        StatusCode::OK,
-        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
-        Json(LeaderboardPublishResponse {
-            published: true,
-            display_name,
-            rank,
-            best_elapsed_ms,
         }),
     )
         .into_response()
@@ -895,7 +836,8 @@ async fn enter_reward_draw_inner(
         r#"
         SELECT id, campaign_slug
         FROM synesthesia_runs
-        WHERE workspace_id = $1 AND run_token_hash = $2 AND completed_at IS NOT NULL
+        WHERE workspace_id = $1 AND run_token_hash = $2
+          AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
         FOR SHARE
         "#,
     )
@@ -1039,15 +981,6 @@ fn clean_attempt_id(value: Option<&str>) -> Option<String> {
     Some(value.to_owned())
 }
 
-fn masked_email_alias(value: &str) -> Option<String> {
-    let (local, domain) = value.rsplit_once('@')?;
-    if local.is_empty() || domain.is_empty() {
-        return None;
-    }
-    let local_prefix: String = local.chars().take(3).collect();
-    (!local_prefix.is_empty()).then(|| format!("{local_prefix}••••"))
-}
-
 fn clean_locale(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty()
@@ -1105,11 +1038,14 @@ mod tests {
     #[test]
     fn leaderboard_aliases_mask_identity_and_stay_bounded() {
         assert_eq!(
-            masked_email_alias("wojciech@example.com"),
+            leaderboard::masked_email_alias("wojciech@example.com"),
             Some("woj••••".to_owned())
         );
-        assert_eq!(masked_email_alias("a@b.pl"), Some("a••••".to_owned()));
-        assert!(masked_email_alias("not-an-email").is_none());
-        assert!(masked_email_alias("@example.com").is_none());
+        assert_eq!(
+            leaderboard::masked_email_alias("a@b.pl"),
+            Some("a••••".to_owned())
+        );
+        assert!(leaderboard::masked_email_alias("not-an-email").is_none());
+        assert!(leaderboard::masked_email_alias("@example.com").is_none());
     }
 }

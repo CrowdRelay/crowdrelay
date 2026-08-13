@@ -34,6 +34,16 @@ The operator owns the data. Public requests never send emails or call external p
 
 ViryaOS Autopilot is an opt-in operations plane built on CrowdRelay. All business intelligence is deterministic Rust: explicit DDD decision services, scoring functions, state machines and versioned policies. There is no LLM or ML decision path. n8n, email, Calendar and other providers are execution adapters only; they receive typed intents and report facts, while CrowdRelay owns the decision and its audit trail.
 
+### Beacons: local lighthouses for the Signal
+
+A **Beacon** is CrowdRelay's domain name for a local person or organisation that can amplify a VIRYA show: radio, local press, TV, a reviewer or creator, photographer, promoter, venue, scene partner, media patron or community partner. A Beacon is **not a fan** and it is not a generic CRM contact. Fans are the core of Signal; Beacons are the local lighthouses around that signal.
+
+The Beacon bounded context turns pre-show promotion into a closed loop instead of an address book: `discover → qualify → authorize → outreach → reply/relationship → show → measured impact`. A normal campaign starts around eight weeks before a show: discovery near T-8, first relevant pitch around T-6, collaboration/patronage follow-up around T-4, a final local push around T-2, then a short post-show thank-you that preserves the relationship. The exact cadence is policy-driven, deduplicated and suppression-aware.
+
+Beacons are only one input into the broader **Attendance Growth / Demand Loop**. CrowdRelay also watches the sales/interest state of each show and can request a free-listing sweep, venue/line-up/scene cross-promotion, fan-ambassador activation, factual social-proof relay, merch preorder to existing buyers, a consent-safe last-mile message to interested non-buyers and a post-show merch follow-up. These are deterministic levers with one-shot/idempotent history rather than a generic “send more promo” loop. The practical operator playbook is [`docs/ATTENDANCE_GROWTH_PLAYBOOK.md`](docs/ATTENDANCE_GROWTH_PLAYBOOK.md).
+
+CrowdRelay decides **who may be contacted, why, when and under which authority**. n8n may execute the already-authorized delivery, and Gemini may adapt tone, language or a verified local hook so the message sounds human. Neither n8n nor an LLM may choose a recipient, invent facts or offers, bypass approval, change cadence, or broaden the action. Replies are recorded against the Beacon/event relationship so future outreach can prefer real relationships over repeated cold contact.
+
 The team-facing system is intentionally described as seven programs rather than the internal bounded contexts:
 
 * **Release Autopilot** — release timeline, Calendar milestones, first-party fan campaigns, press/patronage/endorsement opportunity seeding and post-release sustain;
@@ -45,6 +55,10 @@ The team-facing system is intentionally described as seven programs rather than 
 * **Funding Autopilot** — funding discovery facts, eligibility/economics evaluation, deadline Calendar intents and deterministic application-package preparation; final submission always requires approval.
 
 Every action is governed by one of three authority levels: **AUTO** for reversible operational work, **BOUNDED AUTO** for actions inside explicit operator-owned limits, and **APPROVAL** for contractual, paid or otherwise consequential actions. The global `CROWDRELAY_AUTOPILOT_ENABLED` switch remains the hard kill switch, and every bounded context also has a versioned authority, confidence threshold and 24-hour action quota. Durable actions are idempotent, bounded-retry and auditable. Approval actions emit one provider-neutral notification event so the team is interrupted only when a human decision is actually required.
+
+Attendance growth is a separate demand loop rather than “post more on socials”. Before each show it verifies free event distribution, sets up provider-native intent capture, activates venue/line-up/scene Beacons, runs earned-media waves, triggers local fan ambassadors and high-intent first-party follow-up, and uses free provider follower surfaces such as Bandsintown Posts/free-quota email plus a guided Spotify Artist Pick step. Paid Boost/Promoted Campaigns remain outside Autopilot authority. Every external action must either produce a provider receipt/public URL or a concrete human `manual_step`, so a green action cannot hide an unfinished promotion task.
+
+The manager layer also keeps human work bounded. Actions that require approval are assigned through a skill-aware, load-aware team router and surface in the same `Needs you` queue on Virya staff web and Virya Signal staff mode. Friendly notification/reminder events point the owner back to the canonical task; email is a reminder channel, never a second task database. Booking volume is governed by a versioned manager policy (for VIRYA, normally a 15-show annual target with a stretch ceiling reserved for exceptional opportunities), and an operator-editable Google Sheet may sync that policy through n8n. CrowdRelay validates and persists the last valid policy so Drive/n8n availability never becomes a business-state dependency.
 
 No Meta Ads executor is part of ViryaOS Autopilot. Promotion-budget telemetry may remain available for analysis, but paid advertising is not autonomously executed by this system.
 
@@ -79,7 +93,8 @@ PostgreSQL 18 is the persistence baseline. The local stack uses its asynchronous
 | Operations       | admin queue summary, dead-item inspection, delivery attempt history, and audited manual retry under `/v1/admin/ops`                                    |
 | Audience         | admin-only Fan 360, segments, communication intents and analytics under `/v1/admin/audience`, `/v1/admin/communications` and `/v1/admin/analytics` |
 | Commerce         | staff/admin inventory + reward campaigns and `POST /v1/commerce/coupons/redeem`                                                                  |
-| Synesthesia      | `POST /v1/public/synesthesia/runs`, ordered room completion, album completion and five-CD draw entry                                             |
+| Synesthesia      | run start/rooms/completion, read-only completion context, explicit My Signal handoff, leaderboard publication and five-CD draw entry under `/v1/public/synesthesia` |
+| Autopilot manager | admin opportunity, Beacon, manager-policy, approval and operator read-model endpoints under `/v1/admin/autopilot` |
 
 Catalog, event and ticket-offer reads under `/public/*` are anonymous. Fan-specific `/me/*` routes use the private fan session, while ticket-order status and wallet routes use the per-order checkout bearer token. `/admin/*`, `/staff/*`, and service-only `/commerce/*` plus `/internal/*` routes are isolated authorization boundaries. Admin credentials and staff device sessions cannot call service routes, while service credentials cannot call operator routes. The legacy static staff bearer is accepted only as a measured compatibility fallback until production telemetry confirms zero use. Exact schemas and error codes are documented in the OpenAPI contract. The maintained architecture documentation lives under `docs/`.
 

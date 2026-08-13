@@ -303,6 +303,7 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
         (
             i16,
             Option<OffsetDateTime>,
+            Option<OffsetDateTime>,
             Option<i64>,
             Option<OffsetDateTime>,
             bool,
@@ -315,7 +316,7 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
         r#"
         WITH latest AS (
             SELECT run.id, run.workspace_id, run.next_room_index, run.completed_at,
-                   run.client_total_elapsed_ms, run.linked_at
+                   run.recovery_completed_at, run.client_total_elapsed_ms, run.linked_at
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3
             ORDER BY run.updated_at DESC, run.id DESC
@@ -325,7 +326,7 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
                 MIN(run.client_total_elapsed_ms) FILTER (
                     WHERE run.completed_at IS NOT NULL AND run.client_total_elapsed_ms IS NOT NULL
                 )::bigint AS best_elapsed_ms,
-                COUNT(*) FILTER (WHERE run.completed_at IS NOT NULL)::bigint AS completed_runs,
+                COUNT(*) FILTER (WHERE run.completed_at IS NOT NULL OR run.recovery_completed_at IS NOT NULL)::bigint AS completed_runs,
                 COALESCE(BOOL_OR(run.leaderboard_name IS NOT NULL), false) AS leaderboard_published
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3
@@ -345,8 +346,8 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
                    ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
             FROM public_best
         )
-        SELECT latest.next_room_index, latest.completed_at, latest.client_total_elapsed_ms,
-               latest.linked_at,
+        SELECT latest.next_room_index, latest.completed_at, latest.recovery_completed_at,
+               latest.client_total_elapsed_ms, latest.linked_at,
                EXISTS(
                    SELECT 1 FROM synesthesia_reward_entries AS reward
                    WHERE reward.workspace_id = latest.workspace_id AND reward.run_id = latest.id
@@ -407,6 +408,7 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
         Some((
             rooms,
             completed_at,
+            recovery_completed_at,
             elapsed,
             linked_at,
             reward_entered,
@@ -416,8 +418,12 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
             leaderboard_rank,
         )) => FanHomeSynesthesia {
             started: true,
-            completed: completed_at.is_some(),
-            rooms_completed: rooms,
+            completed: completed_at.is_some() || recovery_completed_at.is_some(),
+            rooms_completed: if recovery_completed_at.is_some() {
+                11
+            } else {
+                rooms
+            },
             client_total_elapsed_ms: elapsed,
             best_elapsed_ms,
             completed_runs,

@@ -48,7 +48,7 @@ class TeamAutopilotsContract(unittest.TestCase):
 
     def test_funding_prepares_automatically_but_submission_is_approval(self):
         domain = text("crates/crowdrelay-domain/src/funding.rs")
-        evaluator = text("crates/crowdrelay-application/src/autopilot/evaluate.rs")
+        evaluator = text("crates/crowdrelay-application/src/autopilot/evaluate/commercial.rs")
         self.assertIn("PreparePackage", domain)
         self.assertIn("SubmitForApproval", domain)
         self.assertIn("force_approval", evaluator)
@@ -87,7 +87,7 @@ class TeamAutopilotsContract(unittest.TestCase):
     def test_provider_submission_needs_positive_callback(self):
         migration = text("migrations/0039_viryaos_team_autopilots.sql")
         execution = text("crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
-        ingress = text("crates/crowdrelay-infra/src/autopilot/operations/ingress.rs")
+        ingress = text("crates/crowdrelay-infra/src/autopilot/operations/ingress/team.rs")
         self.assertIn("submission_requested", migration)
         self.assertIn("SET status='submission_requested'", execution)
         self.assertIn("TeamOpportunityProgress::Submitted", ingress)

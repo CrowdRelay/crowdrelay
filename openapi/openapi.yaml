@@ -830,6 +830,76 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /public/synesthesia/runs/{run_id}/recover:
+    post:
+      operationId: recoverLegacySynesthesiaRun
+      summary: Mark a locally complete legacy Synesthesia save as non-competitive
+      description: Compatibility path for clients affected by the historical room-timing capture bug. Requires the complete canonical eleven-room set, never accepts or fabricates elapsed time, and therefore cannot create or improve a leaderboard result. It may unlock My Signal linking and reward eligibility for an otherwise completed local save.
+      security:
+      - synesthesiaRunBearer: []
+      parameters:
+      - $ref: '#/components/parameters/SynesthesiaRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SynesthesiaRunRecoveryRequest'
+      responses:
+        '200':
+          description: Legacy completion recovered without competitive timing.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaRunCompleteResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/synesthesia/runs/{run_id}/context:
+    get:
+      operationId: getSynesthesiaCompletionContext
+      summary: Read completed-run link context without rotating the Signal handoff
+      description: Authenticates with the completed run token and returns mutable link state. This read-only endpoint never issues or invalidates a handoff code.
+      security:
+      - synesthesiaRunBearer: []
+      parameters:
+      - $ref: '#/components/parameters/SynesthesiaRunId'
+      responses:
+        '200':
+          description: Current completion/link context.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaRunCompleteResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/synesthesia/runs/{run_id}/handoff:
+    post:
+      operationId: issueSynesthesiaSignalHandoff
+      summary: Explicitly issue a fresh short-lived My Signal handoff
+      description: Rotates the handoff only as a direct user action. Status refreshes use the read-only context endpoint so they cannot invalidate an in-flight handoff.
+      security:
+      - synesthesiaRunBearer: []
+      parameters:
+      - $ref: '#/components/parameters/SynesthesiaRunId'
+      responses:
+        '200':
+          description: Fresh handoff issued, or the run is already linked.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaRunCompleteResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /me/home:
     get:
       operationId: getFanHome
@@ -1721,6 +1791,80 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/manager-config/booking-policy:
+    get:
+      operationId: getAutopilotManagerBookingPolicy
+      summary: Read the active durable annual booking policy
+      description: Returns the last valid CrowdRelay policy and version used by booking decisions. A Google Sheets sync should read this first and then write with expected_version. Version 0 means no persisted override yet and the returned policy is the built-in safe default.
+      security:
+      - adminBearer: []
+      responses:
+        '200': { description: Active manager booking policy, content: { application/json: { schema: { $ref: '#/components/schemas/ManagerBookingPolicySummary' } } } }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: setAutopilotManagerBookingPolicy
+      summary: Sync the operator-editable annual booking policy into CrowdRelay
+      description: Validates and persists the last valid manager policy. Google Sheets/n8n is an ingestion path only; CrowdRelay remains the durable policy source used by opportunity decisions.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ManagerBookingPolicyRequest' }
+      responses:
+        '200': { description: Manager policy accepted or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/ManagerConfigMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacons:
+    post:
+      operationId: upsertAutopilotBeacon
+      summary: Create or version-update a local Signal Beacon
+      description: A Beacon is a verified local amplifier around a show or market (radio, press, TV, reviewer, creator, photographer, promoter, patron or community), not a fan and not a generic CRM contact.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BeaconRequest' }
+      responses:
+        '200': { description: Beacon accepted or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/BeaconMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacons/{beacon_id}/reply:
+    post:
+      operationId: recordAutopilotBeaconReply
+      summary: Close the loop on a Beacon reply for one event
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: beacon_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BeaconReplyRequest' }
+      responses:
+        '200': { description: Beacon relationship state recorded or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/team-opportunities/discover:
     post:
       operationId: discoverAutopilotTeamOpportunity
@@ -1865,6 +2009,33 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/actions/{action_id}/assign:
+    post:
+      operationId: assignAutopilotActionOwner
+      summary: Manually reassign one human Autopilot handoff
+      description: Changes only the thin team-handoff owner. The underlying bounded-context action remains authoritative and the new owner receives the normal friendly assignment notification.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/AutopilotActionId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AutopilotActionAssignmentRequest' }
+      responses:
+        '200':
+          description: Handoff owner updated or idempotently replayed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/actions/{action_id}/approve:
     post:
@@ -4859,7 +5030,7 @@ components:
       required: true
       schema:
         type: string
-        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
+        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
     AutopilotActionId:
       in: path
       name: action_id
@@ -5414,6 +5585,19 @@ components:
       required: [client_total_elapsed_ms]
       properties:
         client_total_elapsed_ms: { type: integer, format: int64, minimum: 11000, maximum: 86400000 }
+    SynesthesiaRunRecoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [completed_room_ids]
+      properties:
+        completed_room_ids:
+          type: array
+          minItems: 11
+          maxItems: 11
+          uniqueItems: true
+          items:
+            type: string
+            enum: [wave-of-uncertainty, party-time, unmasked, the-calling, seed-of-doubt, hybrid, technophobia, invaluable, from-the-ashes, waves, rise]
     SynesthesiaRunCompleteResponse:
       type: object
       additionalProperties: false
@@ -5704,7 +5888,7 @@ components:
       enum: [observe, recommend, require_approval, bounded_auto]
     AutopilotContext:
       type: string
-      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth]
     AutopilotDisposition:
       type: string
       enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
@@ -5737,8 +5921,16 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application]
       additionalProperties: true
+    TeamAssigneeSummary:
+      type: object
+      additionalProperties: false
+      required: [member_id, member_key, display_name]
+      properties:
+        member_id: { type: string, format: uuid }
+        member_key: { type: string, minLength: 1, maxLength: 64 }
+        display_name: { type: string, minLength: 1, maxLength: 160 }
     PendingAutopilotAction:
       type: object
       additionalProperties: false
@@ -5752,6 +5944,11 @@ components:
         payload: { $ref: '#/components/schemas/AutopilotActionPayload' }
         created_at: { type: string, format: date-time }
         approval_expires_at: { type: [string, 'null'], format: date-time }
+        assignee:
+          anyOf:
+          - $ref: '#/components/schemas/TeamAssigneeSummary'
+          - type: 'null'
+        assignment_due_at: { type: [string, 'null'], format: date-time }
     RecentAutopilotDecision:
       type: object
       additionalProperties: false
@@ -5764,10 +5961,19 @@ components:
         disposition: { $ref: '#/components/schemas/AutopilotDisposition' }
         reason: { type: string, maxLength: 240 }
         evaluated_at: { type: string, format: date-time }
+    AutopilotManualStep:
+      type: object
+      additionalProperties: false
+      required: [destination, url, what_to_do, why_it_matters]
+      properties:
+        destination: { type: string, maxLength: 120 }
+        url: { type: string, maxLength: 500 }
+        what_to_do: { type: string, maxLength: 300 }
+        why_it_matters: { type: string, maxLength: 300 }
     RecentAutopilotAction:
       type: object
       additionalProperties: false
-      required: [id, context, action_kind, subject_kind, subject_id, status, attempt_count, created_at]
+      required: [id, context, action_kind, subject_kind, subject_id, status, attempt_count, created_at, manual_steps]
       properties:
         id: { type: string, format: uuid }
         context: { $ref: '#/components/schemas/AutopilotContext' }
@@ -5783,6 +5989,10 @@ components:
         executor_id: { type: [string, 'null'], maxLength: 120 }
         provider_reference: { type: [string, 'null'], maxLength: 240 }
         executor_reported_at: { type: [string, 'null'], format: date-time }
+        manual_steps:
+          type: array
+          maxItems: 8
+          items: { $ref: '#/components/schemas/AutopilotManualStep' }
     RecentAutopilotEffect:
       type: object
       additionalProperties: false
@@ -5802,7 +6012,7 @@ components:
     AutopilotOverview:
       type: object
       additionalProperties: false
-      required: [runtime_enabled, policies, promotion_budget_guardrails, needs_you, recent_decisions, recent_actions, recent_effects, queued_actions, processing_actions, succeeded_24h, failed_24h, executor_confirmed_24h, executor_failed_24h, awaiting_executor, release_ledger, rum_metrics_24h]
+      required: [runtime_enabled, policies, promotion_budget_guardrails, needs_you, available_assignees, recent_decisions, recent_actions, recent_effects, queued_actions, processing_actions, succeeded_24h, failed_24h, executor_confirmed_24h, executor_failed_24h, awaiting_executor, release_ledger, rum_metrics_24h]
       properties:
         runtime_enabled: { type: boolean }
         policies:
@@ -5817,6 +6027,10 @@ components:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/PendingAutopilotAction' }
+        available_assignees:
+          type: array
+          maxItems: 32
+          items: { $ref: '#/components/schemas/TeamAssigneeSummary' }
         recent_decisions:
           type: array
           maxItems: 50
@@ -5987,6 +6201,99 @@ components:
         release_id: { type: string, format: uuid }
         version: { type: integer, format: int64, minimum: 1 }
         replayed: { type: boolean }
+    ManagerConfigSource:
+      type: string
+      enum: [google_sheets, operator]
+    BookingManagerPolicy:
+      type: object
+      additionalProperties: false
+      required: [annual_target, annual_stretch, stretch_minimum_score_basis_points, prefer_weekend_one_shots, priority_markets, far_shot_minimum_score_basis_points]
+      properties:
+        annual_target: { type: integer, minimum: 1, maximum: 60, default: 15 }
+        annual_stretch: { type: integer, minimum: 1, maximum: 60, default: 20 }
+        stretch_minimum_score_basis_points: { type: integer, minimum: 0, maximum: 10000, default: 9000 }
+        prefer_weekend_one_shots: { type: boolean, default: true }
+        priority_markets:
+          type: array
+          minItems: 1
+          maxItems: 12
+          items: { type: string, pattern: '^[A-Z0-9-]{1,24}$' }
+        far_shot_minimum_score_basis_points: { type: integer, minimum: 0, maximum: 10000, default: 9000 }
+    ManagerBookingPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [policy, source, expected_version]
+      properties:
+        policy: { $ref: '#/components/schemas/BookingManagerPolicy' }
+        source: { $ref: '#/components/schemas/ManagerConfigSource' }
+        source_revision: { type: [string, 'null'], maxLength: 200 }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    ManagerBookingPolicySummary:
+      type: object
+      additionalProperties: false
+      required: [policy, source, source_revision, version, synced_at]
+      properties:
+        policy: { $ref: '#/components/schemas/BookingManagerPolicy' }
+        source: { type: string, enum: [database, google_sheets, operator] }
+        source_revision: { type: [string, 'null'], maxLength: 200 }
+        version: { type: integer, format: int64, minimum: 0 }
+        synced_at: { type: [string, 'null'], format: date-time }
+    ManagerConfigMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, config_key, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        config_key: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+    BeaconKind:
+      type: string
+      enum: [radio, local_press, television, reviewer, creator, photographer, promoter, venue, scene_partner, patron, community]
+    BeaconReplyDisposition:
+      type: string
+      enum: [none, received, interested, partner, declined, do_not_contact]
+    BeaconRequest:
+      type: object
+      additionalProperties: false
+      required: [beacon_kind, display_name, active, verified, accepts_outreach, do_not_contact, relationship_score, relevance_basis_points, confidence_basis_points, metadata, expected_version]
+      properties:
+        beacon_id: { type: [string, 'null'], format: uuid }
+        city_id: { type: [string, 'null'], format: uuid }
+        beacon_kind: { $ref: '#/components/schemas/BeaconKind' }
+        display_name: { type: string, minLength: 1, maxLength: 240 }
+        contact_email: { type: [string, 'null'], format: email, maxLength: 320 }
+        destination_url: { type: [string, 'null'], maxLength: 2048 }
+        source_url: { type: [string, 'null'], maxLength: 2048 }
+        active: { type: boolean }
+        verified: { type: boolean }
+        accepts_outreach: { type: boolean }
+        do_not_contact: { type: boolean }
+        relationship_score: { type: integer, minimum: 0, maximum: 100 }
+        relevance_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        metadata: { type: object, additionalProperties: true }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+    BeaconReplyRequest:
+      type: object
+      additionalProperties: false
+      required: [event_id, disposition, occurred_at]
+      properties:
+        event_id: { type: string, format: uuid }
+        disposition: { $ref: '#/components/schemas/BeaconReplyDisposition' }
+        occurred_at: { type: string, format: date-time }
+    BeaconMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, beacon_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        beacon_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+    LiveTravelBand:
+      type: string
+      enum: [poland, east_germany, czechia_slovakia, far_shot]
     TeamOpportunityKind:
       type: string
       enum: [festival, showcase, review_contest, support_slot, funding]
@@ -6027,6 +6334,12 @@ components:
         funding_amount_minor: { type: integer, format: int64, minimum: 0 }
         own_contribution_minor: { type: integer, format: int64, minimum: 0 }
         deadline: { type: [string, 'null'], format: date-time }
+        event_starts_at: { type: [string, 'null'], format: date-time }
+        country_code: { type: [string, 'null'], pattern: '^[A-Z]{2}$' }
+        travel_band:
+          anyOf:
+          - $ref: '#/components/schemas/LiveTravelBand'
+          - type: 'null'
         metadata: { type: object, additionalProperties: true }
         expected_version: { type: integer, format: int64, minimum: 0 }
     TeamOpportunityMutation:
@@ -6432,6 +6745,12 @@ components:
         campaign_id: { type: string, format: uuid }
         replayed: { type: boolean }
 
+    AutopilotActionAssignmentRequest:
+      type: object
+      additionalProperties: false
+      required: [member_key]
+      properties:
+        member_key: { type: string, minLength: 2, maxLength: 48, pattern: '^[a-z0-9_-]+$' }
     AutopilotMutation:
       type: object
       additionalProperties: false

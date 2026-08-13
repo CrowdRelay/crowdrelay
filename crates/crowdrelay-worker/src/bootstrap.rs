@@ -730,4 +730,5 @@ include!("bootstrap/persistence.rs");
 include!("bootstrap/validation.rs");
 include!("bootstrap/specifications.rs");
 include!("bootstrap/admission.rs");
+include!("bootstrap/team.rs");
 include!("bootstrap/tests.rs");

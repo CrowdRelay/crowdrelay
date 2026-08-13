@@ -115,6 +115,8 @@ typed_uuid_id!(
     ExperimentVariantId,
     ReleasePlanId,
     TeamOpportunityId,
+    BeaconId,
+    TeamAssignmentId,
 );
 
 #[cfg(test)]

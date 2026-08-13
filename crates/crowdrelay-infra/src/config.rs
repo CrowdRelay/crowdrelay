@@ -21,6 +21,17 @@ use url::Url;
 
 use crate::sensitive_response::SensitiveResponseKey;
 
+mod click;
+mod team;
+
+use click::parse_click_buffer_config;
+pub use team::TeamOperationsConfig;
+use team::{
+    VIRYA_TEAM_KUBA_EMAIL_KEY, VIRYA_TEAM_LUBEK_EMAIL_KEY, VIRYA_TEAM_MARCIN_EMAIL_KEY,
+    VIRYA_TEAM_MAREK_EMAIL_KEY, VIRYA_TEAM_WOJTEK_EMAIL_KEY, parse_team_operations,
+    validate_production_team_contacts,
+};
+
 const ENVIRONMENT_KEY: &str = "CROWDRELAY_ENV";
 const BIND_ADDR_KEY: &str = "CROWDRELAY_BIND_ADDR";
 const DATABASE_URL_KEY: &str = "CROWDRELAY_DATABASE_URL";
@@ -119,6 +130,11 @@ const KNOWN_KEYS: &[&str] = &[
     QR_SIGNING_SECRET_KEY,
     ADMIN_MEMBER_EMAIL_KEY,
     STAFF_MEMBER_EMAIL_KEY,
+    VIRYA_TEAM_WOJTEK_EMAIL_KEY,
+    VIRYA_TEAM_LUBEK_EMAIL_KEY,
+    VIRYA_TEAM_KUBA_EMAIL_KEY,
+    VIRYA_TEAM_MARCIN_EMAIL_KEY,
+    VIRYA_TEAM_MAREK_EMAIL_KEY,
     QR_TTL_SECONDS_KEY,
     REQUIRE_DOUBLE_OPT_IN_KEY,
     RESPONSE_ENCRYPTION_SECRET_KEY,
@@ -144,6 +160,8 @@ pub struct Config {
     pub autopilot_enabled: bool,
     pub autopilot_poll_interval: Duration,
     pub admission_security: AdmissionSecurityConfig,
+    /// Optional secret-backed team contacts used only to bootstrap routing identities.
+    pub team_operations: TeamOperationsConfig,
     /// Derived AEAD key for sensitive idempotency response replay.
     pub response_encryption_key: SensitiveResponseKey,
     /// Optional immediately preceding AEAD key used during bounded rotation.
@@ -236,6 +254,12 @@ impl Config {
             MAX_AUTOPILOT_POLL_INTERVAL_MS,
         )?;
         let admission_security = parse_admission_security(&values, environment.is_production())?;
+        let team_operations = parse_team_operations(&values)?;
+        validate_production_team_contacts(
+            &team_operations,
+            environment.is_production(),
+            autopilot_enabled,
+        )?;
         let response_encryption_key = parse_response_encryption_key(
             values.get(RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
@@ -272,6 +296,7 @@ impl Config {
             autopilot_enabled,
             autopilot_poll_interval,
             admission_security,
+            team_operations,
             response_encryption_key,
             previous_response_encryption_key,
             require_double_opt_in,
@@ -481,6 +506,10 @@ pub enum ConfigError {
     /// A required admission secret was missing in production.
     #[error("production admission API requires {name}")]
     MissingProductionAdmissionSecret { name: &'static str },
+
+    /// Production Autopilot needs every configured team owner to have a secret-backed contact.
+    #[error("production Autopilot team routing requires {name}")]
+    MissingProductionTeamContact { name: &'static str },
 
     /// A member email address failed validation.
     #[error("environment variable {name} must contain a valid normalized email address")]
@@ -833,44 +862,6 @@ fn parse_country_code(value: Option<&String>) -> Result<CountryCode, ConfigError
     let country_code = value.map_or(DEFAULT_COUNTRY_CODE, String::as_str).trim();
     CountryCode::parse(country_code).map_err(|_| ConfigError::InvalidCountryCode {
         name: DEFAULT_COUNTRY_CODE_KEY,
-    })
-}
-
-fn parse_click_buffer_config(
-    values: &HashMap<String, String>,
-) -> Result<ClickBufferConfig, ConfigError> {
-    let capacity = parse_bounded_u32(
-        values.get(CLICK_CHANNEL_CAPACITY_KEY),
-        CLICK_CHANNEL_CAPACITY_KEY,
-        DEFAULT_CLICK_CHANNEL_CAPACITY,
-        1,
-        MAX_CLICK_CHANNEL_CAPACITY,
-    )?;
-    let batch_size = parse_bounded_u32(
-        values.get(CLICK_BATCH_SIZE_KEY),
-        CLICK_BATCH_SIZE_KEY,
-        DEFAULT_CLICK_BATCH_SIZE,
-        1,
-        MAX_CLICK_BATCH_SIZE,
-    )?;
-    if batch_size > capacity {
-        return Err(ConfigError::BatchExceedsCapacity {
-            batch_name: CLICK_BATCH_SIZE_KEY,
-            capacity_name: CLICK_CHANNEL_CAPACITY_KEY,
-        });
-    }
-    let flush_interval = parse_bounded_duration(
-        values.get(CLICK_FLUSH_INTERVAL_MS_KEY),
-        CLICK_FLUSH_INTERVAL_MS_KEY,
-        DEFAULT_CLICK_FLUSH_INTERVAL_MS,
-        MIN_CLICK_FLUSH_INTERVAL_MS,
-        MAX_CLICK_FLUSH_INTERVAL_MS,
-    )?;
-
-    Ok(ClickBufferConfig {
-        capacity: capacity as usize,
-        batch_size: batch_size as usize,
-        flush_interval,
     })
 }
 

@@ -7,6 +7,7 @@ mod measurement;
 mod operations;
 mod runtime;
 mod state;
+mod team;
 
 use std::{collections::HashMap, future::Future, time::Duration};
 
@@ -17,21 +18,23 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotActionPayload, AutopilotActionRepository, AutopilotBookingStateRepository,
         AutopilotContext, AutopilotControlMutation, AutopilotControlOverview,
-        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotMarketStateRepository,
-        AutopilotMeasurementKind, AutopilotMeasurementRepository, AutopilotMerchStateRepository,
-        AutopilotPolicy, AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
-        AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
-        CityMarketSignalMutation, ClaimedAutopilotAction, ClaimedAutopilotMeasurement,
-        DecisionCandidate, ExecutionReportMutation, ExecutorHeartbeatMutation,
-        ExecutorReportStatus, MerchProductEconomicsMutation, PendingAutopilotAction,
-        PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotManualStep,
+        AutopilotMarketStateRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
+        AutopilotMerchStateRepository, AutopilotPolicy, AutopilotPolicyConfig,
+        AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotTicketStateRepository,
+        BookingTargetMutation, CandidatePersistence, CityMarketSignalMutation,
+        ClaimedAutopilotAction, ClaimedAutopilotMeasurement, DecisionCandidate,
+        ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
+        ManagerBookingPolicySummary, ManagerConfigMutation, MerchProductEconomicsMutation,
+        PendingAutopilotAction, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
         RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
         RecordExecutorHeartbeat, RecordRumSample, ReleaseComponentMutation,
         ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority,
-        TicketAllocationGuardrailMutation, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
+        SetManagerBookingPolicy, TeamAssigneeSummary, TicketAllocationGuardrailMutation,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertMerchProductEconomics,
+        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleaseComponent,
+        UpsertTicketAllocationGuardrail,
     },
 };
 use crowdrelay_domain::{
@@ -40,6 +43,7 @@ use crowdrelay_domain::{
     ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
+    beacons::{BeaconCampaignPolicy, BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
     booking::{
         BookingOpportunityPolicy, BookingOutreachPhase, BookingReplyDisposition, BookingTargetKind,
         BookingTargetSnapshot, CityOpportunitySnapshot,
@@ -48,7 +52,10 @@ use crowdrelay_domain::{
     content_supply::{ContentSupplyPolicy, ContentSupplySnapshot},
     experimentation::{ExperimentPolicy, ExperimentSnapshot},
     funding::{FundingOpportunitySnapshot, FundingPolicy},
-    live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
+    live_opportunities::{
+        BookingManagerPolicy, LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
+        LiveTravelBand,
+    },
     market_intelligence::{CityMarketSignal, CityMarketSignalKind, aggregate_city_market_evidence},
     merch_bundle::{MerchBundlePolicy, MerchBundleSnapshot},
     merchandising::{
@@ -59,6 +66,7 @@ use crowdrelay_domain::{
     pricing::{TicketYieldPolicy, TicketYieldSnapshot},
     promotion::{PromotionBudgetPolicy, PromotionPerformanceSnapshot},
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
+    show_growth::{ShowGrowthPolicy, ShowGrowthSnapshot},
     show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
 };
 use serde_json::{Value, json};
@@ -260,6 +268,35 @@ struct ReleaseSnapshotRow {
 }
 
 #[derive(Debug, FromRow)]
+struct LiveOpportunityRow {
+    opportunity_id: Uuid,
+    opportunity_kind: String,
+    active: bool,
+    verified_destination: bool,
+    contact_email: Option<String>,
+    metadata: Value,
+    fit_basis_points: i32,
+    reputation_basis_points: i32,
+    confidence_basis_points: i32,
+    expected_fee_minor: i64,
+    estimated_cost_minor: i64,
+    application_fee_minor: i64,
+    requires_contract: bool,
+    exclusive: bool,
+    deadline: Option<OffsetDateTime>,
+    status: String,
+    event_starts_at: Option<OffsetDateTime>,
+    travel_band: Option<String>,
+    committed_shows_year: i64,
+    annual_target: i32,
+    annual_stretch: i32,
+    stretch_minimum_score_basis_points: i32,
+    far_shot_minimum_score_basis_points: i32,
+    prefer_weekend_one_shots: bool,
+}
+
+#[derive(Debug, FromRow)]
+#[allow(dead_code)]
 struct TeamOpportunityRow {
     opportunity_id: Uuid,
     opportunity_kind: String,
@@ -311,6 +348,10 @@ struct PendingActionRow {
     payload: Value,
     created_at: OffsetDateTime,
     approval_expires_at: Option<OffsetDateTime>,
+    assignee_member_id: Option<Uuid>,
+    assignee_member_key: Option<String>,
+    assignee_display_name: Option<String>,
+    assignment_due_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
@@ -340,6 +381,7 @@ struct RecentActionRow {
     executor_id: Option<String>,
     provider_reference: Option<String>,
     executor_reported_at: Option<OffsetDateTime>,
+    executor_metadata: Option<Value>,
 }
 
 #[derive(Debug, FromRow)]
@@ -402,6 +444,8 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "release" => AutopilotContext::Release,
         "live_opportunity" => AutopilotContext::LiveOpportunity,
         "funding" => AutopilotContext::Funding,
+        "beacon" => AutopilotContext::Beacon,
+        "show_growth" => AutopilotContext::ShowGrowth,
         _ => return Err(RepositoryError::Unexpected),
     };
     let autonomy_level = match row.autonomy_level.as_str() {
@@ -470,6 +514,14 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
             AutopilotContext::Funding => {
                 AutopilotPolicyConfig::Funding(parse_config(row.config, FundingPolicy::default())?)
             }
+            AutopilotContext::Beacon => AutopilotPolicyConfig::Beacon(parse_config(
+                row.config,
+                BeaconCampaignPolicy::default(),
+            )?),
+            AutopilotContext::ShowGrowth => AutopilotPolicyConfig::ShowGrowth(parse_config(
+                row.config,
+                ShowGrowthPolicy::default(),
+            )?),
         };
     let max_actions_24h = u32::try_from(row.max_actions_24h)
         .ok()
@@ -756,6 +808,19 @@ fn pending_action(row: PendingActionRow) -> Result<PendingAutopilotAction, Repos
         payload: serde_json::from_value(row.payload).map_err(|_| RepositoryError::Unexpected)?,
         created_at: row.created_at,
         approval_expires_at: row.approval_expires_at,
+        assignee: match (
+            row.assignee_member_id,
+            row.assignee_member_key,
+            row.assignee_display_name,
+        ) {
+            (Some(member_id), Some(member_key), Some(display_name)) => Some(TeamAssigneeSummary {
+                member_id,
+                member_key,
+                display_name,
+            }),
+            _ => None,
+        },
+        assignment_due_at: row.assignment_due_at,
     })
 }
 
@@ -775,7 +840,41 @@ fn recent_action(row: RecentActionRow) -> Result<RecentAutopilotAction, Reposito
         executor_id: row.executor_id,
         provider_reference: row.provider_reference,
         executor_reported_at: row.executor_reported_at,
+        manual_steps: manual_steps_from_metadata(row.executor_metadata.as_ref()),
     })
+}
+
+fn manual_steps_from_metadata(metadata: Option<&Value>) -> Vec<AutopilotManualStep> {
+    let Some(items) = metadata
+        .and_then(|value| value.get("manual_steps"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .take(8)
+        .filter_map(|item| {
+            let destination = item.get("destination")?.as_str()?.trim();
+            let url = item.get("url")?.as_str()?.trim();
+            let what_to_do = item.get("what_to_do")?.as_str()?.trim();
+            let why_it_matters = item.get("why_it_matters")?.as_str()?.trim();
+            if destination.is_empty()
+                || url.is_empty()
+                || what_to_do.is_empty()
+                || why_it_matters.is_empty()
+            {
+                return None;
+            }
+            Some(AutopilotManualStep {
+                destination: destination.chars().take(120).collect(),
+                url: url.chars().take(500).collect(),
+                what_to_do: what_to_do.chars().take(300).collect(),
+                why_it_matters: why_it_matters.chars().take(300).collect(),
+            })
+        })
+        .collect()
 }
 
 fn recent_effect(row: RecentEffectRow) -> Result<RecentAutopilotEffect, RepositoryError> {
@@ -824,6 +923,10 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "ticket_revenue_72h" => Ok(AutopilotMeasurementKind::TicketRevenue72h),
         "merch_gross_proxy_7d" => Ok(AutopilotMeasurementKind::MerchGrossProxy7d),
         "promotion_roas_7d" => Ok(AutopilotMeasurementKind::PromotionRoas7d),
+        "booking_reply_7d" => Ok(AutopilotMeasurementKind::BookingReply7d),
+        "outreach_reply_7d" => Ok(AutopilotMeasurementKind::OutreachReply7d),
+        "audience_ticket_revenue_72h" => Ok(AutopilotMeasurementKind::AudienceTicketRevenue72h),
+        "show_ticket_revenue_7d" => Ok(AutopilotMeasurementKind::ShowTicketRevenue7d),
         _ => Err(RepositoryError::Unexpected),
     }
 }
@@ -895,6 +998,8 @@ fn parse_context(value: &str) -> Result<AutopilotContext, RepositoryError> {
         "release" => Ok(AutopilotContext::Release),
         "live_opportunity" => Ok(AutopilotContext::LiveOpportunity),
         "funding" => Ok(AutopilotContext::Funding),
+        "beacon" => Ok(AutopilotContext::Beacon),
+        "show_growth" => Ok(AutopilotContext::ShowGrowth),
         _ => Err(RepositoryError::Unexpected),
     }
 }

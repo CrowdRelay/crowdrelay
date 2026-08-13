@@ -25,7 +25,7 @@ use crowdrelay_infra::{
 };
 use crowdrelay_worker::{
     autopilot::AutopilotWorker,
-    bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access},
+    bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     ops_watchdog::OpsWatchdogWorker,
@@ -143,10 +143,19 @@ async fn run_bootstrap(database_pool: &PgPool, config: &Config) -> Result<()> {
     )
     .await
     .context("admission access bootstrap failed")?;
+    let team_profiles_changed = bootstrap_team_operations(
+        database_pool,
+        &config.workspace_slug,
+        &config.database,
+        &config.team_operations,
+    )
+    .await
+    .context("team operations bootstrap failed")?;
 
     tracing::info!(
         workspace_id = %result.workspace_id,
         changed_rows = result.changes.total(),
+        team_profiles_changed,
         audit_recorded = result.audit_recorded,
         "workspace bootstrap completed"
     );

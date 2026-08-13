@@ -58,6 +58,19 @@ jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.minimumPostgresServer
 printf 'crowdrelay_meta_contract=ok\n'
 require_200 crowdrelay_area_catalog "${CROWDRELAY_BASE_URL%/}/v1/public/area/drops"
 require_200 crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"
+
+cors_headers="$(mktemp)"
+curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
+  --header "Origin: ${SYNESTHESIA_BASE_URL%/}" --dump-header "$cors_headers" --output /dev/null \
+  "${CROWDRELAY_BASE_URL%/}/v1/public/events"
+if ! tr -d '\r' < "$cors_headers" | grep -Fqi "access-control-allow-origin: ${SYNESTHESIA_BASE_URL%/}"; then
+  printf 'crowdrelay CORS does not allow Synesthesia origin %s\n' "${SYNESTHESIA_BASE_URL%/}" >&2
+  rm -f "$cors_headers"
+  exit 1
+fi
+rm -f "$cors_headers"
+printf 'crowdrelay_synesthesia_cors=ok\n'
+
 require_200 virya_home "${VIRYA_BASE_URL%/}/"
 require_200 synesthesia_home "${SYNESTHESIA_BASE_URL%/}/"
 require_200 synesthesia_boot_art "${SYNESTHESIA_BASE_URL%/}/menu-eye-poster.webp"

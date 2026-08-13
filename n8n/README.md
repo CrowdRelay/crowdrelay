@@ -50,10 +50,17 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 | `viryaos.fan_lifecycle.message_requested` | deliver deterministic welcome/follow-up/reactivation copy to the already consented fan identity supplied by CrowdRelay |
 | `viryaos.booking.outreach_requested` | deliver the already-authorized booking initial/follow-up message |
 | `viryaos.outreach.requested` | deliver the already-authorized press, review, patronage or endorsement message |
+| `viryaos.beacon.discovery_requested` | scout public local sources for the requested event/market and return only source-backed Beacon candidates through the admin Beacon upsert; Gemini may summarize, never invent/verify a destination |
+| `viryaos.beacon.outreach_requested` | deliver the already-authorized local Beacon pitch/follow-up; personalize tone/local hook only from supplied verified facts |
+| `viryaos.show_growth.requested` | execute one already-selected external attendance lever; verify free listings/distribution, configure free audience-capture surfaces, use provider-native free fan pushes (Bandsintown Posts/free-quota Email Builder + Spotify Artist Pick manual step), run verified-Beacon partner cross-promo and factual social proof; return public receipts or explicit human `manual_steps`, never buy placement or invent proof |
+| `viryaos.team.assignment_notification_requested` | send the assigned band member one friendly what/why/deadline/link notification |
+| `viryaos.team.assignment_reminder_requested` | remind the current owner about the same canonical task; never create a second task or change its owner |
 
 For Gmail-backed booking/outreach, provider correlation is durable in CrowdRelay's execution-report ledger. The private executor writes the Gmail `threadId` as `provider_reference`, and inbound monitoring resolves that reference through CrowdRelay before reporting the deterministic `received` disposition. n8n keeps no durable business-correlation map and does not infer positive/negative intent.
 
 Executors must use the CrowdRelay event ID or supplied business key as their idempotency key. They must not rescore a lead, change pricing policy, infer authority, or silently broaden the requested action. A provider failure is a delivery failure; it is not permission for n8n to invent an alternative business action.
+
+For VIRYA outreach, Gemini is a **bounded copy adapter**, not a manager. A private n8n branch may give it the canonical facts and ask it to make a mail natural, concise and locally relevant, but the recipient, purpose, factual claims, allowed offer, send window, suppression state, approval state and follow-up cadence come from CrowdRelay and must be preserved verbatim in meaning. If personalization cannot be produced safely, send the deterministic fallback template or fail the executor receipt; never hallucinate a local connection.
 
 ## Recommended private layout
 

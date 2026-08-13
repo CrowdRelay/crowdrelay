@@ -15,6 +15,9 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
             '/v1/public/synesthesia/runs',
             '/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}',
             '/v1/public/synesthesia/runs/{run_id}/complete',
+            '/v1/public/synesthesia/runs/{run_id}/recover',
+            '/v1/public/synesthesia/runs/{run_id}/context',
+            '/v1/public/synesthesia/runs/{run_id}/handoff',
             '/v1/public/synesthesia/reward-claims',
             '/v1/public/synesthesia/leaderboard',
             '/v1/public/synesthesia/runs/{run_id}/leaderboard',
@@ -22,6 +25,9 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
             self.assertIn(path, router)
         self.assertIn('synesthesia_runs', migration)
         self.assertIn('synesthesia_reward_entries', migration)
+        recovery = (ROOT / 'migrations/0048_synesthesia_noncompetitive_recovery.sql').read_text()
+        self.assertIn('recovery_completed_at', recovery)
+        self.assertIn('does not carry a fabricated elapsed time', recovery.lower())
         self.assertNotIn('shipping_address', migration.lower())
         self.assertNotIn('postal_code', migration.lower())
         self.assertNotIn('outbox_events', api)
@@ -67,11 +73,24 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         self.assertIn('if linked_run.rows_affected() != 1', reward_block)
         self.assertIn('return Err(SynesthesiaError::Conflict);', reward_block)
 
+    def test_legacy_recovery_cannot_enter_the_competitive_leaderboard(self):
+        api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
+        recovery = api.split('pub async fn recover_run', 1)[1].split('async fn completion_response', 1)[0]
+        leaderboard = (ROOT / 'crates/crowdrelay-api/src/synesthesia/leaderboard.rs').read_text()
+        self.assertIn('recovery_completed_at', recovery)
+        self.assertNotIn('client_total_elapsed_ms', recovery)
+        self.assertNotIn('recovery_completed_at', leaderboard)
+        self.assertGreaterEqual(leaderboard.count('completed_at IS NOT NULL'), 4)
+
     def test_openapi_documents_the_game_contract(self):
         spec = (ROOT / 'openapi/openapi.yaml').read_text()
         self.assertIn('/public/synesthesia/runs:', spec)
         self.assertIn('/public/synesthesia/reward-claims:', spec)
         self.assertIn('/public/synesthesia/leaderboard:', spec)
+        self.assertIn('/public/synesthesia/runs/{run_id}/recover:', spec)
+        self.assertIn('/public/synesthesia/runs/{run_id}/context:', spec)
+        self.assertIn('/public/synesthesia/runs/{run_id}/handoff:', spec)
+        self.assertIn('SynesthesiaRunRecoveryRequest:', spec)
         self.assertIn('SynesthesiaLeaderboardResponse:', spec)
         self.assertIn('SynesthesiaRewardEntryRequest:', spec)
         self.assertIn('synesthesia_completion', spec)

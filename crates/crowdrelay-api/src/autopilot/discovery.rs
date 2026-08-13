@@ -77,6 +77,9 @@ pub async fn discover_team_opportunity(
         funding_amount_minor: 0,
         own_contribution_minor: 0,
         deadline: None,
+        event_starts_at: None,
+        country_code: None,
+        travel_band: None,
         metadata: serde_json::json!({
             "discovery": {
                 "destination_unverified": true,
