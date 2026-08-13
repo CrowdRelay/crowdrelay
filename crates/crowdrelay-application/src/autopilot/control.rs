@@ -153,6 +153,20 @@ pub struct ChiefOfStaffShowTask {
     pub starts_at: OffsetDateTime,
 }
 
+/// Time-sensitive fact surfaced by the Chief-of-Staff read model. This does
+/// not create another task system: approvals and team-opportunity deadlines
+/// remain owned by their existing bounded contexts.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChiefOfStaffAttentionItem {
+    pub kind: String,
+    pub subject_kind: String,
+    pub subject_id: uuid::Uuid,
+    pub title: String,
+    pub detail: String,
+    pub due_at: OffsetDateTime,
+    pub urgency: String,
+}
+
 /// Deterministic daily operating brief. `estimated_minutes_saved_24h` is a
 /// coarse action-kind workload estimate, not fabricated AI precision.
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +181,7 @@ pub struct AutopilotChiefOfStaff {
     pub emitted_24h: i64,
     pub executor_confirmed_24h: i64,
     pub executor_failed_24h: i64,
+    pub attention_items: Vec<ChiefOfStaffAttentionItem>,
     pub top_opportunities: Vec<ChiefOfStaffOpportunity>,
     pub show_tasks: Vec<ChiefOfStaffShowTask>,
 }

@@ -142,13 +142,24 @@ struct ChiefShowTaskRow {
     starts_at: OffsetDateTime,
 }
 
+#[derive(Debug, FromRow)]
+struct ChiefAttentionRow {
+    kind: String,
+    subject_kind: String,
+    subject_id: Uuid,
+    title: String,
+    detail: String,
+    due_at: OffsetDateTime,
+}
+
 pub(in crate::autopilot) async fn load_chief_of_staff(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<crowdrelay_application::autopilot::AutopilotChiefOfStaff, RepositoryError> {
     use crowdrelay_application::autopilot::{
-        AutopilotChiefOfStaff, ChiefOfStaffOpportunity, ChiefOfStaffShowTask,
+        AutopilotChiefOfStaff, ChiefOfStaffAttentionItem, ChiefOfStaffOpportunity,
+        ChiefOfStaffShowTask,
     };
 
     let stats = sqlx::query_as::<_, ChiefStatsRow>(r#"
@@ -246,6 +257,56 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         })
         .collect::<Result<Vec<_>, RepositoryError>>()?;
 
+    // Deadline radar: reuse existing approval expiry and opportunity deadline
+    // facts. No duplicate task table, scheduler or polling path is introduced.
+    let attention_rows = sqlx::query_as::<_, ChiefAttentionRow>(r#"
+        SELECT * FROM (
+            SELECT 'approval'::text kind, action.subject_kind, action.subject_id,
+                   action.action_kind title, action.context detail,
+                   action.approval_expires_at due_at
+            FROM viryaos_autopilot_actions action
+            WHERE action.workspace_id=$1 AND action.status='awaiting_approval'
+              AND action.approval_expires_at IS NOT NULL
+              AND action.approval_expires_at BETWEEN $2 - INTERVAL '2 hours' AND $2 + INTERVAL '24 hours'
+            UNION ALL
+            SELECT CASE WHEN opportunity.opportunity_kind='funding' THEN 'funding_deadline' ELSE 'opportunity_deadline' END kind,
+                   'team_opportunity'::text subject_kind, opportunity.id subject_id,
+                   opportunity.title, opportunity.organization detail, opportunity.deadline due_at
+            FROM viryaos_team_opportunities opportunity
+            WHERE opportunity.workspace_id=$1 AND opportunity.eligible AND opportunity.deadline IS NOT NULL
+              AND opportunity.status IN ('new','prepared','awaiting_approval','submission_requested')
+              AND opportunity.deadline BETWEEN $2 - INTERVAL '2 days' AND $2 + INTERVAL '14 days'
+        ) attention
+        ORDER BY due_at ASC, kind ASC, subject_id ASC
+        LIMIT 12
+    "#).bind(workspace_id.into_uuid()).bind(now).fetch_all(&repo.pool).await.map_err(map_sqlx)?;
+    let attention_items = attention_rows
+        .into_iter()
+        .map(|row| {
+            let seconds = (row.due_at - now).whole_seconds();
+            let urgency = if seconds < 0 {
+                "overdue"
+            } else if seconds < 6 * 3600 {
+                "critical"
+            } else if seconds < 24 * 3600 {
+                "today"
+            } else if seconds < 3 * 24 * 3600 {
+                "soon"
+            } else {
+                "upcoming"
+            };
+            ChiefOfStaffAttentionItem {
+                kind: row.kind,
+                subject_kind: row.subject_kind,
+                subject_id: row.subject_id,
+                title: row.title,
+                detail: row.detail,
+                due_at: row.due_at,
+                urgency: urgency.into(),
+            }
+        })
+        .collect::<Vec<_>>();
+
     let show_rows = sqlx::query_as::<_, ChiefShowTaskRow>(r#"
         WITH task(item_key) AS (VALUES
             ('announcement_published'),('ticketing_verified'),('staff_assigned'),('offline_snapshot_ready'),
@@ -277,9 +338,16 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         })
         .collect::<Vec<_>>();
 
+    // Awaiting approvals are already included in `stats.awaiting_approval`.
+    // Only non-approval deadline items are added here to avoid double counting.
+    let deadline_attention = attention_items
+        .iter()
+        .filter(|item| item.kind != "approval" && item.urgency != "upcoming")
+        .count();
     let needs_you = stats
         .awaiting_approval
         .checked_add(i64::try_from(show_tasks.len()).map_err(|_| RepositoryError::Unexpected)?)
+        .and_then(|value| value.checked_add(i64::try_from(deadline_attention).ok()?))
         .ok_or(RepositoryError::Unexpected)?;
     Ok(AutopilotChiefOfStaff {
         executed_24h: stats.executed_24h,
@@ -292,6 +360,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         measured_improved_7d: stats.measured_improved_7d,
         measured_neutral_7d: stats.measured_neutral_7d,
         measured_worsened_7d: stats.measured_worsened_7d,
+        attention_items,
         top_opportunities,
         show_tasks,
     })

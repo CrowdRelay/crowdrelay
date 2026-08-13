@@ -6152,10 +6152,22 @@ components:
         task_key: { type: string, maxLength: 96 }
         status: { type: string, maxLength: 32 }
         starts_at: { type: string, format: date-time }
+    ChiefOfStaffAttentionItem:
+      type: object
+      additionalProperties: false
+      required: [kind, subject_kind, subject_id, title, detail, due_at, urgency]
+      properties:
+        kind: { type: string, enum: [approval, opportunity_deadline, funding_deadline] }
+        subject_kind: { type: string, maxLength: 64 }
+        subject_id: { type: string, format: uuid }
+        title: { type: string, maxLength: 240 }
+        detail: { type: string, maxLength: 240 }
+        due_at: { type: string, format: date-time }
+        urgency: { type: string, enum: [overdue, critical, today, soon, upcoming] }
     AutopilotChiefOfStaff:
       type: object
       additionalProperties: false
-      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, top_opportunities, show_tasks]
+      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks]
       properties:
         executed_24h: { type: integer, format: int64, minimum: 0 }
         failed_24h: { type: integer, format: int64, minimum: 0 }
@@ -6167,6 +6179,10 @@ components:
         emitted_24h: { type: integer, format: int64, minimum: 0 }
         executor_confirmed_24h: { type: integer, format: int64, minimum: 0 }
         executor_failed_24h: { type: integer, format: int64, minimum: 0 }
+        attention_items:
+          type: array
+          maxItems: 12
+          items: { $ref: '#/components/schemas/ChiefOfStaffAttentionItem' }
         top_opportunities:
           type: array
           maxItems: 10

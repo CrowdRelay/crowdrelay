@@ -363,5 +363,16 @@ class ViryaOsAutopilotV1(unittest.TestCase):
             self.assertIn(f'"{context}"', model)
 
 
+    def test_chief_of_staff_deadline_radar_reuses_existing_domain_facts(self):
+        infra = INFRA_TEXT
+        openapi = OPENAPI.read_text()
+        self.assertIn("ChiefOfStaffAttentionItem", APP_TEXT)
+        self.assertIn("approval_expires_at", infra)
+        self.assertIn("viryaos_team_opportunities", infra)
+        self.assertIn("opportunity.deadline", infra)
+        self.assertIn("attention_items", openapi)
+        self.assertIn("maxItems: 12", openapi)
+        self.assertNotIn("viryaos_chief_of_staff_tasks", infra)
+
 if __name__ == "__main__":
     unittest.main()
