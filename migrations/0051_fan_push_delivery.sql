@@ -31,6 +31,7 @@ CREATE TABLE fan_push_endpoints (
         (transport = 'web_push' AND p256dh IS NOT NULL AND auth_secret IS NOT NULL
             AND length(p256dh) BETWEEN 40 AND 256 AND length(auth_secret) BETWEEN 8 AND 128)
     ),
+    UNIQUE (workspace_id, id),
     UNIQUE (workspace_id, installation_id, transport)
 );
 

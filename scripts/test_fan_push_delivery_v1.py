@@ -15,6 +15,8 @@ class FanPushDeliveryV1Contract(unittest.TestCase):
         self.assertIn("'push_delivery_enabled'", migration)
         self.assertIn("'provider_accepted'", migration)
         self.assertIn("'ambiguous'", migration)
+        self.assertIn('UNIQUE (workspace_id, id)', migration)
+        self.assertIn('REFERENCES fan_push_endpoints (workspace_id, id)', migration)
 
     def test_provider_acceptance_is_not_delivery(self):
         repo = self.text('crates/crowdrelay-worker/src/push_delivery/repository.rs')
