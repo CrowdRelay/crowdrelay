@@ -1,7 +1,6 @@
 from pathlib import Path
 import unittest
 ROOT=Path(__file__).resolve().parents[1]
-ECOSYSTEM=ROOT.parent
 class ReleaseProvenanceContract(unittest.TestCase):
  def test_release_ledger_exposes_content_roots(self):
   app=(ROOT/'crates/crowdrelay-application/src/autopilot/control.rs').read_text()
@@ -11,16 +10,13 @@ class ReleaseProvenanceContract(unittest.TestCase):
   reporter=(ROOT/'scripts/report-release-component.sh').read_text()
   self.assertIn('DEPENDENCY_LOCK_SHA256',reporter)
   self.assertIn('ARTIFACT_MANIFEST_SHA256',reporter)
- def test_every_deployable_surface_reports_dependency_provenance(self):
-  files=[
-   ECOSYSTEM/'virya/.github/workflows/build.yml',
-   ECOSYSTEM/'synesthesia/.github/workflows/deploy-web.yml',
-   ECOSYSTEM/'virya-signal/.github/workflows/android-release-apk.yml',
-   ECOSYSTEM/'virya-signal/.github/workflows/mobile-release.yml',
-   ECOSYSTEM/'virya-signal/.github/workflows/android-play.yml',
-  ]
-  for path in files:
-   text=path.read_text(); self.assertIn('dependency_lock_sha256',text,str(path)); self.assertIn('artifact_manifest_sha256',text,str(path))
+ def test_readiness_requires_provenance_for_every_deployable_surface(self):
+  verifier=(ROOT/'scripts/verify-production-readiness.py').read_text()
+  self.assertIn('CODE_COMPONENTS = ("crowdrelay-api", "crowdrelay-worker", "virya-www", "synesthesia", "virya-signal")',verifier)
+  self.assertIn('MANIFEST_COMPONENTS = ("virya-www", "synesthesia", "virya-signal")',verifier)
+  self.assertIn('for key in CODE_COMPONENTS:',verifier)
+  self.assertIn('dependency_lock_sha256',verifier)
+  self.assertIn('artifact_manifest_sha256',verifier)
  def test_deploy_package_carries_the_reported_lockfile(self):
   ctl=(ROOT/'crowdrelayctl').read_text()
   package=ctl[ctl.index('package_deploy()'):ctl.index('\nship()')]
