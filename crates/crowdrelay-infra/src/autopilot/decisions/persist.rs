@@ -1,6 +1,6 @@
 macro_rules! decision_persist {
     () => {
-    async fn persist_candidate(
+    async fn persist_candidate_impl(
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,

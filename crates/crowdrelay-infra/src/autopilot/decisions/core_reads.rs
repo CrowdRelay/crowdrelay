@@ -1,6 +1,6 @@
 macro_rules! decision_core_reads {
     () => {
-    async fn load_policies(
+    async fn load_policies_impl(
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<AutopilotPolicy>, RepositoryError> {
@@ -24,7 +24,7 @@ macro_rules! decision_core_reads {
         .await
     }
 
-    async fn load_ticket_yield_snapshots(
+    async fn load_ticket_yield_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -128,7 +128,7 @@ macro_rules! decision_core_reads {
         .await
     }
 
-    async fn load_fan_lifecycle_snapshots(
+    async fn load_fan_lifecycle_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -236,7 +236,7 @@ macro_rules! decision_core_reads {
         .await
     }
 
-    async fn load_event_campaign_snapshots(
+    async fn load_event_campaign_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -249,7 +249,7 @@ macro_rules! decision_core_reads {
         .await
     }
 
-    async fn load_merch_inventory_snapshots(
+    async fn load_merch_inventory_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -331,7 +331,7 @@ macro_rules! decision_core_reads {
         .await
     }
 
-    async fn load_merch_price_snapshots(
+    async fn load_merch_price_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -422,7 +422,7 @@ macro_rules! decision_core_reads {
         .await
     }
 
-    async fn load_merch_bundle_snapshots(
+    async fn load_merch_bundle_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,

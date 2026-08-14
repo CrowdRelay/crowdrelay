@@ -1,6 +1,6 @@
 macro_rules! decision_opportunity_reads {
     () => {
-    async fn load_city_opportunity_snapshots(
+    async fn load_city_opportunity_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -140,7 +140,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_booking_target_snapshots(
+    async fn load_booking_target_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         _now: OffsetDateTime,
@@ -185,7 +185,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_outreach_snapshots(
+    async fn load_outreach_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -194,7 +194,7 @@ macro_rules! decision_opportunity_reads {
             .await
     }
 
-    async fn load_content_supply_snapshots(
+    async fn load_content_supply_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -207,7 +207,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_experiment_snapshots(
+    async fn load_experiment_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -220,7 +220,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_show_task_snapshots(
+    async fn load_show_task_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -233,7 +233,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_promotion_performance_snapshots(
+    async fn load_promotion_performance_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -300,7 +300,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_release_plan_snapshots(
+    async fn load_release_plan_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -339,7 +339,7 @@ macro_rules! decision_opportunity_reads {
         }).await
     }
 
-    async fn load_live_opportunity_snapshots(
+    async fn load_live_opportunity_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -424,7 +424,7 @@ macro_rules! decision_opportunity_reads {
         }).await
     }
 
-    async fn load_funding_opportunity_snapshots(
+    async fn load_funding_opportunity_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -452,7 +452,7 @@ macro_rules! decision_opportunity_reads {
         }).await
     }
 
-    async fn load_beacon_discovery_snapshots(
+    async fn load_beacon_discovery_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -465,7 +465,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_beacon_campaign_snapshots(
+    async fn load_beacon_campaign_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
@@ -478,7 +478,7 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
-    async fn load_show_growth_snapshots(
+    async fn load_show_growth_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,

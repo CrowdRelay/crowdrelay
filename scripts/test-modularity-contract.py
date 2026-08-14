@@ -170,6 +170,36 @@ def main() -> None:
                 fail(f"missing-include={parent_rel}:{child_rel}")
             chunks += 1
 
+    # `async_trait` is a procedural attribute and runs before nested
+    # macro_rules! invocations inside the annotated impl are expanded.
+    # Keep Autopilot's heavy SQL in inherent *_impl helpers, but require the
+    # trait-facing async methods to be explicit so the attribute can rewrite
+    # their lifetimes correctly (prevents E0195 regressions).
+    decisions = (ROOT / "crates/crowdrelay-infra/src/autopilot/decisions.rs").read_text(encoding="utf-8")
+    trait_marker = "#[async_trait]\nimpl AutopilotDecisionRepository for PostgresAutopilotRepository"
+    if trait_marker not in decisions:
+        fail("autopilot-decision-async-trait-impl-missing")
+    trait_body = decisions.split(trait_marker, 1)[1]
+    if re.search(r"decision_[a-z0-9_]+!\(\);", trait_body):
+        fail("async-trait-impl-must-not-expand-method-macros")
+    required_methods = (
+        "load_policies", "load_ticket_yield_snapshots", "load_fan_lifecycle_snapshots",
+        "load_event_campaign_snapshots", "load_merch_inventory_snapshots",
+        "load_merch_price_snapshots", "load_merch_bundle_snapshots",
+        "load_city_opportunity_snapshots", "load_booking_target_snapshots",
+        "load_outreach_snapshots", "load_content_supply_snapshots",
+        "load_experiment_snapshots", "load_show_task_snapshots",
+        "load_promotion_performance_snapshots", "load_release_plan_snapshots",
+        "load_live_opportunity_snapshots", "load_funding_opportunity_snapshots",
+        "load_beacon_discovery_snapshots", "load_beacon_campaign_snapshots",
+        "load_show_growth_snapshots", "persist_candidate",
+    )
+    for method in required_methods:
+        if f"async fn {method}(" not in trait_body:
+            fail(f"autopilot-decision-wrapper-missing={method}")
+        if f"self.{method}_impl(" not in trait_body:
+            fail(f"autopilot-decision-helper-call-missing={method}")
+
     print(
         "MODULARITY_CONTRACT=PASS "
         f"parents={len(CONTRACT)} chunks={chunks} "
