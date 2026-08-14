@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import secrets
+import signal
 import ssl
 import sys
 import time
@@ -18,6 +19,16 @@ from typing import Any
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 FLAG = "external_proof_anchoring_enabled"
+
+
+class CanaryInterrupted(BaseException):
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(f"received signal {signum}")
+
+
+def _raise_interrupted(signum: int, _frame: object) -> None:
+    raise CanaryInterrupted(signum)
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,7 +188,11 @@ def main() -> int:
         raise ValueError("--expected-git-sha/CROWDRELAY_EXPECTED_GIT_SHA must be exactly 40 lowercase hex chars")
     run_id = f"{int(time.time())}-{secrets.token_hex(5)}"
     previous_flag_state = False
-    flag_mutated = False
+    rollback_armed = False
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _raise_interrupted)
+    signal.signal(signal.SIGTERM, _raise_interrupted)
 
     try:
         require_exact_api_build(client, expected_git_sha)
@@ -188,8 +203,11 @@ def main() -> int:
         require_no_processing_batches(client, "preflight")
 
         if not previous_flag_state:
+            # Arm rollback before the mutating request. If SIGINT/SIGTERM lands
+            # after the server commits the flag but before the client receives
+            # the response, cleanup must still restore the observed preflight state.
+            rollback_armed = True
             set_flag(client, True, "Rekor production canary", run_id)
-            flag_mutated = True
 
         created = client.json(
             "/v1/admin/proofs/audit-batches",
@@ -270,7 +288,7 @@ def main() -> int:
             f"last_observation={last_observation}"
         )
     except BaseException as error:
-        if flag_mutated:
+        if rollback_armed:
             try:
                 set_flag(
                     client,
@@ -280,11 +298,20 @@ def main() -> int:
                 )
             except Exception as rollback_error:
                 print(f"CRITICAL: failed to restore {FLAG}: {rollback_error}", file=sys.stderr)
+        if isinstance(error, CanaryInterrupted):
+            print(
+                f"Rekor canary interrupted by signal {error.signum}; feature flag restored",
+                file=sys.stderr,
+            )
+            return 130 if error.signum == signal.SIGINT else 143
         if isinstance(error, KeyboardInterrupt):
             print("Rekor canary interrupted; feature flag restored", file=sys.stderr)
             return 130
         print(f"Rekor canary failed; feature flag restored: {error}", file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
