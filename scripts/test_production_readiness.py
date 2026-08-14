@@ -60,6 +60,10 @@ def ledger(**overrides):
 
 
 class ProductionReadinessTest(unittest.TestCase):
+    def test_workflow_skips_until_the_production_endpoint_is_configured(self):
+        workflow = (ROOT / ".github/workflows/production-readiness.yml").read_text()
+        self.assertIn("if: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL != '' }}", workflow)
+
     def test_live_team_email_requires_attest_manifest_executor_and_provenance(self):
         failures, receipt = MODULE.evaluate(ledger())
         self.assertEqual(failures, [])
