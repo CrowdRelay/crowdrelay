@@ -40,7 +40,35 @@ done
   fail 'Rekor anchor did not become healthy'
 }
 
+expected_git_sha="${CROWDRELAY_IMAGE_TAG#sha-}"
+[[ "$expected_git_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'Rekor canary requires an exact 40-char source SHA'
+
+# The relayer has no public port. Verify readiness and the durable confirmation
+# journal from inside the isolated container before the production canary.
+docker exec "$container" node -e '
+const fs=require("node:fs");
+fetch("http://127.0.0.1:8081/health/ready").then(async r=>{
+  const body=await r.text();
+  if(!r.ok) throw new Error(`relayer readiness ${r.status}: ${body.slice(0,300)}`);
+  const p="/data/pending-confirmation.json";
+  if(fs.existsSync(p) && fs.statSync(p).size>0) throw new Error("pending confirmation journal is not empty before canary");
+}).catch(e=>{console.error(e.message);process.exit(1)})' \
+  || fail 'Rekor relayer pre-canary readiness/journal check failed'
+
 CROWDRELAY_ADMIN_API_KEY_FILE="$secret_dir/crowdrelay_admin_api_key" \
+CROWDRELAY_EXPECTED_GIT_SHA="$expected_git_sha" \
   python3 scripts/rekor-canary.py
+
+# A successful canary must leave the relayer ready and without an unconfirmed
+# durable receipt. This catches confirm-contract drift even when publish itself succeeded.
+docker exec "$container" node -e '
+const fs=require("node:fs");
+fetch("http://127.0.0.1:8081/health/ready").then(async r=>{
+  const body=await r.text();
+  if(!r.ok) throw new Error(`relayer readiness ${r.status}: ${body.slice(0,300)}`);
+  const p="/data/pending-confirmation.json";
+  if(fs.existsSync(p) && fs.statSync(p).size>0) throw new Error("pending confirmation journal remains after confirmed canary");
+}).catch(e=>{console.error(e.message);process.exit(1)})' \
+  || fail 'Rekor relayer post-canary readiness/journal check failed'
 
 printf 'Rekor anchor is healthy and the public canary was confirmed.\n'

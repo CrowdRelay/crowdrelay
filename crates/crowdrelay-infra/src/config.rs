@@ -22,9 +22,11 @@ use url::Url;
 use crate::sensitive_response::SensitiveResponseKey;
 
 mod click;
+mod push;
 mod team;
 
 use click::parse_click_buffer_config;
+pub use push::PushPublicConfig;
 pub use team::TeamOperationsConfig;
 use team::{
     VIRYA_TEAM_MEMBER_1_EMAIL_KEY, VIRYA_TEAM_MEMBER_2_EMAIL_KEY, VIRYA_TEAM_MEMBER_3_EMAIL_KEY,
@@ -139,6 +141,9 @@ const KNOWN_KEYS: &[&str] = &[
     REQUIRE_DOUBLE_OPT_IN_KEY,
     RESPONSE_ENCRYPTION_SECRET_KEY,
     PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY,
+    push::PUSH_DELIVERY_ENABLED_KEY,
+    push::WEB_PUSH_VAPID_PUBLIC_KEY,
+    push::FCM_PROJECT_ID_KEY,
 ];
 
 /// Runtime configuration shared by the API and worker.
@@ -168,6 +173,8 @@ pub struct Config {
     pub previous_response_encryption_key: Option<SensitiveResponseKey>,
     /// Requires inbox ownership confirmation before a fan becomes active.
     pub require_double_opt_in: bool,
+    /// Public/runtime push-delivery controls. Provider secrets remain worker-only.
+    pub push_delivery: PushPublicConfig,
 }
 
 impl Config {
@@ -300,6 +307,7 @@ impl Config {
             response_encryption_key,
             previous_response_encryption_key,
             require_double_opt_in,
+            push_delivery: PushPublicConfig::parse(&values)?,
         })
     }
 }
@@ -335,7 +343,6 @@ impl fmt::Display for Environment {
         formatter.write_str(value)
     }
 }
-
 /// PostgreSQL pool and readiness timeouts.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DatabaseConfig {

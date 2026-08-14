@@ -32,12 +32,13 @@ const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
 const MAX_FLAG_CACHE_ENTRIES: usize = 256;
-const FLAG_KEYS: [(&str, bool); 14] = [
+const FLAG_KEYS: [(&str, bool); 15] = [
     ("ticket_sales_enabled", true),
     ("ticket_delivery_enabled", true),
     ("gate_redemption_enabled", true),
     ("mailer_enabled", true),
     ("communication_campaigns_enabled", false),
+    ("push_delivery_enabled", false),
     ("meta_publish_enabled", true),
     ("bandsintown_sync_enabled", true),
     ("n8n_ingress_enabled", true),
@@ -943,7 +944,7 @@ mod tests {
 
     #[test]
     fn all_expected_feature_flags_have_safe_defaults() {
-        assert_eq!(FLAG_KEYS.len(), 14);
+        assert_eq!(FLAG_KEYS.len(), 15);
         assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
         assert_eq!(flag_default("unknown"), None);
     }

@@ -333,12 +333,20 @@ pub async fn emit_due_nearby_gigs(
             .private()
             .into_response();
     }
-    let queued = sqlx::query_scalar::<_, i64>(
+    let push_enabled = if state.push.runtime_enabled {
+        crate::ecosystem::feature_enabled(&state, "push_delivery_enabled")
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let queued = sqlx::query_as::<_, (i64, i64)>(
         r#"
         WITH candidates AS (
             SELECT
                 fans.id AS fan_id,
                 fans.normalized_email,
+                fans.locale,
                 events.id AS event_id,
                 events.slug AS event_slug,
                 events.title AS event_title,
@@ -411,24 +419,84 @@ pub async fn emit_due_nearby_gigs(
                 ON candidates.fan_id = inserted.fan_id
                AND candidates.event_id = inserted.event_id
             RETURNING 1
+        ),
+        push_queued AS (
+            INSERT INTO fan_push_deliveries (
+                workspace_id, fan_id, endpoint_id, source_kind, source_id,
+                title, body, target_path, collapse_key
+            )
+            SELECT
+                $1,
+                candidates.fan_id,
+                endpoint.id,
+                'nearby_concert',
+                candidates.event_id,
+                CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
+                    THEN 'VIRYA blisko Ciebie'
+                    ELSE 'VIRYA near you'
+                END,
+                CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
+                    THEN candidates.event_title || ' — koncert około ' || inserted.distance_km || ' km od Twojego miasta.'
+                    ELSE candidates.event_title || ' — a show about ' || inserted.distance_km || ' km from your city.'
+                END,
+                CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
+                    THEN '/pl/my-signal/?event=' || candidates.event_slug
+                    ELSE '/my-signal/?event=' || candidates.event_slug
+                END,
+                'nearby:' || candidates.event_id::text
+            FROM inserted
+            JOIN candidates
+              ON candidates.fan_id = inserted.fan_id
+             AND candidates.event_id = inserted.event_id
+            JOIN fan_push_endpoints endpoint
+              ON endpoint.workspace_id = $1
+             AND endpoint.fan_id = candidates.fan_id
+             AND endpoint.active
+             AND endpoint.invalidated_at IS NULL
+            WHERE $3::boolean
+              AND EXISTS (
+                  SELECT 1
+                  FROM fan_consents consent
+                  WHERE consent.workspace_id = $1
+                    AND consent.fan_id = candidates.fan_id
+                    AND consent.purpose = 'marketing'
+                    AND consent.granted
+                    AND consent.id = (
+                        SELECT newest.id
+                        FROM fan_consents newest
+                        WHERE newest.workspace_id = consent.workspace_id
+                          AND newest.fan_id = consent.fan_id
+                          AND newest.purpose = consent.purpose
+                        ORDER BY newest.recorded_at DESC, newest.id DESC
+                        LIMIT 1
+                    )
+              )
+            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+            RETURNING 1
         )
-        SELECT count(*) FROM queued
+        SELECT
+            (SELECT count(*)::bigint FROM queued),
+            (SELECT count(*)::bigint FROM push_queued)
         "#,
     )
     .bind(state.ticketing.workspace_id().into_uuid())
     .bind(request_id_value.as_deref())
+    .bind(push_enabled)
     .fetch_one(state.ticketing.pool())
     .await;
     match queued {
-        Ok(count) => (
+        Ok((event_count, push_count)) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(json!({"queued": count})),
+            Json(json!({"queued": event_count, "push_queued": push_count})),
         )
             .into_response(),
-        Err(_) => Problem::service_unavailable(request_id_value)
-            .private()
-            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "could not emit due nearby-gig notifications");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
     }
 }
 

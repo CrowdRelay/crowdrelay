@@ -125,6 +125,123 @@ paths:
       responses:
         '200': { description: Claim result and awarded canonical credit. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
+  /public/push/config:
+    get:
+      operationId: getPublicPushConfig
+      summary: Read the fail-closed fan push transport configuration
+      description: Returns enabled=true only when both the runtime provider configuration and the CrowdRelay push_delivery_enabled feature flag are active.
+      responses:
+        '200':
+          description: Push transport availability. Endpoint material and provider secrets are never returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [enabled, android_fcm, web_push, vapid_public_key]
+                properties:
+                  enabled: { type: boolean }
+                  android_fcm: { type: boolean }
+                  web_push: { type: boolean }
+                  vapid_public_key: { type: [string, 'null'], maxLength: 256 }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/push/endpoints:
+    post:
+      operationId: registerMyPushEndpoint
+      summary: Register or rotate one write-only push endpoint for the authenticated fan
+      description: Registration requires an active fan session, latest marketing consent and the double push kill-switch. Re-registering an installation transfers ownership to the current fan and rotates provider endpoint material atomically.
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, transport, endpoint]
+              properties:
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                transport: { type: string, enum: [android_fcm, web_push] }
+                endpoint: { type: string, minLength: 1, maxLength: 4096 }
+                p256dh: { type: [string, 'null'], maxLength: 256 }
+                auth: { type: [string, 'null'], maxLength: 256 }
+      responses:
+        '200':
+          description: Endpoint accepted without echoing provider material.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [registered]
+                properties: { registered: { type: boolean, const: true } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/push/endpoints/disable:
+    post:
+      operationId: disableMyPushEndpoint
+      summary: Disable one push installation owned by the authenticated fan
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, transport]
+              properties:
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                transport: { type: string, enum: [android_fcm, web_push] }
+      responses:
+        '200':
+          description: Endpoint disabled or already absent.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [registered]
+                properties: { registered: { type: boolean, const: false } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/push/deliveries/{delivery_id}/ack:
+    post:
+      operationId: acknowledgePushDelivery
+      summary: Acknowledge that a specific device displayed a push notification
+      description: The one-time acknowledgement capability is embedded only in the encrypted/data push payload. Provider HTTP acceptance alone never marks a delivery delivered.
+      parameters:
+      - in: path
+        name: delivery_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ack_token]
+              properties:
+                ack_token: { type: string, minLength: 32, maxLength: 200 }
+      responses:
+        '200':
+          description: Device display acknowledgement recorded or idempotently replayed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties: { status: { type: string, const: delivered } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/area/players:
     post:
       operationId: linkInternalAreaPlayer
@@ -4424,6 +4541,36 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
+  /internal/communications/campaigns/{campaign_id}/push/enqueue:
+    post:
+      operationId: enqueueInternalCommunicationPush
+      summary: Materialize a push campaign into the durable per-device delivery ledger
+      description: n8n never calls FCM/Web Push directly. CrowdRelay rechecks campaign audience, current consent and active endpoints, then the supervised push worker owns provider delivery and device acknowledgement.
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Push campaign materialized or idempotently replayed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [campaign_id, recipient_count, push_queued, failed_count, status]
+                properties:
+                  campaign_id: { type: string, format: uuid }
+                  recipient_count: { type: integer, format: int64, minimum: 0 }
+                  push_queued: { type: integer, format: int64, minimum: 0 }
+                  failed_count: { type: integer, format: int64, minimum: 0 }
+                  status: { type: string, const: enqueued }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/communications/campaigns/{campaign_id}/complete:
     post:
       operationId: completeInternalCommunicationCampaign

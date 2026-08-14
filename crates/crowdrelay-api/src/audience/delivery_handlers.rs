@@ -662,3 +662,197 @@ async fn delivery_progress(
     .fetch_one(&state.database)
     .await
 }
+
+/// Materializes a scheduled push campaign into the same durable device delivery
+/// ledger used by direct fan events. Provider delivery remains worker-owned.
+pub async fn enqueue_push_campaign(
+    State(state): State<crate::AppState>,
+    Path(campaign_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.ticketing.commerce_authorized(&headers) {
+        return Problem::unauthorized(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    if !state.push.runtime_enabled {
+        return Problem::conflict(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    match crate::ecosystem::feature_enabled(&state, "push_delivery_enabled").await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Problem::conflict(request_id(&headers))
+                .private()
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(%error, %campaign_id, "could not read push delivery feature flag");
+            return unavailable(&headers);
+        }
+    }
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let campaign = match load_campaign(&state, workspace_id, campaign_id).await {
+        Ok(Some(value)) if value.status == "scheduled" && value.channel == "push" => value,
+        Ok(Some(_)) => {
+            return Problem::conflict(request_id(&headers))
+                .private()
+                .into_response();
+        }
+        Ok(None) => return Problem::not_found(request_id(&headers)).private().into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %campaign_id, "could not load push campaign");
+            return unavailable(&headers);
+        }
+    };
+    if campaign
+        .scheduled_at
+        .is_none_or(|value| value > OffsetDateTime::now_utc() + time::Duration::minutes(1))
+    {
+        return Problem::conflict(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let segment = match load_segment(&state, workspace_id, &campaign.segment_slug).await {
+        Ok(Some(value)) if value.active => value,
+        Ok(_) => return Problem::conflict(request_id(&headers)).private().into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %campaign_id, "could not load push campaign segment");
+            return unavailable(&headers);
+        }
+    };
+    let filter = match serde_json::from_value::<AudienceFilter>(segment.filter) {
+        Ok(value) if value.validate() => value,
+        _ => return unavailable(&headers),
+    };
+    match ensure_recipient_snapshot(&state, workspace_id, campaign_id, &filter, "push").await {
+        Ok(true) => {}
+        Ok(false) => return Problem::conflict(request_id(&headers)).private().into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %campaign_id, "could not snapshot push campaign recipients");
+            return unavailable(&headers);
+        }
+    }
+
+    let result = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        WITH current_recipient AS (
+            SELECT snapshot.fan_id, fan.locale,
+                   EXISTS (
+                       SELECT 1 FROM fan_consents consent
+                       WHERE consent.workspace_id = snapshot.workspace_id
+                         AND consent.fan_id = snapshot.fan_id
+                         AND consent.purpose = 'marketing'
+                         AND consent.granted
+                         AND consent.id = (
+                             SELECT newest.id FROM fan_consents newest
+                             WHERE newest.workspace_id = consent.workspace_id
+                               AND newest.fan_id = consent.fan_id
+                               AND newest.purpose = consent.purpose
+                             ORDER BY newest.recorded_at DESC, newest.id DESC LIMIT 1
+                         )
+                   ) AS consented,
+                   EXISTS (
+                       SELECT 1 FROM fan_push_endpoints endpoint
+                       WHERE endpoint.workspace_id = snapshot.workspace_id
+                         AND endpoint.fan_id = snapshot.fan_id
+                         AND endpoint.active AND endpoint.invalidated_at IS NULL
+                   ) AS has_endpoint
+            FROM communication_campaign_recipients snapshot
+            JOIN fans fan
+              ON fan.workspace_id = snapshot.workspace_id AND fan.id = snapshot.fan_id
+            WHERE snapshot.workspace_id = $1 AND snapshot.campaign_id = $2
+              AND fan.status = 'active'
+        ), ledger AS (
+            INSERT INTO communication_campaign_deliveries (
+                workspace_id, campaign_id, fan_id, attempt_key, status,
+                error_code, completed_at
+            )
+            SELECT $1, $2, fan_id,
+                   'push:' || $2::text || ':' || fan_id::text,
+                   CASE WHEN consented AND has_endpoint THEN 'claimed' ELSE 'failed' END,
+                   CASE
+                     WHEN NOT consented THEN 'marketing_consent_missing'
+                     WHEN NOT has_endpoint THEN 'no_active_push_endpoint'
+                     ELSE NULL
+                   END,
+                   CASE WHEN consented AND has_endpoint THEN NULL ELSE now() END
+            FROM current_recipient
+            ON CONFLICT (workspace_id, campaign_id, fan_id) DO NOTHING
+            RETURNING fan_id, status
+        ), queued AS (
+            INSERT INTO fan_push_deliveries (
+                workspace_id, fan_id, endpoint_id, source_kind, source_id,
+                title, body, target_path, collapse_key
+            )
+            SELECT $1, recipient.fan_id, endpoint.id,
+                   'communication_campaign', $2,
+                   CASE
+                     WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%' THEN
+                       CASE $3
+                         WHEN 'event.announcement.v1' THEN 'VIRYA — nowy koncert'
+                         WHEN 'event.interest_reminder.v1' THEN 'VIRYA — przypomnienie o koncercie'
+                         WHEN 'event.last_call.v1' THEN 'VIRYA — ostatni moment'
+                         WHEN 'event.day_of.v1' THEN 'VIRYA — widzimy się dziś'
+                         WHEN 'release.release_day.v1' THEN 'Nowa premiera VIRYA — dziś'
+                         ELSE 'VIRYA — nowy sygnał'
+                       END
+                     ELSE
+                       CASE $3
+                         WHEN 'event.announcement.v1' THEN 'VIRYA — new show'
+                         WHEN 'event.interest_reminder.v1' THEN 'VIRYA — show reminder'
+                         WHEN 'event.last_call.v1' THEN 'VIRYA — last call'
+                         WHEN 'event.day_of.v1' THEN 'VIRYA — see you today'
+                         WHEN 'release.release_day.v1' THEN 'New VIRYA release — today'
+                         ELSE 'VIRYA — new signal'
+                       END
+                   END,
+                   CASE WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%'
+                     THEN 'Masz nowy sygnał od VIRYA. Szczegóły znajdziesz w My Signal.'
+                     ELSE 'You have a new VIRYA signal. Open My Signal for details.'
+                   END,
+                   CASE WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%'
+                     THEN '/pl/my-signal/' ELSE '/my-signal/' END,
+                   'campaign:' || $2::text
+            FROM current_recipient recipient
+            JOIN communication_campaign_deliveries delivery
+              ON delivery.workspace_id = $1 AND delivery.campaign_id = $2
+             AND delivery.fan_id = recipient.fan_id AND delivery.status = 'claimed'
+            JOIN fan_push_endpoints endpoint
+              ON endpoint.workspace_id = $1 AND endpoint.fan_id = recipient.fan_id
+             AND endpoint.active AND endpoint.invalidated_at IS NULL
+            WHERE recipient.consented
+            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+            RETURNING fan_id
+        )
+        SELECT
+            (SELECT count(*)::bigint FROM communication_campaign_recipients WHERE workspace_id = $1 AND campaign_id = $2),
+            (SELECT count(*)::bigint FROM queued),
+            (SELECT count(*)::bigint FROM communication_campaign_deliveries WHERE workspace_id = $1 AND campaign_id = $2 AND status = 'failed')
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(campaign_id)
+    .bind(&campaign.template_key)
+    .fetch_one(&state.database)
+    .await;
+    match result {
+        Ok((recipient_count, queued_count, failed_count)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({
+                "campaign_id": campaign_id,
+                "recipient_count": recipient_count,
+                "push_queued": queued_count,
+                "failed_count": failed_count,
+                "status": "enqueued"
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %campaign_id, "could not materialize push campaign");
+            unavailable(&headers)
+        }
+    }
+}

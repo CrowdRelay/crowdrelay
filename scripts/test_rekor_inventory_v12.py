@@ -45,11 +45,22 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertIn("await verifyPendingStorage()", runtime)
         self.assertIn("pending storage is not writable", runtime)
 
-    def test_canary_rolls_back_flag(self):
+    def test_canary_restores_previous_flag_and_pins_exact_api_build(self):
         text = (ROOT / "scripts/rekor-canary.py").read_text()
-        self.assertIn('set_flag(client, False', text)
+        self.assertIn('previous_flag_state = current_flag_state(client)', text)
+        self.assertIn('set_flag(\n                    client,\n                    previous_flag_state', text)
+        self.assertIn('require_exact_api_build(client, expected_git_sha)', text)
+        self.assertIn('require_no_processing_batches(client, "preflight")', text)
+        self.assertIn('require_no_processing_batches(client, "post-confirm")', text)
         self.assertIn('verify_rekor_entry(anchor_url, entry_id)', text)
         self.assertIn('external_proof_anchoring_enabled', text)
+
+    def test_installer_checks_private_relayer_before_and_after_canary(self):
+        installer = (ROOT / "ops/rekor/install-anchor.sh").read_text()
+        self.assertIn('CROWDRELAY_EXPECTED_GIT_SHA="$expected_git_sha"', installer)
+        self.assertGreaterEqual(installer.count('/health/ready'), 2)
+        self.assertGreaterEqual(installer.count('/data/pending-confirmation.json'), 2)
+        self.assertIn('pending confirmation journal remains after confirmed canary', installer)
 
     def test_installer_requires_immutable_image_and_private_api_path(self):
         installer = (ROOT / "ops/rekor/install-anchor.sh").read_text()

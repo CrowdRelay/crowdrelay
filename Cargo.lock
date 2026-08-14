@@ -370,6 +370,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "crowdrelay-application",
  "crowdrelay-domain",
  "crowdrelay-infra",
@@ -377,6 +378,7 @@ dependencies = [
  "hex",
  "hmac",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -385,6 +387,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

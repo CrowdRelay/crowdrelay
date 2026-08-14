@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=3.0)
     parser.add_argument("--stalled-seconds", type=int, default=120)
     parser.add_argument("--batch-limit", type=int, default=64)
+    parser.add_argument(
+        "--expected-git-sha",
+        default=os.getenv("CROWDRELAY_EXPECTED_GIT_SHA", ""),
+        help="exact 40-char API git SHA expected to be live before mutating the feature flag",
+    )
     return parser.parse_args()
 
 
@@ -42,6 +47,47 @@ def normalize_base(value: str) -> str:
     if path.endswith("/v1"):
         path = path[:-3]
     return urllib.parse.urlunsplit((url.scheme, url.netloc, path, "", "")).rstrip("/")
+
+
+
+def valid_git_sha(value: str) -> bool:
+    return len(value) == 40 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def require_exact_api_build(client: "Client", expected_git_sha: str) -> None:
+    meta = client.json("/v1/meta")
+    git_sha = meta.get("gitSha") if isinstance(meta, dict) else None
+    if git_sha != expected_git_sha:
+        raise RuntimeError(
+            f"API build drift: expected {expected_git_sha}, observed {git_sha!r}"
+        )
+
+
+def current_flag_state(client: "Client") -> bool:
+    flags = client.json("/v1/admin/ecosystem/flags", admin=True)
+    if not isinstance(flags, list):
+        raise RuntimeError("feature flag list payload is invalid")
+    for item in flags:
+        if isinstance(item, dict) and item.get("key") == FLAG:
+            enabled = item.get("enabled")
+            if isinstance(enabled, bool):
+                return enabled
+            raise RuntimeError("Rekor feature flag state is invalid")
+    raise RuntimeError(f"feature flag {FLAG} is missing")
+
+
+def require_no_processing_batches(client: "Client", phase: str) -> None:
+    batches = client.json(
+        "/v1/admin/proofs/batches?status=processing&limit=2",
+        admin=True,
+    )
+    if not isinstance(batches, list):
+        raise RuntimeError("proof batch list payload is invalid")
+    if batches:
+        ids = [str(item.get("id")) for item in batches if isinstance(item, dict)]
+        raise RuntimeError(
+            f"Rekor canary {phase}: processing proof batches already exist: {ids}"
+        )
 
 
 def read_secret(path: str) -> str:
@@ -126,16 +172,24 @@ def main() -> int:
     base = normalize_base(args.base_url)
     token = read_secret(args.admin_key_file)
     client = Client(base, token)
+    expected_git_sha = args.expected_git_sha.strip()
+    if not valid_git_sha(expected_git_sha):
+        raise ValueError("--expected-git-sha/CROWDRELAY_EXPECTED_GIT_SHA must be exactly 40 lowercase hex chars")
     run_id = f"{int(time.time())}-{secrets.token_hex(5)}"
-    enabled = False
+    previous_flag_state = False
+    flag_mutated = False
 
     try:
+        require_exact_api_build(client, expected_git_sha)
         ready = client.json("/v1/health/ready")
         if not isinstance(ready, dict):
             raise RuntimeError("CrowdRelay readiness payload is invalid")
+        previous_flag_state = current_flag_state(client)
+        require_no_processing_batches(client, "preflight")
 
-        set_flag(client, True, "Rekor production canary", run_id)
-        enabled = True
+        if not previous_flag_state:
+            set_flag(client, True, "Rekor production canary", run_id)
+            flag_mutated = True
 
         created = client.json(
             "/v1/admin/proofs/audit-batches",
@@ -182,6 +236,10 @@ def main() -> int:
                 if not isinstance(fingerprint, str) or not fingerprint.startswith("sha256:"):
                     raise RuntimeError("confirmed batch lacks signer fingerprint")
                 verify_rekor_entry(anchor_url, entry_id)
+                require_exact_api_build(client, expected_git_sha)
+                require_no_processing_batches(client, "post-confirm")
+                if current_flag_state(client) is not True:
+                    raise RuntimeError("Rekor feature flag is not enabled after confirmed canary")
                 print(json.dumps({
                     "status": "confirmed",
                     "batch_id": batch_id,
@@ -189,6 +247,8 @@ def main() -> int:
                     "log_index": current.get("anchor_sequence"),
                     "signer_fingerprint": fingerprint,
                     "flag_enabled": True,
+                    "api_git_sha": expected_git_sha,
+                    "previous_flag_enabled": previous_flag_state,
                 }, ensure_ascii=False, indent=2))
                 return 0
             if status == "failed":
@@ -210,15 +270,20 @@ def main() -> int:
             f"last_observation={last_observation}"
         )
     except BaseException as error:
-        if enabled:
+        if flag_mutated:
             try:
-                set_flag(client, False, f"Automatic rollback after failed Rekor canary: {type(error).__name__}", run_id)
+                set_flag(
+                    client,
+                    previous_flag_state,
+                    f"Automatic rollback after failed Rekor canary: {type(error).__name__}",
+                    run_id,
+                )
             except Exception as rollback_error:
-                print(f"CRITICAL: failed to disable {FLAG}: {rollback_error}", file=sys.stderr)
+                print(f"CRITICAL: failed to restore {FLAG}: {rollback_error}", file=sys.stderr)
         if isinstance(error, KeyboardInterrupt):
-            print("Rekor canary interrupted; feature flag rolled back", file=sys.stderr)
+            print("Rekor canary interrupted; feature flag restored", file=sys.stderr)
             return 130
-        print(f"Rekor canary failed; feature flag rolled back: {error}", file=sys.stderr)
+        print(f"Rekor canary failed; feature flag restored: {error}", file=sys.stderr)
         return 1
 
 

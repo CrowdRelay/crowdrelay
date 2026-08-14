@@ -40,6 +40,16 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/me/area/challenge", post(area::me_challenge))
         .route("/v1/me/area/claim", post(area::me_claim))
         .route("/v1/me/home", get(fan_context::fan_home))
+        .route("/v1/public/push/config", get(push::config))
+        .route("/v1/me/push/endpoints", post(push::register_endpoint))
+        .route(
+            "/v1/me/push/endpoints/disable",
+            post(push::disable_endpoint),
+        )
+        .route(
+            "/v1/public/push/deliveries/{delivery_id}/ack",
+            post(push::acknowledge_delivery),
+        )
         .route(
             "/v1/me/events/{slug}/context",
             get(fan_context::fan_event_context),
@@ -429,6 +439,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/internal/communications/campaigns/{campaign_id}/complete",
             post(audience::complete_campaign),
+        )
+        .route(
+            "/v1/internal/communications/campaigns/{campaign_id}/push/enqueue",
+            post(audience::enqueue_push_campaign),
         )
         .route("/v1/admin/analytics/funnel", get(audience::funnel))
         .route("/v1/admin/analytics/revenue", get(audience::revenue))

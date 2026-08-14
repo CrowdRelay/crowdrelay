@@ -70,6 +70,7 @@ mod ops;
 mod ops_routes;
 mod ops_summary;
 mod proofs;
+mod push;
 mod referrals;
 mod releases;
 mod routing;
@@ -90,6 +91,7 @@ pub use events::{
 };
 pub use fan_lifecycle::FanLifecycleState;
 pub use ops::OpsState;
+pub use push::PushPublicState;
 pub use referrals::ReferralState;
 pub use ticketing::TicketingState;
 
@@ -128,6 +130,7 @@ pub struct AppState {
     pub(crate) ops: OpsState,
     pub(crate) autopilot: PostgresAutopilotRepository,
     pub(crate) autopilot_runtime_enabled: bool,
+    pub(crate) push: push::PushPublicState,
 }
 
 impl AppState {
@@ -147,6 +150,7 @@ impl AppState {
         ops: OpsState,
         autopilot: PostgresAutopilotRepository,
         autopilot_runtime_enabled: bool,
+        push: push::PushPublicState,
     ) -> Self {
         Self {
             database,
@@ -161,6 +165,7 @@ impl AppState {
             ops,
             autopilot,
             autopilot_runtime_enabled,
+            push,
         }
     }
 }
@@ -1008,6 +1013,11 @@ mod tests {
             ops,
             autopilot,
             false,
+            crate::PushPublicState {
+                runtime_enabled: false,
+                web_push_vapid_public_key: None,
+                fcm_project_id: None,
+            },
         ))
     }
 

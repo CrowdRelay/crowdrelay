@@ -30,6 +30,7 @@ use crowdrelay_worker::{
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
+    push_delivery::PushDeliveryWorker,
     reminders::EventReminderScheduler,
     retention::{RetentionWorker, RetentionWorkerConfig},
 };
@@ -221,6 +222,16 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         None
     };
     let workspace_id = trusted_workspace_id(&database, config).await?;
+    let push_delivery_worker = if config.push_delivery.runtime_enabled {
+        Some(PushDeliveryWorker::from_env(
+            database.clone(),
+            workspace_id,
+            config.database.operation_timeout,
+        )?)
+    } else {
+        tracing::info!("fan push delivery is disabled by process configuration");
+        None
+    };
     let autopilot_repository = PostgresAutopilotRepository::new(database.clone(), &config.database);
     let team_email_worker = TeamEmailDispatchWorker::new(
         autopilot_repository.clone(),
@@ -252,6 +263,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let draw_shutdown = shutdown_receiver.clone();
     let autopilot_shutdown = shutdown_receiver.clone();
     let team_email_shutdown = shutdown_receiver.clone();
+    let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
     let mut outbox_task = tokio::spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -279,6 +291,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     });
     let mut team_email_task = tokio::spawn(async move {
         team_email_worker.run(team_email_shutdown).await;
+    });
+    let mut push_delivery_task = tokio::spawn(async move {
+        match push_delivery_worker {
+            Some(worker) => worker.run(push_delivery_shutdown).await,
+            None => wait_for_shutdown(push_delivery_shutdown).await,
+        }
     });
     let mut ops_watchdog_task = tokio::spawn(async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
@@ -319,6 +337,10 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             result = &mut team_email_task => {
                 result.context("ViryaOS team-email worker task failed")?;
                 bail!("ViryaOS team-email worker stopped before shutdown was requested");
+            }
+            result = &mut push_delivery_task => {
+                result.context("fan push delivery worker task failed")?;
+                bail!("fan push delivery worker stopped before shutdown was requested");
             }
             result = &mut ops_watchdog_task => {
                 result.context("CrowdRelay ops watchdog task failed")?;
@@ -382,6 +404,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         shutdown_deadline,
     )
     .await;
+    let push_delivery_result = await_worker_shutdown(
+        push_delivery_task,
+        "fan push delivery worker",
+        shutdown_deadline,
+    )
+    .await;
     let ops_watchdog_result = await_worker_shutdown(
         ops_watchdog_task,
         "CrowdRelay ops watchdog",
@@ -395,6 +423,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     draw_result?;
     autopilot_result?;
     team_email_result?;
+    push_delivery_result?;
     ops_watchdog_result?;
 
     Ok(())

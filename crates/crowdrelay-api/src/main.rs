@@ -21,7 +21,7 @@ use crowdrelay_api::{
     AcquisitionState, AcquisitionStateArgs, AdmissionState, AdmissionStateArgs, AppState,
     ClickMetricsReader, ClickMetricsSnapshot, ClickSubmitter, ConcertQrState,
     EventActionMetricsReader, EventActionMetricsSnapshot, EventActionSubmitter, EventState,
-    FanLifecycleState, HttpConfig, OpsState, ReferralState, TicketingState,
+    FanLifecycleState, HttpConfig, OpsState, PushPublicState, ReferralState, TicketingState,
 };
 use crowdrelay_application::{
     AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, EventCache,
@@ -249,6 +249,11 @@ async fn main() -> Result<()> {
             ops,
             autopilot,
             config.autopilot_enabled,
+            PushPublicState {
+                runtime_enabled: config.push_delivery.runtime_enabled,
+                web_push_vapid_public_key: config.push_delivery.web_push_vapid_public_key.clone(),
+                fcm_project_id: config.push_delivery.fcm_project_id.clone(),
+            },
         ),
         http_config,
     );
