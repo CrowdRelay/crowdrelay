@@ -1,12 +1,14 @@
 name: Runtime performance report
 
 on:
+  schedule:
+    - cron: "41 2 * * *"
   workflow_dispatch:
     inputs:
       requests:
-        description: Requests in the bounded local benchmark
+        description: Requests per bounded local benchmark run
         required: true
-        default: "800"
+        default: "600"
       concurrency:
         description: Concurrent HTTP workers
         required: true
@@ -52,6 +54,8 @@ jobs:
       CROWDRELAY_BOOTSTRAP_JSON: >-
         {"workspace_name":"CrowdRelay Performance","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"Performance","active":true,"smart_links":[{"slug":"perf","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: warn
+      REQUESTS: ${{ inputs.requests || '600' }}
+      CONCURRENCY: ${{ inputs.concurrency || '24' }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -60,6 +64,21 @@ jobs:
           rustc --version --verbose
           cargo --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Restore most recent passing performance baseline
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: artifacts/performance-baseline.json
+          key: crowdrelay-perf-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            crowdrelay-perf-${{ runner.os }}-${{ github.ref_name }}-
+      - name: Preserve restored baseline as evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          if [[ -f artifacts/performance-baseline.json ]]; then
+            cp artifacts/performance-baseline.json artifacts/performance-previous-baseline.json
+          fi
       - name: Set up PostgreSQL 18 schema and workspace
         run: cargo run --locked --package crowdrelay-worker -- setup
       - name: Build API once in release mode
@@ -79,15 +98,42 @@ jobs:
           done
           cat artifacts/crowdrelay-api.log >&2
           exit 1
-      - name: Run bounded runtime benchmark
-        env:
-          REQUESTS: ${{ inputs.requests }}
-          CONCURRENCY: ${{ inputs.concurrency }}
+      - name: Run three bounded benchmark samples
+        shell: bash
         run: |
-          python3 scripts/benchmark-http.py \
-            --requests "$REQUESTS" \
-            --concurrency "$CONCURRENCY" \
+          set -euo pipefail
+          for run in 1 2 3; do
+            python3 scripts/benchmark-http.py \
+              --requests "$REQUESTS" \
+              --concurrency "$CONCURRENCY" \
+              --output "artifacts/http-benchmark-run-${run}.json"
+          done
+      - name: Aggregate runner-noise-resistant candidate
+        run: |
+          python3 scripts/aggregate-benchmarks.py \
+            artifacts/http-benchmark-run-1.json \
+            artifacts/http-benchmark-run-2.json \
+            artifacts/http-benchmark-run-3.json \
             --output artifacts/http-benchmark.json
+      - name: Compare with previous passing baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f artifacts/performance-previous-baseline.json ]]; then
+            python3 scripts/compare-performance.py \
+              --candidate artifacts/http-benchmark.json \
+              --baseline artifacts/performance-previous-baseline.json \
+              --max-latency-regression-pct 25 \
+              --max-rps-drop-pct 20 \
+              --latency-noise-floor-ms 15 \
+              --output artifacts/performance-comparison.json
+          else
+            printf '%s\n' '{"schema":1,"status":"seed","reason":"no-previous-passing-baseline"}' \
+              > artifacts/performance-comparison.json
+            echo "PERFORMANCE_REGRESSION=SEED no_previous_baseline=true"
+          fi
+      - name: Promote passing candidate to next baseline
+        run: cp artifacts/http-benchmark.json artifacts/performance-baseline.json
       - name: Capture final Prometheus snapshot
         if: always()
         run: curl --fail --silent http://127.0.0.1:8080/metrics > artifacts/metrics.prom || true
@@ -95,9 +141,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: crowdrelay-performance-${{ github.sha }}
+          name: crowdrelay-performance-${{ github.sha }}-${{ github.run_id }}
           path: |
-            artifacts/http-benchmark.json
+            artifacts/http-benchmark*.json
+            artifacts/performance-*.json
             artifacts/metrics.prom
             artifacts/crowdrelay-api.log
           if-no-files-found: warn

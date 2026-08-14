@@ -1,0 +1,43 @@
+name: Production operational readiness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "n8n/**"
+      - "scripts/build_n8n_executor_heartbeat.py"
+      - "scripts/publish-n8n-heartbeat.sh"
+      - "scripts/verify-production-readiness.py"
+      - ".github/workflows/production-readiness.yml"
+  schedule:
+    - cron: "11 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-operational-readiness
+  cancel-in-progress: true
+
+jobs:
+  team-email:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      CROWDRELAY_PRODUCTION_BASE_URL: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL }}
+      CROWDRELAY_PRODUCTION_ADMIN_API_KEY: ${{ secrets.CROWDRELAY_PRODUCTION_ADMIN_API_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify attested production capability, not desired state
+        run: python3 scripts/verify-production-readiness.py
+      - name: Upload secretless readiness receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-operational-readiness-${{ github.run_id }}
+          path: |
+            artifacts/operational-readiness.json
+            artifacts/virya-os-release-receipt.json
+          if-no-files-found: warn
+          retention-days: 90

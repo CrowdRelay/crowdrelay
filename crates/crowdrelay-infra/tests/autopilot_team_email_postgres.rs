@@ -1,6 +1,12 @@
 use std::time::Duration;
 
-use crowdrelay_application::autopilot::{AutopilotActionPayload, AutopilotActionRepository};
+use crowdrelay_application::{
+    RepositoryError,
+    autopilot::{
+        AutopilotActionPayload, AutopilotActionRepository, AutopilotRuntimeRepository,
+        ClaimExecution, ExecutorReportStatus, RecordExecutionReport,
+    },
+};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use serde_json::{Value, json};
@@ -167,6 +173,153 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
     .fetch_one(&pool)
     .await?;
     assert_eq!(emission_count, 1);
+
+    // Execution ownership is closed-loop and provider success is monotonic.
+    // This simulates duplicate delivery, a worker/provider ambiguity window and
+    // a delayed failure receipt arriving after Gmail already confirmed success.
+    let executor_id = "n8n-team-email-test".to_owned();
+    let action_id = claimed[0].id;
+    let first_claim = repository
+        .claim_execution(
+            workspace_id,
+            ClaimExecution {
+                action_id,
+                executor_id: executor_id.clone(),
+                occurred_at: now,
+            },
+        )
+        .await?;
+    assert_eq!(first_claim.disposition, "claimed");
+    assert_eq!(first_claim.attempt_number, 1);
+    let claim_token = first_claim.claim_token.ok_or("missing first claim token")?;
+
+    let duplicate_claim = repository
+        .claim_execution(
+            workspace_id,
+            ClaimExecution {
+                action_id,
+                executor_id: executor_id.clone(),
+                occurred_at: now + time::Duration::minutes(1),
+            },
+        )
+        .await?;
+    assert_eq!(duplicate_claim.disposition, "in_flight");
+    assert!(duplicate_claim.claim_token.is_none());
+
+    let ambiguous_claim = repository
+        .claim_execution(
+            workspace_id,
+            ClaimExecution {
+                action_id,
+                executor_id: executor_id.clone(),
+                occurred_at: now + time::Duration::minutes(16),
+            },
+        )
+        .await?;
+    assert_eq!(ambiguous_claim.disposition, "ambiguous");
+    assert!(ambiguous_claim.claim_token.is_none());
+
+    let wrong_token = repository
+        .record_execution_report(
+            workspace_id,
+            RecordExecutionReport {
+                action_id,
+                receipt_key: format!("wrong-token-{team_action_id}"),
+                executor_id: executor_id.clone(),
+                status: ExecutorReportStatus::Failed,
+                claim_token: Some(Uuid::now_v7()),
+                provider_reference: None,
+                error_kind: Some("simulated_transport_failure".to_owned()),
+                metadata: json!({"test": true}),
+                occurred_at: now + time::Duration::minutes(2),
+            },
+        )
+        .await;
+    assert!(matches!(wrong_token, Err(RepositoryError::Conflict)));
+
+    let success_receipt = format!("gmail-success-{team_action_id}");
+    let success = repository
+        .record_execution_report(
+            workspace_id,
+            RecordExecutionReport {
+                action_id,
+                receipt_key: success_receipt.clone(),
+                executor_id: executor_id.clone(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: Some(claim_token),
+                provider_reference: Some("gmail-message-123".to_owned()),
+                error_kind: None,
+                metadata: json!({"provider": "gmail"}),
+                occurred_at: now + time::Duration::minutes(2),
+            },
+        )
+        .await?;
+    assert!(!success.replayed);
+
+    let replayed_success = repository
+        .record_execution_report(
+            workspace_id,
+            RecordExecutionReport {
+                action_id,
+                receipt_key: success_receipt,
+                executor_id: executor_id.clone(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: Some(claim_token),
+                provider_reference: Some("gmail-message-123".to_owned()),
+                error_kind: None,
+                metadata: json!({"provider": "gmail"}),
+                occurred_at: now + time::Duration::minutes(2),
+            },
+        )
+        .await?;
+    assert!(replayed_success.replayed);
+
+    let delayed_failure = repository
+        .record_execution_report(
+            workspace_id,
+            RecordExecutionReport {
+                action_id,
+                receipt_key: format!("delayed-failure-{team_action_id}"),
+                executor_id: executor_id.clone(),
+                status: ExecutorReportStatus::Failed,
+                claim_token: Some(claim_token),
+                provider_reference: None,
+                error_kind: Some("late_transport_timeout".to_owned()),
+                metadata: json!({"test": "delayed-after-success"}),
+                occurred_at: now + time::Duration::minutes(3),
+            },
+        )
+        .await?;
+    assert!(!delayed_failure.replayed);
+
+    let after_success = repository
+        .claim_execution(
+            workspace_id,
+            ClaimExecution {
+                action_id,
+                executor_id: executor_id.clone(),
+                occurred_at: now + time::Duration::minutes(20),
+            },
+        )
+        .await?;
+    assert_eq!(after_success.disposition, "already_succeeded");
+    assert_eq!(after_success.attempt_number, 1);
+    assert_eq!(
+        after_success.provider_reference.as_deref(),
+        Some("gmail-message-123")
+    );
+
+    let claim_state = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, provider_reference FROM viryaos_autopilot_execution_claims \
+         WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(team_action_id)
+    .bind(&executor_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(claim_state.0, "succeeded");
+    assert_eq!(claim_state.1.as_deref(), Some("gmail-message-123"));
 
     pool.close().await;
     Ok(())

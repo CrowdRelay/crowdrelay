@@ -54,6 +54,15 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         self.assertIn("autopilot_team_email_postgres", ci)
         self.assertIn("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL", ci)
 
+    def test_provider_success_is_monotonic_under_delayed_failure_receipts(self):
+        runtime = text("crates/crowdrelay-infra/src/autopilot/runtime.rs")
+        integration = text("crates/crowdrelay-infra/tests/autopilot_team_email_postgres.rs")
+        self.assertIn("preserve_succeeded_claim", runtime)
+        self.assertIn('claim_status == "succeeded"', runtime)
+        self.assertIn("delayed-failure-", integration)
+        self.assertIn('assert_eq!(after_success.disposition, "already_succeeded")', integration)
+        self.assertIn('assert_eq!(claim_state.0, "succeeded")', integration)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,20 @@
 name: Dependency security
 
 on:
+  push:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**/Cargo.toml"
+      - ".github/workflows/security.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**/Cargo.toml"
+      - ".github/workflows/security.yml"
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
@@ -9,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dependency-security
+  group: dependency-security-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -18,6 +32,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Generate deterministic lock SBOM
+        run: python3 scripts/generate_lock_sbom.py Cargo.lock artifacts/crowdrelay-sbom.cdx.json
+      - name: Upload dependency SBOM
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: crowdrelay-sbom-${{ github.sha }}
+          path: artifacts/crowdrelay-sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Install pinned cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit reachable Rust dependencies

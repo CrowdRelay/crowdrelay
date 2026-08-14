@@ -1,6 +1,54 @@
 //! Closed-loop executor evidence, release ledger and first-party RUM storage.
 
 use super::*;
+use time::{Duration as TimeDuration, format_description::well_known::Rfc3339};
+
+const WORKFLOW_ATTESTATION_MAX_AGE: TimeDuration = TimeDuration::days(14);
+
+type ReleaseComponentRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    OffsetDateTime,
+    Value,
+);
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn workflow_attestation_evidence(
+    metadata: &Value,
+    manifest_sha: Option<&str>,
+    now: OffsetDateTime,
+) -> (Option<String>, Option<OffsetDateTime>, bool) {
+    let object = metadata.as_object();
+    let sha = object
+        .and_then(|value| value.get("workflow_attestation_sha"))
+        .and_then(Value::as_str)
+        .filter(|value| valid_sha256(value))
+        .map(str::to_owned);
+    let bound_manifest = object
+        .and_then(|value| value.get("workflow_attestation_manifest_sha"))
+        .and_then(Value::as_str);
+    let attested_at = object
+        .and_then(|value| value.get("workflow_attested_at"))
+        .and_then(Value::as_str)
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok());
+    let fresh = attested_at.is_some_and(|value| {
+        value <= now + TimeDuration::minutes(5) && value >= now - WORKFLOW_ATTESTATION_MAX_AGE
+    });
+    let manifest_matches = manifest_sha.is_some_and(|expected| bound_manifest == Some(expected));
+    let ready = sha.is_some() && fresh && manifest_matches;
+    (sha, attested_at, ready)
+}
 
 const RELEASE_COMPONENTS: [&str; 6] = [
     "crowdrelay-api",
@@ -150,6 +198,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
+            let mut preserve_succeeded_claim = false;
             if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed) {
                 let claim = sqlx::query_as::<_, (Uuid, String)>(
                     "SELECT claim_token, status FROM viryaos_autopilot_execution_claims \
@@ -161,10 +210,15 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;
-                if let Some((expected_token, _status)) = claim
-                    && command.claim_token != Some(expected_token)
-                {
-                    return Err(RepositoryError::Conflict);
+                if let Some((expected_token, claim_status)) = claim {
+                    if command.claim_token != Some(expected_token) {
+                        return Err(RepositoryError::Conflict);
+                    }
+                    // Provider success is monotonic. A delayed failure from the same
+                    // attempt remains useful audit evidence, but it must never
+                    // downgrade the durable claim and make the action claimable again.
+                    preserve_succeeded_claim = claim_status == "succeeded"
+                        && command.status == ExecutorReportStatus::Failed;
                 }
             }
             let report_id = Uuid::now_v7();
@@ -199,25 +253,26 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
             if let Some(id) = inserted {
                 if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed)
+                    && !preserve_succeeded_claim
                     && let Some(token) = command.claim_token
                 {
-                        let terminal_status = command.status.as_str();
-                        sqlx::query(
-                            r#"UPDATE viryaos_autopilot_execution_claims
-                               SET status=$5, provider_reference=$6, error_kind=$7, completed_at=$8
-                               WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3 AND claim_token=$4"#,
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(command.action_id.into_uuid())
-                        .bind(&command.executor_id)
-                        .bind(token)
-                        .bind(terminal_status)
-                        .bind(&command.provider_reference)
-                        .bind(&command.error_kind)
-                        .bind(command.occurred_at)
-                        .execute(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
+                    let terminal_status = command.status.as_str();
+                    sqlx::query(
+                        r#"UPDATE viryaos_autopilot_execution_claims
+                           SET status=$5, provider_reference=$6, error_kind=$7, completed_at=$8
+                           WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3 AND claim_token=$4"#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(command.action_id.into_uuid())
+                    .bind(&command.executor_id)
+                    .bind(token)
+                    .bind(terminal_status)
+                    .bind(&command.provider_reference)
+                    .bind(&command.error_kind)
+                    .bind(command.occurred_at)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
                 }
                 match command.status {
                     ExecutorReportStatus::Failed => {
@@ -522,6 +577,13 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 .await
                 .map_err(map_sqlx)?;
             }
+            let mut release_metadata = command.metadata.clone();
+            if let Some(metadata) = release_metadata.as_object_mut() {
+                metadata.insert(
+                    "executor_id".to_owned(),
+                    Value::String(command.executor_id.clone()),
+                );
+            }
             sqlx::query(
                 r#"
                 INSERT INTO viryaos_release_components (
@@ -533,7 +595,11 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                     version=EXCLUDED.version,
                     manifest_sha=EXCLUDED.manifest_sha,
                     observed_at=EXCLUDED.observed_at,
-                    metadata=EXCLUDED.metadata
+                    metadata=CASE
+                        WHEN viryaos_release_components.manifest_sha = EXCLUDED.manifest_sha
+                        THEN COALESCE(viryaos_release_components.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                        ELSE EXCLUDED.metadata
+                    END
                 WHERE viryaos_release_components.observed_at <= EXCLUDED.observed_at
                 "#,
             )
@@ -541,7 +607,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .bind(&command.manifest_sha)
             .bind(&command.version)
             .bind(command.observed_at)
-            .bind(serde_json::json!({"executor_id": &command.executor_id}))
+            .bind(&release_metadata)
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
@@ -574,7 +640,12 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                     version=EXCLUDED.version,
                     manifest_sha=EXCLUDED.manifest_sha,
                     observed_at=EXCLUDED.observed_at,
-                    metadata=EXCLUDED.metadata
+                    metadata=CASE
+                        WHEN EXCLUDED.component_key = 'n8n'
+                         AND viryaos_release_components.manifest_sha = EXCLUDED.manifest_sha
+                        THEN COALESCE(viryaos_release_components.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                        ELSE EXCLUDED.metadata
+                    END
                 WHERE viryaos_release_components.observed_at <= EXCLUDED.observed_at
                 "#,
             )
@@ -606,10 +677,10 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<ReleaseLedgerOverview, RepositoryError> {
         self.bounded(async {
-            let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, OffsetDateTime)>(
+            let rows = sqlx::query_as::<_, ReleaseComponentRow>(
                 r#"
                 SELECT component_key, environment, source_sha, artifact_digest,
-                       deploy_ref, version, manifest_sha, observed_at
+                       deploy_ref, version, manifest_sha, observed_at, metadata
                 FROM viryaos_release_components
                 WHERE workspace_id=$1 AND environment='production'
                 ORDER BY component_key
@@ -619,28 +690,56 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
+            let mut n8n_attestation_ready = false;
             let components = rows
                 .into_iter()
-                .map(|row| ReleaseComponentSummary {
-                    component_key: row.0,
-                    environment: row.1,
-                    source_sha: row.2,
-                    artifact_digest: row.3,
-                    deploy_ref: row.4,
-                    version: row.5,
-                    manifest_sha: row.6,
-                    observed_at: row.7,
-                    stale: row.7 < now - time::Duration::days(7),
+                .map(|row| {
+                    let (workflow_attestation_sha, workflow_attested_at, attestation_ready) =
+                        workflow_attestation_evidence(&row.8, row.6.as_deref(), now);
+                    if row.0 == "n8n" {
+                        n8n_attestation_ready = attestation_ready;
+                    }
+                    let metadata_sha = |key: &str| {
+                        row.8
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .filter(|value| valid_sha256(value))
+                            .map(str::to_owned)
+                    };
+                    ReleaseComponentSummary {
+                        component_key: row.0,
+                        environment: row.1,
+                        source_sha: row.2,
+                        artifact_digest: row.3,
+                        deploy_ref: row.4,
+                        version: row.5,
+                        manifest_sha: row.6,
+                        dependency_lock_sha256: metadata_sha("dependency_lock_sha256"),
+                        artifact_manifest_sha256: metadata_sha("artifact_manifest_sha256"),
+                        workflow_attestation_sha,
+                        workflow_attested_at,
+                        observed_at: row.7,
+                        stale: row.7 < now - time::Duration::days(7),
+                    }
                 })
                 .collect::<Vec<_>>();
-            let present = components.iter().map(|item| item.component_key.as_str()).collect::<std::collections::HashSet<_>>();
+            let present = components
+                .iter()
+                .map(|item| item.component_key.as_str())
+                .collect::<std::collections::HashSet<_>>();
             let missing_components = RELEASE_COMPONENTS
                 .iter()
                 .filter(|key| !present.contains(**key))
                 .map(|key| (*key).to_owned())
                 .collect::<Vec<_>>();
-            let api_sha = components.iter().find(|item| item.component_key == "crowdrelay-api").map(|item| item.source_sha.as_str());
-            let worker_sha = components.iter().find(|item| item.component_key == "crowdrelay-worker").map(|item| item.source_sha.as_str());
+            let api_sha = components
+                .iter()
+                .find(|item| item.component_key == "crowdrelay-api")
+                .map(|item| item.source_sha.as_str());
+            let worker_sha = components
+                .iter()
+                .find(|item| item.component_key == "crowdrelay-worker")
+                .map(|item| item.source_sha.as_str());
             let backend_sha_drift = matches!((api_sha, worker_sha), (Some(api), Some(worker)) if api != worker);
             let active_executor_count = sqlx::query_scalar::<_, i64>(
                 r#"SELECT count(*)::bigint
@@ -688,6 +787,29 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .iter()
                         .any(|observed| observed != expected)
                 });
+            let active_team_email_executor_count = sqlx::query_scalar::<_, i64>(
+                r#"SELECT count(DISTINCT executor.executor_id)::bigint
+                   FROM viryaos_executor_instances executor
+                   JOIN viryaos_executor_capabilities capability
+                     ON capability.workspace_id=executor.workspace_id
+                    AND capability.executor_id=executor.executor_id
+                   LEFT JOIN viryaos_executor_circuit_breakers breaker
+                     ON breaker.workspace_id=executor.workspace_id
+                    AND breaker.executor_id=executor.executor_id
+                   WHERE executor.workspace_id=$1
+                     AND executor.expires_at>$2
+                     AND capability.expires_at>$2
+                     AND capability.capability='team.email'
+                     AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=$2)"#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            let team_email_live = active_team_email_executor_count > 0
+                && n8n_attestation_ready
+                && !executor_manifest_drift;
             Ok(ReleaseLedgerOverview {
                 components,
                 missing_components,
@@ -696,6 +818,9 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                 active_executor_count,
                 guarded_executor_count,
                 active_executor_manifest_shas,
+                active_team_email_executor_count,
+                n8n_attestation_ready,
+                team_email_live,
             })
         })
         .await

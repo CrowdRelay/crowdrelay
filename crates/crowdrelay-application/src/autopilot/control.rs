@@ -1057,6 +1057,15 @@ pub struct ReleaseComponentSummary {
     pub deploy_ref: Option<String>,
     pub version: Option<String>,
     pub manifest_sha: Option<String>,
+    /// SHA-256 of the dependency lockfile used for the deployed build.
+    pub dependency_lock_sha256: Option<String>,
+    /// SHA-256 of the build artifact manifest when the component has one.
+    pub artifact_manifest_sha256: Option<String>,
+    /// Public SHA-256 of the secretless n8n workflow attestation. Only the n8n
+    /// component populates these fields; private workflow JSON never enters the
+    /// release ledger read model.
+    pub workflow_attestation_sha: Option<String>,
+    pub workflow_attested_at: Option<OffsetDateTime>,
     pub observed_at: OffsetDateTime,
     pub stale: bool,
 }
@@ -1070,6 +1079,15 @@ pub struct ReleaseLedgerOverview {
     pub active_executor_count: i64,
     pub guarded_executor_count: i64,
     pub active_executor_manifest_shas: Vec<String>,
+    /// Number of currently healthy executors advertising the team-email
+    /// provider capability. This is stronger than a desired-state manifest bit.
+    pub active_team_email_executor_count: i64,
+    /// True only when the current n8n release component carries a fresh
+    /// attestation explicitly bound to the same route-manifest SHA.
+    pub n8n_attestation_ready: bool,
+    /// Operator-level truth: desired route + attested matching manifest + live
+    /// non-guarded executor capability.
+    pub team_email_live: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

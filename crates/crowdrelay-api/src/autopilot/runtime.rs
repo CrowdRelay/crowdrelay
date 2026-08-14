@@ -17,13 +17,23 @@ use crowdrelay_application::autopilot::{
 use crowdrelay_domain::AutopilotActionId;
 use serde::Deserialize;
 use std::collections::HashSet;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 const MAX_HEARTBEAT_TTL: Duration = Duration::hours(2);
+const WORKFLOW_ATTESTATION_MAX_AGE: Duration = Duration::days(14);
 const CLOCK_SKEW: Duration = Duration::minutes(5);
 const MAX_RUM_AGE: Duration = Duration::days(1);
+const MAX_RELEASE_REPORT_AGE: Duration = Duration::days(1);
 const MAX_EXECUTION_REPORT_AGE: Duration = Duration::days(7);
+const RELEASE_CODE_COMPONENTS: [&str; 5] = [
+    "crowdrelay-api",
+    "crowdrelay-worker",
+    "virya-www",
+    "synesthesia",
+    "virya-signal",
+];
+const RELEASE_MANIFEST_COMPONENTS: [&str; 3] = ["virya-www", "synesthesia", "virya-signal"];
 const RELEASE_COMPONENTS: [&str; 6] = [
     "crowdrelay-api",
     "crowdrelay-worker",
@@ -118,6 +128,91 @@ fn text_ok(value: &str, max: usize) -> bool {
 fn object_metadata(value: &serde_json::Value) -> bool {
     value.as_object().is_some_and(|map| map.len() <= 24)
         && serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 2_048)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_git_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(valid_sha256)
+}
+
+fn metadata_sha256(metadata: &serde_json::Value, key: &str) -> bool {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(valid_sha256)
+}
+
+fn release_provenance_valid(request: &ReleaseComponentRequest) -> bool {
+    if RELEASE_CODE_COMPONENTS.contains(&request.component_key.as_str()) {
+        if !valid_git_sha(&request.source_sha)
+            || request
+                .artifact_digest
+                .as_deref()
+                .is_none_or(|value| !valid_sha256_digest(value))
+            || !metadata_sha256(&request.metadata, "dependency_lock_sha256")
+        {
+            return false;
+        }
+        if RELEASE_MANIFEST_COMPONENTS.contains(&request.component_key.as_str())
+            && !metadata_sha256(&request.metadata, "artifact_manifest_sha256")
+        {
+            return false;
+        }
+        return true;
+    }
+    request.component_key == "n8n"
+        && valid_sha256(&request.source_sha)
+        && request.manifest_sha.as_deref().is_some_and(valid_sha256)
+        && request.source_sha == request.manifest_sha.as_deref().unwrap_or_default()
+}
+
+fn team_email_attestation_valid(request: &ExecutorHeartbeatRequest, now: OffsetDateTime) -> bool {
+    let advertises_team_email = request
+        .capabilities
+        .iter()
+        .any(|item| item.capability == "team.email");
+    if !advertises_team_email {
+        return true;
+    }
+    let Some(metadata) = request.metadata.as_object() else {
+        return false;
+    };
+    let Some(attestation_sha) = metadata
+        .get("workflow_attestation_sha")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(attestation_manifest_sha) = metadata
+        .get("workflow_attestation_manifest_sha")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(attested_at) = metadata
+        .get("workflow_attested_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+    else {
+        return false;
+    };
+    valid_sha256(attestation_sha)
+        && attestation_manifest_sha == request.manifest_sha
+        && attested_at >= now - WORKFLOW_ATTESTATION_MAX_AGE
+        && attested_at <= now + CLOCK_SKEW
 }
 
 fn time_is_current(value: OffsetDateTime, now: OffsetDateTime, max_age: Duration) -> bool {
@@ -270,9 +365,10 @@ pub async fn executor_heartbeat(
             .all(|item| text_ok(&item.capability, 120) && text_ok(&item.version, 40));
     if !text_ok(&request.executor_id, 120)
         || !text_ok(&request.version, 80)
-        || !text_ok(&request.manifest_sha, 128)
+        || !valid_sha256(&request.manifest_sha)
         || !capabilities_valid
         || !object_metadata(&request.metadata)
+        || !team_email_attestation_valid(&request, now)
         || !time_is_current(request.observed_at, now, CLOCK_SKEW)
         || request.expires_at <= request.observed_at
         || request.expires_at > request.observed_at + MAX_HEARTBEAT_TTL
@@ -333,7 +429,8 @@ pub async fn release_component(
             .as_ref()
             .is_some_and(|value| value.len() > 128)
         || !object_metadata(&request.metadata)
-        || !time_is_current(request.observed_at, now, MAX_RUM_AGE)
+        || !release_provenance_valid(&request)
+        || !time_is_current(request.observed_at, now, MAX_RELEASE_REPORT_AGE)
     {
         return Problem::bad_request(request_id(&headers))
             .private()

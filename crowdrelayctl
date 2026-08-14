@@ -99,12 +99,23 @@ report_release_ledger() {
     echo "Release ledger reporter skipped: $reporter is missing or not executable." >&2
     return 0
   fi
-  local component
+  local dependency_lock_sha
+  dependency_lock_sha="$(sha256sum "${ROOT_DIR}/Cargo.lock" | awk '{print $1}')"
+  local component service container_id artifact_digest
   for component in crowdrelay-api crowdrelay-worker; do
+    service="api"
+    [[ "$component" == "crowdrelay-worker" ]] && service="worker"
+    container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+    artifact_digest=""
+    if [[ -n "$container_id" ]]; then
+      artifact_digest="$(docker inspect "$container_id" --format '{{.Image}}' 2>/dev/null || true)"
+    fi
     if ! CROWDRELAY_BASE_URL="$CROWDRELAY_PUBLIC_BASE_URL" \
       CROWDRELAY_COMMERCE_API_KEY="$CROWDRELAY_LEDGER_COMMERCE_API_KEY" \
       COMPONENT_KEY="$component" \
       SOURCE_SHA="$CROWDRELAY_IMAGE_SHA" \
+      ARTIFACT_DIGEST="$artifact_digest" \
+      DEPENDENCY_LOCK_SHA256="$dependency_lock_sha" \
       DEPLOY_REF="crowdrelayctl" \
       "$reporter"; then
       echo "Release ledger reporter failed for $component; production deploy remains valid." >&2
@@ -260,6 +271,7 @@ package_deploy() (
   mkdir -p "$staging/scripts"
   cp scripts/report-release-component.sh "$staging/scripts/report-release-component.sh"
   cp scripts/production-smoke.sh "$staging/scripts/production-smoke.sh"
+  cp Cargo.lock "$staging/Cargo.lock"
   chmod 700 "$staging/scripts/report-release-component.sh" "$staging/scripts/production-smoke.sh"
   cp -R deploy/systemd "$staging/deploy/systemd"
   cp "$(absolute_path "$CROWDRELAY_COMPOSE_FILE")" "$staging/compose.production.yaml"
