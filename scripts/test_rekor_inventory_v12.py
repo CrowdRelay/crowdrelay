@@ -54,7 +54,7 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertIn('require_no_processing_batches(client, "post-confirm")', text)
         self.assertIn('verify_rekor_entry(anchor_url, entry_id)', text)
         self.assertIn('external_proof_anchoring_enabled', text)
-        self.assertIn('rollback_armed = True\n            set_flag(client, True', text)
+        self.assertIn('flag_mutated = True\n            set_flag(client, True', text)
         self.assertIn('signal.signal(signal.SIGINT, _raise_interrupted)', text)
         self.assertIn('signal.signal(signal.SIGTERM, _raise_interrupted)', text)
         self.assertIn('finally:', text)

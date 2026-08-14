@@ -188,7 +188,7 @@ def main() -> int:
         raise ValueError("--expected-git-sha/CROWDRELAY_EXPECTED_GIT_SHA must be exactly 40 lowercase hex chars")
     run_id = f"{int(time.time())}-{secrets.token_hex(5)}"
     previous_flag_state = False
-    rollback_armed = False
+    flag_mutated = False
     previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGINT, _raise_interrupted)
@@ -206,7 +206,7 @@ def main() -> int:
             # Arm rollback before the mutating request. If SIGINT/SIGTERM lands
             # after the server commits the flag but before the client receives
             # the response, cleanup must still restore the observed preflight state.
-            rollback_armed = True
+            flag_mutated = True
             set_flag(client, True, "Rekor production canary", run_id)
 
         created = client.json(
@@ -288,7 +288,7 @@ def main() -> int:
             f"last_observation={last_observation}"
         )
     except BaseException as error:
-        if rollback_armed:
+        if flag_mutated:
             try:
                 set_flag(
                     client,
