@@ -279,8 +279,7 @@ async fn measure_request(request: Request<Body>, next: Next) -> Response {
     if let Ok(value) = HeaderValue::from_str(&format!("app;dur={elapsed_ms:.2}")) {
         response.headers_mut().insert(SERVER_TIMING.clone(), value);
     }
-    let release = option_env!("CROWDRELAY_RELEASE").unwrap_or(env!("CARGO_PKG_VERSION"));
-    if let Ok(value) = HeaderValue::from_str(release) {
+    if let Ok(value) = HeaderValue::from_str(meta::release_identity()) {
         response
             .headers_mut()
             .insert(X_CROWDRELAY_RELEASE.clone(), value);

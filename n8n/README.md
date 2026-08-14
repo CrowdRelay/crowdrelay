@@ -82,6 +82,27 @@ they are removed from the Git index with `git rm --cached`.
 Do not use `git clean -x` in this repository unless you have separately backed
 up ignored operator files.
 
+## Secretless production workflow attestation
+
+The route manifest proves which event is mapped to which workflow ID, but it cannot prove the contents of a private n8n export. Before advertising a newly enabled capability, generate a smoke template from the exact private exports first. The template includes mapped workflows that are still `enabled=0`, so a provider/credential smoke can be completed **before** the manifest and heartbeat are flipped live. After the smoke passes, enable the mapping and generate the final public attestation bound to the same workflow SHA:
+
+```bash
+python3 scripts/generate_n8n_workflow_attestation.py \
+  --manifest n8n/viryaos-production-workflow-manifest.tsv \
+  --workflow-dir n8n/private-production-exports \
+  --smoke-template-out /tmp/viryaos-smoke-template.json
+
+# Fill the template only from an end-to-end smoke against the exact exported SHA.
+# Then flip the verified production mapping to enabled=1 and generate the final attest:
+python3 scripts/generate_n8n_workflow_attestation.py \
+  --manifest n8n/viryaos-production-workflow-manifest.tsv \
+  --workflow-dir n8n/private-production-exports \
+  --smoke-results /tmp/viryaos-smoke-results.json \
+  --output /tmp/viryaos-production-workflow-attestation.json
+```
+
+The generated artifact contains only workflow IDs and SHA-256 hashes, event/capability mappings, node **types/counts**, active state, execution-persistence settings, contract versions, and bound smoke-test booleans/timestamps. It deliberately excludes node names, parameters, URLs, credentials and credential references. Enabled workflows fail attestation when they are inactive, persist execution data, have stale smoke evidence, do not validate the event, skip a required execution claim, fail to queue/report provider receipts safely, or have not passed the provider credential check. The companion `.sha256` can be recorded as `WORKFLOW_ATTESTATION_SHA` in the n8n release-component metadata while the existing route-manifest SHA remains the heartbeat parity key.
+
 ## Security requirements
 
 The public ingress must verify the webhook before invoking any branch:
@@ -103,3 +124,7 @@ data persistence unless a carefully redacted audit trail is explicitly needed.
 ## ViryaOS executor runtime
 
 See [`viryaos-executor-contract.md`](./viryaos-executor-contract.md) and [`viryaos-executor-manifest.tsv`](./viryaos-executor-manifest.tsv) for heartbeat capabilities, pre-send claims, provider execution receipts, campaign delivery safety, blue/green safety and release-ledger behavior. The concrete release mapping is [`viryaos-production-workflow-manifest.tsv`](./viryaos-production-workflow-manifest.tsv); its checked SHA is the release-ledger/heartbeat parity key. The legacy `import-workflows.sh` is deliberately fail-closed and is not a production deployment path.
+
+### `team.email` activation state
+
+`team.email` is now part of the production desired-state manifest (`VOSTEAMEMAIL001`, enabled). Deployment remains fail-closed: the executor must not include `team.email` in its live heartbeat until the exact private workflow export has passed the hash-bound pre-activation smoke (event validation, execution claim, provider receipt ordering, credential/provider check) and the workflow is active. The final public attestation must be generated from that same workflow SHA before the heartbeat is updated.

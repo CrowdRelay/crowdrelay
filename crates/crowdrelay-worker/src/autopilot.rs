@@ -101,20 +101,7 @@ impl AutopilotWorker {
         }
         match self
             .repository
-            .dispatch_team_handoff_reminders(self.workspace_id, now)
-            .await
-        {
-            Ok(count) if count > 0 => tracing::info!(count, "emitted ViryaOS team reminders"),
-            Ok(_) => {}
-            Err(error) => {
-                phase_failed = true;
-                tracing::warn!(error = %error, "ViryaOS team reminder dispatch failed");
-            }
-        }
-
-        match self
-            .repository
-            .claim_due_actions(self.workspace_id, ACTION_BATCH_SIZE, now)
+            .claim_due_autonomous_actions(self.workspace_id, ACTION_BATCH_SIZE, now)
             .await
         {
             Ok(actions) => {
@@ -208,6 +195,110 @@ impl AutopilotWorker {
             Err(error) => {
                 phase_failed = true;
                 tracing::warn!(error = %error, "ViryaOS Autopilot measurement claim failed");
+            }
+        }
+
+        if phase_failed {
+            Err(RepositoryError::Unexpected)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TeamEmailDispatchWorker {
+    repository: PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    poll_interval: Duration,
+}
+
+impl TeamEmailDispatchWorker {
+    #[must_use]
+    pub fn new(
+        repository: PostgresAutopilotRepository,
+        workspace_id: WorkspaceId,
+        poll_interval: Duration,
+    ) -> Self {
+        Self {
+            repository,
+            workspace_id,
+            poll_interval,
+        }
+    }
+
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        let mut ticks = interval(self.poll_interval);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = ticks.tick() => {
+                    if let Err(error) = self.run_once(OffsetDateTime::now_utc()).await {
+                        tracing::warn!(error = %error, "ViryaOS team-email dispatch cycle failed");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_once(&self, now: OffsetDateTime) -> Result<(), RepositoryError> {
+        let mut phase_failed = false;
+
+        match self
+            .repository
+            .dispatch_team_handoff_reminders(self.workspace_id, now)
+            .await
+        {
+            Ok(count) if count > 0 => tracing::info!(count, "emitted ViryaOS team reminders"),
+            Ok(_) => {}
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS team reminder dispatch failed");
+            }
+        }
+
+        match self
+            .repository
+            .claim_due_team_email_actions(self.workspace_id, ACTION_BATCH_SIZE, now)
+            .await
+        {
+            Ok(actions) => {
+                for action in actions {
+                    if let Err(error) = self
+                        .repository
+                        .execute_action(self.workspace_id, &action, OffsetDateTime::now_utc())
+                        .await
+                    {
+                        phase_failed = true;
+                        let error_kind = repository_error_kind(error);
+                        let retryable = repository_error_retryable(error);
+                        tracing::warn!(
+                            action_id = %action.id,
+                            action_kind = action.payload.action_kind(),
+                            error_kind,
+                            "ViryaOS team-email action failed"
+                        );
+                        let _ = self
+                            .repository
+                            .fail_action(
+                                self.workspace_id,
+                                action.id,
+                                error_kind,
+                                retryable,
+                                OffsetDateTime::now_utc(),
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS team-email action claim failed");
             }
         }
 

@@ -33,7 +33,7 @@ class ViryaOsExecutorManifestContract(unittest.TestCase):
         self.assertEqual(rows["promotion.budget"]["default_advertised"], "0")
         self.assertEqual(rows["calendar.upsert"]["default_advertised"], "0")
         self.assertEqual(rows["funding.package"]["default_advertised"], "0")
-        for capability in ("merch.reorder", "merch.bundle", "content.artifact", "show.escalation"):
+        for capability in ("merch.reorder", "merch.bundle", "content.artifact", "show.escalation", "team.email"):
             self.assertEqual(rows[capability]["default_advertised"], "1")
 
 

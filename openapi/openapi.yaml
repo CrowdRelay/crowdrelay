@@ -5181,11 +5181,12 @@ components:
     EcosystemMeta:
       type: object
       additionalProperties: false
-      required: [apiVersion, schemaVersion, release, buildTimestamp, minimumPostgresServerVersionNum, capabilities]
+      required: [apiVersion, schemaVersion, release, gitSha, buildTimestamp, minimumPostgresServerVersionNum, capabilities]
       properties:
         apiVersion: { type: string, const: '1' }
         schemaVersion: { type: integer, minimum: 36 }
         release: { type: string }
+        gitSha: { type: [string, 'null'], minLength: 7, maxLength: 64 }
         buildTimestamp: { type: [string, 'null'] }
         minimumPostgresServerVersionNum: { type: integer, minimum: 180000 }
         capabilities:
@@ -6832,8 +6833,11 @@ components:
     DatabaseRuntimeSummary:
       type: object
       additionalProperties: false
-      required: [server_version_num, io_method, io_workers, io_max_concurrency, effective_io_concurrency, maintenance_io_concurrency, io_combine_limit_bytes, io_max_combine_limit_bytes, async_io_active]
+      required: [pool_size, pool_idle, pool_max, server_version_num, io_method, io_workers, io_max_concurrency, effective_io_concurrency, maintenance_io_concurrency, io_combine_limit_bytes, io_max_combine_limit_bytes, async_io_active]
       properties:
+        pool_size: { type: integer, minimum: 0 }
+        pool_idle: { type: integer, minimum: 0 }
+        pool_max: { type: integer, minimum: 1 }
         server_version_num: { type: integer, minimum: 0 }
         io_method: { type: [string, 'null'] }
         io_workers: { type: [integer, 'null'], minimum: 0 }

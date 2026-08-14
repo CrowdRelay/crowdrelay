@@ -8,12 +8,23 @@ const API_VERSION: &str = "1";
 pub(crate) const SCHEMA_VERSION: u32 = 50;
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
 
+pub(crate) fn git_sha() -> Option<&'static str> {
+    option_env!("CROWDRELAY_GIT_SHA").filter(|value| !value.is_empty())
+}
+
+pub(crate) fn release_identity() -> &'static str {
+    git_sha()
+        .or(option_env!("CROWDRELAY_RELEASE").filter(|value| !value.is_empty()))
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MetaResponse {
     api_version: &'static str,
     schema_version: u32,
     release: &'static str,
+    git_sha: Option<&'static str>,
     build_timestamp: Option<&'static str>,
     minimum_postgres_server_version_num: i32,
     capabilities: BTreeMap<&'static str, bool>,
@@ -44,8 +55,12 @@ pub async fn get() -> impl IntoResponse {
         Json(MetaResponse {
             api_version: API_VERSION,
             schema_version: SCHEMA_VERSION,
-            release: option_env!("CROWDRELAY_RELEASE").unwrap_or(env!("CARGO_PKG_VERSION")),
-            build_timestamp: option_env!("CROWDRELAY_BUILD_TIMESTAMP"),
+            release: option_env!("CROWDRELAY_RELEASE")
+                .filter(|value| !value.is_empty())
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+            git_sha: git_sha(),
+            build_timestamp: option_env!("CROWDRELAY_BUILD_TIMESTAMP")
+                .filter(|value| !value.is_empty()),
             minimum_postgres_server_version_num:
                 crowdrelay_infra::database::MIN_POSTGRES_SERVER_VERSION_NUM,
             capabilities,

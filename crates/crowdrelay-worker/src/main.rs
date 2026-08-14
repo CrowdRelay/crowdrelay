@@ -24,7 +24,7 @@ use crowdrelay_infra::{
     autopilot::PostgresAutopilotRepository, config::Config, database, observability,
 };
 use crowdrelay_worker::{
-    autopilot::AutopilotWorker,
+    autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
@@ -221,14 +221,22 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         None
     };
     let workspace_id = trusted_workspace_id(&database, config).await?;
+    let autopilot_repository = PostgresAutopilotRepository::new(database.clone(), &config.database);
+    let team_email_worker = TeamEmailDispatchWorker::new(
+        autopilot_repository.clone(),
+        workspace_id,
+        config.autopilot_poll_interval.min(Duration::from_secs(60)),
+    );
     let autopilot_worker = if config.autopilot_enabled {
         Some(AutopilotWorker::new(
-            PostgresAutopilotRepository::new(database.clone(), &config.database),
+            autopilot_repository,
             workspace_id,
             config.autopilot_poll_interval,
         ))
     } else {
-        tracing::info!("ViryaOS Autopilot is disabled by configuration");
+        tracing::info!(
+            "ViryaOS autonomous decisioning is disabled; team-email dispatch remains capability-gated"
+        );
         None
     };
     let ops_watchdog = OpsWatchdogWorker::new(
@@ -243,6 +251,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let event_sync_shutdown = shutdown_receiver.clone();
     let draw_shutdown = shutdown_receiver.clone();
     let autopilot_shutdown = shutdown_receiver.clone();
+    let team_email_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
     let mut outbox_task = tokio::spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -267,6 +276,9 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             Some(worker) => worker.run(autopilot_shutdown).await,
             None => wait_for_shutdown(autopilot_shutdown).await,
         }
+    });
+    let mut team_email_task = tokio::spawn(async move {
+        team_email_worker.run(team_email_shutdown).await;
     });
     let mut ops_watchdog_task = tokio::spawn(async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
@@ -303,6 +315,10 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             result = &mut autopilot_task => {
                 result.context("ViryaOS Autopilot worker task failed")?;
                 bail!("ViryaOS Autopilot worker stopped before shutdown was requested");
+            }
+            result = &mut team_email_task => {
+                result.context("ViryaOS team-email worker task failed")?;
+                bail!("ViryaOS team-email worker stopped before shutdown was requested");
             }
             result = &mut ops_watchdog_task => {
                 result.context("CrowdRelay ops watchdog task failed")?;
@@ -360,6 +376,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         shutdown_deadline,
     )
     .await;
+    let team_email_result = await_worker_shutdown(
+        team_email_task,
+        "ViryaOS team-email worker",
+        shutdown_deadline,
+    )
+    .await;
     let ops_watchdog_result = await_worker_shutdown(
         ops_watchdog_task,
         "CrowdRelay ops watchdog",
@@ -372,6 +394,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     event_sync_result?;
     draw_result?;
     autopilot_result?;
+    team_email_result?;
     ops_watchdog_result?;
 
     Ok(())

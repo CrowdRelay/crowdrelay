@@ -1,0 +1,33 @@
+name: Dependency security
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-security
+  cancel-in-progress: true
+
+jobs:
+  rustsec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit reachable Rust dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsa_graph="$(cargo tree --locked --workspace --all-features -i rsa 2>/dev/null)"
+          if [[ -n "$rsa_graph" ]]; then
+            echo "RUSTSEC-2023-0071 is reachable in an active dependency graph:" >&2
+            echo "$rsa_graph" >&2
+            exit 1
+          fi
+          cargo audit --ignore RUSTSEC-2023-0071

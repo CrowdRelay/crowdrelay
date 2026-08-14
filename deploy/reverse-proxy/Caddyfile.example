@@ -1,4 +1,9 @@
 api.example.com {
   encode zstd gzip
+  log
   reverse_proxy crowdrelay-api:8080
+  # Correlate edge TTFB with proxy/upstream time while CrowdRelay's own
+  # Server-Timing header reports application handler duration.
+  log_append upstream_latency_ms {rp.upstream.latency_ms}
+  log_append upstream_duration_ms {rp.upstream.duration_ms}
 }

@@ -45,6 +45,7 @@ jobs:
       CROWDRELAY_OUTBOX_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_ADMISSION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_EVENT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_REFERRAL_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
@@ -111,7 +112,8 @@ jobs:
             admission_postgres \
             events_postgres \
             fan_lifecycle_postgres \
-            referrals_rewards_postgres
+            referrals_rewards_postgres \
+            autopilot_team_email_postgres
           do
             cargo test --locked \
               --package crowdrelay-infra \

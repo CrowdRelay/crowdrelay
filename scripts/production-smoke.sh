@@ -48,16 +48,29 @@ require_200() {
   printf '%s=ok\n' "$label"
 }
 
+probe_edge_timing() {
+  local label="$1" url="$2" headers timing server_timing
+  headers="$(mktemp)"
+  timing="$(curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
+    --retry 1 --retry-delay 1 --retry-all-errors --dump-header "$headers" --output /dev/null \
+    --write-out 'connect_s=%{time_connect} ttfb_s=%{time_starttransfer} total_s=%{time_total}' "$url")"
+  server_timing="$(tr -d '\r' < "$headers" | awk -F': ' 'tolower($1)=="server-timing" {print $2; exit}')"
+  rm -f "$headers"
+  printf 'edge_timing label=%s %s server_timing=%s\n' "$label" "$timing" "${server_timing:-missing}"
+}
+
 require_200 crowdrelay_live "${CROWDRELAY_BASE_URL%/}/v1/health/live"
 require_200 crowdrelay_ready "${CROWDRELAY_BASE_URL%/}/v1/health/ready"
 require_200 crowdrelay_metrics "${CROWDRELAY_BASE_URL%/}/metrics"
 meta_file="$(mktemp)"
 curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
   --retry 1 --retry-delay 1 --retry-all-errors --output "$meta_file" "${CROWDRELAY_BASE_URL%/}/v1/meta"
-jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1' "$meta_file" >/dev/null
+jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.gitSha | type == "string" and test("^[0-9a-f]{40}$")) and (.buildTimestamp | type == "string" and length > 0) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1' "$meta_file" >/dev/null
 printf 'crowdrelay_meta_contract=ok\n'
 require_200 crowdrelay_area_catalog "${CROWDRELAY_BASE_URL%/}/v1/public/area/drops"
 require_200 crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"
+probe_edge_timing crowdrelay_ready "${CROWDRELAY_BASE_URL%/}/v1/health/ready"
+probe_edge_timing crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"
 
 cors_headers="$(mktemp)"
 curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \

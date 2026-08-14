@@ -36,6 +36,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
 
+# Embed the immutable source identity only in the final application build so
+# dependency caching remains reusable across source-only commits.
+ARG CROWDRELAY_GIT_SHA=""
+ARG CROWDRELAY_BUILD_TIMESTAMP=""
+ENV CROWDRELAY_GIT_SHA=${CROWDRELAY_GIT_SHA} \
+    CROWDRELAY_BUILD_TIMESTAMP=${CROWDRELAY_BUILD_TIMESTAMP}
+
 # API and worker are compiled in one Cargo invocation. Both runtime targets then
 # reuse this same builder graph instead of compiling the workspace twice.
 RUN --mount=type=cache,id=crowdrelay-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

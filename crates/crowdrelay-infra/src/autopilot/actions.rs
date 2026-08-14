@@ -2,13 +2,48 @@
 
 use super::*;
 
-#[async_trait]
-impl AutopilotActionRepository for PostgresAutopilotRepository {
-    async fn claim_due_actions(
+const TEAM_ASSIGNMENT_EMAIL_ACTION_KIND: &str = "team.assignment.email";
+
+impl PostgresAutopilotRepository {
+    pub async fn claim_due_autonomous_actions(
         &self,
         workspace_id: WorkspaceId,
         limit: u32,
         now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAutopilotAction>, RepositoryError> {
+        self.claim_due_actions_filtered(
+            workspace_id,
+            limit,
+            now,
+            None,
+            Some(TEAM_ASSIGNMENT_EMAIL_ACTION_KIND),
+        )
+        .await
+    }
+
+    pub async fn claim_due_team_email_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAutopilotAction>, RepositoryError> {
+        self.claim_due_actions_filtered(
+            workspace_id,
+            limit,
+            now,
+            Some(TEAM_ASSIGNMENT_EMAIL_ACTION_KIND),
+            None,
+        )
+        .await
+    }
+
+    async fn claim_due_actions_filtered(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+        include_action_kind: Option<&'static str>,
+        exclude_action_kind: Option<&'static str>,
     ) -> Result<Vec<ClaimedAutopilotAction>, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
@@ -19,11 +54,15 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                 UPDATE viryaos_autopilot_actions
                 SET status='cancelled', finished_at=$2, last_error_kind='approval_expired'
                 WHERE workspace_id=$1 AND status='awaiting_approval'
+                  AND ($3::text IS NULL OR action_kind = $3)
+                  AND ($4::text IS NULL OR action_kind <> $4)
                   AND approval_expires_at IS NOT NULL AND approval_expires_at <= $2
                 "#,
             )
             .bind(workspace_id.into_uuid())
             .bind(now)
+            .bind(include_action_kind)
+            .bind(exclude_action_kind)
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
@@ -35,12 +74,16 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     last_error_kind = 'stale_retry_exhausted'
                 WHERE workspace_id = $1
                   AND status = 'processing'
+                  AND ($3::text IS NULL OR action_kind = $3)
+                  AND ($4::text IS NULL OR action_kind <> $4)
                   AND started_at <= $2 - INTERVAL '15 minutes'
                   AND attempt_count >= 5
                 "#,
             )
             .bind(workspace_id.into_uuid())
             .bind(now)
+            .bind(include_action_kind)
+            .bind(exclude_action_kind)
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
@@ -51,6 +94,8 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     FROM viryaos_autopilot_actions
                     WHERE workspace_id = $1
                       AND attempt_count < 5
+                      AND ($4::text IS NULL OR action_kind = $4)
+                      AND ($5::text IS NULL OR action_kind <> $5)
                       AND (
                           (status = 'queued' AND available_at <= $2)
                           OR (
@@ -88,6 +133,8 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
             .bind(workspace_id.into_uuid())
             .bind(now)
             .bind(i64::from(limit.min(100)))
+            .bind(include_action_kind)
+            .bind(exclude_action_kind)
             .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
@@ -108,6 +155,19 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
             Ok(actions)
         })
         .await
+    }
+}
+
+#[async_trait]
+impl AutopilotActionRepository for PostgresAutopilotRepository {
+    async fn claim_due_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAutopilotAction>, RepositoryError> {
+        self.claim_due_actions_filtered(workspace_id, limit, now, None, None)
+            .await
     }
 
     async fn execute_action(

@@ -87,7 +87,7 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         self.assertIn('ViryaOS Autopilot evaluation failed', worker)
         self.assertIn('ViryaOS Autopilot action claim failed', worker)
         self.assertIn('ViryaOS Autopilot measurement claim failed', worker)
-        evaluation_failure = worker[worker.index('ViryaOS Autopilot evaluation failed'):worker.index('claim_due_actions')]
+        evaluation_failure = worker[worker.index('ViryaOS Autopilot evaluation failed'):worker.index('claim_due_autonomous_actions')]
         self.assertNotIn('return Err', evaluation_failure)
 
     def test_optional_deadline_calendar_never_blocks_primary_provider_action(self):

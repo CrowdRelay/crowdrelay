@@ -36,6 +36,22 @@ class ReleaseContract(unittest.TestCase):
         self.assertIn("n8n_release_manifest_sha", infra)
         self.assertIn("executor_manifest_drift", openapi)
 
+
+    def test_container_build_embeds_immutable_release_identity(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        publish = (ROOT / ".github/workflows/publish-images.yml").read_text()
+        meta = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
+        api = (ROOT / "crates/crowdrelay-api/src/lib.rs").read_text()
+        openapi = (ROOT / "openapi/openapi.yaml").read_text()
+        self.assertIn('ARG CROWDRELAY_GIT_SHA=""', dockerfile)
+        self.assertIn('ARG CROWDRELAY_BUILD_TIMESTAMP=""', dockerfile)
+        self.assertIn("CROWDRELAY_GIT_SHA=${{ env.IMAGE_SHA }}", publish)
+        self.assertIn("CROWDRELAY_BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }}", publish)
+        self.assertIn("git_sha: Option<&\'static str>", meta)
+        self.assertIn('option_env!("CROWDRELAY_GIT_SHA")', meta)
+        self.assertIn("meta::release_identity()", api)
+        self.assertIn("gitSha", openapi)
+
     def test_contract_is_service_boundary_not_internal_crate_promise(self):
         text = (ROOT / "docs/STABLE_CONTRACT.md").read_text().lower()
         self.assertIn("openapi/openapi.yaml", text)

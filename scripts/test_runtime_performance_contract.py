@@ -193,6 +193,10 @@ class RuntimePerformanceContract(unittest.TestCase):
         self.assertNotIn("path:", metrics)
         self.assertIn("server-timing", api)
         self.assertIn("x-crowdrelay-release", api)
+        self.assertIn("edge_timing label=", (ROOT / "scripts/production-smoke.sh").read_text())
+        caddy = (ROOT / "deploy/reverse-proxy/Caddyfile.example").read_text()
+        self.assertIn("{rp.upstream.latency_ms}", caddy)
+        self.assertIn("{rp.upstream.duration_ms}", caddy)
         self.assertIn("privileged && authorization.is_some()", api)
 
 

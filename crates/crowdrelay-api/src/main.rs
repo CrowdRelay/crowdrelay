@@ -46,8 +46,8 @@ use tokio::{
     net::TcpListener,
     signal,
     sync::watch,
-    task::JoinHandle,
-    time::{Instant, MissedTickBehavior, interval, timeout_at},
+    task::JoinSet,
+    time::{MissedTickBehavior, interval, timeout},
 };
 
 #[tokio::main]
@@ -256,18 +256,37 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind API listener to {}", config.bind_addr))?;
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-    let click_task = tokio::spawn(click_worker.run(shutdown_receiver.clone()));
-    let event_action_task = tokio::spawn(event_action_worker.run(shutdown_receiver.clone()));
-    let refresh_task = tokio::spawn(refresh_smart_links(
-        load_smart_links,
-        config.redirect_refresh_interval,
-        shutdown_receiver.clone(),
-    ));
-    let event_refresh_task = tokio::spawn(refresh_events(
-        load_events,
-        config.redirect_refresh_interval,
-        shutdown_receiver,
-    ));
+    let mut runtime_tasks = JoinSet::new();
+
+    let refresh_interval = config.redirect_refresh_interval;
+    let server_shutdown = shutdown_receiver.clone();
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::Server(
+            axum::serve(listener, app)
+                .with_graceful_shutdown(wait_for_shutdown(server_shutdown))
+                .await
+                .context("API server failed"),
+        )
+    });
+    let click_shutdown = shutdown_receiver.clone();
+    runtime_tasks.spawn(async move {
+        click_worker.run(click_shutdown).await;
+        RuntimeTaskExit::Background("click ingestion")
+    });
+    let event_action_shutdown = shutdown_receiver.clone();
+    runtime_tasks.spawn(async move {
+        event_action_worker.run(event_action_shutdown).await;
+        RuntimeTaskExit::Background("event action ingestion")
+    });
+    let smart_link_shutdown = shutdown_receiver.clone();
+    runtime_tasks.spawn(async move {
+        refresh_smart_links(load_smart_links, refresh_interval, smart_link_shutdown).await;
+        RuntimeTaskExit::Background("smart-link refresh")
+    });
+    runtime_tasks.spawn(async move {
+        refresh_events(load_events, refresh_interval, shutdown_receiver).await;
+        RuntimeTaskExit::Background("event refresh")
+    });
 
     tracing::info!(
         bind_addr = %config.bind_addr,
@@ -275,21 +294,19 @@ async fn main() -> Result<()> {
         "CrowdRelay API started"
     );
 
-    let signal_sender = shutdown_sender.clone();
-    let server_result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            let _ = signal_sender.send(true);
-        })
-        .await
-        .context("API server failed");
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let runtime_result = tokio::select! {
+        () = &mut shutdown => {
+            tracing::info!("shutdown requested");
+            Ok(())
+        }
+        first_exit = runtime_tasks.join_next() => unexpected_runtime_exit(first_exit),
+    };
 
     let _ = shutdown_sender.send(true);
-    await_background_tasks(
-        click_task,
-        event_action_task,
-        refresh_task,
-        event_refresh_task,
+    let shutdown_result = drain_runtime_tasks(
+        &mut runtime_tasks,
         config
             .database
             .operation_timeout
@@ -315,7 +332,42 @@ async fn main() -> Result<()> {
     database.close().await;
     tracing::info!("CrowdRelay API stopped");
 
-    server_result
+    runtime_result.and(shutdown_result)
+}
+
+#[derive(Debug)]
+enum RuntimeTaskExit {
+    Server(Result<()>),
+    Background(&'static str),
+}
+
+fn unexpected_runtime_exit(
+    exit: Option<std::result::Result<RuntimeTaskExit, tokio::task::JoinError>>,
+) -> Result<()> {
+    match exit {
+        Some(Ok(RuntimeTaskExit::Server(Ok(())))) => {
+            Err(anyhow!("API server stopped before shutdown was requested"))
+        }
+        Some(Ok(RuntimeTaskExit::Server(Err(error)))) => Err(error),
+        Some(Ok(RuntimeTaskExit::Background(task_name))) => {
+            Err(anyhow!("{task_name} stopped before shutdown was requested"))
+        }
+        Some(Err(error)) => Err(anyhow!("critical API runtime task failed: {error}")),
+        None => Err(anyhow!(
+            "all API runtime tasks stopped before shutdown was requested"
+        )),
+    }
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
 }
 
 async fn refresh_smart_links(
@@ -377,54 +429,73 @@ async fn refresh_events(
     }
 }
 
-async fn await_background_tasks(
-    click_task: JoinHandle<()>,
-    event_action_task: JoinHandle<()>,
-    refresh_task: JoinHandle<()>,
-    event_refresh_task: JoinHandle<()>,
+async fn drain_runtime_tasks(
+    runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
     deadline: Duration,
-) {
-    let shutdown_deadline = match Instant::now().checked_add(deadline) {
-        Some(deadline) => deadline,
-        None => {
-            tracing::error!("graceful shutdown deadline overflowed; aborting background tasks");
-            Instant::now()
-        }
-    };
-    await_background_task(click_task, "click ingestion", shutdown_deadline).await;
-    await_background_task(
-        event_action_task,
-        "event action ingestion",
-        shutdown_deadline,
-    )
-    .await;
-    await_background_task(refresh_task, "smart-link refresh", shutdown_deadline).await;
-    await_background_task(event_refresh_task, "event refresh", shutdown_deadline).await;
-}
-
-async fn await_background_task(
-    mut task: JoinHandle<()>,
-    task_name: &'static str,
-    shutdown_deadline: Instant,
-) {
-    match timeout_at(shutdown_deadline, &mut task).await {
-        Ok(Ok(())) => tracing::debug!(task_name, "background task stopped cleanly"),
-        Ok(Err(error)) => tracing::error!(task_name, %error, "background task failed"),
+) -> Result<()> {
+    match timeout(deadline, drain_runtime_tasks_inner(runtime_tasks)).await {
+        Ok(result) => result,
         Err(_) => {
-            tracing::error!(
-                task_name,
-                "background task exceeded graceful shutdown deadline"
-            );
-            task.abort();
-            match task.await {
-                Ok(()) => tracing::debug!(task_name, "background task stopped after abort request"),
-                Err(error) if error.is_cancelled() => {
-                    tracing::debug!(task_name, "background task cancellation completed");
-                }
-                Err(error) => {
-                    tracing::error!(task_name, %error, "background task failed while aborting");
+            tracing::error!("API runtime tasks exceeded graceful shutdown deadline");
+            runtime_tasks.abort_all();
+            while let Some(result) = runtime_tasks.join_next().await {
+                match result {
+                    Ok(exit) => log_runtime_task_exit(exit),
+                    Err(error) if error.is_cancelled() => {
+                        tracing::debug!("API runtime task cancellation completed");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "API runtime task failed while aborting");
+                    }
                 }
             }
+            Err(anyhow!(
+                "API runtime tasks exceeded graceful shutdown deadline"
+            ))
+        }
+    }
+}
+
+async fn drain_runtime_tasks_inner(runtime_tasks: &mut JoinSet<RuntimeTaskExit>) -> Result<()> {
+    let mut first_error: Option<anyhow::Error> = None;
+    while let Some(result) = runtime_tasks.join_next().await {
+        match result {
+            Ok(RuntimeTaskExit::Server(Ok(()))) => {
+                tracing::debug!("API server stopped cleanly");
+            }
+            Ok(RuntimeTaskExit::Server(Err(error))) => {
+                tracing::error!(%error, "API server failed during shutdown");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Ok(RuntimeTaskExit::Background(task_name)) => {
+                tracing::debug!(task_name, "background task stopped cleanly");
+            }
+            Err(error) => {
+                tracing::error!(%error, "API runtime task failed during shutdown");
+                if first_error.is_none() {
+                    first_error = Some(anyhow!("API runtime task failed during shutdown: {error}"));
+                }
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn log_runtime_task_exit(exit: RuntimeTaskExit) {
+    match exit {
+        RuntimeTaskExit::Server(Ok(())) => {
+            tracing::debug!("API server stopped after abort request");
+        }
+        RuntimeTaskExit::Server(Err(error)) => {
+            tracing::error!(%error, "API server failed while aborting")
+        }
+        RuntimeTaskExit::Background(task_name) => {
+            tracing::debug!(task_name, "background task stopped after abort request")
         }
     }
 }
@@ -457,6 +528,4 @@ async fn shutdown_signal() {
         () = ctrl_c => {}
         () = terminate => {}
     }
-
-    tracing::info!("shutdown requested");
 }

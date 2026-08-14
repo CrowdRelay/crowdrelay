@@ -3,6 +3,8 @@
 //! The control plane intentionally exposes metadata only: event payloads,
 //! signing material, endpoint URLs, and fan data never leave this module.
 
+mod database_runtime;
+
 use std::{future::Future, time::Duration};
 
 use axum::{
@@ -18,6 +20,8 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use tokio::time::timeout;
 use uuid::Uuid;
+
+use database_runtime::{DatabaseRuntimeRow, DatabaseRuntimeSummary};
 
 use crate::{
     IDEMPOTENCY_KEY, Problem,
@@ -88,30 +92,6 @@ struct AreaRuntimeRow {
     ticket_rewards_issued: i64,
     stale_ticket_reward_reservations: i64,
     legacy_imported_players: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DatabaseRuntimeSummary {
-    server_version_num: i32,
-    io_method: Option<String>,
-    io_workers: Option<i32>,
-    io_max_concurrency: Option<i32>,
-    effective_io_concurrency: Option<i32>,
-    maintenance_io_concurrency: Option<i32>,
-    io_combine_limit_bytes: Option<i64>,
-    io_max_combine_limit_bytes: Option<i64>,
-    async_io_active: bool,
-}
-#[derive(Debug, FromRow)]
-struct DatabaseRuntimeRow {
-    server_version_num: i32,
-    io_method: Option<String>,
-    io_workers: Option<i32>,
-    io_max_concurrency: Option<i32>,
-    effective_io_concurrency: Option<i32>,
-    maintenance_io_concurrency: Option<i32>,
-    io_combine_limit_bytes: Option<i64>,
-    io_max_combine_limit_bytes: Option<i64>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1037,19 +1017,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
     .await
     .map_err(OpsError::sqlx)?;
 
-    let database = DatabaseRuntimeSummary {
-        server_version_num: database.server_version_num,
-        async_io_active: database.server_version_num >= 180_000
-            && database.effective_io_concurrency.unwrap_or_default() > 0
-            && database.io_method.as_deref() != Some("sync"),
-        io_method: database.io_method,
-        io_workers: database.io_workers,
-        io_max_concurrency: database.io_max_concurrency,
-        effective_io_concurrency: database.effective_io_concurrency,
-        maintenance_io_concurrency: database.maintenance_io_concurrency,
-        io_combine_limit_bytes: database.io_combine_limit_bytes,
-        io_max_combine_limit_bytes: database.io_max_combine_limit_bytes,
-    };
+    let database = DatabaseRuntimeSummary::from_row(&state.pool, database);
 
     Ok(OpsSummary {
         outbox: QueueSummary {
