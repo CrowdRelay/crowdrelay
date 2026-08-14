@@ -1,4 +1,5 @@
 from pathlib import Path
+from rust_source_tree import read_rust_module
 import re
 import unittest
 
@@ -114,7 +115,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
 
     def test_control_plane_and_pg18_runtime_are_public_contracts(self):
         openapi = OPENAPI.read_text()
-        ops = OPS.read_text() + (ROOT / "crates/crowdrelay-api/src/ops/database_runtime.rs").read_text()
+        ops = read_rust_module(ROOT, "crates/crowdrelay-api/src/ops.rs") + (ROOT / "crates/crowdrelay-api/src/ops/database_runtime.rs").read_text()
         for path in (
             "/admin/autopilot/overview",
             "/admin/autopilot/policies/{context}",

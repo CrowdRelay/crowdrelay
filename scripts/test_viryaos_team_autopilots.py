@@ -5,11 +5,14 @@ This intentionally checks functional safety boundaries, not query plans or
 implementation trivia.
 """
 from pathlib import Path
+from rust_source_tree import read_rust_module
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 def text(path: str) -> str:
+    if path.endswith(".rs"):
+        return read_rust_module(ROOT, path)
     return (ROOT / path).read_text()
 
 class TeamAutopilotsContract(unittest.TestCase):

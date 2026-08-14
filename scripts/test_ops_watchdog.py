@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from rust_source_tree import read_rust_module
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +24,7 @@ class OpsWatchdogContract(unittest.TestCase):
         self.assertNotIn("retry_dead_delivery", worker)
 
     def test_watchdog_health_is_exposed_by_the_first_party_ops_summary(self):
-        ops = (ROOT / "crates/crowdrelay-api/src/ops.rs").read_text()
+        ops = read_rust_module(ROOT, "crates/crowdrelay-api/src/ops.rs")
         watchdog = (ROOT / "crates/crowdrelay-api/src/ops_summary.rs").read_text()
         self.assertIn("watchdog: WatchdogSummary", ops)
         self.assertIn("crate::ops_summary::load_watchdog_summary", ops)
@@ -33,7 +34,7 @@ class OpsWatchdogContract(unittest.TestCase):
 
     def test_public_schema_tracks_latest_migration(self):
         meta = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
-        ops = (ROOT / "crates/crowdrelay-api/src/ops.rs").read_text()
+        ops = read_rust_module(ROOT, "crates/crowdrelay-api/src/ops.rs")
         latest = max(
             int(path.name.split("_", 1)[0])
             for path in (ROOT / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql")

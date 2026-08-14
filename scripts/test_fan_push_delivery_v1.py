@@ -9,7 +9,8 @@ class FanPushDeliveryV1Contract(unittest.TestCase):
 
     def test_schema_and_public_capability_are_published(self):
         meta = self.text('crates/crowdrelay-api/src/meta.rs')
-        self.assertIn('SCHEMA_VERSION: u32 = 51', meta)
+        latest = max(int(path.name[:4]) for path in (ROOT / 'migrations').glob('[0-9][0-9][0-9][0-9]_*.sql'))
+        self.assertIn(f'SCHEMA_VERSION: u32 = {latest}', meta)
         self.assertIn('"fan_push_delivery_v1"', meta)
         migration = self.text('migrations/0051_fan_push_delivery.sql')
         self.assertIn("'push_delivery_enabled'", migration)
@@ -17,6 +18,11 @@ class FanPushDeliveryV1Contract(unittest.TestCase):
         self.assertIn("'ambiguous'", migration)
         self.assertIn('UNIQUE (workspace_id, id)', migration)
         self.assertIn('REFERENCES fan_push_endpoints (workspace_id, id)', migration)
+        hot_path = self.text('migrations/0052_push_queue_hot_path_indexes.sql')
+        self.assertIn('(workspace_id, available_at, created_at, id)', hot_path)
+        self.assertIn('(workspace_id, ack_deadline, id)', hot_path)
+        self.assertIn("WHERE status IN ('queued','retry_wait')", hot_path)
+        self.assertIn("WHERE status = 'provider_accepted'", hot_path)
 
     def test_provider_acceptance_is_not_delivery(self):
         repo = self.text('crates/crowdrelay-worker/src/push_delivery/repository.rs')

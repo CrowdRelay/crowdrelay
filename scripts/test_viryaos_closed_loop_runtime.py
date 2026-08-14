@@ -1,4 +1,5 @@
 from pathlib import Path
+from rust_source_tree import read_rust_module
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -6,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ViryaOsClosedLoopRuntime(unittest.TestCase):
     def test_runtime_migration_and_ports_exist(self):
         migration = (ROOT / 'migrations/0040_viryaos_closed_loop_runtime.sql').read_text()
-        app = (ROOT / 'crates/crowdrelay-application/src/autopilot/control.rs').read_text()
+        app = read_rust_module(ROOT, 'crates/crowdrelay-application/src/autopilot/control.rs')
         for token in ('viryaos_executor_instances','viryaos_executor_circuit_breakers','viryaos_autopilot_execution_reports','viryaos_contact_governor','viryaos_release_components','viryaos_rum_samples','approval_expires_at','guarded_until'):
             self.assertIn(token, migration)
         self.assertIn('trait AutopilotRuntimeRepository', app)

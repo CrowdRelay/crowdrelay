@@ -23,13 +23,26 @@ class ReleaseContract(unittest.TestCase):
         migrations = sorted((ROOT / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"))
         latest = int(migrations[-1].name.split("_", 1)[0])
         meta = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
-        ops = (ROOT / "crates/crowdrelay-api/src/ops.rs").read_text()
+        ops_root = ROOT / "crates/crowdrelay-api/src/ops.rs"
+        ops = "\n".join(
+            path.read_text()
+            for path in (
+                ops_root,
+                ops_root.parent / "ops/models.rs",
+                ops_root.parent / "ops/handlers.rs",
+                ops_root.parent / "ops/query_support.rs",
+            )
+        )
         self.assertIn(f"const SCHEMA_VERSION: u32 = {latest};", meta)
         self.assertIn("schema_version: crate::meta::SCHEMA_VERSION,", ops)
         self.assertIn('"communication_delivery_ledger_v1"', meta)
 
     def test_release_ledger_exposes_n8n_executor_manifest_drift(self):
-        application = (ROOT / "crates/crowdrelay-application/src/autopilot/control.rs").read_text()
+        control = ROOT / "crates/crowdrelay-application/src/autopilot/control.rs"
+        application = "\n".join(
+            path.read_text()
+            for path in (control, control.parent / "control/state_ports.rs", control.parent / "control/runtime_ports.rs")
+        )
         infra = (ROOT / "crates/crowdrelay-infra/src/autopilot/runtime.rs").read_text()
         openapi = (ROOT / "openapi/openapi.yaml").read_text()
         self.assertIn("pub executor_manifest_drift: bool", application)

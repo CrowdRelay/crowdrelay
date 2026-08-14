@@ -12,11 +12,11 @@ class RockSolidPublicReadPath(unittest.TestCase):
         self.assertIn("stale-if-error=86400", source)
         self.assertIn(
             '"public, max-age=60, stale-while-revalidate=600, stale-if-error=86400"',
-            api_contract,
+            source,
         )
         self.assertNotIn(
             '"public, max-age=60, stale-while-revalidate=600"',
-            api_contract,
+            source,
         )
         self.assertNotIn(".list_cities\n        .execute(\n            state.acquisition.workspace_id", source)
 

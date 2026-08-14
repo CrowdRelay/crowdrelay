@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 from pathlib import Path
+from rust_source_tree import read_rust_module
 
 root = Path(__file__).resolve().parents[1]
 ecosystem = root.parent
@@ -21,7 +22,7 @@ if signal.is_dir() and virya.is_dir() and synesthesia.is_dir():
     signal_css = (signal / "styles.css").read_text()
     virya_css = (virya / "src/styles/global.css").read_text()
     syn_hud = (synesthesia / "scripts/ui/app_hud.gd").read_text()
-    fan_home = (signal / "src/app/fan.rs").read_text()
+    fan_home = read_rust_module(ecosystem, "virya-signal/src/app/fan.rs")
     fan_formatters = (signal / "src/app/formatters.rs").read_text()
     checks.update({
         "signal token adoption": tokens["palette"]["signal"] in signal_css,

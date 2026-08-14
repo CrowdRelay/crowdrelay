@@ -327,50 +327,55 @@ pub fn select_booking_target(
         return BookingTargetDecision::NoEligibleTarget;
     }
     let cooldown = Duration::days(i64::from(policy.target_cooldown_days));
-    let mut eligible = targets
-        .iter()
-        .filter(|target| {
-            target.city_id == city_id
-                && target.version > 0
-                && target.active
-                && target.accepts_booking
-                && target.priority <= 100
-                && target.relationship_score <= 100
-                && target.priority >= policy.minimum_priority
-                && !target.outreach_in_flight
-                && !target.last_outreach_at.is_some_and(|at| at > now)
-                && !target
-                    .last_outreach_at
-                    .is_some_and(|at| now - at < cooldown)
-        })
-        .map(|target| {
-            let capacity_fit = capacity_fit_score(target.capacity, expected_attendance);
-            // Priority is the operator-owned commercial intent and must remain
-            // the dominant selector. Relationship quality refines it, while
-            // capacity fit is deliberately bounded so a "perfect room" can't
-            // override a materially stronger trusted relationship.
-            let score = target
-                .priority
-                .saturating_mul(60)
-                .saturating_add(target.relationship_score.saturating_mul(25))
-                .saturating_add(capacity_fit.saturating_mul(15))
-                / 100;
-            (target, score)
-        })
-        .collect::<Vec<_>>();
-    eligible.sort_by(|(left, left_score), (right, right_score)| {
-        right_score
-            .cmp(left_score)
-            .then_with(|| right.priority.cmp(&left.priority))
-            .then_with(|| left.last_outreach_at.cmp(&right.last_outreach_at))
-            .then_with(|| left.target_id.cmp(&right.target_id))
-    });
-    eligible.first().map_or(
+    let mut best: Option<(&BookingTargetSnapshot, u16)> = None;
+    for target in targets {
+        if target.city_id != city_id
+            || target.version <= 0
+            || !target.active
+            || !target.accepts_booking
+            || target.priority > 100
+            || target.relationship_score > 100
+            || target.priority < policy.minimum_priority
+            || target.outreach_in_flight
+            || target.last_outreach_at.is_some_and(|at| at > now)
+            || target
+                .last_outreach_at
+                .is_some_and(|at| now - at < cooldown)
+        {
+            continue;
+        }
+
+        let capacity_fit = capacity_fit_score(target.capacity, expected_attendance);
+        // Priority is the operator-owned commercial intent and must remain
+        // the dominant selector. Relationship quality refines it, while
+        // capacity fit is deliberately bounded so a "perfect room" can't
+        // override a materially stronger trusted relationship.
+        let score = target
+            .priority
+            .saturating_mul(60)
+            .saturating_add(target.relationship_score.saturating_mul(25))
+            .saturating_add(capacity_fit.saturating_mul(15))
+            / 100;
+        let replace = best.is_none_or(|(current, current_score)| {
+            score > current_score
+                || (score == current_score
+                    && (target.priority > current.priority
+                        || (target.priority == current.priority
+                            && (target.last_outreach_at < current.last_outreach_at
+                                || (target.last_outreach_at == current.last_outreach_at
+                                    && target.target_id < current.target_id)))))
+        });
+        if replace {
+            best = Some((target, score));
+        }
+    }
+
+    best.map_or(
         BookingTargetDecision::NoEligibleTarget,
         |(target, score)| BookingTargetDecision::Selected {
             target_id: target.target_id,
             target_version: target.version,
-            selection_score: *score,
+            selection_score: score,
         },
     )
 }
@@ -493,6 +498,35 @@ mod tests {
                 selection_score: 71,
             }
         );
+    }
+
+    #[test]
+    fn target_selection_tie_break_is_stable_without_sorting_or_allocation() {
+        let city = CityId::new();
+        let mut first = target(city, 80, 80);
+        let mut second = target(city, 80, 80);
+        first.last_outreach_at = None;
+        second.last_outreach_at = None;
+        let expected = if first.target_id < second.target_id {
+            first.target_id
+        } else {
+            second.target_id
+        };
+
+        let forward = [first.clone(), second.clone()];
+        let reverse = [second, first];
+        for candidates in [&forward[..], &reverse[..]] {
+            assert!(matches!(
+                select_booking_target(
+                    city,
+                    100,
+                    candidates,
+                    BookingTargetSelectionPolicy::default(),
+                    now()
+                ),
+                BookingTargetDecision::Selected { target_id, .. } if target_id == expected
+            ));
+        }
     }
 
     #[test]

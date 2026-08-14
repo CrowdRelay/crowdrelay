@@ -7026,15 +7026,25 @@ components:
         status: { type: [string, 'null'] }
         target_type: { type: [string, 'null'] }
         target_id: { type: [string, 'null'] }
+    OpsWatchdogSummary:
+      type: object
+      additionalProperties: false
+      required: [active_alerts, critical_alerts, last_observed_at]
+      properties:
+        active_alerts: { type: integer, format: int64, minimum: 0 }
+        critical_alerts: { type: integer, format: int64, minimum: 0 }
+        last_observed_at: { type: [string, 'null'], format: date-time }
     OpsSummary:
       type: object
       additionalProperties: false
-      required: [outbox, deliveries, http, database, area, schema_version, release]
+      required: [outbox, deliveries, push, watchdog, http, database, area, schema_version, release]
       properties:
         release: { type: string, minLength: 1, maxLength: 128 }
         schema_version: { type: integer, minimum: 36 }
         outbox: { $ref: '#/components/schemas/OpsQueueSummary' }
         deliveries: { $ref: '#/components/schemas/OpsQueueSummary' }
+        push: { $ref: '#/components/schemas/OpsQueueSummary' }
+        watchdog: { $ref: '#/components/schemas/OpsWatchdogSummary' }
         http: { $ref: '#/components/schemas/HttpRequestSummary' }
         database: { $ref: '#/components/schemas/DatabaseRuntimeSummary' }
         area: { $ref: '#/components/schemas/OpsAreaRuntimeSummary' }

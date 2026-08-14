@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class SynesthesiaEcosystemContract(unittest.TestCase):
     def test_public_ledger_is_additive_and_no_shipping_pii(self):
         migration = (ROOT / 'migrations/0030_synesthesia_ecosystem.sql').read_text()
-        api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
+        api = read_rust_module(ROOT, 'crates/crowdrelay-api/src/synesthesia.rs')
         router = ((ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text() + (ROOT / 'crates/crowdrelay-api/src/routing.rs').read_text())
         for path in (
             '/v1/public/synesthesia/runs',
@@ -57,7 +57,7 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         self.assertIn('synesthesia_reward_entries', worker)
 
     def test_v4_handoff_is_idempotent_and_identity_safe(self):
-        api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
+        api = read_rust_module(ROOT, 'crates/crowdrelay-api/src/synesthesia.rs')
         migration = (ROOT / 'migrations/0032_fan_context_synesthesia_handoff.sql').read_text()
         router = ((ROOT / 'crates/crowdrelay-api/src/lib.rs').read_text() + (ROOT / 'crates/crowdrelay-api/src/routing.rs').read_text())
         self.assertIn('/v1/me/synesthesia/link', router)
@@ -74,7 +74,7 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         self.assertIn('return Err(SynesthesiaError::Conflict);', reward_block)
 
     def test_legacy_recovery_cannot_enter_the_competitive_leaderboard(self):
-        api = (ROOT / 'crates/crowdrelay-api/src/synesthesia.rs').read_text()
+        api = read_rust_module(ROOT, 'crates/crowdrelay-api/src/synesthesia.rs')
         recovery = api.split('pub async fn recover_run', 1)[1].split('async fn completion_response', 1)[0]
         leaderboard = (ROOT / 'crates/crowdrelay-api/src/synesthesia/leaderboard.rs').read_text()
         self.assertIn('recovery_completed_at', recovery)

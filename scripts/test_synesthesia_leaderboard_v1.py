@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Source contract for replayable Synesthesia attempts and privacy-safe public scores."""
 from pathlib import Path
+from rust_source_tree import read_rust_module
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
     def test_replays_get_independent_attempts(self):
         migration = (ROOT / "migrations/0044_synesthesia_leaderboard.sql").read_text()
-        api = (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
+        api = read_rust_module(ROOT, "crates/crowdrelay-api/src/synesthesia.rs")
         self.assertIn("ADD COLUMN attempt_id text NOT NULL DEFAULT 'legacy'", migration)
         self.assertIn("synesthesia_runs_attempt_uidx", migration)
         self.assertIn("workspace_id, campaign_slug, install_hash, attempt_id", migration)

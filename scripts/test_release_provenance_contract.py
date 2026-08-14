@@ -3,7 +3,8 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 class ReleaseProvenanceContract(unittest.TestCase):
  def test_release_ledger_exposes_content_roots(self):
-  app=(ROOT/'crates/crowdrelay-application/src/autopilot/control.rs').read_text()
+  control=ROOT/'crates/crowdrelay-application/src/autopilot/control.rs'
+  app='\n'.join(path.read_text() for path in (control, control.parent/'control/state_ports.rs', control.parent/'control/runtime_ports.rs'))
   runtime=(ROOT/'crates/crowdrelay-infra/src/autopilot/runtime.rs').read_text()
   for token in ('dependency_lock_sha256','artifact_manifest_sha256'):
    self.assertIn(token,app); self.assertIn(token,runtime)

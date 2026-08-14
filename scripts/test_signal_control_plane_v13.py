@@ -1,9 +1,10 @@
 from pathlib import Path
+from rust_source_tree import read_rust_module
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text(encoding="utf-8") + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text(encoding="utf-8"))
-OPS = (ROOT / "crates/crowdrelay-api/src/ops.rs").read_text(encoding="utf-8")
+OPS = read_rust_module(ROOT, "crates/crowdrelay-api/src/ops.rs")
 SPEC = (ROOT / "openapi/openapi.yaml").read_text(encoding="utf-8")
 
 

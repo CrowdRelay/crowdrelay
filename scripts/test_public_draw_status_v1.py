@@ -1,4 +1,5 @@
 from pathlib import Path
+from rust_source_tree import read_rust_module
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,7 @@ class PublicDrawStatusContracts(unittest.TestCase):
         self.assertIn("max-age=5, s-maxage=10, must-revalidate", (ROOT / "crates/crowdrelay-api/src/proofs.rs").read_text())
 
     def test_status_exposes_only_lifecycle_and_proof_availability(self):
-        source = (ROOT / "crates/crowdrelay-api/src/proofs.rs").read_text()
+        source = read_rust_module(ROOT, "crates/crowdrelay-api/src/proofs.rs")
         status = source.split("async fn load_draw_status", 1)[1]
         status = status.split("async fn load_draw_proof", 1)[0]
         for token in [
@@ -34,7 +35,7 @@ class PublicDrawStatusContracts(unittest.TestCase):
 
 
     def test_public_draw_timestamps_are_rfc3339_json_strings(self):
-        source = (ROOT / "crates/crowdrelay-api/src/proofs.rs").read_text()
+        source = read_rust_module(ROOT, "crates/crowdrelay-api/src/proofs.rs")
         status_struct = source.split("pub struct PublicDrawStatus", 1)[1].split("pub struct PublicDrawProof", 1)[0]
         proof_struct = source.split("pub struct PublicDrawProof", 1)[1].split("pub struct PublicAnchor", 1)[0]
         anchor_struct = source.split("pub struct PublicAnchor", 1)[1].split("pub struct ClaimRequest", 1)[0]
@@ -44,7 +45,7 @@ class PublicDrawStatusContracts(unittest.TestCase):
         self.assertIn('#[serde(with = "time::serde::rfc3339::option")]', anchor_struct)
 
     def test_missing_draw_is_not_confused_with_missing_receipt(self):
-        source = (ROOT / "crates/crowdrelay-api/src/proofs.rs").read_text()
+        source = read_rust_module(ROOT, "crates/crowdrelay-api/src/proofs.rs")
         status = source.split("async fn load_draw_status", 1)[1]
         status = status.split("async fn load_draw_proof", 1)[0]
         self.assertIn("fetch_optional", status)
