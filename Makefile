@@ -19,20 +19,20 @@ validate-contract-assets:
 	node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
 
 contract-tests:
-	python3 -m unittest discover -s scripts -p 'test_*.py'
+	. .venv/bin/activate && python3 -m unittest discover -s scripts -p 'test_*.py'
 
 runtime-contracts:
-	python3 scripts/check-ci-policy.py
-	python3 scripts/source-size-ratchet.py
-	python3 scripts/test-modularity-contract.py
-	python3 scripts/check-postgres-major.py
-	python3 scripts/postgres18_runtime_contract.py
-	python3 scripts/area_wallet_authority_v2_contract.py
-	python3 scripts/staff_device_sessions_v2_contract.py
-	python3 scripts/test-ecosystem-contract-v2.py
-	python3 scripts/test-ops-control-plane-v2.py
-	python3 scripts/test-ecosystem-design-contract.py
-	python3 scripts/test-image-provenance-policy.py
+	. .venv/bin/activate && python3 scripts/check-ci-policy.py
+	. .venv/bin/activate && python3 scripts/source-size-ratchet.py
+	. .venv/bin/activate && python3 scripts/test-modularity-contract.py
+	. .venv/bin/activate && python3 scripts/check-postgres-major.py
+	. .venv/bin/activate && python3 scripts/postgres18_runtime_contract.py
+	. .venv/bin/activate && python3 scripts/area_wallet_authority_v2_contract.py
+	. .venv/bin/activate && python3 scripts/staff_device_sessions_v2_contract.py
+	. .venv/bin/activate && python3 scripts/test-ecosystem-contract-v2.py
+	. .venv/bin/activate && python3 scripts/test-ops-control-plane-v2.py
+	. .venv/bin/activate && python3 scripts/test-ecosystem-design-contract.py
+	. .venv/bin/activate && python3 scripts/test-image-provenance-policy.py
 
 ci: check validate-contract-assets contract-tests runtime-contracts
 

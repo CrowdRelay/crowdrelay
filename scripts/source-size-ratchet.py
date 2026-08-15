@@ -14,7 +14,7 @@ baseline_path = root / "scripts/source-size-ratchet.json"
 baseline = json.loads(baseline_path.read_text())
 tracked = {str(k): int(v) for k, v in baseline["maxLines"].items()}
 extensions = {".rs", ".ts", ".tsx", ".js", ".jsx", ".astro", ".gd", ".py"}
-ignore_parts = {"node_modules", "target", "dist", ".git", ".baseline", "vendor"}
+ignore_parts = {"node_modules", "target", "dist", ".git", ".baseline", "vendor", ".venv"}
 errors: list[str] = []
 large: dict[str, int] = {}
 for path in root.rglob("*"):
