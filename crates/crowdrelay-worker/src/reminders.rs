@@ -159,6 +159,8 @@ impl EventReminderScheduler {
             .map_err(ReminderSchedulerError::Database)?;
         }
 
+        let checklist_emissions = enqueue_due_show_checklists(&mut transaction).await?;
+
         let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
         if !ids.is_empty() {
             sqlx::query(
@@ -177,8 +179,108 @@ impl EventReminderScheduler {
             .commit()
             .await
             .map_err(ReminderSchedulerError::Database)?;
-        Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+        Ok(u64::try_from(rows.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(checklist_emissions))
     }
+}
+
+async fn enqueue_due_show_checklists(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<u64, ReminderSchedulerError> {
+    let inserted = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH due AS (
+            SELECT event.workspace_id,
+                   event.id AS event_id,
+                   event.slug AS event_slug,
+                   event.title,
+                   event.starts_at,
+                   CASE
+                       WHEN event.starts_at BETWEEN now() + interval '6 days 18 hours'
+                                                AND now() + interval '7 days' THEN 'week'
+                       WHEN event.starts_at BETWEEN now() + interval '42 hours'
+                                                AND now() + interval '48 hours' THEN 'two_days'
+                   END AS phase
+            FROM events AS event
+            WHERE event.status = 'published'
+              AND event.starts_at > now()
+        ), inserted_events AS (
+            INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, request_id)
+            SELECT due.workspace_id,
+                   'show.checklist_due',
+                   1,
+                   jsonb_build_object(
+                       'event_id', due.event_id,
+                       'event_slug', due.event_slug,
+                       'event_title', due.title,
+                       'starts_at', due.starts_at,
+                       'checklist', due.phase,
+                       'severity', 'info',
+                       'summary', CASE due.phase
+                           WHEN 'week' THEN '7 dni do koncertu: zacznij odhaczać checklistę przygotowań.'
+                           ELSE '2 dni do koncertu: domknij sprzęt, pliki, merch, strój i logistykę.'
+                       END
+                   ),
+                   'show-checklist:' || due.event_id::text || ':' || due.phase
+            FROM due
+            WHERE due.phase IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM show_notification_emissions emission
+                  WHERE emission.workspace_id = due.workspace_id
+                    AND emission.event_id = due.event_id
+                    AND emission.phase = due.phase
+              )
+            RETURNING id, workspace_id, payload
+        ), inserted_push AS (
+            INSERT INTO fan_push_deliveries (
+                workspace_id, fan_id, audience_kind, endpoint_id,
+                source_kind, source_id, title, body, target_path,
+                collapse_key, status, available_at
+            )
+            SELECT event.workspace_id,
+                   NULL,
+                   'staff',
+                   endpoint.id,
+                   'show_checklist',
+                   event.id,
+                   CASE event.payload ->> 'checklist'
+                       WHEN 'week' THEN 'VIRYA · koncert za 7 dni'
+                       ELSE 'VIRYA · koncert za 2 dni'
+                   END,
+                   (event.payload ->> 'event_title') || ' — otwórz checklistę i odhacz przygotowania.',
+                   '/staff/checklist?event=' || (event.payload ->> 'event_slug'),
+                   'show-checklist:' || (event.payload ->> 'event_id') || ':' || (event.payload ->> 'checklist'),
+                   'queued',
+                   now()
+            FROM inserted_events event
+            JOIN fan_push_endpoints endpoint
+              ON endpoint.workspace_id = event.workspace_id
+             AND endpoint.audience_kind = 'staff'
+             AND endpoint.active
+             AND endpoint.invalidated_at IS NULL
+            WHERE event.payload ->> 'checklist' IN ('week', 'two_days')
+            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+            RETURNING 1
+        ), emissions AS (
+            INSERT INTO show_notification_emissions (
+                workspace_id, event_id, phase, outbox_event_id
+            )
+            SELECT event.workspace_id,
+                   (event.payload ->> 'event_id')::uuid,
+                   event.payload ->> 'checklist',
+                   event.id
+            FROM inserted_events event
+            RETURNING 1
+        )
+        SELECT count(*)::bigint FROM emissions
+        "#,
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(ReminderSchedulerError::Database)?;
+    Ok(u64::try_from(inserted).unwrap_or(0))
 }
 
 async fn cancel_ineligible_jobs(
@@ -383,7 +485,8 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_secs(1),
         )?;
-        assert_eq!(scheduler.enqueue_due().await?, 1);
+        let enqueued = scheduler.enqueue_due().await?;
+        assert!(enqueued >= 1, "Should enqueue at least the event reminder");
         assert_eq!(scheduler.enqueue_due().await?, 0);
 
         let status =

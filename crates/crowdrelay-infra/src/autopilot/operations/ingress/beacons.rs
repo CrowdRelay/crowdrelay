@@ -24,6 +24,14 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                     let trimmed = email.trim();
                     trimmed.is_empty() || trimmed.len() > 320 || !trimmed.contains('@')
                 })
+                || command.destination_url.as_ref().is_some_and(|value| {
+                    let trimmed = value.trim();
+                    trimmed.is_empty() || trimmed.len() > 2048
+                })
+                || command.source_url.as_ref().is_some_and(|value| {
+                    let trimmed = value.trim();
+                    trimmed.is_empty() || trimmed.len() > 2048
+                })
             {
                 return Err(RepositoryError::Unexpected);
             }
@@ -31,20 +39,34 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
             super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout)
                 .await?;
+            // Match the same identity policy enforced by migration 0053: use
+            // email when known, otherwise a public destination URL. Treating
+            // NULL email as an identity used to collapse every email-less
+            // scene partner/community of one kind in a city into a single row.
+            let normalized_email = command.contact_email.as_deref().map(str::trim);
+            let normalized_destination = command.destination_url.as_deref().map(str::trim);
+            let normalized_source = command.source_url.as_deref().map(str::trim);
             let natural = sqlx::query_as::<_, (Uuid, i64)>(
                 r#"
                 SELECT id, version
                 FROM viryaos_beacons
                 WHERE workspace_id=$1 AND beacon_kind=$2
                   AND city_id IS NOT DISTINCT FROM $3
-                  AND contact_email IS NOT DISTINCT FROM $4
+                  AND (
+                    ($4::text IS NOT NULL AND contact_email = $4)
+                    OR (
+                      $4::text IS NULL AND $5::text IS NOT NULL
+                      AND destination_url = $5
+                    )
+                  )
                 FOR UPDATE
                 "#,
             )
             .bind(workspace_id.into_uuid())
             .bind(command.kind.as_str())
             .bind(command.city_id.map(CityId::into_uuid))
-            .bind(command.contact_email.as_deref().map(str::trim))
+            .bind(normalized_email)
+            .bind(normalized_destination)
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_sqlx)?;
@@ -119,9 +141,9 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 .bind(command.city_id.map(CityId::into_uuid))
                 .bind(command.kind.as_str())
                 .bind(command.display_name.trim())
-                .bind(command.contact_email.as_deref().map(str::trim))
-                .bind(command.destination_url.as_deref())
-                .bind(command.source_url.as_deref())
+                .bind(normalized_email)
+                .bind(normalized_destination)
+                .bind(normalized_source)
                 .bind(command.active)
                 .bind(command.verified)
                 .bind(command.accepts_outreach)
@@ -156,9 +178,9 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 .bind(command.city_id.map(CityId::into_uuid))
                 .bind(command.kind.as_str())
                 .bind(command.display_name.trim())
-                .bind(command.contact_email.as_deref().map(str::trim))
-                .bind(command.destination_url.as_deref())
-                .bind(command.source_url.as_deref())
+                .bind(normalized_email)
+                .bind(normalized_destination)
+                .bind(normalized_source)
                 .bind(command.active)
                 .bind(command.verified)
                 .bind(command.accepts_outreach)

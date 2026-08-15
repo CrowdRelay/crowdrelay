@@ -74,7 +74,10 @@ impl PushDeliveryRepository {
         sqlx::query(
             r#"
             UPDATE fan_push_deliveries delivery
-            SET status = 'failed', error_code = 'fan_or_consent_ineligible',
+            SET status = 'failed', error_code = CASE
+                    WHEN delivery.audience_kind = 'fan' THEN 'fan_or_consent_ineligible'
+                    ELSE 'staff_endpoint_ineligible'
+                END,
                 completed_at = now(), updated_at = now()
             WHERE delivery.workspace_id = $1
               AND delivery.status IN ('queued','retry_wait','claimed')
@@ -83,23 +86,29 @@ impl PushDeliveryRepository {
                     SELECT 1 FROM fan_push_endpoints endpoint
                     WHERE endpoint.workspace_id = delivery.workspace_id
                       AND endpoint.id = delivery.endpoint_id
-                      AND endpoint.fan_id = delivery.fan_id
+                      AND endpoint.audience_kind = delivery.audience_kind
+                      AND endpoint.fan_id IS NOT DISTINCT FROM delivery.fan_id
                       AND endpoint.active AND endpoint.invalidated_at IS NULL
                 )
-                OR NOT EXISTS (
-                    SELECT 1 FROM fans fan
-                    WHERE fan.workspace_id = delivery.workspace_id
-                      AND fan.id = delivery.fan_id AND fan.status = 'active'
+                OR (
+                    delivery.audience_kind = 'fan'
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1 FROM fans fan
+                            WHERE fan.workspace_id = delivery.workspace_id
+                              AND fan.id = delivery.fan_id AND fan.status = 'active'
+                        )
+                        OR COALESCE((
+                            SELECT consent.granted
+                            FROM fan_consents consent
+                            WHERE consent.workspace_id = delivery.workspace_id
+                              AND consent.fan_id = delivery.fan_id
+                              AND consent.purpose = 'marketing'
+                            ORDER BY consent.recorded_at DESC, consent.id DESC
+                            LIMIT 1
+                        ), false) = false
+                    )
                 )
-                OR COALESCE((
-                    SELECT consent.granted
-                    FROM fan_consents consent
-                    WHERE consent.workspace_id = delivery.workspace_id
-                      AND consent.fan_id = delivery.fan_id
-                      AND consent.purpose = 'marketing'
-                    ORDER BY consent.recorded_at DESC, consent.id DESC
-                    LIMIT 1
-                ), false) = false
               )
             "#,
         )
@@ -171,25 +180,33 @@ impl PushDeliveryRepository {
                     JOIN fan_push_endpoints endpoint
                       ON endpoint.workspace_id = delivery.workspace_id
                      AND endpoint.id = delivery.endpoint_id
-                     AND endpoint.fan_id = delivery.fan_id
-                    JOIN fans fan
-                      ON fan.workspace_id = delivery.workspace_id
+                     AND endpoint.audience_kind = delivery.audience_kind
+                     AND endpoint.fan_id IS NOT DISTINCT FROM delivery.fan_id
+                    LEFT JOIN fans fan
+                      ON delivery.audience_kind = 'fan'
+                     AND fan.workspace_id = delivery.workspace_id
                      AND fan.id = delivery.fan_id
                     WHERE delivery.workspace_id = $1
                       AND delivery.status IN ('queued','retry_wait')
                       AND delivery.available_at <= now()
                       AND delivery.attempt_count < $3
                       AND endpoint.active AND endpoint.invalidated_at IS NULL
-                      AND fan.status = 'active'
-                      AND COALESCE((
-                          SELECT consent.granted
-                          FROM fan_consents consent
-                          WHERE consent.workspace_id = delivery.workspace_id
-                            AND consent.fan_id = delivery.fan_id
-                            AND consent.purpose = 'marketing'
-                          ORDER BY consent.recorded_at DESC, consent.id DESC
-                          LIMIT 1
-                      ), false)
+                      AND (
+                          delivery.audience_kind = 'staff'
+                          OR (
+                              delivery.audience_kind = 'fan'
+                              AND fan.status = 'active'
+                              AND COALESCE((
+                                  SELECT consent.granted
+                                  FROM fan_consents consent
+                                  WHERE consent.workspace_id = delivery.workspace_id
+                                    AND consent.fan_id = delivery.fan_id
+                                    AND consent.purpose = 'marketing'
+                                  ORDER BY consent.recorded_at DESC, consent.id DESC
+                                  LIMIT 1
+                              ), false)
+                          )
+                      )
                     ORDER BY delivery.available_at, delivery.created_at, delivery.id
                     FOR UPDATE OF delivery SKIP LOCKED
                     LIMIT $2

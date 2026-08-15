@@ -17,6 +17,7 @@ pub struct ShowGrowthHistory {
     pub free_listing_sweep_requested: bool,
     pub audience_capture_setup_requested: bool,
     pub partner_cross_promo_requested: bool,
+    pub grassroots_scene_relay_requested: bool,
     pub fan_ambassadors_requested: bool,
     pub social_proof_relay_requested: bool,
     pub free_fan_channel_push_requested: bool,
@@ -51,6 +52,7 @@ pub struct ShowGrowthPolicy {
     pub free_listing_lead_days: u32,
     pub audience_capture_lead_days: u32,
     pub partner_cross_promo_lead_days: u32,
+    pub grassroots_scene_relay_lead_days: u32,
     pub fan_ambassador_lead_days: u32,
     pub social_proof_lead_days: u32,
     pub free_fan_channel_push_lead_days: u32,
@@ -77,6 +79,7 @@ impl Default for ShowGrowthPolicy {
             free_listing_lead_days: 56,
             audience_capture_lead_days: 52,
             partner_cross_promo_lead_days: 49,
+            grassroots_scene_relay_lead_days: 42,
             fan_ambassador_lead_days: 35,
             social_proof_lead_days: 21,
             free_fan_channel_push_lead_days: 18,
@@ -101,6 +104,7 @@ pub enum ShowGrowthLever {
     FreeListingSweep,
     AudienceCaptureSetup,
     PartnerCrossPromo,
+    GrassrootsSceneRelay,
     FanAmbassadors,
     SocialProofRelay,
     FreeFanChannelPush,
@@ -117,6 +121,7 @@ impl ShowGrowthLever {
             Self::FreeListingSweep => "free_listing_sweep",
             Self::AudienceCaptureSetup => "audience_capture_setup",
             Self::PartnerCrossPromo => "partner_cross_promo",
+            Self::GrassrootsSceneRelay => "grassroots_scene_relay",
             Self::FanAmbassadors => "fan_ambassadors",
             Self::SocialProofRelay => "social_proof_relay",
             Self::FreeFanChannelPush => "free_fan_channel_push",
@@ -132,6 +137,7 @@ impl ShowGrowthLever {
             Self::FreeListingSweep => "show.growth.free_listings.v1",
             Self::AudienceCaptureSetup => "show.growth.audience_capture.v1",
             Self::PartnerCrossPromo => "show.growth.partner_cross_promo.v1",
+            Self::GrassrootsSceneRelay => "show.growth.grassroots_scene_relay.v1",
             Self::FanAmbassadors => "show.growth.fan_ambassadors.v1",
             Self::SocialProofRelay => "show.growth.social_proof.v1",
             Self::FreeFanChannelPush => "show.growth.free_fan_push.v1",
@@ -231,6 +237,17 @@ pub fn evaluate_show_growth(
         return request(ShowGrowthLever::PartnerCrossPromo, 9_400);
     }
 
+    // Activate the real local scene graph after broad partner outreach but before
+    // asking fans to relay. This is deliberately relationship-first: verified
+    // record stores, rehearsal rooms, photographers, alt businesses, student
+    // media and moderated communities get one useful ask or one consented warm
+    // introduction, never a cold mass blast.
+    if days <= i64::from(policy.grassroots_scene_relay_lead_days)
+        && !snapshot.history.grassroots_scene_relay_requested
+    {
+        return request(ShowGrowthLever::GrassrootsSceneRelay, 9_350);
+    }
+
     // Turn the strongest local first-party fans into a small street team. This
     // uses existing referral identities; no mass cold messaging is introduced.
     if days <= i64::from(policy.fan_ambassador_lead_days)
@@ -325,7 +342,8 @@ const fn valid_policy(policy: ShowGrowthPolicy) -> bool {
     policy.lookahead_days >= policy.free_listing_lead_days
         && policy.free_listing_lead_days >= policy.audience_capture_lead_days
         && policy.audience_capture_lead_days >= policy.partner_cross_promo_lead_days
-        && policy.partner_cross_promo_lead_days >= policy.fan_ambassador_lead_days
+        && policy.partner_cross_promo_lead_days >= policy.grassroots_scene_relay_lead_days
+        && policy.grassroots_scene_relay_lead_days >= policy.fan_ambassador_lead_days
         && policy.fan_ambassador_lead_days >= policy.social_proof_lead_days
         && policy.social_proof_lead_days >= policy.free_fan_channel_push_lead_days
         && policy.free_fan_channel_push_lead_days >= policy.merch_preorder_lead_days
@@ -396,11 +414,27 @@ mod tests {
     }
 
     #[test]
+    fn grassroots_scene_relay_follows_partner_cross_promo() {
+        let mut data = snapshot(40);
+        data.history.free_listing_sweep_requested = true;
+        data.history.audience_capture_setup_requested = true;
+        data.history.partner_cross_promo_requested = true;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::GrassrootsSceneRelay,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn ambassadors_require_real_local_referral_strength() {
         let mut data = snapshot(30);
         data.history.free_listing_sweep_requested = true;
         data.history.audience_capture_setup_requested = true;
         data.history.partner_cross_promo_requested = true;
+        data.history.grassroots_scene_relay_requested = true;
         data.qualified_referrers_in_city = 0;
         assert_eq!(
             evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
@@ -423,6 +457,7 @@ mod tests {
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
+            grassroots_scene_relay_requested: true,
             fan_ambassadors_requested: true,
             ..ShowGrowthHistory::default()
         };
@@ -453,6 +488,7 @@ mod tests {
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
+            grassroots_scene_relay_requested: true,
             fan_ambassadors_requested: true,
             social_proof_relay_requested: true,
             free_fan_channel_push_requested: true,
@@ -488,6 +524,7 @@ mod tests {
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
+            grassroots_scene_relay_requested: true,
             fan_ambassadors_requested: true,
             social_proof_relay_requested: true,
             ..ShowGrowthHistory::default()

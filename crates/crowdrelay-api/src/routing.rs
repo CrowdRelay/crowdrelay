@@ -47,6 +47,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(push::disable_endpoint),
         )
         .route(
+            "/v1/staff/push/endpoints",
+            post(push::register_staff_endpoint),
+        )
+        .route(
+            "/v1/staff/push/endpoints/disable",
+            post(push::disable_staff_endpoint),
+        )
+        .route(
             "/v1/public/push/deliveries/{delivery_id}/ack",
             post(push::acknowledge_delivery),
         )
@@ -463,6 +471,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route(
             "/v1/admin/ecosystem/checklists/{event_slug}/{item_key}",
+            post(ecosystem::update_checklist),
+        )
+        .route(
+            "/v1/staff/ecosystem/checklists/{event_slug}",
+            get(ecosystem::show_checklist),
+        )
+        .route(
+            "/v1/staff/ecosystem/checklists/{event_slug}/{item_key}",
             post(ecosystem::update_checklist),
         )
         .route(

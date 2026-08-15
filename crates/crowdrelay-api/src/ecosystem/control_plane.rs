@@ -396,10 +396,10 @@ async fn load_checklist(
     ensure_checklist_defaults(state, event.id).await?;
     let items = sqlx::query_as::<_, ChecklistItem>(
         r#"
-        SELECT item_key, status, note, updated_at
+        SELECT item_key, section, sort_order, status, note, updated_at
         FROM show_checklist_items
         WHERE workspace_id = $1 AND event_id = $2
-        ORDER BY item_key
+        ORDER BY sort_order, item_key
         "#,
     )
     .bind(state.ticketing.workspace_id().into_uuid())
@@ -422,21 +422,35 @@ async fn ensure_checklist_defaults(
 ) -> Result<(), EcosystemError> {
     sqlx::query(
         r#"
-        INSERT INTO show_checklist_items (workspace_id, event_id, item_key, status)
-        SELECT $1, $2, defaults.item_key, 'pending'
+        INSERT INTO show_checklist_items (
+            workspace_id, event_id, item_key, section, sort_order, status
+        )
+        SELECT $1, $2, defaults.item_key, defaults.section, defaults.sort_order, 'pending'
         FROM (VALUES
-            ('announcement_published'),
-            ('ticketing_verified'),
-            ('staff_assigned'),
-            ('offline_snapshot_ready'),
-            ('gate_device_charged'),
-            ('backup_device_ready'),
-            ('network_tested'),
-            ('guestlist_checked'),
-            ('post_show_reconciliation'),
-            ('post_show_report')
-        ) AS defaults(item_key)
-        ON CONFLICT (workspace_id, event_id, item_key) DO NOTHING
+            ('laptop_charged_packed', 'gear', 10),
+            ('setlist_ready', 'show_files', 20),
+            ('show_files_backup_ready', 'show_files', 30),
+            ('merch_packed', 'gear', 40),
+            ('rack_cables_instruments_packed', 'gear', 50),
+            ('instrument_spares_packed', 'gear', 60),
+            ('stage_outfit_packed', 'gear', 70),
+            ('wireless_checked', 'gear', 80),
+            ('power_and_chargers_packed', 'gear', 90),
+            ('camera_handoff_ready', 'media', 110),
+            ('venue_schedule_confirmed', 'logistics', 130),
+            ('tech_rider_confirmed', 'logistics', 140),
+            ('staff_assigned', 'logistics', 150),
+            ('guestlist_checked', 'logistics', 160),
+            ('offline_snapshot_ready', 'gate', 210),
+            ('gate_device_charged', 'gate', 220),
+            ('backup_device_ready', 'gate', 230),
+            ('network_tested', 'gate', 240),
+            ('post_show_reconciliation', 'post_show', 310),
+            ('post_show_report', 'post_show', 320)
+        ) AS defaults(item_key, section, sort_order)
+        ON CONFLICT (workspace_id, event_id, item_key) DO UPDATE
+        SET section = EXCLUDED.section,
+            sort_order = EXCLUDED.sort_order
         "#,
     )
     .bind(state.ticketing.workspace_id().into_uuid())
@@ -559,9 +573,10 @@ async fn emit_due_inner(
     let emitted = sqlx::query_scalar::<_, i64>(
         r#"
         WITH due AS (
-            SELECT event.id AS event_id, event.title, event.starts_at,
+            SELECT event.id AS event_id, event.slug AS event_slug, event.title, event.starts_at,
                    CASE
-                       WHEN event.starts_at BETWEEN now() + interval '6 days' AND now() + interval '8 days' THEN 'week'
+                       WHEN event.starts_at BETWEEN now() + interval '6 days 18 hours' AND now() + interval '7 days' THEN 'week'
+                       WHEN event.starts_at BETWEEN now() + interval '42 hours' AND now() + interval '48 hours' THEN 'two_days'
                        WHEN event.starts_at BETWEEN now() + interval '18 hours' AND now() + interval '30 hours' THEN 'day'
                        WHEN event.starts_at BETWEEN now() + interval '90 minutes' AND now() + interval '3 hours' THEN 'gate'
                        WHEN event.starts_at BETWEEN now() - interval '8 hours' AND now() - interval '1 hour' THEN 'followup'
@@ -576,12 +591,14 @@ async fn emit_due_inner(
                    1,
                    jsonb_build_object(
                        'event_id', due.event_id,
+                       'event_slug', due.event_slug,
                        'event_title', due.title,
                        'starts_at', due.starts_at,
                        'checklist', due.phase,
                        'severity', CASE WHEN due.phase = 'gate' THEN 'warning' ELSE 'info' END,
                        'summary', CASE due.phase
                            WHEN 'week' THEN 'Tydzień do koncertu: domknij sprzedaż, komunikację i obsadę.'
+                           WHEN 'two_days' THEN 'Dwa dni do koncertu: domknij checklistę sprzętu, plików, merchu i stroju.'
                            WHEN 'day' THEN 'Dzień do koncertu: pobierz snapshot offline i sprawdź guestlistę.'
                            WHEN 'gate' THEN 'Bramka zaraz rusza: urządzenia, backup i sieć muszą być gotowe.'
                            ELSE 'Po koncercie: uruchom reconciliation i raport wydarzenia.'
@@ -596,7 +613,38 @@ async fn emit_due_inner(
                     AND emission.event_id = due.event_id
                     AND emission.phase = due.phase
               )
-            RETURNING id, payload
+            RETURNING id, workspace_id, payload
+        ), inserted_push AS (
+            INSERT INTO fan_push_deliveries (
+                workspace_id, fan_id, audience_kind, endpoint_id,
+                source_kind, source_id, title, body, target_path,
+                collapse_key, status, available_at
+            )
+            SELECT inserted.workspace_id,
+                   NULL,
+                   'staff',
+                   endpoint.id,
+                   'show_checklist',
+                   inserted.id,
+                   CASE inserted.payload ->> 'checklist'
+                       WHEN 'week' THEN 'VIRYA · koncert za 7 dni'
+                       WHEN 'two_days' THEN 'VIRYA · koncert za 2 dni'
+                       ELSE 'VIRYA · checklista koncertowa'
+                   END,
+                   (inserted.payload ->> 'event_title') || ' — otwórz checklistę i odhacz przygotowania.',
+                   '/staff/checklist?event=' || (inserted.payload ->> 'event_slug'),
+                   'show-checklist:' || (inserted.payload ->> 'event_id') || ':' || (inserted.payload ->> 'checklist'),
+                   'queued',
+                   now()
+            FROM inserted_events inserted
+            JOIN fan_push_endpoints endpoint
+              ON endpoint.workspace_id = inserted.workspace_id
+             AND endpoint.audience_kind = 'staff'
+             AND endpoint.active
+             AND endpoint.invalidated_at IS NULL
+            WHERE inserted.payload ->> 'checklist' IN ('week', 'two_days')
+            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+            RETURNING 1
         ), emissions AS (
             INSERT INTO show_notification_emissions (
                 workspace_id, event_id, phase, outbox_event_id

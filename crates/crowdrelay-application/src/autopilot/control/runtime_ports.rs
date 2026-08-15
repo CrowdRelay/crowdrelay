@@ -37,6 +37,7 @@ pub struct ManagerBookingPolicySummary {
     pub source: String,
     pub source_revision: Option<String>,
     pub version: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub synced_at: Option<OffsetDateTime>,
 }
 
@@ -172,6 +173,7 @@ pub struct ProviderActionCorrelation {
     pub subject_id: uuid::Uuid,
     pub executor_id: String,
     pub provider_reference: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub occurred_at: OffsetDateTime,
 }
 
@@ -196,6 +198,7 @@ pub struct RecordExecutorHeartbeat {
 pub struct ExecutorHeartbeatMutation {
     pub executor_id: String,
     pub capability_count: usize,
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
 }
 
@@ -229,7 +232,9 @@ pub struct ReleaseComponentSummary {
     /// component populates these fields; private workflow JSON never enters the
     /// release ledger read model.
     pub workflow_attestation_sha: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub workflow_attested_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
     pub stale: bool,
 }
@@ -258,6 +263,7 @@ pub struct ReleaseLedgerOverview {
 pub struct ReleaseComponentMutation {
     pub component_key: String,
     pub environment: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
 }
 

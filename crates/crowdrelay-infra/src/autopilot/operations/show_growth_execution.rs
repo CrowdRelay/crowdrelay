@@ -71,6 +71,8 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "google_event_visibility_via_bandsintown_distribution",
                 "youtube_official_artist_concert_visibility_via_bandsintown_distribution",
                 "apple_music_maps_shazam_visibility_via_bandsintown_distribution",
+                "amazon_music_event_visibility_via_bandsintown_distribution",
+                "songkick_partner_distribution_health_deezer_bandcamp_soundcloud",
                 "venue_calendar_or_newsletter",
                 "local_city_or_culture_calendar",
                 "relevant_free_scene_calendar"
@@ -83,6 +85,8 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "treat_bandsintown_as_one_canonical_distribution_source_not_five_duplicate_manual_posts",
                 "use_songkick_tourbox_as_an_independent_free_discovery_graph_when_artist_access_is_available",
                 "verify_downstream_distribution_health_and_return_drift_as_manual_steps",
+                "verify_bandsintown_artist_links_for_spotify_youtube_official_artist_channel_and_apple_music_before_assuming_distribution",
+                "verify_youtube_sell_tickets_setting_when_official_artist_channel_is_available",
                 "respect_destination_terms_and_moderation",
                 "never_bypass_captcha_login_or_email_verification",
                 "return_public_urls_for_every_success",
@@ -102,7 +106,9 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "bandsintown_event_widget_follow_or_signup",
                 "bandsintown_qr_for_social_or_physical_materials",
                 "bandsintown_presale_signup_or_event_reminder_when_applicable",
-                "virya_signal_primary_signup_on_owned_surfaces"
+                "virya_signal_primary_signup_on_owned_surfaces",
+                "virya_signal_signup_qr_for_merch_table_current_shows_and_permitted_partner_surfaces",
+                "canonical_show_qr_with_campaign_attribution"
             ],
             "rules": [
                 "free_or_owned_channels_only",
@@ -111,6 +117,9 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "use_canonical_event_facts_and_ticket_url",
                 "if_presale_is_not_configured_do_not_invent_dates_codes_or_access",
                 "if_ticketing_is_not_on_sale_use_supported_reminder_or_signup_only_when_truthfully_applicable",
+                "physical_or_partner_qr_placement_requires_venue_or_owner_permission",
+                "owned_qr_must_preserve_normal_signal_consent_and_use_campaign_attribution_when_available",
+                "do_not_purchase_printing_or_placement_without_separate_authority",
                 "never_bypass_login_2fa_captcha_or_email_verification",
                 "return_manual_steps_for_human_only_provider_configuration",
                 "never_purchase_promotion_or_upgrade_without_separate_approval"
@@ -129,6 +138,8 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "instagram_collab_or_co_post_when_partner_accepts",
                 "support_or_bill_cross_post",
                 "scene_community_listing",
+                "ask_verified_scene_beacon_for_one_warm_intro_to_one_relevant_local_scene_contact",
+                "moderated_local_metal_group_or_forum_listing_when_rules_allow",
                 "ticket_giveaway_with_verified_partner",
                 "shared_short_form_live_clip"
             ],
@@ -139,8 +150,59 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "actual_outreach_must_pass_beacon_policy_and_suppression",
                 "one_concrete_ask_per_message",
                 "share_one_canonical_ticket_url",
+                "warm_intro_requires_beacon_consent_and_no_private_contact_data_is_forwarded_without_permission",
+                "new_intro_target_enters_as_unverified_beacon_until_public_identity_or_direct_consent_is_verified",
+                "community_posts_are_manual_or_moderator_approved_and_never_automated_cold_spam",
+                "never_bypass_group_rules_posting_limits_or_moderation",
                 "no_reciprocal_commitment_outside_configured_authority"
             ]
+        }),
+        ShowGrowthLever::GrassrootsSceneRelay => json!({
+            "objective": "activate a small trusted local scene graph around the show so reach comes through real relationships rather than anonymous cold promotion",
+            "surface_classes": [
+                "verified_local_metal_media_or_podcast",
+                "independent_radio_or_student_music_programme",
+                "record_store",
+                "rehearsal_studio",
+                "music_shop_or_luthier",
+                "tattoo_alt_fashion_or_scene_business",
+                "local_live_photographer_or_video_creator",
+                "venue_promoter_or_bill_partner",
+                "moderated_local_metal_community",
+                "student_or_city_culture_channel",
+                "fan_ambassador_with_existing_local_trust"
+            ],
+            "preferred_actions": [
+                "one_useful_cross_post_or_listing",
+                "one_consent_based_warm_intro",
+                "one_physical_signal_or_show_qr_placement_with_owner_permission",
+                "one_ticket_giveaway_with_verified_partner_and_explicit_terms",
+                "one_permissioned_live_clip_or_photo_relay",
+                "one_local_story_angle_tied_to_the_show_or_scene"
+            ],
+            "rules": [
+                "verified_existing_beacons_may_be_contacted_only_through_normal_beacon_policy",
+                "new_public_candidates_are_ingested_as_unverified_before_any_outreach",
+                "prefer_depth_of_relationship_over_number_of_contacts",
+                "one_concrete_ask_per_person_or_community",
+                "warm_intro_requires_explicit_consent_from_the_introducing_beacon",
+                "never_forward_private_contact_data_without_permission",
+                "community_posting_is_manual_or_moderator_approved_only",
+                "physical_qr_or_flyer_placement_requires_owner_or_venue_permission",
+                "use_campaign_attributed_canonical_urls_or_signal_qr_where_supported",
+                "fan_generated_media_requires_explicit_repost_permission_and_credit",
+                "do_not_offer_money_freebies_or_reciprocity_not_already_authorised",
+                "no_scraping_no_mass_dm_no_automated_cold_group_posting"
+            ],
+            "relationship_state_contract": {
+                "edge_kinds": ["warm_intro", "cross_promo", "community_access", "bill_partner", "venue_partner", "creator_relay"],
+                "statuses": ["candidate", "permission_requested", "introduced", "active", "declined", "suppressed"],
+                "measure": ["attributable_reach", "clicks", "rsvps", "ticket_orders"]
+            },
+            "receipt_contract": {
+                "metadata": ["activated_relationships", "warm_intros", "public_urls", "qr_placements", "manual_steps", "skipped_with_reason"],
+                "manual_steps_must_include": ["destination", "what_to_do", "why_it_matters", "consent_or_moderation_requirement"]
+            }
         }),
         ShowGrowthLever::FreeFanChannelPush => json!({
             "objective": "use free provider-native follower channels to put this show in front of already-relevant listeners without paid reach",
@@ -148,17 +210,31 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "bandsintown_location_targeted_post",
                 "bandsintown_event_rsvp_targeted_post",
                 "bandsintown_email_builder_local_followers_within_verified_free_quota",
-                "spotify_artist_pick_for_event"
+                "bandsintown_waitlist_or_event_rsvp_reactivation_when_applicable",
+                "bandsintown_featured_video_or_live_clip_when_available",
+                "spotify_artist_pick_for_event",
+                "youtube_artist_post_to_existing_subscribers_when_posts_are_available",
+                "youtube_official_artist_concert_tab_and_ticket_shelf_health",
+                "youtube_fan_shorts_using_official_virya_audio_as_permissioned_social_proof",
+                "bandcamp_community_message_to_existing_followers_when_available"
             ],
             "rules": [
                 "free_quota_or_free_surface_only",
                 "verify_current_provider_quota_before_sending_email",
+                "bandsintown_email_builder_free_allowance_is_currently_10000_emails_per_artist_per_month_but_must_be_reverified_before_each_campaign",
+                "if_show_is_sold_out_use_provider_waitlist_or_rsvp_reactivation_only_when_truthfully_available",
                 "never_use_bandsintown_boost_or_promoted_campaign_without_separate_paid_approval",
                 "do_not_import_signal_contacts_into_bandsintown_for_this_action",
                 "target_only_existing_provider_followers_or_event_rsvps_by_location_or_event",
+                "reuse_a_current_high_quality_live_clip_instead_of_creating_low_signal_content_for_quota",
                 "one_canonical_ticket_url",
                 "use_only_verified_event_facts_and_approved_copy",
                 "spotify_artist_pick_is_a_human_provider_configuration_step_unless_an_official_supported_api_exists",
+                "youtube_posts_and_bandcamp_community_are_existing_audience_surfaces_not_cold_outreach",
+                "verify_youtube_official_artist_channel_concerts_and_ticket_shelf_instead_of_assuming_delivery",
+                "fan_shorts_are_opt_in_creative_actions_and_never_require_or_pressure_private_fans_to_publish",
+                "youtube_or_bandcamp_account_actions_are_manual_steps_unless_an_official_supported_api_exists",
+                "never_import_or_scrape_contacts_to_expand_these_provider_audiences",
                 "never_bypass_login_2fa_captcha_or_email_verification",
                 "return_manual_steps_when_provider_ui_action_is_required"
             ],
@@ -174,6 +250,7 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "verified_patronage_or_media_partner",
                 "strong_current_live_video",
                 "real_live_photo_or_crowd_moment",
+                "fan_generated_live_photo_or_clip_with_explicit_repost_permission",
                 "verified_festival_final_or_award_fact"
             ],
             "rules": [
@@ -181,6 +258,8 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "never_invent_quotes_reviews_streams_or_sold_out_claims",
                 "adapt_format_per_channel_without_changing_claims",
                 "prefer_live_video_real_crowd_or_verified_press_proof",
+                "fan_generated_media_requires_explicit_repost_permission_and_credit",
+                "never_repurpose_private_or_closed_group_media_without_permission",
                 "if_no_verified_proof_exists_use_local_story_context_not_fake_social_proof",
                 "one_canonical_ticket_cta"
             ]
@@ -271,6 +350,41 @@ async fn execute_first_party_growth_campaign(
 
     let suffix = lever.as_str().replace('_', "-");
     let slug = format!("viryaos-{}-{}", event.0, suffix);
+    let content = match lever {
+        ShowGrowthLever::FanAmbassadors => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "ticket_url": event.4,
+            "venue": event.3,
+            "managed_by": "viryaos_show_growth",
+            "relay_pack": {
+                "objective": "help a small number of proven local fans reach real metalheads through personal trust rather than mass promotion",
+                "preferred_actions": [
+                    "send_a_personal_invite_to_one_to_three_relevant_friends",
+                    "share_the_canonical_event_link_in_a_personal_story_or_feed",
+                    "share_in_a_local_metal_community_only_when_the_fan_is_already_a_member_and_rules_allow_it",
+                    "make_an_optional_short_using_official_virya_audio_if_the_fan_already_creates_public_content",
+                    "share_the_campaign_attributed_signal_or_show_qr_at_an_in_person_scene_touchpoint_when_permission_exists",
+                    "use_the_fans_existing_referral_identity_when_the_delivery_template_supports_it"
+                ],
+                "rules": [
+                    "no_mass_dm_or_contact_scraping",
+                    "no_automated_group_posting",
+                    "no_fake_urgency_or_fake_social_proof",
+                    "one_canonical_ticket_url",
+                    "respect_community_rules_and_moderators",
+                    "do_not_create_new_financial_incentives_without_separate_authority"
+                ]
+            }
+        }),
+        _ => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "ticket_url": event.4,
+            "venue": event.3,
+            "managed_by": "viryaos_show_growth"
+        }),
+    };
     let segment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO audience_segments(workspace_id,slug,name,description,filter,active)
@@ -291,16 +405,7 @@ async fn execute_first_party_growth_campaign(
         r#"
         INSERT INTO communication_campaigns(
             workspace_id,segment_id,slug,name,channel,template_key,content
-        ) VALUES(
-            $1,$2,$3,$4,'email',$5,
-            jsonb_build_object(
-                'event_id',$6::uuid,
-                'lever',$7::text,
-                'ticket_url',$8::text,
-                'venue',$9::text,
-                'managed_by','viryaos_show_growth'
-            )
-        )
+        ) VALUES($1,$2,$3,$4,'email',$5,$6)
         ON CONFLICT(workspace_id,slug) DO UPDATE SET template_key=communication_campaigns.template_key
         RETURNING id,status
         "#,
@@ -310,10 +415,7 @@ async fn execute_first_party_growth_campaign(
     .bind(&slug)
     .bind(format!("{} · {}", event.1, lever.as_str()))
     .bind(template_key)
-    .bind(event_id.into_uuid())
-    .bind(lever.as_str())
-    .bind(&event.4)
-    .bind(&event.3)
+    .bind(content)
     .fetch_one(&mut **tx)
     .await
     .map_err(map_sqlx)?;

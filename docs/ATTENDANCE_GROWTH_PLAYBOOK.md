@@ -32,7 +32,9 @@ The `show_growth` bounded context evaluates one snapshot per upcoming show. Each
 - verify a Bandsintown event with the canonical ticket link, because that same listing can feed Spotify live-event discovery when the ticketing partner is not integrated directly;
 - verify Spotify live-event visibility instead of assuming that a Bandsintown/ticketing sync propagated correctly;
 - verify a **Songkick Tourbox** event with the canonical ticket link when VIRYA has artist/manager access; Songkick provides another free discovery graph and can distribute artist-managed dates to partners such as Deezer, Bandcamp and SoundCloud;
-- treat Bandsintown as a **publish-once distribution source** for supported downstream discovery surfaces (Spotify plus Google/YouTube/Apple/Shazam) instead of creating duplicate manual posts; verify propagation health and return only real drift/human-only fixes;
+- treat Bandsintown as a **publish-once distribution source** for supported downstream discovery surfaces (Spotify plus Google/YouTube/Apple/Shazam/Amazon Music) instead of creating duplicate manual posts; verify propagation health and return only real drift/human-only fixes;
+- verify that the Bandsintown artist profile is actually linked to the correct Spotify, YouTube Official Artist Channel and Apple Music artist identities; for YouTube, verify the account-level concert/ticketing setting instead of assuming distribution is enabled;
+- after Songkick Tourbox publication, verify its downstream discovery graph (including Deezer/Bandcamp/SoundCloud where supported) rather than counting the Tourbox form submission itself as reach;
 - submit/update the venue calendar/newsletter where that surface is free and appropriate;
 - discover and submit relevant free city/culture and scene calendars for the event market;
 - deduplicate before publishing and return the public URLs as executor receipts;
@@ -48,6 +50,7 @@ After distribution is healthy, use provider-native free capture surfaces without
 - keep **VIRYA Signal** as the primary signup/relationship CTA on owned VIRYA pages;
 - make sure the Bandsintown event has a usable Smart Link and canonical ticket/event facts;
 - use Bandsintown Follow/Signup/Widget capture where it is native and useful, plus its QR surface for printed/social material;
+- generate a campaign-attributed **VIRYA Signal / canonical show QR** for the merch table, current shows and partner surfaces where the owner/venue explicitly permits placement; keep the normal Signal consent flow and never buy printing/placement under the free-growth authority;
 - when a real presale exists, configure the free Bandsintown presale signup/alert flow; when ticketing is not yet on sale, prefer a truthful supported reminder instead of inventing a presale;
 - never import Signal contacts into Bandsintown merely to inflate a provider list. Any third-party import needs its own explicit consent/policy decision;
 - provider login/2FA/CAPTCHA steps become precise `manual_steps` rather than brittle browser automation.
@@ -57,7 +60,8 @@ This gives VIRYA another discovery/follower graph while preserving the much more
 **Beacon discovery**
 
 - find local radio, press, TV, reviewers, creators, photographers, promoters, venues, scene partners, patrons and communities;
-- require a public source URL and a verifiable contact path;
+- prioritize real scene-trust surfaces: metal media/podcasts, independent music programmes, venue/promoter/support-band networks, record stores, rehearsal studios, music shops, tattoo/alternative-fashion scene businesses, student/culture portals, moderated metal communities and local live creators;
+- require a public source URL and a verifiable contact path; never scrape private member lists or personal data;
 - ingest discoveries as unverified candidates first;
 - only CrowdRelay may qualify/authorize them for contact.
 
@@ -72,11 +76,11 @@ Use verified venue, line-up, promoter and scene-partner Beacons to request **one
 - co-post/repost from the venue or promoter;
 - where the partner agrees, Facebook Page event co-host/calendar relay and an Instagram Collab/co-post so the event reaches the partner's existing local audience;
 - support-act / bill cross-promotion so every act contributes its local audience;
-- local scene/community listing;
+- local scene/community listing, including relevant moderated metal groups/forums only when the member/community rules allow it;
 - ticket giveaway with a verified partner;
 - a shared short-form live clip when the partner has a suitable channel.
 
-The executor cannot silently replace the requested offer with another one or promise reciprocal placement outside configured authority. The purpose is to borrow already-relevant local audiences, not to manufacture generic reach.
+The executor cannot silently replace the requested offer with another one or promise reciprocal placement outside configured authority. Community posting is manual or moderator-approved: no cold-bot posting, scraping, rule bypass or repetitive group spam. The purpose is to borrow already-relevant local audiences, not to manufacture generic reach.
 
 ### T-42 / T-28 / T-14: earned-media Beacon waves
 
@@ -99,7 +103,7 @@ Gemini may make the authorized message natural and locally relevant. It must not
 
 **Fan ambassadors**
 
-When there is enough local Signal/referral activity, activate people who have already demonstrated referral intent rather than mailing every subscriber. The CTA is concrete: bring/share with one relevant person, not “please spam your friends”.
+When there is enough local Signal/referral activity, activate people who have already demonstrated referral intent rather than mailing every subscriber. CrowdRelay now emits a small **relay pack** with the campaign: invite one to three people who genuinely like heavy music, share the one canonical event link on a personal surface, and optionally share it in a local metal community only when the fan is already a member and the rules permit it. Existing referral identity may be used by the delivery template; no scraped contacts, mass DMs, automated group posting or newly invented financial incentive is allowed. The CTA is concrete: bring/share with one relevant person, not “please spam your friends”.
 
 ### T-21: factual social-proof relay
 
@@ -119,7 +123,9 @@ Use free distribution to followers VIRYA has already earned on third-party live-
 
 - send/schedule a **Bandsintown Post** targeted to the event city or existing event RSVPs; provider-native posts can generate follower notifications without paid reach;
 - when the currently verified free quota allows it, use **Bandsintown Email Builder** for local/event-relevant followers. Never silently cross into paid Promoted Email/Boost;
+- reuse a strong current **live clip / Featured Video** on the provider surface when available; do not manufacture filler content just to occupy a slot;
 - create a human step for **Spotify Artist Pick** so the upcoming concert can sit at the top of the artist profile until the show. This is intentionally a guided operator action because it requires Spotify for Artists account access rather than an invented automation API;
+- when available, create a human step for a **YouTube artist Post** to the existing subscriber audience and a **Bandcamp Community** message to existing followers. These are earned-audience surfaces, not permission to scrape/import contacts or automate private/community posting;
 - use one canonical ticket URL and already-approved event/story facts;
 - record provider-confirmed send/schedule/reach metadata, or an explicit skip reason/manual step.
 
@@ -199,3 +205,7 @@ Merch is not falsely attributed to a show when the underlying purchase data cann
 - no autonomous paid placement;
 - no Gemini/LLM recipient selection or business-policy decisions;
 - provider-confirmed receipt is the external completion truth.
+### Warm intros and permissioned fan proof
+
+The free partner lane may ask a **verified local Beacon for one warm introduction** to a relevant scene contact. The introduction is consent-based: private contact details are never forwarded without permission, and a newly introduced destination remains unverified until its public identity or direct consent is established. Social proof can also reuse fan-shot live photos/clips, but only with explicit repost permission and credit; private or closed-group media is never harvested as campaign material.
+

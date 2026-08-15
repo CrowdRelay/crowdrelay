@@ -483,6 +483,22 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                                     "creator", "photographer", "promoter", "venue", "scene_partner",
                                     "patron", "community"
                                 ],
+                                "priority_source_classes": [
+                                    "local_metal_media_and_podcasts",
+                                    "independent_radio_and_music_programmes",
+                                    "venue_promoter_support_band_networks",
+                                    "record_stores_rehearsal_studios_and_music_shops",
+                                    "tattoo_alt_fashion_and_scene_businesses",
+                                    "student_culture_portals_and_local_event_calendars",
+                                    "moderated_metal_communities_and_forums",
+                                    "local_live_creators_photographers_and_reviewers"
+                                ],
+                                "discovery_rules": [
+                                    "prefer_people_and_places_with_existing_local_scene_trust_over_generic_reach",
+                                    "never_treat_generic_local_businesses_as_scene_relevant_without_public_evidence",
+                                    "community_candidates_must_have_public_rules_or_moderator_contact_when_available",
+                                    "do_not_scrape_private_member_lists_or_personal_contact_data"
+                                ],
                                 "callback_path": "/v1/admin/autopilot/beacons",
                                 "gemini_may_summarize_not_verify": true
                             }

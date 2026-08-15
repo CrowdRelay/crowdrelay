@@ -364,6 +364,51 @@ class ViryaOsAutopilotV1(unittest.TestCase):
             self.assertIn(f'"{context}"', model)
 
 
+    def test_autopilot_control_plane_dates_serialize_as_rfc3339_strings(self):
+        control = (APP_ROOT / "autopilot/control.rs").read_text()
+        runtime_ports = (APP_ROOT / "autopilot/control/runtime_ports.rs").read_text()
+        for field in (
+            "guarded_until", "created_at", "approval_expires_at", "assignment_due_at",
+            "evaluated_at", "finished_at", "executor_reported_at", "starts_at", "due_at",
+        ):
+            self.assertRegex(
+                control,
+                rf'#\[serde\(with = "time::serde::rfc3339(?:::option)?"\)\]\s+pub {field}:',
+                field,
+            )
+        for field in ("synced_at", "occurred_at", "expires_at", "workflow_attested_at", "observed_at"):
+            self.assertRegex(
+                runtime_ports,
+                rf'#\[serde\(with = "time::serde::rfc3339(?:::option)?"\)\]\s+pub {field}:',
+                field,
+            )
+        openapi = OPENAPI.read_text()
+        for field in ("guarded_until", "created_at", "approval_expires_at", "assignment_due_at", "evaluated_at", "starts_at", "due_at"):
+            self.assertRegex(openapi, rf'{field}: .*format: date-time')
+
+    def test_action_payload_schema_covers_internal_team_email_kind(self):
+        openapi = OPENAPI.read_text()
+        control = (APP_ROOT / "autopilot/control.rs").read_text()
+        self.assertIn("send_team_assignment_email", openapi)
+        self.assertIn("SendTeamAssignmentEmail", APP_TEXT)
+        self.assertIn('serialize_with = "serialize_control_payload"', control)
+        serializer = control.split("fn serialize_control_payload", 1)[1].split("/// Human-actionable", 1)[0]
+        self.assertIn('object.remove("recipient_email")', serializer)
+        self.assertIn('"release_at"', serializer)
+        self.assertIn('"due_at"', serializer)
+        self.assertIn("Rfc3339", serializer)
+
+    def test_current_autopilot_contexts_fit_the_openapi_overview_capacity(self):
+        model = (APP_ROOT / "autopilot/model.rs").read_text()
+        context_impl = model.split("impl AutopilotContext", 1)[1].split("/// Typed bounded-context", 1)[0]
+        contexts = set(re.findall(r'Self::\w+ => "([a-z0-9_]+)"', context_impl))
+        openapi = OPENAPI.read_text()
+        schema = openapi.split("AutopilotOverview:", 1)[1].split("AutopilotAuthorityRequest:", 1)[0]
+        capacity = re.search(r"policies:\s+type: array\s+maxItems: (\d+)", schema)
+        self.assertIsNotNone(capacity)
+        self.assertGreaterEqual(int(capacity.group(1)), len(contexts))
+        self.assertEqual(len(contexts), 17)
+
     def test_chief_of_staff_deadline_radar_reuses_existing_domain_facts(self):
         infra = INFRA_TEXT
         openapi = OPENAPI.read_text()

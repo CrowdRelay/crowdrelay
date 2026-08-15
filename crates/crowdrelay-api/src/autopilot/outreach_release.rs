@@ -14,14 +14,14 @@ pub async fn upsert_beacon(
             .contact_email
             .as_ref()
             .is_some_and(|value| !valid_booking_email(value))
-        || request
-            .destination_url
-            .as_ref()
-            .is_some_and(|value| value.len() > 2048)
-        || request
-            .source_url
-            .as_ref()
-            .is_some_and(|value| value.len() > 2048)
+        || request.destination_url.as_ref().is_some_and(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || trimmed.len() > 2048
+        })
+        || request.source_url.as_ref().is_some_and(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || trimmed.len() > 2048
+        })
         || !request.metadata.is_object();
     if invalid {
         return Problem::bad_request(request_id(&headers))

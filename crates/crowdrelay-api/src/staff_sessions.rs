@@ -354,19 +354,33 @@ pub async fn revoke_device_session(
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    let result = sqlx::query(
+    let result = sqlx::query_scalar::<_, i64>(
         r#"
-        UPDATE staff_device_sessions
-        SET revoked_at = COALESCE(revoked_at, now())
-        WHERE workspace_id = $1 AND id = $2
+        WITH revoked AS (
+            UPDATE staff_device_sessions
+            SET revoked_at = COALESCE(revoked_at, now())
+            WHERE workspace_id = $1 AND id = $2
+            RETURNING token_hash
+        ), invalidated_push AS (
+            UPDATE fan_push_endpoints endpoint
+            SET active = false, invalidated_at = COALESCE(invalidated_at, now()),
+                last_error_code = 'staff_session_revoked', updated_at = now()
+            FROM revoked
+            WHERE endpoint.workspace_id = $1
+              AND endpoint.audience_kind = 'staff'
+              AND endpoint.principal_hash = revoked.token_hash
+              AND endpoint.active
+            RETURNING endpoint.id
+        )
+        SELECT count(*)::bigint FROM revoked
         "#,
     )
     .bind(state.ticketing.workspace_id().into_uuid())
     .bind(session_id)
-    .execute(state.ticketing.pool())
+    .fetch_one(state.ticketing.pool())
     .await;
     match result {
-        Ok(result) if result.rows_affected() == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(1) => StatusCode::NO_CONTENT.into_response(),
         Ok(_) => Problem::not_found(request_id_value)
             .private()
             .into_response(),

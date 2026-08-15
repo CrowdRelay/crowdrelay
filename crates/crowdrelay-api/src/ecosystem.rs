@@ -145,6 +145,8 @@ pub struct ListFindingsQuery {
 #[derive(Debug, Serialize, FromRow)]
 pub struct ChecklistItem {
     item_key: String,
+    section: String,
+    sort_order: i32,
     status: String,
     note: Option<String>,
     #[serde(with = "time::serde::rfc3339")]

@@ -4811,6 +4811,108 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/push/endpoints:
+    post:
+      operationId: registerStaffPushEndpoint
+      summary: Register or rotate one push endpoint for the authenticated staff device
+      description: Uses the staff bearer identity and stores a staff audience subscription independently from any fan subscription on the same installation.
+      security: [{ staffBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, transport, endpoint]
+              properties:
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                transport: { type: string, enum: [android_fcm, web_push] }
+                endpoint: { type: string, minLength: 1, maxLength: 4096 }
+                p256dh: { type: [string, 'null'], maxLength: 256 }
+                auth: { type: [string, 'null'], maxLength: 256 }
+      responses:
+        '200':
+          description: Staff endpoint accepted without echoing provider material.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [registered]
+                properties: { registered: { type: boolean, const: true } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/push/endpoints/disable:
+    post:
+      operationId: disableStaffPushEndpoint
+      summary: Disable one push installation for the authenticated staff bearer
+      security: [{ staffBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, transport]
+              properties:
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                transport: { type: string, enum: [android_fcm, web_push] }
+      responses:
+        '200':
+          description: Staff endpoint disabled or already absent.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [registered]
+                properties: { registered: { type: boolean, const: false } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/ecosystem/checklists/{event_slug}:
+    get:
+      operationId: getStaffShowChecklist
+      summary: Read the canonical pre-gig checklist for one show
+      security: [{ staffBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/EventSlug' }]
+      responses:
+        '200': { description: Show identity and canonical shared checklist items. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/ecosystem/checklists/{event_slug}/{item_key}:
+    post:
+      operationId: updateStaffShowChecklistItem
+      summary: Update one canonical pre-gig checklist item as authenticated staff
+      security: [{ staffBearer: [] }]
+      parameters:
+      - { $ref: '#/components/parameters/EventSlug' }
+      - in: path
+        name: item_key
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [pending, done, blocked, skipped] }
+                note: { type: [string, 'null'], maxLength: 1000 }
+      responses:
+        '200': { description: Updated canonical checklist. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /staff/ops/show-snapshot/{event_slug}:
     get:
       operationId: getStaffShowSnapshot
@@ -6096,7 +6198,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email]
       additionalProperties: true
     TeamAssigneeSummary:
       type: object
@@ -6192,7 +6294,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 15
+          maxItems: 17
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array
