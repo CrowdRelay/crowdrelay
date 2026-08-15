@@ -15,7 +15,7 @@ use crowdrelay_domain::{
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use time::OffsetDateTime;
 
 use super::{
@@ -32,6 +32,7 @@ pub struct AutopilotPolicySummary {
     pub minimum_confidence: Confidence,
     pub max_actions_24h: u32,
     pub version: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub guarded_until: Option<OffsetDateTime>,
     pub guardrail_reason: Option<String>,
 }
@@ -53,6 +54,48 @@ pub struct TeamAssigneeSummary {
     pub display_name: String,
 }
 
+fn serialize_control_payload<S>(
+    payload: &AutopilotActionPayload,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut value = serde_json::to_value(payload).map_err(serde::ser::Error::custom)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        serde::ser::Error::custom("autopilot payload must serialize as an object")
+    })?;
+
+    // The durable action enum intentionally retains its original Serde shape so
+    // historical JSONB rows remain readable. The operator API is a separate
+    // boundary: date-times are RFC3339 strings and executor-only recipient PII
+    // is never exposed to Signal or another control-plane client.
+    match payload {
+        AutopilotActionPayload::ExecuteReleaseMilestone { release_at, .. } => {
+            let formatted = release_at
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(serde::ser::Error::custom)?;
+            object.insert(
+                "release_at".to_owned(),
+                serde_json::Value::String(formatted),
+            );
+        }
+        AutopilotActionPayload::SendTeamAssignmentEmail { due_at, .. } => {
+            object.remove("recipient_email");
+            let formatted = (*due_at)
+                .map(|value| value.format(&time::format_description::well_known::Rfc3339))
+                .transpose()
+                .map_err(serde::ser::Error::custom)?;
+            object.insert(
+                "due_at".to_owned(),
+                formatted.map_or(serde_json::Value::Null, serde_json::Value::String),
+            );
+        }
+        _ => {}
+    }
+    value.serialize(serializer)
+}
+
 /// Human-actionable Autopilot job waiting in the approval queue.
 #[derive(Clone, Debug, Serialize)]
 pub struct PendingAutopilotAction {
@@ -61,10 +104,14 @@ pub struct PendingAutopilotAction {
     pub action_kind: String,
     pub subject_kind: String,
     pub subject_id: uuid::Uuid,
+    #[serde(serialize_with = "serialize_control_payload")]
     pub payload: AutopilotActionPayload,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub approval_expires_at: Option<OffsetDateTime>,
     pub assignee: Option<TeamAssigneeSummary>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub assignment_due_at: Option<OffsetDateTime>,
 }
 
@@ -77,6 +124,7 @@ pub struct RecentAutopilotDecision {
     pub confidence: Confidence,
     pub disposition: PolicyDisposition,
     pub reason: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub evaluated_at: OffsetDateTime,
 }
 
@@ -103,12 +151,15 @@ pub struct RecentAutopilotAction {
     pub subject_id: uuid::Uuid,
     pub status: String,
     pub attempt_count: u32,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub finished_at: Option<OffsetDateTime>,
     pub last_error_kind: Option<String>,
     pub executor_status: Option<String>,
     pub executor_id: Option<String>,
     pub provider_reference: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub executor_reported_at: Option<OffsetDateTime>,
     pub manual_steps: Vec<AutopilotManualStep>,
 }
@@ -126,6 +177,7 @@ pub struct RecentAutopilotEffect {
     pub delta_basis_points: i32,
     pub baseline_value: f64,
     pub observed_value: f64,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
 }
 
@@ -180,6 +232,7 @@ pub struct ChiefOfStaffShowTask {
     pub event_title: String,
     pub task_key: String,
     pub status: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub starts_at: OffsetDateTime,
 }
 
@@ -193,6 +246,7 @@ pub struct ChiefOfStaffAttentionItem {
     pub subject_id: uuid::Uuid,
     pub title: String,
     pub detail: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub due_at: OffsetDateTime,
     pub urgency: String,
 }
