@@ -135,6 +135,42 @@ compose() {
   docker compose --env-file "$env_file" --file "$compose_file" "$@"
 }
 
+runtime_owner_uid() {
+  if [[ -n "${SUDO_UID:-}" ]]; then
+    printf '%s\n' "$SUDO_UID"
+  else
+    id -u
+  fi
+}
+
+run_privileged() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+    return
+  fi
+  require_command sudo
+  sudo "$@"
+}
+
+prepare_runtime_file_permissions() {
+  local owner_uid runtime_gid bootstrap_file secrets_file file current_uid current_gid current_mode
+  owner_uid="$(runtime_owner_uid)"
+  runtime_gid="10001"
+  bootstrap_file="$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
+  secrets_file="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+
+  for file in "$bootstrap_file" "$secrets_file"; do
+    require_regular_file "$file"
+    current_uid="$(stat -c '%u' "$file")"
+    current_gid="$(stat -c '%g' "$file")"
+    current_mode="$(stat -c '%a' "$file")"
+    if [[ "$current_uid" != "$owner_uid" || "$current_gid" != "$runtime_gid" || "$current_mode" != "640" ]]; then
+      run_privileged chown "${owner_uid}:${runtime_gid}" "$file"
+      run_privileged chmod 0640 "$file"
+    fi
+  done
+}
+
 init_files() {
   if [[ ! -e "$LOCAL_CONFIG" ]]; then
     cp .crowdrelay.local.sh.example "$LOCAL_CONFIG"
@@ -225,6 +261,7 @@ verify() {
 }
 
 deploy() {
+  prepare_runtime_file_permissions
   doctor
   if ! docker network inspect "$CROWDRELAY_DOCKER_NETWORK" >/dev/null 2>&1; then
     if [[ "$CROWDRELAY_CREATE_NETWORK" == "true" ]]; then
@@ -306,7 +343,23 @@ archive="$2"
 mkdir -p "$install_dir"
 
 # Production secrets/config are server-owned. A code/image ship must never
-# silently replace them with the packager machine's local copies.
+# silently replace them with the packager machine's local copies. Runtime JSON
+# is owner-readable/writable and group-readable by the unprivileged container
+# identity (GID 10001); it is never made world-readable. Normalise legacy
+# 10001:10001/0400 files before preserving them so the SSH deploy user can
+# perform future ships without losing access.
+deploy_uid="$(id -u)"
+runtime_gid="10001"
+normalize_runtime_json() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  sudo chown "${deploy_uid}:${runtime_gid}" "$path"
+  sudo chmod 0640 "$path"
+}
+
+normalize_runtime_json "$install_dir/deploy/bootstrap.production.json"
+normalize_runtime_json "$install_dir/deploy/webhook-secrets.production.json"
+
 preserve_dir="$(mktemp -d)"
 cleanup() { rm -rf -- "$preserve_dir"; }
 trap cleanup EXIT
@@ -327,9 +380,9 @@ for rel in .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.producti
 done
 cd "$install_dir"
 chmod 700 crowdrelayctl
-chmod 600 .crowdrelay.local.sh deploy/.env.production deploy/bootstrap.production.json
-sudo chown 10001:10001 deploy/webhook-secrets.production.json
-sudo chmod 0400 deploy/webhook-secrets.production.json
+chmod 600 .crowdrelay.local.sh deploy/.env.production
+normalize_runtime_json "$install_dir/deploy/bootstrap.production.json"
+normalize_runtime_json "$install_dir/deploy/webhook-secrets.production.json"
 ./crowdrelayctl deploy
 REMOTE
 }
