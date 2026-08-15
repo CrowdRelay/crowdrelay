@@ -9,7 +9,6 @@ target/
 .vscode/
 coverage/
 *.pyc
-.venv/
 
 # Local operator state. Deployment-specific filenames belong in
 # .git/info/exclude so they are never documented by the public repository.
