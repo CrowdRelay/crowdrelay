@@ -50,6 +50,157 @@ fn workflow_attestation_evidence(
     (sha, attested_at, ready)
 }
 
+fn receipt_text<'a>(value: &'a Value, key: &str, max: usize) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= max)
+}
+
+fn receipt_count(value: &Value, key: &str) -> i64 {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .unwrap_or(0)
+}
+
+async fn record_show_growth_receipt(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+    metadata: &Value,
+    occurred_at: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    if let Some(surfaces) = metadata.get("surfaces").and_then(Value::as_array) {
+        if surfaces.len() > 12 {
+            return Err(RepositoryError::Unexpected);
+        }
+        for surface in surfaces {
+            let Some(surface_key) = receipt_text(surface, "surface_key", 96) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let Some(provider) = receipt_text(surface, "provider", 64) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let Some(surface_kind) = receipt_text(surface, "surface_kind", 32) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let Some(status) = receipt_text(surface, "status", 32) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let public_url = receipt_text(surface, "public_url", 2048);
+            let attribution_url = receipt_text(surface, "attribution_url", 2048);
+            let free_quota_remaining = surface
+                .get("free_quota_remaining")
+                .and_then(Value::as_i64)
+                .filter(|value| *value >= 0)
+                .and_then(|value| i32::try_from(value).ok());
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_show_growth_surfaces(
+                    workspace_id,event_id,surface_key,provider,surface_kind,status,
+                    public_url,attribution_url,free_quota_remaining,attributable_reach,
+                    attributed_clicks,attributed_rsvps,attributed_ticket_orders,
+                    last_checked_at,last_published_at,metadata
+                ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                    CASE WHEN $6 IN ('published','verified') THEN $14 ELSE NULL END,$15)
+                ON CONFLICT(workspace_id,event_id,surface_key) DO UPDATE SET
+                    provider=EXCLUDED.provider,
+                    surface_kind=EXCLUDED.surface_kind,
+                    status=EXCLUDED.status,
+                    public_url=COALESCE(EXCLUDED.public_url,viryaos_show_growth_surfaces.public_url),
+                    attribution_url=COALESCE(EXCLUDED.attribution_url,viryaos_show_growth_surfaces.attribution_url),
+                    free_quota_remaining=COALESCE(EXCLUDED.free_quota_remaining,viryaos_show_growth_surfaces.free_quota_remaining),
+                    attributable_reach=GREATEST(viryaos_show_growth_surfaces.attributable_reach,EXCLUDED.attributable_reach),
+                    attributed_clicks=GREATEST(viryaos_show_growth_surfaces.attributed_clicks,EXCLUDED.attributed_clicks),
+                    attributed_rsvps=GREATEST(viryaos_show_growth_surfaces.attributed_rsvps,EXCLUDED.attributed_rsvps),
+                    attributed_ticket_orders=GREATEST(viryaos_show_growth_surfaces.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
+                    last_checked_at=EXCLUDED.last_checked_at,
+                    last_published_at=COALESCE(EXCLUDED.last_published_at,viryaos_show_growth_surfaces.last_published_at),
+                    metadata=viryaos_show_growth_surfaces.metadata || EXCLUDED.metadata
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(surface_key)
+            .bind(provider)
+            .bind(surface_kind)
+            .bind(status)
+            .bind(public_url)
+            .bind(attribution_url)
+            .bind(free_quota_remaining)
+            .bind(receipt_count(surface, "attributable_reach"))
+            .bind(receipt_count(surface, "clicks"))
+            .bind(receipt_count(surface, "rsvps"))
+            .bind(receipt_count(surface, "ticket_orders"))
+            .bind(occurred_at)
+            .bind(surface.get("metadata").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({})))
+            .execute(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+        }
+    }
+
+    if let Some(activations) = metadata.get("activations").and_then(Value::as_array) {
+        if activations.len() > 12 {
+            return Err(RepositoryError::Unexpected);
+        }
+        for activation in activations {
+            let Some(kind) = receipt_text(activation, "activation_kind", 32) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let Some(destination_key) = receipt_text(activation, "destination_key", 240) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let Some(status) = receipt_text(activation, "status", 32) else {
+                return Err(RepositoryError::Unexpected);
+            };
+            let beacon_id = receipt_text(activation, "beacon_id", 64)
+                .and_then(|value| uuid::Uuid::parse_str(value).ok());
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_grassroots_activations(
+                    workspace_id,event_id,beacon_id,activation_kind,destination_key,status,
+                    canonical_url,public_receipt_url,attributable_reach,attributed_clicks,
+                    attributed_rsvps,attributed_ticket_orders,receipt,created_at,updated_at
+                ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+                ON CONFLICT(workspace_id,event_id,activation_kind,destination_key) DO UPDATE SET
+                    beacon_id=COALESCE(EXCLUDED.beacon_id,viryaos_grassroots_activations.beacon_id),
+                    status=EXCLUDED.status,
+                    canonical_url=COALESCE(EXCLUDED.canonical_url,viryaos_grassroots_activations.canonical_url),
+                    public_receipt_url=COALESCE(EXCLUDED.public_receipt_url,viryaos_grassroots_activations.public_receipt_url),
+                    attributable_reach=GREATEST(viryaos_grassroots_activations.attributable_reach,EXCLUDED.attributable_reach),
+                    attributed_clicks=GREATEST(viryaos_grassroots_activations.attributed_clicks,EXCLUDED.attributed_clicks),
+                    attributed_rsvps=GREATEST(viryaos_grassroots_activations.attributed_rsvps,EXCLUDED.attributed_rsvps),
+                    attributed_ticket_orders=GREATEST(viryaos_grassroots_activations.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
+                    receipt=viryaos_grassroots_activations.receipt || EXCLUDED.receipt,
+                    updated_at=EXCLUDED.updated_at
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(event_id.into_uuid())
+            .bind(beacon_id)
+            .bind(kind)
+            .bind(destination_key)
+            .bind(status)
+            .bind(receipt_text(activation, "canonical_url", 2048))
+            .bind(receipt_text(activation, "public_receipt_url", 2048))
+            .bind(receipt_count(activation, "attributable_reach"))
+            .bind(receipt_count(activation, "clicks"))
+            .bind(receipt_count(activation, "rsvps"))
+            .bind(receipt_count(activation, "ticket_orders"))
+            .bind(activation.get("receipt").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({})))
+            .bind(occurred_at)
+            .execute(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+        }
+    }
+    Ok(())
+}
+
 const RELEASE_COMPONENTS: [&str; 6] = [
     "crowdrelay-api",
     "crowdrelay-worker",
@@ -358,6 +509,16 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .ok_or(RepositoryError::NotFound)?;
                         let payload = serde_json::from_value::<AutopilotActionPayload>(payload_value)
                             .map_err(|_| RepositoryError::Unexpected)?;
+                        if let AutopilotActionPayload::RequestShowGrowth { event_id, .. } = &payload {
+                            record_show_growth_receipt(
+                                &mut transaction,
+                                workspace_id,
+                                *event_id,
+                                &command.metadata,
+                                command.occurred_at,
+                            )
+                            .await?;
+                        }
                         if payload_requires_executor(&payload) {
                             schedule_effect_measurement(
                                 &mut transaction,

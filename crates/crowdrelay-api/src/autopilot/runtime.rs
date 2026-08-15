@@ -128,6 +128,16 @@ fn text_ok(value: &str, max: usize) -> bool {
 fn object_metadata(value: &serde_json::Value) -> bool {
     value.as_object().is_some_and(|map| map.len() <= 24)
         && serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 2_048)
+        && ["surfaces", "activations"].into_iter().all(|key| {
+            value.get(key).is_none_or(|items| {
+                items.as_array().is_some_and(|items| {
+                    items.len() <= 12
+                        && items
+                            .iter()
+                            .all(|item| item.as_object().is_some_and(|map| map.len() <= 20))
+                })
+            })
+        })
 }
 
 fn valid_sha256(value: &str) -> bool {
