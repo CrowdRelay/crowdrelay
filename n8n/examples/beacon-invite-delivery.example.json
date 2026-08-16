@@ -1,0 +1,23 @@
+{
+  "name": "CrowdRelay — example reviewed Latarnik invitation delivery",
+  "nodes": [
+    {"parameters": {}, "id": "b2000000-0000-4000-8000-000000000001", "name": "Called by verified ingress", "type": "n8n-nodes-base.executeWorkflowTrigger", "typeVersion": 1.1, "position": [0,0]},
+    {"parameters": {"jsCode": "const e=$json; if(!e||e.type!=='viryaos.beacon.invite_delivery_requested'||e.version!==1||!e.data?.job_id) throw new Error('Unsupported event'); return [{json:{event_id:e.id,job_id:e.data.job_id}}];"}, "id": "b2000000-0000-4000-8000-000000000002", "name": "Validate invitation job", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [240,0]},
+    {"parameters": {"method": "POST", "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/beacon/invite-delivery-jobs/' + $json.job_id + '/claim' }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"}]}, "sendBody": true, "contentType":"raw", "rawContentType":"application/json", "body":"={{ JSON.stringify({workerId:$env.VIRYA_N8N_EXECUTOR_ID}) }}", "options":{"timeout":10000}}, "id":"b2000000-0000-4000-8000-000000000003", "name":"Claim once and mint response-only invites", "type":"n8n-nodes-base.httpRequest", "typeVersion":4.2, "position":[500,0]},
+    {"parameters": {"jsCode": "const claim=$json; const inv=claim.batch?.invitations??[]; return inv.map(x=>({json:{job_id:claim.jobId,claim_token:claim.claimToken,to:x.contactEmail,subject:x.delivery.subject,text:x.delivery.text}}));"}, "id":"b2000000-0000-4000-8000-000000000004", "name":"Split server-owned invitation copy", "type":"n8n-nodes-base.code", "typeVersion":2, "position":[760,0]},
+    {"parameters": {"method":"POST","url":"={{ $env.VIRYA_MAIL_DELIVERY_URL }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.VIRYA_MAIL_DELIVERY_TOKEN }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({to:$json.to,subject:$json.subject,text:$json.text}) }}","options":{"timeout":15000}}, "id":"b2000000-0000-4000-8000-000000000005", "name":"Send invitation — no automatic retry", "type":"n8n-nodes-base.httpRequest", "typeVersion":4.2, "position":[1020,0], "retryOnFail":false},
+    {"parameters": {"jsCode": "const claim=$('Claim once and mint response-only invites').first().json; return [{json:{job_id:claim.jobId,claim_token:claim.claimToken,status:'completed',provider_summary:{delivered:$input.all().length}}}];"}, "id":"b2000000-0000-4000-8000-000000000006", "name":"Build terminal receipt", "type":"n8n-nodes-base.code", "typeVersion":2, "position":[1280,0]},
+    {"parameters": {"method":"POST","url":"={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/beacon/invite-delivery-jobs/' + $json.job_id + '/report' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({claimToken:$json.claim_token,status:$json.status,providerSummary:$json.provider_summary}) }}","options":{"timeout":10000}}, "id":"b2000000-0000-4000-8000-000000000007", "name":"Report terminal delivery", "type":"n8n-nodes-base.httpRequest", "typeVersion":4.2, "position":[1540,0]}
+  ],
+  "connections": {
+    "Called by verified ingress":{"main":[[{"node":"Validate invitation job","type":"main","index":0}]]},
+    "Validate invitation job":{"main":[[{"node":"Claim once and mint response-only invites","type":"main","index":0}]]},
+    "Claim once and mint response-only invites":{"main":[[{"node":"Split server-owned invitation copy","type":"main","index":0}]]},
+    "Split server-owned invitation copy":{"main":[[{"node":"Send invitation — no automatic retry","type":"main","index":0}]]},
+    "Send invitation — no automatic retry":{"main":[[{"node":"Build terminal receipt","type":"main","index":0}]]},
+    "Build terminal receipt":{"main":[[{"node":"Report terminal delivery","type":"main","index":0}]]}
+  },
+  "active": false,
+  "settings":{"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
+  "tags":[]
+}

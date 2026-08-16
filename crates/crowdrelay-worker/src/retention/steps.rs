@@ -365,3 +365,38 @@ async fn scrub_terminal_outbox_secrets(
     .map_err(RetentionRunError::Database)?;
     Ok(result.rows_affected())
 }
+
+async fn scrub_beacon_release_delivery_pii(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT recipient.workspace_id,recipient.campaign_id,recipient.beacon_id
+            FROM viryaos_beacon_release_recipients AS recipient
+            WHERE recipient.status='delivered'
+              AND recipient.pii_purged_at IS NULL
+              AND recipient.delivery_details_purge_after IS NOT NULL
+              AND recipient.delivery_details_purge_after <= now()
+            ORDER BY recipient.delivery_details_purge_after,recipient.workspace_id,recipient.campaign_id,recipient.beacon_id
+            FOR UPDATE OF recipient SKIP LOCKED
+            LIMIT $1
+        )
+        UPDATE viryaos_beacon_release_recipients AS recipient
+        SET recipient_name=NULL,recipient_phone=NULL,parcel_locker_code=NULL,
+            pii_purged_at=now(),delivery_details_purge_after=NULL
+        FROM candidates
+        WHERE recipient.workspace_id=candidates.workspace_id
+          AND recipient.campaign_id=candidates.campaign_id
+          AND recipient.beacon_id=candidates.beacon_id
+          AND recipient.status='delivered'
+          AND recipient.pii_purged_at IS NULL
+        "#,
+    )
+    .bind(batch_size)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}

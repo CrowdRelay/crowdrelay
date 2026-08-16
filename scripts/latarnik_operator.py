@@ -14,6 +14,7 @@ import sys
 import urllib.error
 import urllib.request
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ def request_json(
     *,
     bearer: str,
     payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> Any:
     body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
     headers = {
@@ -56,6 +58,8 @@ def request_json(
     }
     if body is not None:
         headers["Content-Type"] = "application/json"
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     req = urllib.request.Request(
         f"{api_base()}/{path.lstrip('/')}",
         data=body,
@@ -80,8 +84,20 @@ def request_json(
         raise OperatorError(f"non-JSON response from {path}") from error
 
 
-def admin_request(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
-    return request_json(method, path, bearer=env("CROWDRELAY_ADMIN_API_KEY"), payload=payload)
+def admin_request(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    idempotency_key: str | None = None,
+) -> Any:
+    return request_json(
+        method,
+        path,
+        bearer=env("CROWDRELAY_ADMIN_API_KEY"),
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
 
 
 def internal_request(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
@@ -105,6 +121,34 @@ def secure_dump(value: Any, output: str | None) -> None:
         except OSError:
             pass
     print(f"wrote sensitive Latarnik output to {path} (mode 0600)", file=sys.stderr)
+
+
+def uuid_value(value: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a UUID") from error
+
+
+def https_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value.strip())
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise argparse.ArgumentTypeError("must be an HTTPS URL without embedded credentials")
+    return value.strip()
+
+
+def mutation_key(args: argparse.Namespace, label: str) -> str:
+    explicit = (getattr(args, "idempotency_key", None) or "").strip()
+    if explicit:
+        if len(explicit) > 200 or len(explicit) < 8:
+            raise OperatorError("--idempotency-key must be 8..200 characters")
+        return explicit
+    generated = f"latarnik-{label}-{uuid.uuid4()}"
+    print(
+        f"idempotency-key={generated} (reuse this exact key if the result is ambiguous)",
+        file=sys.stderr,
+    )
+    return generated
 
 
 def bounded_int(minimum: int, maximum: int):
@@ -190,9 +234,102 @@ def emit_wave(args: argparse.Namespace) -> Any:
     )
 
 
+def release_list(_: argparse.Namespace) -> Any:
+    return admin_request("GET", "admin/autopilot/beacon-release-campaigns")
+
+
+def release_create(args: argparse.Namespace) -> Any:
+    return admin_request(
+        "POST",
+        "admin/autopilot/beacon-release-campaigns",
+        {"slug": args.slug, "title": args.title, "sku": args.sku, "claimDeadline": args.claim_deadline},
+        idempotency_key=mutation_key(args, "release-create"),
+    )
+
+
+def release_launch(args: argparse.Namespace) -> Any:
+    return admin_request(
+        "POST",
+        f"admin/autopilot/beacon-release-campaigns/{args.campaign_id}/launch",
+        {},
+        idempotency_key=mutation_key(args, "release-launch"),
+    )
+
+
+def release_close(args: argparse.Namespace) -> Any:
+    return admin_request(
+        "POST",
+        f"admin/autopilot/beacon-release-campaigns/{args.campaign_id}/close",
+        {},
+        idempotency_key=mutation_key(args, "release-close"),
+    )
+
+
+def release_recipients(args: argparse.Namespace) -> Any:
+    return admin_request("GET", f"admin/autopilot/beacon-release-campaigns/{args.campaign_id}/recipients")
+
+
+def release_state(args: argparse.Namespace) -> Any:
+    return admin_request(
+        "POST",
+        f"admin/autopilot/beacon-release-campaigns/{args.campaign_id}/recipients/{args.beacon_id}",
+        {"status": args.status},
+        idempotency_key=mutation_key(args, "release-recipient"),
+    )
+
+
+def network(_: argparse.Namespace) -> Any:
+    return admin_request("GET", "admin/autopilot/beacon-network")
+
+
+def network_discover(args: argparse.Namespace) -> Any:
+    return admin_request(
+        "POST",
+        "admin/autopilot/beacon-network",
+        {"action": "discover", "countryCode": args.country_code, "targetCount": args.target_count},
+        idempotency_key=mutation_key(args, "network-discover"),
+    )
+
+
+def network_approve(args: argparse.Namespace) -> Any:
+    if not args.source_verified or not args.marketing_email_consent_confirmed:
+        raise OperatorError("approval requires --source-verified and --marketing-email-consent-confirmed")
+    return admin_request(
+        "POST",
+        "admin/autopilot/beacon-network",
+        {
+            "action": "approve",
+            "beaconId": args.beacon_id,
+            "sourceVerified": True,
+            "marketingEmailConsentConfirmed": True,
+            "consentEvidenceUrl": args.consent_evidence_url,
+        },
+        idempotency_key=mutation_key(args, "network-approve"),
+    )
+
+
+def network_invite(args: argparse.Namespace) -> Any:
+    beacon_ids = list(dict.fromkeys(args.beacon_id or []))
+    if not beacon_ids:
+        raise OperatorError("network-invite requires at least one --beacon-id")
+    return admin_request(
+        "POST",
+        "admin/autopilot/beacon-network",
+        {
+            "action": "queue_invites",
+            "beaconIds": beacon_ids,
+            "ttlDays": args.ttl_days,
+            "radiusKm": args.radius_km,
+            "locale": args.locale,
+        },
+        idempotency_key=mutation_key(args, "network-invite"),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Operate CrowdRelay Signal Latarnik")
     parser.add_argument("--output", help="JSON output path; invite files are created as 0600 (use - for stdout)")
+    parser.add_argument("--idempotency-key", help="reuse the exact key when retrying an ambiguous mutation")
     sub = parser.add_subparsers(dest="command", required=True)
 
     command = sub.add_parser("candidates", help="ranked verified Beacons eligible for invitation")
@@ -233,6 +370,56 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--limit", type=bounded_int(1, 100), default=20)
     command.add_argument("--lead-days", type=bounded_int(1, 180), default=60)
     command.set_defaults(handler=emit_wave)
+
+    command = sub.add_parser("release-list", help="list physical-release Latarnik campaigns and pool summary")
+    command.set_defaults(handler=release_list)
+
+    command = sub.add_parser("release-create", help="create one physical-release campaign draft")
+    command.add_argument("--slug", required=True)
+    command.add_argument("--title", required=True)
+    command.add_argument("--sku", required=True)
+    command.add_argument("--claim-deadline", required=True, help="future RFC3339 timestamp")
+    command.set_defaults(handler=release_create)
+
+    command = sub.add_parser("release-launch", help="snapshot the active Latarnik pool and launch one release")
+    command.add_argument("campaign_id", type=uuid_value)
+    command.set_defaults(handler=release_launch)
+
+    command = sub.add_parser("release-close", help="close one release and free unused reservations")
+    command.add_argument("campaign_id", type=uuid_value)
+    command.set_defaults(handler=release_close)
+
+    command = sub.add_parser("release-recipients", help="list fulfillment recipients for one release")
+    command.add_argument("campaign_id", type=uuid_value)
+    command.set_defaults(handler=release_recipients)
+
+    command = sub.add_parser("release-state", help="advance or cancel one Latarnik fulfillment recipient")
+    command.add_argument("campaign_id", type=uuid_value)
+    command.add_argument("beacon_id", type=uuid_value)
+    command.add_argument("--status", choices=("prepared", "sent", "delivered", "cancelled"), required=True)
+    command.set_defaults(handler=release_state)
+
+    command = sub.add_parser("network", help="show discovery, review candidates and invite jobs")
+    command.set_defaults(handler=network)
+
+    command = sub.add_parser("network-discover", help="request public-source Latarnik research; does not grant outreach consent")
+    command.add_argument("--country-code", choices=("PL",), default="PL")
+    command.add_argument("--target-count", type=bounded_int(1, 500), default=100)
+    command.set_defaults(handler=network_discover)
+
+    command = sub.add_parser("network-approve", help="approve one reviewed candidate with explicit consent evidence")
+    command.add_argument("beacon_id", type=uuid_value)
+    command.add_argument("--source-verified", action="store_true", required=True)
+    command.add_argument("--marketing-email-consent-confirmed", action="store_true", required=True)
+    command.add_argument("--consent-evidence-url", type=https_url, required=True)
+    command.set_defaults(handler=network_approve)
+
+    command = sub.add_parser("network-invite", help="queue invites for already approved reviewed candidates")
+    command.add_argument("--beacon-id", action="append", type=uuid_value, required=True)
+    command.add_argument("--ttl-days", type=bounded_int(1, 90), default=14)
+    command.add_argument("--radius-km", type=bounded_int(1, 500), default=100)
+    command.add_argument("--locale", choices=("pl", "en"), default="pl")
+    command.set_defaults(handler=network_invite)
     return parser
 
 

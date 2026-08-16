@@ -52,8 +52,19 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 | `viryaos.outreach.requested` | deliver the already-authorized press, review, patronage or endorsement message |
 | `viryaos.beacon.discovery_requested` | scout public local sources for the requested event/market (metal media/podcasts, radio/music programmes, venue/promoter/bill networks, scene businesses, student/culture portals, moderated communities and local live creators) and return only source-backed Beacon candidates through the admin Beacon upsert; Gemini may summarize, never invent/verify a destination |
 | `viryaos.beacon.outreach_requested` | deliver the already-authorized local Beacon pitch/follow-up; personalize tone/local hook only from supplied verified facts |
+| `viryaos.beacon.release_delivery_confirmation_requested` | send CrowdRelay-owned “Dziękujemy Latarniku…” physical-release confirmation mail to an already active Latarnik; never add shipment PII to workflow data |
+| `viryaos.beacon.network_discovery_requested` | research public Polish sources, return source-backed candidates through the protected discovery-ingest endpoint, generate an XLSX review sheet, and report the run; candidates remain `verified=false` + `accepts_outreach=false` |
+| `viryaos.beacon.invite_delivery_requested` | claim one reviewed invitation job exactly once, send the server-owned invitation copy, then report `completed`, `failed`, or `ambiguous`; never auto-resend an ambiguous non-idempotent provider send |
 | `viryaos.show_growth.requested` | execute one already-selected external attendance lever; verify free listings/distribution, configure free audience-capture surfaces, use provider-native free fan pushes (Bandsintown Posts/free-quota Email Builder + current live/Featured Video + Spotify Artist Pick + YouTube Post/Bandcamp Community manual steps when available), verify Bandsintown/Songkick downstream distribution, run verified-Beacon partner cross-promo and factual social proof; return public receipts or explicit human `manual_steps`, never buy placement or invent proof |
 | `viryaos.team.assignment_email_requested` | send the assigned band member one friendly what/why/deadline/link email; initial notification and reminders share the same provider-confirmed execution contract |
+
+### Latarnik network acquisition boundary
+
+`beacon.network.discovery` automates research, not permission. The public workflow may only use public sources and must ingest discovered rows through `/v1/internal/beacon/network-discovery/{run_id}/candidates`; that endpoint forces new rows to remain unverified and non-contactable. The XLSX is an operator review artifact. A discovered row becomes invite-eligible only after an operator records both source verification and explicit marketing-email consent evidence in CrowdRelay. A public email address by itself is never treated as consent.
+
+Invitation delivery uses `/v1/internal/beacon/invite-delivery-jobs/{job_id}/claim`. The claim is one-shot and returns raw Signal invite URLs only in the response; the outbox carries only `job_id`. If the provider result becomes uncertain after any send attempt, report `ambiguous` and stop: do not retry the job automatically.
+
+Physical-release mail is separate from acquisition. CrowdRelay determines the active release pool, reserves stock and owns the exact mail copy; n8n only performs provider delivery after `beacon.release.mail` has passed production attestation.
 
 For Gmail-backed booking/outreach, provider correlation is durable in CrowdRelay's execution-report ledger. The private executor writes the Gmail `threadId` as `provider_reference`, and inbound monitoring resolves that reference through CrowdRelay before reporting the deterministic `received` disposition. n8n keeps no durable business-correlation map and does not infer positive/negative intent.
 

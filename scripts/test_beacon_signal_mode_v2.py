@@ -58,16 +58,16 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
     def test_batch_invites_are_bounded_hashed_and_revoke_old_sessions(self) -> None:
         self.assertIn("const MAX_BATCH_INVITES: usize = 200", LIFECYCLE)
         self.assertIn("payload.beacon_ids.len() > MAX_BATCH_INVITES", ADMIN)
-        self.assertIn("token_hash(&invite_token)", ADMIN)
+        self.assertIn("token_hash(&invite_token)", LIFECYCLE)
         self.assertNotIn("invite_token text", MIGRATION)
         self.assertNotIn("INSERT INTO outbox_events", ADMIN.split("pub async fn create_invite_batch", 1)[1].split("pub async fn admin_dashboard", 1)[0])
-        self.assertIn("SET revoked_at=COALESCE(revoked_at, now())", ADMIN)
-        self.assertIn("COALESCE(profile.status, '') <> 'active'", ADMIN)
+        self.assertIn("SET revoked_at=COALESCE(revoked_at, now())", LIFECYCLE)
+        self.assertIn("COALESCE(profile.status, '') <> 'active'", LIFECYCLE)
         self.assertIn("InviteDeliveryCopy", API)
         self.assertIn("version: 2", API)
         self.assertIn("version: u8", LIFECYCLE)
-        self.assertIn("version: 2", ADMIN)
-        self.assertIn("invite_delivery_copy", ADMIN)
+        self.assertIn("version: 2", LIFECYCLE)
+        self.assertIn("invite_delivery_copy", LIFECYCLE)
         self.assertIn("Virya Signal — zaproszenie do Latarnika", INVITE_COPY)
         self.assertIn("Virya Signal — Beacon invitation", INVITE_COPY)
 
@@ -138,7 +138,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
             self.assertIn(route, ROUTING)
             self.assertIn(route.replace("/v1", "", 1) + ":", OPENAPI)
         self.assertIn('("beacon_signal_v2", true)', META)
-        self.assertIn("SCHEMA_VERSION: u32 = 57", META)
+        self.assertIn("SCHEMA_VERSION: u32 = 59", META)
 
     def test_leave_is_channel_scoped_unless_global_dnc_is_explicit(self) -> None:
         self.assertIn("do_not_contact: bool", LIFECYCLE)

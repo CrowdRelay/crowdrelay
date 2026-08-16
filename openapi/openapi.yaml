@@ -642,6 +642,60 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/releases:
+    get:
+      operationId: listBeaconPhysicalReleases
+      summary: List physical Virya releases allocated to the authenticated Latarnik
+      security: [{ beaconBearer: [] }]
+      responses:
+        '200': { description: Physical-release campaigns and the Latarnik fulfillment state. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/releases/{campaign_id}/delivery:
+    post:
+      operationId: confirmBeaconPhysicalReleaseDelivery
+      summary: Confirm one release recipient and Paczkomat destination
+      security: [{ beaconBearer: [] }]
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [recipientName, recipientPhone, parcelLockerCode]
+              properties:
+                recipientName: { type: string, minLength: 1, maxLength: 160 }
+                recipientPhone: { type: string, minLength: 7, maxLength: 32 }
+                parcelLockerCode: { type: string, minLength: 1, maxLength: 32, pattern: '^[A-Za-z0-9_-]+$' }
+      responses:
+        '200': { description: Delivery destination confirmed for this release. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/releases/{campaign_id}/decline:
+    post:
+      operationId: declineBeaconPhysicalReleaseDelivery
+      summary: Decline one physical-release copy and release its inventory reservation
+      security: [{ beaconBearer: [] }]
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Release declined and the reserved unit returned to available campaign stock. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /beacon/me/press-room:
     get:
       operationId: getBeaconPressRoom
@@ -2302,6 +2356,171 @@ paths:
         '201': { description: Eligible one-time invitations with localized mail-ready copy; plaintext capabilities are response-only and ineligible rows are counted as skipped. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-network:
+    get:
+      operationId: getBeaconNetworkAcquisition
+      summary: Read Latarnik discovery runs, review queue and invitation delivery jobs
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Network acquisition state. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: mutateBeaconNetworkAcquisition
+      summary: Request discovery, approve a reviewed candidate, or queue reviewed invitations
+      description: Discovery never grants outreach permission. Approving a discovered candidate requires explicit source verification and marketing-email consent evidence.
+      security: [{ adminBearer: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action: { type: string, enum: [discover, approve, queue_invites] }
+                countryCode: { type: string, pattern: '^[A-Z]{2}$', default: PL }
+                targetCount: { type: integer, minimum: 1, maximum: 500, default: 100 }
+                beaconId: { type: string, format: uuid }
+                beaconIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+                sourceVerified: { type: boolean }
+                marketingEmailConsentConfirmed: { type: boolean }
+                consentEvidenceUrl: { type: string, format: uri, maxLength: 2048 }
+                ttlDays: { type: integer, minimum: 1, maximum: 30, default: 14 }
+                radiusKm: { type: integer, minimum: 10, maximum: 500, default: 100 }
+                locale: { type: string, pattern: '^[a-z]{2}(-[A-Z]{2})?$', default: pl }
+      responses:
+        '200': { description: Mutation replayed or candidate approved. }
+        '202': { description: Discovery or invitation delivery job queued. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-release-campaigns:
+    get:
+      operationId: listBeaconPhysicalReleaseCampaigns
+      summary: Read the active Latarnik release pool and physical-release campaigns
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Pool counts, campaigns and current recipient fulfillment state. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: createBeaconPhysicalReleaseCampaign
+      summary: Create a draft physical-release campaign for the Latarnik pool
+      security: [{ adminBearer: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [slug, title, sku, claimDeadline]
+              properties:
+                slug: { type: string, minLength: 1, maxLength: 128, pattern: '^[a-z0-9][a-z0-9_-]*$' }
+                title: { type: string, minLength: 1, maxLength: 200 }
+                sku: { type: string, minLength: 1, maxLength: 128 }
+                claimDeadline: { type: string, format: date-time }
+      responses:
+        '201': { description: Draft campaign created or idempotently replayed. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-release-campaigns/{campaign_id}/launch:
+    post:
+      operationId: launchBeaconPhysicalReleaseCampaign
+      summary: Snapshot the active Latarnik pool, reserve one copy each and queue confirmation mail
+      description: Launch is fail-closed unless every eligible release Latarnik is contactable and the selected SKU can cover the complete pool.
+      security: [{ adminBearer: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Campaign launched or idempotently replayed. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-release-campaigns/{campaign_id}/close:
+    post:
+      operationId: closeBeaconPhysicalReleaseCampaign
+      summary: Close a release campaign and free every unclaimed inventory reservation
+      security: [{ adminBearer: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Campaign closed or idempotently replayed. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-release-campaigns/{campaign_id}/recipients:
+    get:
+      operationId: listBeaconPhysicalReleaseRecipients
+      summary: Read fulfillment state and shipment details for one Latarnik release campaign
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Current recipient fulfillment rows. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-release-campaigns/{campaign_id}/recipients/{beacon_id}:
+    post:
+      operationId: updateBeaconPhysicalReleaseRecipient
+      summary: Advance or cancel one Latarnik physical-release shipment
+      security: [{ adminBearer: [] }]
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: campaign_id
+        required: true
+        schema: { type: string, format: uuid }
+      - in: path
+        name: beacon_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [prepared, sent, delivered, cancelled] }
+      responses:
+        '200': { description: Recipient state updated or idempotently replayed. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/beacon-signal:
     get:
@@ -5442,6 +5661,137 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/beacon/network-discovery/{run_id}/candidates:
+    post:
+      operationId: ingestBeaconNetworkDiscoveryCandidates
+      summary: Ingest public-source Latarnik candidates without granting outreach permission
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: run_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [candidates]
+              properties:
+                candidates:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [beaconKind, displayName, sourceUrl]
+                    properties:
+                      beaconKind: { type: string, enum: [radio, local_press, television, reviewer, creator, photographer, promoter, patron, community] }
+                      displayName: { type: string, minLength: 1, maxLength: 240 }
+                      contactEmail: { type: [string, 'null'], format: email, maxLength: 320 }
+                      destinationUrl: { type: [string, 'null'], format: uri, maxLength: 2048 }
+                      sourceUrl: { type: string, format: uri, maxLength: 2048 }
+                      cityId: { type: [string, 'null'], format: uuid }
+                      sourceNote: { type: [string, 'null'], maxLength: 1000 }
+                      relevanceBasisPoints: { type: [integer, 'null'], minimum: 0, maximum: 10000 }
+                      confidenceBasisPoints: { type: [integer, 'null'], minimum: 0, maximum: 10000 }
+      responses:
+        '200': { description: Candidates stored or refreshed as human-review-required and not contactable. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/beacon/network-discovery/{run_id}/report:
+    post:
+      operationId: reportBeaconNetworkDiscovery
+      summary: Finish a Latarnik discovery run and record the XLSX report identity
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: run_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status, discoveredCount]
+              properties:
+                status: { type: string, enum: [ready, failed] }
+                discoveredCount: { type: integer, minimum: 0 }
+                reportFilename: { type: [string, 'null'], maxLength: 240 }
+                reportSha256: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+                failureKind: { type: [string, 'null'], maxLength: 96 }
+      responses:
+        '200': { description: Discovery run finalized. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/beacon/invite-delivery-jobs/{job_id}/claim:
+    post:
+      operationId: claimBeaconInviteDeliveryJob
+      summary: Claim one reviewed Latarnik invitation batch and mint response-only invite URLs
+      description: A job is claimable exactly once. Plaintext invite capabilities are returned only in this response and are never stored in the outbox.
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: job_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [workerId]
+              properties:
+                workerId: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '200': { description: One-shot claim token plus server-owned invitation copy and response-only invite URLs. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/beacon/invite-delivery-jobs/{job_id}/report:
+    post:
+      operationId: reportBeaconInviteDeliveryJob
+      summary: Record terminal invitation delivery outcome without automatic resend
+      security: [{ commerceBearer: [] }]
+      parameters:
+      - in: path
+        name: job_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [claimToken, status]
+              properties:
+                claimToken: { type: string, minLength: 16, maxLength: 256 }
+                status: { type: string, enum: [completed, failed, ambiguous] }
+                providerSummary: { type: object, additionalProperties: true, default: {} }
+      responses:
+        '200': { description: Terminal outcome recorded or idempotently replayed. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/beacon/notifications/emit-due:
     post:

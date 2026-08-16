@@ -1,0 +1,287 @@
+{
+  "name": "CrowdRelay — example Latarnik PL public-source discovery + XLSX",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b1000000-0000-4000-8000-000000000001",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e=$json; if(!e||e.type!=='viryaos.beacon.network_discovery_requested'||e.version!==1) throw new Error('Unsupported event'); const d=e.data??{}; if(!d.run_id||!d.country_code||!Number.isInteger(d.target_count)) throw new Error('Invalid discovery request'); return [{json:{event_id:e.id,run_id:d.run_id,country_code:d.country_code,target_count:d.target_count}}];"
+      },
+      "id": "b1000000-0000-4000-8000-000000000002",
+      "name": "Validate discovery intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VIRYA_BEACON_PUBLIC_SEARCH_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.VIRYA_BEACON_PUBLIC_SEARCH_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({country_code:$json.country_code,target_count:$json.target_count,public_sources_only:true,categories:['metal media','music radio','podcast','reviewer','creator','photographer','promoter','community']}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000003",
+      "name": "Search configured public-source adapter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const req=$('Validate discovery intent').first().json; const rows=Array.isArray($json.candidates)?$json.candidates:[]; const clean=[]; for(const row of rows.slice(0,Math.min(req.target_count,500))){ const source=String(row.source_url??'').trim(); if(!source.startsWith('https://')) continue; const email=row.contact_email==null?null:String(row.contact_email).trim().toLowerCase(); const dest=row.destination_url==null?null:String(row.destination_url).trim(); if(!email&&!dest) continue; clean.push({beaconKind:String(row.beacon_kind??'').trim(),displayName:String(row.display_name??'').trim(),contactEmail:email,destinationUrl:dest,sourceUrl:source,cityId:row.city_id??null,sourceNote:row.source_note??null,relevanceBasisPoints:row.relevance_basis_points??5000,confidenceBasisPoints:row.confidence_basis_points??5000}); } return [{json:{...req,candidates:clean}}];"
+      },
+      "id": "b1000000-0000-4000-8000-000000000004",
+      "name": "Normalize source-backed candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/beacon/network-discovery/' + $json.run_id + '/candidates' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({candidates:$json.candidates}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000005",
+      "name": "Ingest as unverified review queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1020,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const src=$('Normalize source-backed candidates').first().json; return src.candidates.map(c=>({json:{Name:c.displayName,Type:c.beaconKind,Email:c.contactEmail??'',Destination:c.destinationUrl??'',Source:c.sourceUrl,Evidence:c.sourceNote??'',Review:'REQUIRED',MarketingConsent:'NOT CONFIRMED'}}));"
+      },
+      "id": "b1000000-0000-4000-8000-000000000006",
+      "name": "Build operator review rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "fileName": "latarnicy-pl-review.xlsx",
+          "headerRow": true,
+          "sheetName": "Latarnicy PL"
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000007",
+      "name": "Convert review to XLSX",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.VIRYA_OPERATOR_REVIEW_EMAIL }}",
+        "subject": "={{ 'Latarnicy PL — review ' + $('Validate discovery intent').first().json.run_id }}",
+        "emailType": "text",
+        "message": "Public-source candidates only. Review the source evidence and confirm explicit marketing-email consent in CrowdRelay before any invitation. The attached XLSX is not an authorization to send.",
+        "options": {
+          "appendAttribution": false,
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "=data"
+              }
+            ]
+          }
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000008",
+      "name": "Email XLSX to operator",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1740,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/beacon/network-discovery/' + $('Validate discovery intent').first().json.run_id + '/report' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({status:'ready',discoveredCount:$('Normalize source-backed candidates').first().json.candidates.length,reportFilename:'latarnicy-pl-review.xlsx'}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000009",
+      "name": "Report review artifact ready",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate discovery intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate discovery intent": {
+      "main": [
+        [
+          {
+            "node": "Search configured public-source adapter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search configured public-source adapter": {
+      "main": [
+        [
+          {
+            "node": "Normalize source-backed candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize source-backed candidates": {
+      "main": [
+        [
+          {
+            "node": "Ingest as unverified review queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest as unverified review queue": {
+      "main": [
+        [
+          {
+            "node": "Build operator review rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build operator review rows": {
+      "main": [
+        [
+          {
+            "node": "Convert review to XLSX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert review to XLSX": {
+      "main": [
+        [
+          {
+            "node": "Email XLSX to operator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email XLSX to operator": {
+      "main": [
+        [
+          {
+            "node": "Report review artifact ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "tags": []
+}

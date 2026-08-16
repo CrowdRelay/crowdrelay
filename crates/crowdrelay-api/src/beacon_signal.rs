@@ -21,6 +21,8 @@ use crate::{Problem, request_id};
 mod helpers;
 mod invite_copy;
 mod lifecycle;
+mod network;
+mod releases;
 use helpers::{
     clean_locale, clean_topics, random_token, token_hash, valid_invite_token, valid_radius,
 };
@@ -30,6 +32,16 @@ pub use lifecycle::{
     admin_press_requests, admin_resolve_press_request, admin_set_state, admin_upsert_press_asset,
     create_invite_batch, leave, my_press_requests, press_room, record_event_engagement,
     submit_coverage,
+};
+pub use network::{
+    admin_beacon_network, admin_beacon_network_action, internal_claim_invite_delivery_job,
+    internal_ingest_discovered_beacons, internal_report_discovery_run,
+    internal_report_invite_delivery_job,
+};
+pub use releases::{
+    admin_close_release_campaign, admin_create_release_campaign, admin_launch_release_campaign,
+    admin_list_release_campaigns, admin_list_release_recipients, admin_update_release_recipient,
+    confirm_release_delivery, decline_release_delivery, my_release_campaigns,
 };
 
 const PRIVATE_NO_STORE: &str = "private, no-store";

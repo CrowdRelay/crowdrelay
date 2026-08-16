@@ -107,6 +107,8 @@ impl RetentionWorker {
                                 outbox_payloads_scrubbed = stats.outbox_payloads_scrubbed,
                                 terminal_outbox_events_deleted =
                                     stats.terminal_outbox_events_deleted,
+                                beacon_release_delivery_pii_purged =
+                                    stats.beacon_release_delivery_pii_purged,
                                 "retention cycle completed"
                             );
                         }
@@ -180,6 +182,10 @@ impl RetentionWorker {
             outbox_payloads_scrubbed,
             RetentionStep::TerminalOutboxSecrets
         );
+        execute_step!(
+            beacon_release_delivery_pii_purged,
+            RetentionStep::BeaconReleaseDeliveryPii
+        );
 
         if let Some(error) = first_failure {
             return Err(error);
@@ -244,6 +250,9 @@ impl RetentionWorker {
             RetentionStep::TerminalOutboxSecrets => {
                 scrub_terminal_outbox_secrets(&mut transaction, self.batch_size).await?
             }
+            RetentionStep::BeaconReleaseDeliveryPii => {
+                scrub_beacon_release_delivery_pii(&mut transaction, self.batch_size).await?
+            }
         };
 
         transaction
@@ -265,6 +274,7 @@ enum RetentionStep {
     ExpiredAdmissionPasses,
     OldTerminalOutboxEvents,
     TerminalOutboxSecrets,
+    BeaconReleaseDeliveryPii,
 }
 
 impl RetentionStep {
@@ -279,6 +289,7 @@ impl RetentionStep {
             Self::ExpiredAdmissionPasses => "expired_admission_passes",
             Self::OldTerminalOutboxEvents => "old_terminal_outbox_events",
             Self::TerminalOutboxSecrets => "terminal_outbox_secrets",
+            Self::BeaconReleaseDeliveryPii => "beacon_release_delivery_pii",
         }
     }
 }
@@ -295,6 +306,7 @@ pub struct RetentionStats {
     pub expired_admission_passes_reconciled: u64,
     pub outbox_payloads_scrubbed: u64,
     pub terminal_outbox_events_deleted: u64,
+    pub beacon_release_delivery_pii_purged: u64,
 }
 
 impl RetentionStats {
@@ -309,6 +321,7 @@ impl RetentionStats {
             || self.expired_admission_passes_reconciled > 0
             || self.outbox_payloads_scrubbed > 0
             || self.terminal_outbox_events_deleted > 0
+            || self.beacon_release_delivery_pii_purged > 0
     }
 }
 

@@ -89,7 +89,7 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
         ):
             self.assertIn(route, ROUTING)
         self.assertIn('("beacon_signal_v1", true)', META)
-        self.assertIn("SCHEMA_VERSION: u32 = 57", META)
+        self.assertIn("SCHEMA_VERSION: u32 = 59", META)
 
 
 if __name__ == "__main__":

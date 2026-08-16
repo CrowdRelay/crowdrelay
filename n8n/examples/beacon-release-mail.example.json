@@ -1,0 +1,12 @@
+{
+  "name": "CrowdRelay — example Latarnik physical-release confirmation mail",
+  "nodes": [
+    {"parameters":{},"id":"b3000000-0000-4000-8000-000000000001","name":"Called by verified ingress","type":"n8n-nodes-base.executeWorkflowTrigger","typeVersion":1.1,"position":[0,0]},
+    {"parameters":{"jsCode":"const e=$json; if(!e||e.type!=='viryaos.beacon.release_delivery_confirmation_requested'||e.version!==1) throw new Error('Unsupported event'); const d=e.data??{}; if(!d.contact_email||!d.subject||!d.text||d.recipient_phone||d.parcel_locker_code||d.recipient_name) throw new Error('Invalid or shipment-PII-bearing release mail event'); return [{json:{event_id:e.id,to:d.contact_email,subject:d.subject,text:d.text}}];"},"id":"b3000000-0000-4000-8000-000000000002","name":"Validate server-owned release mail","type":"n8n-nodes-base.code","typeVersion":2,"position":[260,0]},
+    {"parameters":{"method":"POST","url":"={{ $env.VIRYA_MAIL_DELIVERY_URL }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.VIRYA_MAIL_DELIVERY_TOKEN }}"},{"name":"Idempotency-Key","value":"={{ $json.event_id }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({to:$json.to,subject:$json.subject,text:$json.text}) }}","options":{"timeout":15000}},"id":"b3000000-0000-4000-8000-000000000003","name":"Deliver confirmation mail","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[540,0]}
+  ],
+  "connections":{"Called by verified ingress":{"main":[[{"node":"Validate server-owned release mail","type":"main","index":0}]]},"Validate server-owned release mail":{"main":[[{"node":"Deliver confirmation mail","type":"main","index":0}]]}},
+  "active":false,
+  "settings":{"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
+  "tags":[]
+}

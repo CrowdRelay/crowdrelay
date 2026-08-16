@@ -35,119 +35,27 @@ pub async fn create_invite_batch(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
-    let eligible = sqlx::query_as::<_, (Uuid, String, String)>(
-        r#"
-        SELECT beacon.id, beacon.display_name, beacon.contact_email
-        FROM viryaos_beacons beacon
-        LEFT JOIN viryaos_beacon_signal_profiles profile
-          ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
-        WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
-          AND beacon.active AND beacon.verified AND beacon.accepts_outreach
-          AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
-          AND COALESCE(profile.status, '') <> 'active'
-        ORDER BY beacon.id
-        FOR UPDATE OF beacon
-        "#,
+    let response = match mint_invite_batch_tx(
+        &mut tx,
+        workspace_id,
+        &beacon_ids,
+        payload.ttl_days,
+        payload.radius_km,
+        &locale,
     )
-    .bind(workspace_id)
-    .bind(&beacon_ids)
-    .fetch_all(&mut *tx)
-    .await;
-    let eligible = match eligible {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "Beacon batch invite eligibility lookup failed");
-            return BeaconSignalError::Unavailable.response(request_id_value);
-        }
-    };
-
-    let expires_at = OffsetDateTime::now_utc() + Duration::days(payload.ttl_days);
-    let path = if locale.starts_with("pl") {
-        "pl/latarnik"
-    } else {
-        "latarnik"
-    };
-    let mut invitations = Vec::with_capacity(eligible.len());
-    let mut invited_ids = Vec::with_capacity(eligible.len());
-    for (beacon_id, display_name, contact_email) in eligible {
-        let Some(invite_token) = random_token::<24>() else {
-            return BeaconSignalError::Unavailable.response(request_id_value);
-        };
-        let result = sqlx::query(
-            r#"
-            INSERT INTO viryaos_beacon_signal_profiles (
-                workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
-                radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at,
-                paused_at, revoked_at
-            ) VALUES ($1,$2,'invited',$3,$4,$5,$6,true,1,now(),NULL,NULL)
-            ON CONFLICT (workspace_id, beacon_id) DO UPDATE SET
-                status='invited', invite_token_hash=EXCLUDED.invite_token_hash,
-                invite_expires_at=EXCLUDED.invite_expires_at, radius_km=EXCLUDED.radius_km,
-                locale=EXCLUDED.locale, nearby_gigs_enabled=true,
-                invite_count=viryaos_beacon_signal_profiles.invite_count + 1,
-                last_invited_at=now(), paused_at=NULL, revoked_at=NULL, updated_at=now()
-            WHERE viryaos_beacon_signal_profiles.status <> 'active'
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(beacon_id)
-        .bind(token_hash(&invite_token))
-        .bind(expires_at)
-        .bind(payload.radius_km)
-        .bind(&locale)
-        .execute(&mut *tx)
-        .await;
-        match result {
-            Ok(result) if result.rows_affected() == 1 => {
-                invited_ids.push(beacon_id);
-                let invite_url = format!("https://virya.music/{path}?invite={invite_token}");
-                let delivery = invite_delivery_copy(&locale, &display_name, &invite_url);
-                invitations.push(BatchInviteItem {
-                    beacon_id,
-                    display_name,
-                    contact_email,
-                    invite_url,
-                    delivery,
-                    expires_at,
-                });
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, %beacon_id, "Beacon batch invite persistence failed");
-                return BeaconSignalError::Unavailable.response(request_id_value);
-            }
-        }
-    }
-    if !invited_ids.is_empty()
-        && let Err(error) = sqlx::query(
-            r#"
-            UPDATE viryaos_beacon_signal_sessions
-            SET revoked_at=COALESCE(revoked_at, now())
-            WHERE workspace_id=$1 AND beacon_id=ANY($2) AND revoked_at IS NULL
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(&invited_ids)
-        .execute(&mut *tx)
-        .await
+    .await
     {
-        tracing::warn!(%error, "Beacon batch old-session revocation failed");
-        return BeaconSignalError::Unavailable.response(request_id_value);
-    }
+        Ok(value) => value,
+        Err(error) => return error.response(request_id_value),
+    };
     if let Err(error) = tx.commit().await {
         tracing::warn!(%error, "Beacon batch invite transaction failed to commit");
         return BeaconSignalError::Unavailable.response(request_id_value);
     }
-    let created = invitations.len();
     (
         StatusCode::CREATED,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-        Json(BatchInviteResponse {
-            version: 2,
-            created,
-            skipped: beacon_ids.len().saturating_sub(created),
-            invitations,
-        }),
+        Json(response),
     )
         .into_response()
 }

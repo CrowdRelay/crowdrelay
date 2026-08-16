@@ -45,6 +45,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route("/v1/beacon/me/press-room", get(beacon_signal::press_room))
         .route(
+            "/v1/beacon/me/releases",
+            get(beacon_signal::my_release_campaigns),
+        )
+        .route(
+            "/v1/beacon/me/releases/{campaign_id}/delivery",
+            post(beacon_signal::confirm_release_delivery),
+        )
+        .route(
+            "/v1/beacon/me/releases/{campaign_id}/decline",
+            post(beacon_signal::decline_release_delivery),
+        )
+        .route(
             "/v1/beacon/me/press-requests",
             get(beacon_signal::my_press_requests).post(beacon_signal::create_press_request),
         )
@@ -628,6 +640,48 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/beacon-coverage",
             get(beacon_signal::admin_coverage),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-release-campaigns",
+            get(beacon_signal::admin_list_release_campaigns)
+                .post(beacon_signal::admin_create_release_campaign),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-release-campaigns/{campaign_id}/launch",
+            post(beacon_signal::admin_launch_release_campaign),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-release-campaigns/{campaign_id}/close",
+            post(beacon_signal::admin_close_release_campaign),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-release-campaigns/{campaign_id}/recipients",
+            get(beacon_signal::admin_list_release_recipients),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-release-campaigns/{campaign_id}/recipients/{beacon_id}",
+            post(beacon_signal::admin_update_release_recipient),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-network",
+            get(beacon_signal::admin_beacon_network)
+                .post(beacon_signal::admin_beacon_network_action),
+        )
+        .route(
+            "/v1/internal/beacon/network-discovery/{run_id}/candidates",
+            post(beacon_signal::internal_ingest_discovered_beacons),
+        )
+        .route(
+            "/v1/internal/beacon/network-discovery/{run_id}/report",
+            post(beacon_signal::internal_report_discovery_run),
+        )
+        .route(
+            "/v1/internal/beacon/invite-delivery-jobs/{job_id}/claim",
+            post(beacon_signal::internal_claim_invite_delivery_job),
+        )
+        .route(
+            "/v1/internal/beacon/invite-delivery-jobs/{job_id}/report",
+            post(beacon_signal::internal_report_invite_delivery_job),
         )
         .route(
             "/v1/internal/beacon/notifications/emit-due",
