@@ -1,3 +1,5 @@
+> Superseded for release operation by [`signal-latarnik-v2.md`](signal-latarnik-v2.md). This file documents the original foundation slice.
+
 # Signal — Latarnik v1
 
 ## Product intent

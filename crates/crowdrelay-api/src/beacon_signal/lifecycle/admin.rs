@@ -62,7 +62,11 @@ pub async fn create_invite_batch(
     };
 
     let expires_at = OffsetDateTime::now_utc() + Duration::days(payload.ttl_days);
-    let path = if locale.starts_with("pl") { "pl/latarnik" } else { "latarnik" };
+    let path = if locale.starts_with("pl") {
+        "pl/latarnik"
+    } else {
+        "latarnik"
+    };
     let mut invitations = Vec::with_capacity(eligible.len());
     let mut invited_ids = Vec::with_capacity(eligible.len());
     for (beacon_id, display_name, contact_email) in eligible {
@@ -114,8 +118,8 @@ pub async fn create_invite_batch(
             }
         }
     }
-    if !invited_ids.is_empty() {
-        if let Err(error) = sqlx::query(
+    if !invited_ids.is_empty()
+        && let Err(error) = sqlx::query(
             r#"
             UPDATE viryaos_beacon_signal_sessions
             SET revoked_at=COALESCE(revoked_at, now())
@@ -126,10 +130,9 @@ pub async fn create_invite_batch(
         .bind(&invited_ids)
         .execute(&mut *tx)
         .await
-        {
-            tracing::warn!(%error, "Beacon batch old-session revocation failed");
-            return BeaconSignalError::Unavailable.response(request_id_value);
-        }
+    {
+        tracing::warn!(%error, "Beacon batch old-session revocation failed");
+        return BeaconSignalError::Unavailable.response(request_id_value);
     }
     if let Err(error) = tx.commit().await {
         tracing::warn!(%error, "Beacon batch invite transaction failed to commit");
@@ -191,10 +194,7 @@ pub async fn admin_candidates(
     }
 }
 
-pub async fn admin_dashboard(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let request_id_value = request_id(&headers);
     let profiles = sqlx::query_as::<_, AdminProfileView>(
         r#"
@@ -255,10 +255,22 @@ pub async fn admin_dashboard(
     .await;
     match profiles {
         Ok(profiles) => {
-            let active = profiles.iter().filter(|profile| profile.status == "active").count();
-            let invited = profiles.iter().filter(|profile| profile.status == "invited").count();
-            let paused = profiles.iter().filter(|profile| profile.status == "paused").count();
-            let revoked = profiles.iter().filter(|profile| profile.status == "revoked").count();
+            let active = profiles
+                .iter()
+                .filter(|profile| profile.status == "active")
+                .count();
+            let invited = profiles
+                .iter()
+                .filter(|profile| profile.status == "invited")
+                .count();
+            let paused = profiles
+                .iter()
+                .filter(|profile| profile.status == "paused")
+                .count();
+            let revoked = profiles
+                .iter()
+                .filter(|profile| profile.status == "revoked")
+                .count();
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -483,7 +495,10 @@ pub async fn admin_resolve_press_request(
     (
         StatusCode::OK,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-        Json(ResolvePressResponse { request_id: press_request_id, status: payload.status.as_str() }),
+        Json(ResolvePressResponse {
+            request_id: press_request_id,
+            status: payload.status.as_str(),
+        }),
     )
         .into_response()
 }
@@ -611,7 +626,11 @@ pub async fn admin_engagements(
     Query(query): Query<AdminEngagementQuery>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if query.status.as_deref().is_some_and(|value| !valid_engagement_status(value)) {
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|value| !valid_engagement_status(value))
+    {
         return BeaconSignalError::BadRequest.response(request_id_value);
     }
     let rows = sqlx::query_as::<_, AdminEngagementView>(
@@ -657,10 +676,7 @@ pub async fn admin_engagements(
     }
 }
 
-pub async fn admin_coverage(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn admin_coverage(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let request_id_value = request_id(&headers);
     let rows = sqlx::query_as::<_, AdminCoverageView>(
         r#"
@@ -693,7 +709,6 @@ pub async fn admin_coverage(
         }
     }
 }
-
 
 pub async fn admin_press_requests(
     State(state): State<crate::AppState>,
@@ -733,5 +748,3 @@ pub async fn admin_press_requests(
         }
     }
 }
-
-

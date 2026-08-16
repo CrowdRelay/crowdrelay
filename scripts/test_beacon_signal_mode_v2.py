@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations/0057_beacon_signal_full_mode.sql").read_text()
 API = (ROOT / "crates/crowdrelay-api/src/beacon_signal.rs").read_text()
+INVITE_COPY = (ROOT / "crates/crowdrelay-api/src/beacon_signal/invite_copy.rs").read_text()
 LIFECYCLE = (ROOT / "crates/crowdrelay-api/src/beacon_signal/lifecycle.rs").read_text()
 ADMIN = (ROOT / "crates/crowdrelay-api/src/beacon_signal/lifecycle/admin.rs").read_text()
 MEMBER = (ROOT / "crates/crowdrelay-api/src/beacon_signal/lifecycle/member.rs").read_text()
@@ -67,7 +68,8 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertIn("version: u8", LIFECYCLE)
         self.assertIn("version: 2", ADMIN)
         self.assertIn("invite_delivery_copy", ADMIN)
-        self.assertIn("Virya Signal — zaproszenie do Latarnika", API)
+        self.assertIn("Virya Signal — zaproszenie do Latarnika", INVITE_COPY)
+        self.assertIn("Virya Signal — Beacon invitation", INVITE_COPY)
 
     def test_event_lifecycle_and_campaign_projection_are_monotonic(self) -> None:
         self.assertIn("fn next_engagement_status", LIFECYCLE)

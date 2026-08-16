@@ -21,6 +21,16 @@ use uuid::Uuid;
 
 use crate::{Problem, request_id};
 
+mod invite_copy;
+mod lifecycle;
+use invite_copy::{InviteDeliveryCopy, invite_delivery_copy};
+pub use lifecycle::{
+    admin_candidates, admin_coverage, admin_dashboard, admin_engagements, admin_press_assets,
+    admin_press_requests, admin_resolve_press_request, admin_set_state, admin_upsert_press_asset,
+    create_invite_batch, leave, my_press_requests, press_room, record_event_engagement,
+    submit_coverage,
+};
+
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const DEFAULT_INVITE_TTL_DAYS: i64 = 14;
 const MAX_INVITE_TTL_DAYS: i64 = 30;
@@ -103,9 +113,10 @@ fn default_locale() -> String {
 struct CreateInviteResponse {
     version: u8,
     beacon_id: Uuid,
-    display_name: String,
     invite_token: String,
     invite_url: String,
+    display_name: String,
+    delivery: InviteDeliveryCopy,
     #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
@@ -167,6 +178,10 @@ struct NearbyEvent {
     starts_at: OffsetDateTime,
     ticket_url: Option<String>,
     distance_km: i32,
+    engagement_status: Option<String>,
+    help_kind: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_notified_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -240,10 +255,16 @@ struct PressRequestResponse {
 pub struct EmitNearbyRequest {
     #[serde(default = "default_wave_size")]
     limit: i64,
+    #[serde(default = "default_lead_days")]
+    lead_days: i64,
 }
 
 fn default_wave_size() -> i64 {
     DEFAULT_WAVE_SIZE
+}
+
+fn default_lead_days() -> i64 {
+    60
 }
 
 #[derive(Debug, Serialize)]
@@ -265,8 +286,11 @@ struct AdminPressRequestView {
     request_kind: String,
     details: Option<String>,
     status: String,
+    resolution_note: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    resolved_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +384,9 @@ pub(crate) async fn authorize_beacon(
           AND session.expires_at > now()
           AND profile.status = 'active'
           AND beacon.active
+          AND beacon.verified
+          AND beacon.accepts_outreach
+          AND NOT beacon.do_not_contact
         "#,
     )
     .bind(state.ticketing.workspace_id().into_uuid())
@@ -454,14 +481,16 @@ pub async fn create_invite(
         r#"
         INSERT INTO viryaos_beacon_signal_profiles (
             workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
-            radius_km, locale, nearby_gigs_enabled
-        ) VALUES ($1, $2, 'invited', $3, $4, $5, $6, true)
+            radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at
+        ) VALUES ($1, $2, 'invited', $3, $4, $5, $6, true, 1, now())
         ON CONFLICT (workspace_id, beacon_id) DO UPDATE SET
             status = 'invited',
             invite_token_hash = EXCLUDED.invite_token_hash,
             invite_expires_at = EXCLUDED.invite_expires_at,
             radius_km = EXCLUDED.radius_km,
             locale = EXCLUDED.locale,
+            invite_count = viryaos_beacon_signal_profiles.invite_count + 1,
+            last_invited_at = now(), paused_at = NULL, revoked_at = NULL,
             updated_at = now()
         "#,
     )
@@ -506,15 +535,17 @@ pub async fn create_invite(
         "latarnik"
     };
     let invite_url = format!("https://virya.music/{path}?invite={invite_token}");
+    let delivery = invite_delivery_copy(&locale, &display_name, &invite_url);
     (
         StatusCode::CREATED,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
         Json(CreateInviteResponse {
-            version: 1,
+            version: 2,
             beacon_id,
             display_name,
             invite_token,
             invite_url,
+            delivery,
             expires_at,
         }),
     )
@@ -687,7 +718,10 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
             .unwrap_or(None),
         None => None,
     };
-    let nearby_events = if principal.city_id.is_none() || !principal.nearby_gigs_enabled {
+    let nearby_events = if principal.city_id.is_none()
+        || !principal.nearby_gigs_enabled
+        || !principal.topics.iter().any(|topic| topic == "shows")
+    {
         Ok(Vec::new())
     } else {
         sqlx::query_as::<_, NearbyEvent>(
@@ -700,13 +734,18 @@ pub async fn me(State(state): State<crate::AppState>, headers: HeaderMap) -> Res
                            + COS(RADIANS(event_city.latitude)) * COS(RADIANS(home_city.latitude))
                            * POWER(SIN(RADIANS(home_city.longitude - event_city.longitude) / 2), 2)
                        )))
-                   )::integer) AS distance_km
+                   )::integer) AS distance_km,
+                   engagement.status AS engagement_status, engagement.help_kind,
+                   engagement.last_notified_at
             FROM viryaos_beacons beacon
             JOIN cities home_city ON home_city.id = beacon.city_id
             JOIN events event ON event.workspace_id = beacon.workspace_id
                 AND event.status='published' AND event.starts_at > now()
                 AND event.starts_at < now() + interval '365 days'
             JOIN cities event_city ON event_city.id = event.city_id
+            LEFT JOIN viryaos_beacon_signal_event_engagements engagement
+              ON engagement.workspace_id=event.workspace_id
+             AND engagement.beacon_id=beacon.id AND engagement.event_id=event.id
             WHERE beacon.workspace_id=$1 AND beacon.id=$2
               AND home_city.latitude IS NOT NULL AND home_city.longitude IS NOT NULL
               AND event_city.latitude IS NOT NULL AND event_city.longitude IS NOT NULL
@@ -877,21 +916,32 @@ pub async fn create_press_request(
         return BeaconSignalError::BadRequest.response(request_id_value);
     }
     let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let mut tx = match state.ticketing.pool().begin().await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Beacon press request transaction failed to start");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
     if let Some(event_id) = payload.event_id {
         let exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM events WHERE workspace_id=$1 AND id=$2)",
         )
         .bind(workspace_id)
         .bind(event_id)
-        .fetch_one(state.ticketing.pool())
-        .await
-        .unwrap_or(false);
-        if !exists {
-            return BeaconSignalError::NotFound.response(request_id_value);
+        .fetch_one(&mut *tx)
+        .await;
+        match exists {
+            Ok(true) => {}
+            Ok(false) => return BeaconSignalError::NotFound.response(request_id_value),
+            Err(error) => {
+                tracing::warn!(%error, %event_id, "Beacon press request event lookup failed");
+                return BeaconSignalError::Unavailable.response(request_id_value);
+            }
         }
     }
     let request_id_generated = Uuid::now_v7();
-    let result = sqlx::query(
+    if let Err(error) = sqlx::query(
         r#"
         INSERT INTO viryaos_beacon_press_requests
             (id,workspace_id,beacon_id,event_id,request_kind,details)
@@ -903,24 +953,45 @@ pub async fn create_press_request(
     .bind(principal.beacon_id)
     .bind(payload.event_id)
     .bind(payload.request_kind.as_str())
-    .bind(details)
-    .execute(state.ticketing.pool())
-    .await;
-    match result {
-        Ok(_) => (
-            StatusCode::CREATED,
-            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(PressRequestResponse {
-                request_id: request_id_generated,
-                status: "open",
-            }),
-        )
-            .into_response(),
-        Err(error) => {
-            tracing::warn!(%error, beacon_id=%principal.beacon_id, "Beacon press request failed");
-            BeaconSignalError::Unavailable.response(request_id_value)
-        }
+    .bind(&details)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(%error, beacon_id=%principal.beacon_id, "Beacon press request failed");
+        return BeaconSignalError::Unavailable.response(request_id_value);
     }
+    let event_payload = serde_json::json!({
+        "request_id": request_id_generated,
+        "beacon_id": principal.beacon_id,
+        "event_id": payload.event_id,
+        "request_kind": payload.request_kind.as_str(),
+        "details": details,
+    });
+    if let Err(error) = sqlx::query(
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.press_request_created',1,$2,$3)",
+    )
+    .bind(workspace_id)
+    .bind(event_payload)
+    .bind(request_id(&headers))
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(%error, beacon_id=%principal.beacon_id, "Beacon press request outbox write failed");
+        return BeaconSignalError::Unavailable.response(request_id_value);
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(%error, beacon_id=%principal.beacon_id, "Beacon press request transaction failed to commit");
+        return BeaconSignalError::Unavailable.response(request_id_value);
+    }
+    (
+        StatusCode::CREATED,
+        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+        Json(PressRequestResponse {
+            request_id: request_id_generated,
+            status: "open",
+        }),
+    )
+        .into_response()
 }
 
 pub async fn logout(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -968,7 +1039,7 @@ pub async fn emit_nearby(
         Ok(value) => value,
         Err(_) => return BeaconSignalError::BadRequest.response(request_id_value),
     };
-    if !(1..=MAX_WAVE_SIZE).contains(&payload.limit) {
+    if !(1..=MAX_WAVE_SIZE).contains(&payload.limit) || !(1..=180).contains(&payload.lead_days) {
         return BeaconSignalError::BadRequest.response(request_id_value);
     }
     let workspace_id = state.ticketing.workspace_id().into_uuid();
@@ -982,14 +1053,15 @@ pub async fn emit_nearby(
     let result = sqlx::query_as::<_, (i64, i64)>(
         r#"
         WITH candidates AS (
-            SELECT beacon.id AS beacon_id, event.id AS event_id, event.slug AS event_slug,
-                   event.title AS event_title, event.starts_at, profile.locale, profile.radius_km,
-                   beacon.relationship_score, beacon.relevance_basis_points,
-                   LEAST(20000, ROUND(
-                       6371 * 2 * ASIN(LEAST(1.0, SQRT(
-                           POWER(SIN(RADIANS(home_city.latitude - event_city.latitude) / 2), 2)
+            SELECT beacon.id AS beacon_id,event.id AS event_id,
+                   event.title AS event_title,event.starts_at,profile.locale,profile.radius_km,
+                   beacon.relationship_score,beacon.relevance_basis_points,
+                   engagement.last_notified_at,
+                   LEAST(20000,ROUND(
+                       6371 * 2 * ASIN(LEAST(1.0,SQRT(
+                           POWER(SIN(RADIANS(home_city.latitude - event_city.latitude) / 2),2)
                            + COS(RADIANS(event_city.latitude)) * COS(RADIANS(home_city.latitude))
-                           * POWER(SIN(RADIANS(home_city.longitude - event_city.longitude) / 2), 2)
+                           * POWER(SIN(RADIANS(home_city.longitude - event_city.longitude) / 2),2)
                        )))
                    )::integer) AS distance_km
             FROM viryaos_beacon_signal_profiles profile
@@ -998,47 +1070,59 @@ pub async fn emit_nearby(
             JOIN cities home_city ON home_city.id=beacon.city_id
             JOIN events event ON event.workspace_id=profile.workspace_id
               AND event.status='published' AND event.starts_at > now()
-              AND event.starts_at < now() + interval '365 days'
+              AND event.starts_at < now() + ($4::bigint * interval '1 day')
             JOIN cities event_city ON event_city.id=event.city_id
+            LEFT JOIN viryaos_beacon_signal_event_engagements engagement
+              ON engagement.workspace_id=profile.workspace_id
+             AND engagement.beacon_id=beacon.id AND engagement.event_id=event.id
+            LEFT JOIN viryaos_beacon_campaigns campaign
+              ON campaign.workspace_id=profile.workspace_id
+             AND campaign.beacon_id=beacon.id AND campaign.event_id=event.id
             WHERE profile.workspace_id=$1 AND profile.status='active'
-              AND profile.nearby_gigs_enabled AND beacon.active AND beacon.verified
-              AND beacon.accepts_outreach AND NOT beacon.do_not_contact
+              AND profile.nearby_gigs_enabled AND 'shows'=ANY(profile.topics)
+              AND beacon.active AND beacon.verified AND beacon.accepts_outreach
+              AND NOT beacon.do_not_contact
               AND home_city.latitude IS NOT NULL AND home_city.longitude IS NOT NULL
               AND event_city.latitude IS NOT NULL AND event_city.longitude IS NOT NULL
+              AND COALESCE(engagement.status,'eligible') NOT IN ('completed','declined')
+              AND engagement.last_notified_at IS NULL
+              AND COALESCE(campaign.status,'candidate') NOT IN ('declined','suppressed','closed')
         ), ranked AS (
             SELECT * FROM candidates
             WHERE distance_km <= radius_km
-            ORDER BY starts_at, relevance_basis_points DESC,
-                     relationship_score DESC, distance_km, beacon_id, event_id
+            ORDER BY starts_at,relevance_basis_points DESC,relationship_score DESC,
+                     distance_km,beacon_id,event_id
             LIMIT $2
-        ), eligible AS (
-            INSERT INTO viryaos_beacon_campaigns (workspace_id, beacon_id, event_id, status)
-            SELECT $1, beacon_id, event_id, 'candidate'
-            FROM ranked
-            ON CONFLICT (workspace_id, beacon_id, event_id) DO NOTHING
-            RETURNING beacon_id, event_id
+        ), campaign_seed AS (
+            INSERT INTO viryaos_beacon_campaigns (workspace_id,beacon_id,event_id,status)
+            SELECT $1,beacon_id,event_id,'candidate' FROM ranked
+            ON CONFLICT (workspace_id,beacon_id,event_id) DO NOTHING
+            RETURNING beacon_id,event_id
+        ), engagement_seed AS (
+            INSERT INTO viryaos_beacon_signal_event_engagements
+                (workspace_id,beacon_id,event_id,status)
+            SELECT $1,beacon_id,event_id,'eligible' FROM ranked
+            ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
+                updated_at=viryaos_beacon_signal_event_engagements.updated_at
+            RETURNING beacon_id,event_id
         ), push_queued AS (
             INSERT INTO fan_push_deliveries (
-                workspace_id, fan_id, audience_kind, endpoint_id,
-                source_kind, source_id, title, body, target_path, collapse_key
+                workspace_id,fan_id,audience_kind,endpoint_id,source_kind,source_id,
+                title,body,target_path,collapse_key
             )
-            SELECT $1, NULL, 'beacon', endpoint.id,
-                   'beacon_nearby_concert', ranked.event_id,
+            SELECT $1,NULL,'beacon',endpoint.id,'beacon_nearby_concert',ranked.event_id,
                    CASE WHEN lower(ranked.locale) LIKE 'pl%'
-                        THEN 'VIRYA · materiał lokalny'
-                        ELSE 'VIRYA · local story'
-                   END,
+                        THEN 'VIRYA · materiał lokalny' ELSE 'VIRYA · local story' END,
                    CASE WHEN lower(ranked.locale) LIKE 'pl%'
                         THEN ranked.event_title || ' — gramy około ' || ranked.distance_km || ' km od Ciebie. Press room jest gotowy.'
-                        ELSE ranked.event_title || ' — we play about ' || ranked.distance_km || ' km from you. The press room is ready.'
-                   END,
+                        ELSE ranked.event_title || ' — we play about ' || ranked.distance_km || ' km from you. The press room is ready.' END,
                    CASE WHEN lower(ranked.locale) LIKE 'pl%'
-                        THEN '/pl/latarnik?event=' || ranked.event_slug
-                        ELSE '/latarnik?event=' || ranked.event_slug
-                   END,
+                        THEN '/pl/latarnik?event_id=' || ranked.event_id::text
+                        ELSE '/latarnik?event_id=' || ranked.event_id::text END,
                    'beacon-nearby:' || ranked.event_id::text
-            FROM eligible
-            JOIN ranked ON ranked.beacon_id=eligible.beacon_id AND ranked.event_id=eligible.event_id
+            FROM ranked
+            JOIN engagement_seed seeded
+              ON seeded.beacon_id=ranked.beacon_id AND seeded.event_id=ranked.event_id
             JOIN viryaos_beacon_signal_sessions session
               ON session.workspace_id=$1 AND session.beacon_id=ranked.beacon_id
              AND session.revoked_at IS NULL AND session.expires_at > now()
@@ -1047,16 +1131,43 @@ pub async fn emit_nearby(
              AND endpoint.principal_hash=session.token_hash
              AND endpoint.active AND endpoint.invalidated_at IS NULL
             WHERE $3::boolean
-            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
-            RETURNING 1
+            ON CONFLICT (workspace_id,source_kind,source_id,endpoint_id) DO NOTHING
+            RETURNING endpoint_id,source_id
+        ), notified_pairs AS (
+            SELECT DISTINCT session.beacon_id,push_queued.source_id AS event_id
+            FROM push_queued
+            JOIN fan_push_endpoints endpoint
+              ON endpoint.workspace_id=$1 AND endpoint.id=push_queued.endpoint_id
+            JOIN viryaos_beacon_signal_sessions session
+              ON session.workspace_id=$1 AND session.token_hash=endpoint.principal_hash
+        ), marked AS (
+            UPDATE viryaos_beacon_signal_event_engagements engagement
+            SET status=CASE WHEN engagement.status='eligible' THEN 'notified' ELSE engagement.status END,
+                notification_count=engagement.notification_count + 1,
+                first_notified_at=COALESCE(engagement.first_notified_at,now()),
+                last_notified_at=now(),updated_at=now()
+            FROM notified_pairs notified
+            WHERE engagement.workspace_id=$1
+              AND engagement.beacon_id=notified.beacon_id AND engagement.event_id=notified.event_id
+            RETURNING engagement.beacon_id,engagement.event_id
+        ), campaign_contacted AS (
+            UPDATE viryaos_beacon_campaigns campaign
+            SET status=CASE WHEN campaign.status='candidate' THEN 'contacted' ELSE campaign.status END,
+                last_phase='local_push',last_outreach_at=now(),updated_at=now()
+            FROM marked
+            WHERE campaign.workspace_id=$1
+              AND campaign.beacon_id=marked.beacon_id AND campaign.event_id=marked.event_id
+              AND campaign.status NOT IN ('declined','suppressed','closed')
+            RETURNING campaign.beacon_id,campaign.event_id
         )
-        SELECT (SELECT count(*)::bigint FROM eligible),
+        SELECT (SELECT count(*)::bigint FROM ranked),
                (SELECT count(*)::bigint FROM push_queued)
         "#,
     )
     .bind(workspace_id)
     .bind(payload.limit)
     .bind(push_enabled)
+    .bind(payload.lead_days)
     .fetch_one(state.ticketing.pool())
     .await;
     match result {
@@ -1071,44 +1182,6 @@ pub async fn emit_nearby(
             .into_response(),
         Err(error) => {
             tracing::warn!(%error, "Beacon nearby notification wave failed");
-            BeaconSignalError::Unavailable.response(request_id_value)
-        }
-    }
-}
-
-pub async fn admin_press_requests(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-) -> Response {
-    let request_id_value = request_id(&headers);
-    let result = sqlx::query_as::<_, AdminPressRequestView>(
-        r#"
-        SELECT request.id, request.beacon_id, beacon.display_name, beacon.beacon_kind,
-               request.event_id, event.title AS event_title, request.request_kind,
-               request.details, request.status, request.created_at
-        FROM viryaos_beacon_press_requests request
-        JOIN viryaos_beacons beacon
-          ON beacon.workspace_id=request.workspace_id AND beacon.id=request.beacon_id
-        LEFT JOIN events event
-          ON event.workspace_id=request.workspace_id AND event.id=request.event_id
-        WHERE request.workspace_id=$1
-        ORDER BY CASE request.status WHEN 'open' THEN 0 ELSE 1 END,
-                 request.created_at DESC, request.id DESC
-        LIMIT 100
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .fetch_all(state.ticketing.pool())
-    .await;
-    match result {
-        Ok(requests) => (
-            StatusCode::OK,
-            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(AdminPressRequestsResponse { requests }),
-        )
-            .into_response(),
-        Err(error) => {
-            tracing::warn!(%error, "Beacon press-request list failed");
             BeaconSignalError::Unavailable.response(request_id_value)
         }
     }

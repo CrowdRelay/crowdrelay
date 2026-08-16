@@ -642,7 +642,30 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/press-room:
+    get:
+      operationId: getBeaconPressRoom
+      summary: Read the versioned Latarnik Press Room with event facts and assets
+      security: [{ beaconBearer: [] }]
+      parameters:
+      - in: query
+        name: event_id
+        required: false
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Global and optional event-specific press assets plus bounded event facts. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /beacon/me/press-requests:
+    get:
+      operationId: listOwnBeaconPressRequests
+      summary: List the authenticated Latarnik press requests and resolutions
+      security: [{ beaconBearer: [] }]
+      responses:
+        '200': { description: Up to 100 requests, open first. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
     post:
       operationId: createBeaconPressRequest
       summary: Ask Virya for one missing press asset or collaboration action
@@ -664,6 +687,82 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/events/{event_id}/engagement:
+    post:
+      operationId: recordBeaconEventEngagement
+      summary: Record open, interest, help, completion or decline for a nearby Virya event
+      security: [{ beaconBearer: [] }]
+      parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action: { type: string, enum: [opened, interested, helping, completed, declined] }
+                helpKind: { type: [string, 'null'], enum: [article, radio, podcast, photos, share, contact, other, null] }
+                helpDetails: { type: [string, 'null'], maxLength: 1500 }
+      responses:
+        '200': { description: Monotonic engagement state recorded. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/events/{event_id}/coverage:
+    post:
+      operationId: submitBeaconCoverage
+      summary: Submit coverage created for a Virya event and close the Latarnik loop
+      security: [{ beaconBearer: [] }]
+      parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [coverageKind, url]
+              properties:
+                coverageKind: { type: string, enum: [article, radio, video, photo, social, podcast, other] }
+                url: { type: string, format: uri, maxLength: 2048 }
+                title: { type: [string, 'null'], maxLength: 240 }
+      responses:
+        '201': { description: Coverage stored and event engagement completed. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/leave:
+    post:
+      operationId: leaveBeaconSignal
+      summary: Revoke all Latarnik sessions, optionally setting global do-not-contact
+      security: [{ beaconBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                doNotContact: { type: boolean, default: false }
+      responses:
+        '204': { description: Latarnik access revoked. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /beacon/me/logout:
     post:
@@ -2170,11 +2269,141 @@ paths:
                 radiusKm: { type: integer, minimum: 10, maximum: 500, default: 100 }
                 locale: { type: string, pattern: '^[a-z]{2}(-[A-Z]{2})?$', default: pl }
       responses:
-        '201': { description: Single-use invitation URL and token. }
+        '201': { description: Single-use invitation URL/token plus localized mail-ready subject and plain-text copy; plaintext capability is response-only. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacons/signal-invites/batch:
+    post:
+      operationId: createBeaconSignalInviteBatch
+      summary: Mint up to 200 one-time Latarnik invitations without persisting plaintext tokens
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [beaconIds]
+              properties:
+                beaconIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+                ttlDays: { type: integer, minimum: 1, maximum: 30, default: 14 }
+                radiusKm: { type: integer, minimum: 10, maximum: 500, default: 100 }
+                locale: { type: string, pattern: '^[a-z]{2}(-[A-Z]{2})?$', default: pl }
+      responses:
+        '201': { description: Eligible one-time invitations with localized mail-ready copy; plaintext capabilities are response-only and ineligible rows are counted as skipped. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-signal:
+    get:
+      operationId: getBeaconSignalDashboard
+      summary: Read Latarnik profiles, sessions, push state, requests, engagements and coverage counters
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Latarnik operations dashboard. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-signal/candidates:
+    get:
+      operationId: listBeaconSignalCandidates
+      summary: List verified outreach-eligible Beacons that can be invited to Signal Latarnik
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Up to 500 invite candidates ranked by relevance and relationship. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacons/{beacon_id}/signal-state:
+    post:
+      operationId: setBeaconSignalState
+      summary: Pause, reactivate or revoke a Latarnik profile
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: beacon_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, paused, revoked] }
+      responses:
+        '200': { description: Updated Latarnik profile state. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-press-assets:
+    get:
+      operationId: listBeaconPressAssets
+      summary: List global and event-specific Latarnik press assets, including archived entries
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Up to 500 press asset rows. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: upsertBeaconPressAsset
+      summary: Create, update or archive a global/event-specific Latarnik press asset
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [assetKey, assetKind, labelPl, labelEn, url]
+              properties:
+                assetId: { type: [string, 'null'], format: uuid }
+                eventId: { type: [string, 'null'], format: uuid }
+                assetKey: { type: string, minLength: 2, maxLength: 64 }
+                assetKind: { type: string, enum: [epk, photo, logo, bio, audio, video, rider, social, contact, link] }
+                labelPl: { type: string, minLength: 1, maxLength: 120 }
+                labelEn: { type: string, minLength: 1, maxLength: 120 }
+                url: { type: string, maxLength: 2048 }
+                sortOrder: { type: integer, minimum: 0, maximum: 10000, default: 100 }
+                active: { type: boolean, default: true }
+      responses:
+        '200': { description: Press asset upserted. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-signal-engagements:
+    get:
+      operationId: listBeaconSignalEngagements
+      summary: List recent Latarnik event engagement and help state
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: query
+        name: status
+        required: false
+        schema: { type: string, enum: [eligible, notified, opened, interested, helping, completed, declined] }
+      responses:
+        '200': { description: Up to 300 recent engagement rows. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-coverage:
+    get:
+      operationId: listBeaconCoverage
+      summary: List coverage submitted by Latarnicy
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Up to 300 recent coverage links. }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/beacon-press-requests:
     get:
@@ -2184,6 +2413,32 @@ paths:
       responses:
         '200': { description: Up to 100 press requests, open first. }
         '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-press-requests/{press_request_id}/resolve:
+    post:
+      operationId: resolveBeaconPressRequest
+      summary: Resolve or cancel a Latarnik press request with an optional staff note
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: press_request_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [resolved, cancelled] }
+                resolutionNote: { type: [string, 'null'], maxLength: 2000 }
+      responses:
+        '200': { description: Press request terminal state recorded. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/team-opportunities/discover:
     post:

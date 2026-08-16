@@ -43,11 +43,21 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/beacon/me/preferences",
             post(beacon_signal::update_preferences),
         )
+        .route("/v1/beacon/me/press-room", get(beacon_signal::press_room))
         .route(
             "/v1/beacon/me/press-requests",
-            post(beacon_signal::create_press_request),
+            get(beacon_signal::my_press_requests).post(beacon_signal::create_press_request),
+        )
+        .route(
+            "/v1/beacon/me/events/{event_id}/engagement",
+            post(beacon_signal::record_event_engagement),
+        )
+        .route(
+            "/v1/beacon/me/events/{event_id}/coverage",
+            post(beacon_signal::submit_coverage),
         )
         .route("/v1/beacon/me/logout", post(beacon_signal::logout))
+        .route("/v1/beacon/me/leave", post(beacon_signal::leave))
         .route("/v1/public/cities", get(acquisition::list_cities))
         .route("/v1/public/area/drops", get(area::public_drops))
         .route("/v1/me/area", get(area::me_wallet))
@@ -584,8 +594,40 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(beacon_signal::create_invite),
         )
         .route(
+            "/v1/admin/autopilot/beacons/signal-invites/batch",
+            post(beacon_signal::create_invite_batch),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-signal",
+            get(beacon_signal::admin_dashboard),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-signal/candidates",
+            get(beacon_signal::admin_candidates),
+        )
+        .route(
+            "/v1/admin/autopilot/beacons/{beacon_id}/signal-state",
+            post(beacon_signal::admin_set_state),
+        )
+        .route(
             "/v1/admin/autopilot/beacon-press-requests",
             get(beacon_signal::admin_press_requests),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-press-requests/{press_request_id}/resolve",
+            post(beacon_signal::admin_resolve_press_request),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-press-assets",
+            get(beacon_signal::admin_press_assets).post(beacon_signal::admin_upsert_press_asset),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-signal-engagements",
+            get(beacon_signal::admin_engagements),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-coverage",
+            get(beacon_signal::admin_coverage),
         )
         .route(
             "/v1/internal/beacon/notifications/emit-due",

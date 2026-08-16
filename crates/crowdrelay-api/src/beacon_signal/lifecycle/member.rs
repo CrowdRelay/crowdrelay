@@ -56,7 +56,12 @@ pub async fn press_room(
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-                Json(PressRoomResponse { version: 2, event_id: query.event_id, event, assets }),
+                Json(PressRoomResponse {
+                    version: 2,
+                    event_id: query.event_id,
+                    event,
+                    assets,
+                }),
             )
                 .into_response()
         }
@@ -457,7 +462,11 @@ pub async fn submit_coverage(
     (
         StatusCode::CREATED,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-        Json(CoverageResponse { coverage_id, event_id, status: "completed" }),
+        Json(CoverageResponse {
+            coverage_id,
+            event_id,
+            status: "completed",
+        }),
     )
         .into_response()
 }
@@ -520,18 +529,17 @@ pub async fn leave(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     }
-    if payload.do_not_contact {
-        if let Err(error) = sqlx::query(
+    if payload.do_not_contact
+        && let Err(error) = sqlx::query(
             "UPDATE viryaos_beacons SET accepts_outreach=false,do_not_contact=true,version=version+1,updated_at=now() WHERE workspace_id=$1 AND id=$2",
         )
         .bind(workspace_id)
         .bind(principal.beacon_id)
         .execute(&mut *tx)
         .await
-        {
-            tracing::warn!(%error, beacon_id=%principal.beacon_id, "Beacon global do-not-contact update failed");
-            return BeaconSignalError::Unavailable.response(request_id_value);
-        }
+    {
+        tracing::warn!(%error, beacon_id=%principal.beacon_id, "Beacon global do-not-contact update failed");
+        return BeaconSignalError::Unavailable.response(request_id_value);
     }
     let event_payload = serde_json::json!({
         "beacon_id": principal.beacon_id,
@@ -555,4 +563,3 @@ pub async fn leave(
     }
     (StatusCode::NO_CONTENT, [(CACHE_CONTROL, PRIVATE_NO_STORE)]).into_response()
 }
-

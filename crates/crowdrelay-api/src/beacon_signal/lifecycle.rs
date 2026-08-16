@@ -501,15 +501,24 @@ fn valid_asset_key(value: &str) -> bool {
     let value = value.as_bytes();
     (2..=64).contains(&value.len())
         && value.first().is_some_and(u8::is_ascii_lowercase)
-        && value
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
+        && value.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
 }
 
 fn valid_asset_kind(value: &str) -> bool {
     matches!(
         value,
-        "epk" | "photo" | "logo" | "bio" | "audio" | "video" | "rider" | "social" | "contact" | "link"
+        "epk"
+            | "photo"
+            | "logo"
+            | "bio"
+            | "audio"
+            | "video"
+            | "rider"
+            | "social"
+            | "contact"
+            | "link"
     )
 }
 
@@ -533,16 +542,27 @@ fn engagement_rank(value: &str) -> u8 {
     }
 }
 
-fn next_engagement_status(current: Option<&str>, action: EngagementAction) -> Result<&'static str, ()> {
+fn next_engagement_status(
+    current: Option<&str>,
+    action: EngagementAction,
+) -> Result<&'static str, ()> {
     let target = action.as_str();
     let Some(current) = current else {
         return Ok(target);
     };
     if current == "completed" {
-        return if action == EngagementAction::Completed { Ok("completed") } else { Err(()) };
+        return if action == EngagementAction::Completed {
+            Ok("completed")
+        } else {
+            Err(())
+        };
     }
     if current == "declined" {
-        return if action == EngagementAction::Declined { Ok("declined") } else { Err(()) };
+        return if action == EngagementAction::Declined {
+            Ok("declined")
+        } else {
+            Err(())
+        };
     }
     if action == EngagementAction::Declined {
         return Ok("declined");
@@ -566,11 +586,26 @@ mod tests {
 
     #[test]
     fn engagement_state_is_monotonic_and_terminal() {
-        assert_eq!(next_engagement_status(Some("notified"), EngagementAction::Opened), Ok("opened"));
-        assert_eq!(next_engagement_status(Some("helping"), EngagementAction::Opened), Ok("helping"));
-        assert_eq!(next_engagement_status(Some("helping"), EngagementAction::Completed), Ok("completed"));
-        assert_eq!(next_engagement_status(Some("declined"), EngagementAction::Interested), Err(()));
-        assert_eq!(next_engagement_status(Some("completed"), EngagementAction::Opened), Err(()));
+        assert_eq!(
+            next_engagement_status(Some("notified"), EngagementAction::Opened),
+            Ok("opened")
+        );
+        assert_eq!(
+            next_engagement_status(Some("helping"), EngagementAction::Opened),
+            Ok("helping")
+        );
+        assert_eq!(
+            next_engagement_status(Some("helping"), EngagementAction::Completed),
+            Ok("completed")
+        );
+        assert_eq!(
+            next_engagement_status(Some("declined"), EngagementAction::Interested),
+            Err(())
+        );
+        assert_eq!(
+            next_engagement_status(Some("completed"), EngagementAction::Opened),
+            Err(())
+        );
     }
 
     #[test]

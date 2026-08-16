@@ -50,10 +50,10 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
         self.assertIn("DEFAULT_WAVE_SIZE: i64 = 20", API)
         self.assertIn("WHERE distance_km <= radius_km", API)
         self.assertIn("6371 * 2 * ASIN", API)
-        self.assertIn("ORDER BY starts_at, relevance_basis_points DESC", API)
+        self.assertRegex(API, r"ORDER BY\s+starts_at,\s*relevance_basis_points DESC")
         self.assertIn("LIMIT $2", API)
-        self.assertIn("ON CONFLICT (workspace_id, beacon_id, event_id) DO NOTHING", API)
-        self.assertIn("ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING", API)
+        self.assertRegex(API, r"ON CONFLICT \(workspace_id,\s*beacon_id,\s*event_id\) DO NOTHING")
+        self.assertRegex(API, r"ON CONFLICT \(workspace_id,\s*source_kind,\s*source_id,\s*endpoint_id\) DO NOTHING")
 
     def test_press_room_and_requests_are_first_class(self) -> None:
         self.assertIn('epk_url: format!("{root}/epk")', API)
@@ -87,7 +87,7 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
         ):
             self.assertIn(route, ROUTING)
         self.assertIn('("beacon_signal_v1", true)', META)
-        self.assertIn("SCHEMA_VERSION: u32 = 56", META)
+        self.assertIn("SCHEMA_VERSION: u32 = 57", META)
 
 
 if __name__ == "__main__":
