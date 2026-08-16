@@ -2747,6 +2747,30 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /admin/ops/deliveries/dead/clear:
+    post:
+      operationId: clearDeadWebhookDeliveries
+      summary: Acknowledge all dead webhook deliveries as cancelled
+      description: Moves only dead webhook deliveries to the terminal cancelled state. Pending, processing and delivered rows are untouched; attempt history remains available until normal retention removes the parent event.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Dead deliveries were acknowledged, or an identical request was replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsClearDeadDeliveriesResult'
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '409':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /admin/ops/deliveries/{delivery_id}:
     get:
       operationId: getOperationsDelivery
@@ -7673,6 +7697,16 @@ components:
         target_type: { type: string, enum: [outbox, delivery] }
         target_id: { type: string, format: uuid }
         status: { type: string, enum: [pending] }
+        replayed: { type: boolean }
+
+    OpsClearDeadDeliveriesResult:
+      type: object
+      additionalProperties: false
+      required: [operation_id, cleared, status, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        cleared: { type: integer, format: int64, minimum: 0 }
+        status: { type: string, enum: [cancelled] }
         replayed: { type: boolean }
 
     SignalOverview:

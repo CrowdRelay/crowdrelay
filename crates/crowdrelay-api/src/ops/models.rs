@@ -226,6 +226,14 @@ pub struct RetryResult {
     replayed: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ClearDeadDeliveriesResult {
+    operation_id: Uuid,
+    cleared: u64,
+    status: &'static str,
+    replayed: bool,
+}
+
 /// Aggregate-only owner view of Virya Signal health and growth.
 ///
 /// The response intentionally contains no e-mail addresses, display names,

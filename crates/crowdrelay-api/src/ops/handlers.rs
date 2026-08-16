@@ -195,6 +195,109 @@ pub async fn delivery_details(
     }
 }
 
+pub async fn clear_dead_deliveries(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let request_id_value = request_id(&headers);
+    let future = clear_dead_deliveries_transaction(
+        &state.ops,
+        &idempotency_key,
+        request_id_value.as_deref(),
+    );
+    match run_with_timeout(state.ops.operation_timeout, future).await {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => error.into_response(request_id_value),
+    }
+}
+
+async fn clear_dead_deliveries_transaction(
+    state: &OpsState,
+    idempotency_key: &str,
+    request_id: Option<&str>,
+) -> Result<ClearDeadDeliveriesResult, OpsError> {
+    let mut transaction = state.pool.begin().await.map_err(OpsError::sqlx)?;
+    let operation_id = Uuid::now_v7();
+    let workspace_id = state.workspace_id.into_uuid();
+    let action = "clear_dead_deliveries";
+    let target_type = "delivery_queue";
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO operator_actions (
+            id, workspace_id, action, target_type, target_id,
+            idempotency_key, request_id, details
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(operation_id)
+    .bind(workspace_id)
+    .bind(action)
+    .bind(target_type)
+    .bind(workspace_id)
+    .bind(idempotency_key)
+    .bind(request_id)
+    .bind(json!({
+        "from_status": "dead",
+        "to_status": "cancelled",
+        "scope": "webhook_deliveries",
+    }))
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(OpsError::sqlx)?;
+
+    if inserted.is_none() {
+        let existing = load_existing_action(&mut transaction, state, idempotency_key).await?;
+        transaction.commit().await.map_err(OpsError::sqlx)?;
+        if existing.action != action
+            || existing.target_type != target_type
+            || existing.target_id != workspace_id
+        {
+            return Err(OpsError::Conflict);
+        }
+        return Ok(ClearDeadDeliveriesResult {
+            operation_id: existing.id,
+            cleared: 0,
+            status: "cancelled",
+            replayed: true,
+        });
+    }
+
+    // Clearing the operator dead queue is an acknowledgement, not destructive
+    // deletion. Preserve attempt/error history and the parent outbox row; moving
+    // only `dead` deliveries to the existing terminal `cancelled` state keeps
+    // materialization/idempotency invariants intact and leaves pending/sent rows
+    // completely untouched. Normal retention later removes parent+children.
+    let cleared = sqlx::query(
+        r#"
+        UPDATE webhook_deliveries
+        SET status = 'cancelled',
+            locked_at = NULL, lock_owner = NULL, lease_expires_at = NULL,
+            dead_at = NULL, cancelled_at = now(), updated_at = now()
+        WHERE workspace_id = $1 AND status = 'dead'
+        "#,
+    )
+    .bind(workspace_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(OpsError::sqlx)?
+    .rows_affected();
+
+    transaction.commit().await.map_err(OpsError::sqlx)?;
+    Ok(ClearDeadDeliveriesResult {
+        operation_id,
+        cleared,
+        status: "cancelled",
+        replayed: false,
+    })
+}
+
 pub async fn retry_outbox(
     State(state): State<crate::AppState>,
     headers: HeaderMap,

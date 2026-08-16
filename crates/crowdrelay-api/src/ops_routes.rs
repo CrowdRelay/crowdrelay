@@ -13,6 +13,10 @@ pub(crate) fn router() -> Router<crate::AppState> {
         .route("/v1/admin/ops/outbox", get(crate::ops::list_outbox))
         .route("/v1/admin/ops/deliveries", get(crate::ops::list_deliveries))
         .route(
+            "/v1/admin/ops/deliveries/dead/clear",
+            post(crate::ops::clear_dead_deliveries),
+        )
+        .route(
             "/v1/admin/ops/deliveries/{delivery_id}",
             get(crate::ops::delivery_details),
         )
