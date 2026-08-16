@@ -76,6 +76,7 @@ impl PushDeliveryRepository {
             UPDATE fan_push_deliveries delivery
             SET status = 'failed', error_code = CASE
                     WHEN delivery.audience_kind = 'fan' THEN 'fan_or_consent_ineligible'
+                    WHEN delivery.audience_kind = 'beacon' THEN 'beacon_session_ineligible'
                     ELSE 'staff_endpoint_ineligible'
                 END,
                 completed_at = now(), updated_at = now()
@@ -107,6 +108,32 @@ impl PushDeliveryRepository {
                             ORDER BY consent.recorded_at DESC, consent.id DESC
                             LIMIT 1
                         ), false) = false
+                    )
+                )
+                OR (
+                    delivery.audience_kind = 'beacon'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM fan_push_endpoints beacon_endpoint
+                        JOIN viryaos_beacon_signal_sessions session
+                          ON session.workspace_id = beacon_endpoint.workspace_id
+                         AND session.token_hash = beacon_endpoint.principal_hash
+                         AND session.revoked_at IS NULL
+                         AND session.expires_at > now()
+                        JOIN viryaos_beacon_signal_profiles profile
+                          ON profile.workspace_id = session.workspace_id
+                         AND profile.beacon_id = session.beacon_id
+                         AND profile.status = 'active'
+                        JOIN viryaos_beacons beacon
+                          ON beacon.workspace_id = session.workspace_id
+                         AND beacon.id = session.beacon_id
+                         AND beacon.active
+                         AND beacon.verified
+                         AND beacon.accepts_outreach
+                         AND NOT beacon.do_not_contact
+                        WHERE beacon_endpoint.workspace_id = delivery.workspace_id
+                          AND beacon_endpoint.id = delivery.endpoint_id
+                          AND beacon_endpoint.audience_kind = 'beacon'
                     )
                 )
               )
@@ -205,6 +232,28 @@ impl PushDeliveryRepository {
                                   ORDER BY consent.recorded_at DESC, consent.id DESC
                                   LIMIT 1
                               ), false)
+                          )
+                          OR (
+                              delivery.audience_kind = 'beacon'
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM viryaos_beacon_signal_sessions session
+                                  JOIN viryaos_beacon_signal_profiles profile
+                                    ON profile.workspace_id = session.workspace_id
+                                   AND profile.beacon_id = session.beacon_id
+                                   AND profile.status = 'active'
+                                  JOIN viryaos_beacons beacon
+                                    ON beacon.workspace_id = session.workspace_id
+                                   AND beacon.id = session.beacon_id
+                                   AND beacon.active
+                                   AND beacon.verified
+                                   AND beacon.accepts_outreach
+                                   AND NOT beacon.do_not_contact
+                                  WHERE session.workspace_id = delivery.workspace_id
+                                    AND session.token_hash = endpoint.principal_hash
+                                    AND session.revoked_at IS NULL
+                                    AND session.expires_at > now()
+                              )
                           )
                       )
                     ORDER BY delivery.available_at, delivery.created_at, delivery.id

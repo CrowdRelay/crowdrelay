@@ -581,6 +581,145 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '500':
           $ref: '#/components/responses/PrivateProblem'
+  /beacon/invitations/exchange:
+    post:
+      operationId: exchangeBeaconSignalInvitation
+      summary: Exchange a one-time Latarnik invitation for a revocable Beacon Signal session
+      description: The invitation is hashed at rest, single-use and available only to an existing verified Beacon relationship.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [inviteToken]
+              properties:
+                inviteToken: { type: string, minLength: 24, maxLength: 128 }
+                radiusKm: { type: [integer, 'null'], minimum: 10, maximum: 500 }
+                locale: { type: [string, 'null'], pattern: '^[a-z]{2}(-[A-Z]{2})?$' }
+                topics:
+                  type: [array, 'null']
+                  items: { type: string, enum: [shows, press_materials, releases, interviews, accreditation] }
+                  maxItems: 5
+      responses:
+        '201': { description: Latarnik session created; bearer token is returned once. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me:
+    get:
+      operationId: getBeaconSignalHome
+      summary: Read the Latarnik home, nearby shows and press-room links
+      security: [{ beaconBearer: [] }]
+      responses:
+        '200': { description: Current Beacon profile, preferences, nearby shows and press-room links. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/preferences:
+    post:
+      operationId: updateBeaconSignalPreferences
+      summary: Update Latarnik distance, locale, topics or nearby-show notification preference
+      security: [{ beaconBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                radiusKm: { type: [integer, 'null'], minimum: 10, maximum: 500 }
+                locale: { type: [string, 'null'], pattern: '^[a-z]{2}(-[A-Z]{2})?$' }
+                topics:
+                  type: [array, 'null']
+                  items: { type: string, enum: [shows, press_materials, releases, interviews, accreditation] }
+                  maxItems: 5
+                nearbyGigsEnabled: { type: [boolean, 'null'] }
+              minProperties: 1
+      responses:
+        '200': { description: Updated Latarnik preferences. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/press-requests:
+    post:
+      operationId: createBeaconPressRequest
+      summary: Ask Virya for one missing press asset or collaboration action
+      security: [{ beaconBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [requestKind]
+              properties:
+                eventId: { type: [string, 'null'], format: uuid }
+                requestKind: { type: string, enum: [press_photo, wav, clean_version, interview, accreditation, custom] }
+                details: { type: [string, 'null'], minLength: 1, maxLength: 1500 }
+      responses:
+        '201': { description: Request queued for staff follow-up. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/me/logout:
+    post:
+      operationId: logoutBeaconSignalSession
+      summary: Revoke the current Latarnik session and its push endpoints
+      security: [{ beaconBearer: [] }]
+      responses:
+        '204': { description: Session revoked. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/push/endpoints:
+    post:
+      operationId: registerBeaconPushEndpoint
+      summary: Register or rotate a push endpoint for the authenticated Latarnik session
+      security: [{ beaconBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, transport, endpoint]
+              properties:
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                transport: { type: string, enum: [android_fcm, web_push] }
+                endpoint: { type: string, minLength: 1, maxLength: 4096 }
+                p256dh: { type: [string, 'null'], maxLength: 256 }
+                auth: { type: [string, 'null'], maxLength: 256 }
+      responses:
+        '200': { description: Beacon endpoint accepted without echoing provider material. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /beacon/push/endpoints/disable:
+    post:
+      operationId: disableBeaconPushEndpoint
+      summary: Disable a push installation for the authenticated Latarnik session
+      security: [{ beaconBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, transport]
+              properties:
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                transport: { type: string, enum: [android_fcm, web_push] }
+      responses:
+        '200': { description: Beacon endpoint disabled or already absent. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/cities:
     get:
       operationId: listPublicCities
@@ -2008,6 +2147,43 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacons/{beacon_id}/signal-invites:
+    post:
+      operationId: createBeaconSignalInvite
+      summary: Mint a one-time Latarnik invitation for an eligible verified Beacon
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: beacon_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                ttlDays: { type: integer, minimum: 1, maximum: 30, default: 14 }
+                radiusKm: { type: integer, minimum: 10, maximum: 500, default: 100 }
+                locale: { type: string, pattern: '^[a-z]{2}(-[A-Z]{2})?$', default: pl }
+      responses:
+        '201': { description: Single-use invitation URL and token. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/beacon-press-requests:
+    get:
+      operationId: listBeaconPressRequests
+      summary: List Latarnik press-material and collaboration requests for staff follow-up
+      security: [{ adminBearer: [] }]
+      responses:
+        '200': { description: Up to 100 press requests, open first. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/team-opportunities/discover:
     post:
@@ -4988,6 +5164,26 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '422': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/beacon/notifications/emit-due:
+    post:
+      operationId: emitDueBeaconNearbyNotifications
+      summary: Queue one bounded, idempotent Latarnik nearby-show wave
+      description: Ranks active Beacons by show date, relevance, relationship score and distance; never fans out an unbounded contact list.
+      security: [{ commerceBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                limit: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200': { description: Number of newly eligible Beacon-event relationships and queued push deliveries. }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/nearby-gigs/emit-due:
     post:
       operationId: emitDueNearbyGigs
@@ -5243,6 +5439,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+    beaconBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-beacon-session
   parameters:
     SynesthesiaRunId:
       in: path

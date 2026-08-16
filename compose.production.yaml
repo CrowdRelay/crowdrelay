@@ -64,7 +64,7 @@ services:
     environment:
       TOKIO_WORKER_THREADS: ${CROWDRELAY_WORKER_TOKIO_THREADS:-1}
     volumes:
-      - /opt/crowdrelay/deploy/secrets/firebase-service-account.json:/run/secrets/firebase-service-account.json:ro
+      - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
     depends_on:
       setup:

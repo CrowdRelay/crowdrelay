@@ -138,6 +138,23 @@ class RuntimePerformanceContract(unittest.TestCase):
         self.assertIn(".get_or_try_init(|| async {", trusted)
         self.assertIn("SELECT id FROM workspaces WHERE slug = $1", trusted)
 
+    def test_area_wallet_parallelizes_only_independent_reads(self):
+        source = (ROOT / "crates/crowdrelay-api/src/area/storage.rs").read_text()
+        start = source.index("async fn wallet_for_player")
+        end = source.index("async fn upsert_player", start)
+        wallet = source[start:end]
+        self.assertIn("tokio::try_join!(", wallet)
+        for read in (
+            "load_drops(state, Some(player_id))",
+            "load_claims(state, player_id)",
+            "area_credit_balance(state, player_id)",
+            "legacy_migration,",
+            "load_vouchers(state, player_id)",
+            "load_ticket_rewards(state, player_id)",
+        ):
+            self.assertIn(read, wallet)
+        self.assertNotIn("begin().await", wallet)
+
     def test_production_runtime_threads_are_explicitly_bounded(self):
         compose = (ROOT / "compose.production.yaml").read_text()
         for fragment in (

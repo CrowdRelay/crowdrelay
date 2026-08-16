@@ -10,6 +10,7 @@ CROWDRELAY_COMPOSE_FILE="${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}"
 CROWDRELAY_ENV_FILE="${CROWDRELAY_ENV_FILE:-deploy/.env.production}"
 CROWDRELAY_BOOTSTRAP_FILE="${CROWDRELAY_BOOTSTRAP_FILE:-deploy/bootstrap.production.json}"
 CROWDRELAY_WEBHOOK_SECRETS_FILE="${CROWDRELAY_WEBHOOK_SECRETS_FILE:-deploy/webhook-secrets.production.json}"
+CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE="${CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE:-deploy/secrets/firebase-service-account.json}"
 CROWDRELAY_DOCKER_NETWORK="${CROWDRELAY_DOCKER_NETWORK:-crowdrelay}"
 CROWDRELAY_CREATE_NETWORK="${CROWDRELAY_CREATE_NETWORK:-false}"
 CROWDRELAY_PUBLIC_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-}"
@@ -130,6 +131,7 @@ compose() {
   export CROWDRELAY_ENV_FILE="$env_file"
   export CROWDRELAY_BOOTSTRAP_HOST_FILE="$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
   export CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+  export CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE="$(absolute_path "$CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE")"
   export CROWDRELAY_DOCKER_NETWORK
   export CROWDRELAY_IMAGE_TAG="sha-${CROWDRELAY_IMAGE_SHA}"
   docker compose --env-file "$env_file" --file "$compose_file" "$@"
@@ -153,13 +155,17 @@ run_privileged() {
 }
 
 prepare_runtime_file_permissions() {
-  local owner_uid runtime_gid bootstrap_file secrets_file file current_uid current_gid current_mode
+  local owner_uid runtime_gid bootstrap_file secrets_file fcm_file file current_uid current_gid current_mode
   owner_uid="$(runtime_owner_uid)"
   runtime_gid="10001"
   bootstrap_file="$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
   secrets_file="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+  fcm_file="$(absolute_path "$CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE")"
 
-  for file in "$bootstrap_file" "$secrets_file"; do
+  # These files are bind-mounted into containers running as 10001:10001.
+  # Keep them deploy-user readable for future ships, group-readable by the
+  # runtime identity, and never world-readable.
+  for file in "$bootstrap_file" "$secrets_file" "$fcm_file"; do
     require_regular_file "$file"
     current_uid="$(stat -c '%u' "$file")"
     current_gid="$(stat -c '%g' "$file")"
@@ -237,6 +243,43 @@ PY
   echo "Pinned sha-${sha}."
 }
 
+
+verify_exact_release_identity() {
+  require_command python3
+  local service container_id configured_image image_id revision meta
+  for service in api worker; do
+    container_id="$(compose ps -q "$service")"
+    [[ -n "$container_id" ]] || {
+      echo "Exact-SHA verification failed: missing running $service container." >&2
+      exit 1
+    }
+    configured_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+    [[ "$configured_image" == *":sha-${CROWDRELAY_IMAGE_SHA}" ]] || {
+      echo "Exact-SHA verification failed for $service: image=$configured_image expected tag sha-${CROWDRELAY_IMAGE_SHA}." >&2
+      exit 1
+    }
+    image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+    revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_id")"
+    [[ "$revision" == "$CROWDRELAY_IMAGE_SHA" ]] || {
+      echo "Exact-SHA verification failed for $service: OCI revision=$revision expected=${CROWDRELAY_IMAGE_SHA}." >&2
+      exit 1
+    }
+  done
+
+  meta="$(compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    http://127.0.0.1:8080/v1/meta)"
+  printf '%s' "$meta" | python3 -c '
+import json
+import sys
+expected = sys.argv[1]
+data = json.load(sys.stdin)
+actual = data.get("gitSha")
+if actual != expected:
+    raise SystemExit(f"Exact-SHA verification failed for API runtime metadata: gitSha={actual!r} expected={expected!r}")
+' "$CROWDRELAY_IMAGE_SHA"
+  echo "EXACT_SHA_GATE=PASS sha-${CROWDRELAY_IMAGE_SHA}"
+}
+
 verify() {
   require_command docker
   compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
@@ -288,6 +331,7 @@ deploy() {
   compose pull
   compose run --rm setup
   compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans api worker
+  verify_exact_release_identity
   run_hook crowdrelay_before_verify
   verify
   report_release_ledger

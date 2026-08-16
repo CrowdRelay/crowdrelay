@@ -34,6 +34,20 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/fans/access", post(fan_lifecycle::request_fan_access))
         .route("/v1/fans/confirm", post(fan_lifecycle::confirm_fan))
         .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
+        .route(
+            "/v1/beacon/invitations/exchange",
+            post(beacon_signal::exchange_invite),
+        )
+        .route("/v1/beacon/me", get(beacon_signal::me))
+        .route(
+            "/v1/beacon/me/preferences",
+            post(beacon_signal::update_preferences),
+        )
+        .route(
+            "/v1/beacon/me/press-requests",
+            post(beacon_signal::create_press_request),
+        )
+        .route("/v1/beacon/me/logout", post(beacon_signal::logout))
         .route("/v1/public/cities", get(acquisition::list_cities))
         .route("/v1/public/area/drops", get(area::public_drops))
         .route("/v1/me/area", get(area::me_wallet))
@@ -53,6 +67,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/staff/push/endpoints/disable",
             post(push::disable_staff_endpoint),
+        )
+        .route(
+            "/v1/beacon/push/endpoints",
+            post(push::register_beacon_endpoint),
+        )
+        .route(
+            "/v1/beacon/push/endpoints/disable",
+            post(push::disable_beacon_endpoint),
         )
         .route(
             "/v1/public/push/deliveries/{delivery_id}/ack",
@@ -556,6 +578,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/beacons/{beacon_id}/reply",
             post(autopilot::record_beacon_reply),
+        )
+        .route(
+            "/v1/admin/autopilot/beacons/{beacon_id}/signal-invites",
+            post(beacon_signal::create_invite),
+        )
+        .route(
+            "/v1/admin/autopilot/beacon-press-requests",
+            get(beacon_signal::admin_press_requests),
+        )
+        .route(
+            "/v1/internal/beacon/notifications/emit-due",
+            post(beacon_signal::emit_nearby),
         )
         .route(
             "/v1/admin/autopilot/outreach-targets",

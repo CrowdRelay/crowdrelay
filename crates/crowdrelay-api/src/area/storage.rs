@@ -179,8 +179,22 @@ async fn wallet_for_player(
     state: &crate::AppState,
     player_id: Uuid,
 ) -> Result<AreaWallet, sqlx::Error> {
-    let drops = load_drops(state, Some(player_id)).await?;
-    let claims = load_claims(state, player_id).await?;
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let legacy_migration = sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS (SELECT 1 FROM area_legacy_wallet_imports WHERE workspace_id=$1 AND player_id=$2)"#,
+    )
+    .bind(workspace_id)
+    .bind(player_id)
+    .fetch_one(state.ticketing.pool());
+    let (drops, claims, token_balance, legacy_migration_applied, vouchers, ticket_rewards) =
+        tokio::try_join!(
+            load_drops(state, Some(player_id)),
+            load_claims(state, player_id),
+            area_credit_balance(state, player_id),
+            legacy_migration,
+            load_vouchers(state, player_id),
+            load_ticket_rewards(state, player_id),
+        )?;
     let total = u32::try_from(drops.len()).unwrap_or(u32::MAX);
     let current =
         u32::try_from(drops.iter().filter(|drop| drop.claim_count > 0).count()).unwrap_or(u32::MAX);
@@ -189,16 +203,7 @@ async fn wallet_for_player(
     } else {
         f64::from(current) * 100.0 / f64::from(total)
     };
-    let token_balance = safe_u32(area_credit_balance(state, player_id).await?);
-    let legacy_migration_applied = sqlx::query_scalar::<_, bool>(
-        r#"SELECT EXISTS (SELECT 1 FROM area_legacy_wallet_imports WHERE workspace_id=$1 AND player_id=$2)"#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(player_id)
-    .fetch_one(state.ticketing.pool())
-    .await?;
-    let vouchers = load_vouchers(state, player_id).await?;
-    let ticket_rewards = load_ticket_rewards(state, player_id).await?;
+    let token_balance = safe_u32(token_balance);
     let public_drops = drops.iter().map(public_drop).collect::<Vec<_>>();
     let live_drops = public_drops
         .iter()

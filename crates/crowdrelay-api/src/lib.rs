@@ -56,6 +56,7 @@ mod admission;
 mod area;
 mod audience;
 mod autopilot;
+mod beacon_signal;
 mod commerce;
 mod concert_qr;
 mod ecosystem;

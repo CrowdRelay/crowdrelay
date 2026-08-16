@@ -417,6 +417,149 @@ pub async fn disable_staff_endpoint(
     }
 }
 
+pub async fn register_beacon_endpoint(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<RegisterPushEndpointRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => return PushError::BadRequest.response(request_id_value),
+    };
+    let principal = match crate::beacon_signal::authorize_beacon(&state, &headers).await {
+        Ok(value) => value,
+        Err(_) => return PushError::Unauthorized.response(request_id_value),
+    };
+    if !push_enabled(&state).await.unwrap_or(false) {
+        return PushError::Conflict.response(request_id_value);
+    }
+    let installation_id = payload.installation_id.trim();
+    let transport = payload.transport.trim();
+    let endpoint = payload.endpoint.trim();
+    if !valid_installation_id(installation_id)
+        || endpoint.is_empty()
+        || endpoint.len() > MAX_ENDPOINT_ADDRESS
+    {
+        return PushError::BadRequest.response(request_id_value);
+    }
+    let (p256dh, auth) = match transport {
+        "android_fcm" if state.push.fcm_project_id.is_some() => {
+            if !valid_fcm_token(endpoint) || payload.p256dh.is_some() || payload.auth.is_some() {
+                return PushError::BadRequest.response(request_id_value);
+            }
+            (None, None)
+        }
+        "web_push" if state.push.web_push_vapid_public_key.is_some() => {
+            if !valid_web_push_endpoint(endpoint) {
+                return PushError::BadRequest.response(request_id_value);
+            }
+            let Some(p256dh) = payload.p256dh.as_deref().map(str::trim) else {
+                return PushError::BadRequest.response(request_id_value);
+            };
+            let Some(auth) = payload.auth.as_deref().map(str::trim) else {
+                return PushError::BadRequest.response(request_id_value);
+            };
+            if !valid_push_key(p256dh, 40) || !valid_push_key(auth, 8) {
+                return PushError::BadRequest.response(request_id_value);
+            }
+            (Some(p256dh), Some(auth))
+        }
+        _ => return PushError::BadRequest.response(request_id_value),
+    };
+    let result = sqlx::query(
+        r#"
+        INSERT INTO fan_push_endpoints (
+            workspace_id, fan_id, audience_kind, principal_hash,
+            installation_id, transport, endpoint_address, p256dh, auth_secret,
+            active, last_seen_at, invalidated_at, last_error_code
+        )
+        VALUES ($1, NULL, 'beacon', $2, $3, $4, $5, $6, $7, true, now(), NULL, NULL)
+        ON CONFLICT (workspace_id, installation_id, transport, audience_kind)
+        DO UPDATE SET
+            fan_id = NULL,
+            principal_hash = EXCLUDED.principal_hash,
+            endpoint_address = EXCLUDED.endpoint_address,
+            p256dh = EXCLUDED.p256dh,
+            auth_secret = EXCLUDED.auth_secret,
+            active = true,
+            last_seen_at = now(),
+            invalidated_at = NULL,
+            last_error_code = NULL,
+            updated_at = now()
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(&principal.session_hash)
+    .bind(installation_id)
+    .bind(transport)
+    .bind(endpoint)
+    .bind(p256dh)
+    .bind(auth)
+    .execute(&state.database)
+    .await;
+    match result {
+        Ok(_) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(PushEndpointMutationResponse { registered: true }),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, beacon_id=%principal.beacon_id, transport, "could not register Beacon push endpoint");
+            PushError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
+pub async fn disable_beacon_endpoint(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<DisablePushEndpointRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => return PushError::BadRequest.response(request_id_value),
+    };
+    let principal = match crate::beacon_signal::authorize_beacon(&state, &headers).await {
+        Ok(value) => value,
+        Err(_) => return PushError::Unauthorized.response(request_id_value),
+    };
+    let installation_id = payload.installation_id.trim();
+    let transport = payload.transport.trim();
+    if !valid_installation_id(installation_id) || !matches!(transport, "android_fcm" | "web_push") {
+        return PushError::BadRequest.response(request_id_value);
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE fan_push_endpoints
+        SET active = false, invalidated_at = now(), updated_at = now()
+        WHERE workspace_id = $1 AND audience_kind = 'beacon'
+          AND principal_hash = $2
+          AND installation_id = $3 AND transport = $4 AND active
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(&principal.session_hash)
+    .bind(installation_id)
+    .bind(transport)
+    .execute(&state.database)
+    .await;
+    match result {
+        Ok(_) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(PushEndpointMutationResponse { registered: false }),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, beacon_id=%principal.beacon_id, transport, "could not disable Beacon push endpoint");
+            PushError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
 pub async fn acknowledge_delivery(
     State(state): State<crate::AppState>,
     Path(delivery_id): Path<Uuid>,
