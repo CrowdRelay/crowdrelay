@@ -11,18 +11,19 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use getrandom::fill;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{Problem, request_id};
 
+mod helpers;
 mod invite_copy;
 mod lifecycle;
+use helpers::{
+    clean_locale, clean_topics, random_token, token_hash, valid_invite_token, valid_radius,
+};
 use invite_copy::{InviteDeliveryCopy, invite_delivery_copy};
 pub use lifecycle::{
     admin_candidates, admin_coverage, admin_dashboard, admin_engagements, admin_press_assets,
@@ -36,8 +37,6 @@ const DEFAULT_INVITE_TTL_DAYS: i64 = 14;
 const MAX_INVITE_TTL_DAYS: i64 = 30;
 const SESSION_TTL_DAYS: i64 = 180;
 const DEFAULT_RADIUS_KM: i32 = 100;
-const MIN_RADIUS_KM: i32 = 10;
-const MAX_RADIUS_KM: i32 = 500;
 const DEFAULT_WAVE_SIZE: i64 = 20;
 const MAX_WAVE_SIZE: i64 = 100;
 
@@ -297,60 +296,6 @@ struct AdminPressRequestView {
 #[serde(rename_all = "camelCase")]
 struct AdminPressRequestsResponse {
     requests: Vec<AdminPressRequestView>,
-}
-
-fn random_token<const N: usize>() -> Option<String> {
-    let mut bytes = [0_u8; N];
-    fill(&mut bytes).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(bytes))
-}
-
-fn token_hash(value: &str) -> Vec<u8> {
-    Sha256::digest(value.as_bytes()).to_vec()
-}
-
-fn clean_locale(value: &str) -> Option<String> {
-    let value = value.trim();
-    let valid = matches!(value.len(), 2 | 5)
-        && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-        && value.as_bytes().get(1).is_some_and(u8::is_ascii_lowercase)
-        && (value.len() == 2
-            || (value.as_bytes().get(2) == Some(&b'-')
-                && value.as_bytes().get(3).is_some_and(u8::is_ascii_uppercase)
-                && value.as_bytes().get(4).is_some_and(u8::is_ascii_uppercase)));
-    valid.then(|| value.to_owned())
-}
-
-fn clean_topics(values: Vec<String>) -> Option<Vec<String>> {
-    let mut values = values
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .collect::<Vec<_>>();
-    if values.is_empty()
-        || values.iter().any(|value| {
-            !matches!(
-                value.as_str(),
-                "shows" | "press_materials" | "releases" | "interviews" | "accreditation"
-            )
-        })
-    {
-        return None;
-    }
-    values.sort();
-    values.dedup();
-    Some(values)
-}
-
-fn valid_radius(value: i32) -> bool {
-    (MIN_RADIUS_KM..=MAX_RADIUS_KM).contains(&value)
-}
-
-fn valid_invite_token(value: &str) -> bool {
-    let value = value.trim();
-    (24..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 pub(crate) async fn authorize_beacon(

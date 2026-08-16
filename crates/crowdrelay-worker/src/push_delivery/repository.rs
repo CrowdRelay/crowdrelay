@@ -73,6 +73,30 @@ impl PushDeliveryRepository {
 
         sqlx::query(
             r#"
+            UPDATE fan_push_endpoints endpoint
+            SET active = false,
+                invalidated_at = COALESCE(endpoint.invalidated_at, now()),
+                last_error_code = 'staff_session_expired',
+                updated_at = now()
+            WHERE endpoint.workspace_id = $1
+              AND endpoint.audience_kind = 'staff'
+              AND endpoint.active
+              AND EXISTS (
+                  SELECT 1
+                  FROM staff_device_sessions session
+                  WHERE session.workspace_id = endpoint.workspace_id
+                    AND session.token_hash = endpoint.principal_hash
+                    AND (session.revoked_at IS NOT NULL OR session.expires_at <= now())
+              )
+            "#,
+        )
+        .bind(self.workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .context("invalidate expired staff-session push endpoints")?;
+
+        sqlx::query(
+            r#"
             UPDATE fan_push_deliveries delivery
             SET status = 'failed', error_code = CASE
                     WHEN delivery.audience_kind = 'fan' THEN 'fan_or_consent_ineligible'
@@ -219,7 +243,25 @@ impl PushDeliveryRepository {
                       AND delivery.attempt_count < $3
                       AND endpoint.active AND endpoint.invalidated_at IS NULL
                       AND (
-                          delivery.audience_kind = 'staff'
+                          (
+                              delivery.audience_kind = 'staff'
+                              AND (
+                                  NOT EXISTS (
+                                      SELECT 1
+                                      FROM staff_device_sessions known_staff_session
+                                      WHERE known_staff_session.workspace_id = delivery.workspace_id
+                                        AND known_staff_session.token_hash = endpoint.principal_hash
+                                  )
+                                  OR EXISTS (
+                                      SELECT 1
+                                      FROM staff_device_sessions active_staff_session
+                                      WHERE active_staff_session.workspace_id = delivery.workspace_id
+                                        AND active_staff_session.token_hash = endpoint.principal_hash
+                                        AND active_staff_session.revoked_at IS NULL
+                                        AND active_staff_session.expires_at > now()
+                                  )
+                              )
+                          )
                           OR (
                               delivery.audience_kind = 'fan'
                               AND fan.status = 'active'
@@ -305,6 +347,34 @@ impl PushDeliveryRepository {
                         updated_at = now()
                     WHERE workspace_id = $1 AND id = $2
                       AND status = 'claimed' AND claim_token = $3
+                      AND (
+                          audience_kind <> 'staff'
+                          OR EXISTS (
+                              SELECT 1
+                              FROM fan_push_endpoints endpoint
+                              WHERE endpoint.workspace_id = fan_push_deliveries.workspace_id
+                                AND endpoint.id = fan_push_deliveries.endpoint_id
+                                AND endpoint.audience_kind = 'staff'
+                                AND endpoint.active
+                                AND endpoint.invalidated_at IS NULL
+                                AND (
+                                    NOT EXISTS (
+                                        SELECT 1
+                                        FROM staff_device_sessions known_staff_session
+                                        WHERE known_staff_session.workspace_id = endpoint.workspace_id
+                                          AND known_staff_session.token_hash = endpoint.principal_hash
+                                    )
+                                    OR EXISTS (
+                                        SELECT 1
+                                        FROM staff_device_sessions active_staff_session
+                                        WHERE active_staff_session.workspace_id = endpoint.workspace_id
+                                          AND active_staff_session.token_hash = endpoint.principal_hash
+                                          AND active_staff_session.revoked_at IS NULL
+                                          AND active_staff_session.expires_at > now()
+                                    )
+                                )
+                          )
+                      )
                     "#,
                 )
                 .bind(self.workspace_id)

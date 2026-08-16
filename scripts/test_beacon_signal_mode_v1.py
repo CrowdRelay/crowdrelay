@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (ROOT / "migrations/0056_beacon_signal_mode.sql").read_text()
 API = (ROOT / "crates/crowdrelay-api/src/beacon_signal.rs").read_text()
+HELPERS = (ROOT / "crates/crowdrelay-api/src/beacon_signal/helpers.rs").read_text()
 PUSH = (ROOT / "crates/crowdrelay-api/src/push.rs").read_text()
 WORKER = (ROOT / "crates/crowdrelay-worker/src/push_delivery/repository.rs").read_text()
 ROUTING = (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
@@ -42,7 +43,8 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
         self.assertIn("invite_token_hash=NULL", API)
         self.assertIn("session.revoked_at IS NULL", API)
         self.assertIn("session.expires_at > now()", API)
-        self.assertIn("Sha256::digest", API)
+        self.assertIn("Sha256::digest", HELPERS)
+        self.assertIn("token_hash", API)
         self.assertNotIn("join_all", API)
 
     def test_nearby_wave_is_distance_ranked_bounded_and_idempotent(self) -> None:

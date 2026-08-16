@@ -46,5 +46,21 @@ class StaffShowChecklistPushV1Contract(unittest.TestCase):
         self.assertIn("staff_session_revoked", sessions)
         self.assertIn("endpoint.principal_hash = revoked.token_hash", sessions)
 
+    def test_expired_device_session_stops_staff_push_delivery(self):
+        repository = text("crates/crowdrelay-worker/src/push_delivery/repository.rs")
+        self.assertIn("staff_session_expired", repository)
+        self.assertIn("staff_device_sessions session", repository)
+        self.assertIn("session.token_hash = endpoint.principal_hash", repository)
+        self.assertIn("session.revoked_at IS NOT NULL OR session.expires_at <= now()", repository)
+        self.assertIn("invalidate expired staff-session push endpoints", repository)
+        # Re-check device-session eligibility both while claiming and immediately
+        # before provider handoff; static owner/staff keys have no session row and
+        # remain backward-compatible.
+        self.assertGreaterEqual(repository.count("known_staff_session"), 2)
+        self.assertGreaterEqual(repository.count("active_staff_session"), 2)
+        self.assertIn("active_staff_session.revoked_at IS NULL", repository)
+        self.assertIn("active_staff_session.expires_at > now()", repository)
+
+
 if __name__ == "__main__":
     unittest.main()
