@@ -64,7 +64,7 @@ FOR EACH ROW EXECUTE FUNCTION crowdrelay_set_updated_at();
 CREATE INDEX viryaos_beacon_invite_delivery_jobs_recent_idx
     ON viryaos_beacon_invite_delivery_jobs (workspace_id, status, created_at DESC, id DESC);
 
-INSERT INTO viryaos_manager_config (workspace_id, config_key, config)
+INSERT INTO viryaos_manager_config (workspace_id, config_key, value)
 SELECT id, 'beacon_network_policy', jsonb_build_object(
     'discoveryCountry', 'PL',
     'publicSourcesOnly', true,

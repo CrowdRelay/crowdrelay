@@ -30,6 +30,8 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
         self.assertNotIn("CREATE TABLE viryaos_beacon_network_contacts", MIGRATION)
         self.assertIn("beacon_ids uuid[]", MIGRATION)
         self.assertIn("claim_token_hash bytea", MIGRATION)
+        self.assertIn("INSERT INTO viryaos_manager_config (workspace_id, config_key, value)", MIGRATION)
+        self.assertNotIn("INSERT INTO viryaos_manager_config (workspace_id, config_key, config)", MIGRATION)
         self.assertIn("'queued','claimed','completed','failed','ambiguous','cancelled'", MIGRATION)
         self.assertIn("rawInviteCapabilitiesInOutbox', false", MIGRATION)
 
