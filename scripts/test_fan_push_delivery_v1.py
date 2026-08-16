@@ -60,5 +60,13 @@ class FanPushDeliveryV1Contract(unittest.TestCase):
         self.assertIn('valid_web_push_endpoint', api)
         self.assertIn('.redirect(Policy::none())', providers)
 
+    def test_provider_response_bodies_are_streamed_with_a_hard_limit(self):
+        providers = self.text('crates/crowdrelay-worker/src/push_delivery/providers.rs')
+        self.assertIn('const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;', providers)
+        self.assertIn('async fn read_limited_provider_response', providers)
+        self.assertIn('body.len().saturating_add(chunk.len()) > MAX_PROVIDER_RESPONSE_BYTES', providers)
+        self.assertNotIn('response.text().await', providers)
+        self.assertNotIn('.json::<FcmSuccess>()', providers)
+
 if __name__ == '__main__':
     unittest.main()

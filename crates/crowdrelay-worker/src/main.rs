@@ -18,7 +18,7 @@ use std::{
     collections::HashMap, env, fs::File, future::pending, io::Read, sync::Arc, time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{
     autopilot::PostgresAutopilotRepository, config::Config, database, observability,
@@ -38,7 +38,8 @@ use sqlx::PgPool;
 use tokio::{
     signal,
     sync::watch,
-    time::{Instant, MissedTickBehavior, interval, timeout, timeout_at},
+    task::JoinSet,
+    time::{MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
 
@@ -265,41 +266,51 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let team_email_shutdown = shutdown_receiver.clone();
     let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
-    let mut outbox_task = tokio::spawn(async move {
+    let mut runtime_tasks = JoinSet::new();
+    runtime_tasks.spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
+        "outbox worker"
     });
-    let mut reminder_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         reminder_scheduler.run(reminder_shutdown).await;
+        "event reminder scheduler"
     });
-    let mut retention_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         retention_worker.run(retention_shutdown).await;
+        "retention worker"
     });
-    let mut event_sync_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         event_sync_worker.run(event_sync_shutdown).await;
+        "event sync worker"
     });
-    let mut draw_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         match weighted_draw_worker {
             Some(worker) => worker.run(draw_shutdown).await,
             None => wait_for_shutdown(draw_shutdown).await,
         }
+        "weighted draw worker"
     });
-    let mut autopilot_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         match autopilot_worker {
             Some(worker) => worker.run(autopilot_shutdown).await,
             None => wait_for_shutdown(autopilot_shutdown).await,
         }
+        "ViryaOS Autopilot worker"
     });
-    let mut team_email_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         team_email_worker.run(team_email_shutdown).await;
+        "ViryaOS team-email worker"
     });
-    let mut push_delivery_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         match push_delivery_worker {
             Some(worker) => worker.run(push_delivery_shutdown).await,
             None => wait_for_shutdown(push_delivery_shutdown).await,
         }
+        "fan push delivery worker"
     });
-    let mut ops_watchdog_task = tokio::spawn(async move {
+    runtime_tasks.spawn(async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
+        "CrowdRelay ops watchdog"
     });
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
@@ -308,47 +319,14 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
-    loop {
+    let runtime_result = loop {
         tokio::select! {
-            result = &mut outbox_task => {
-                result.context("outbox worker task failed")?;
-                bail!("outbox worker task stopped before shutdown was requested");
-            }
-            result = &mut reminder_task => {
-                result.context("event reminder scheduler task failed")?;
-                bail!("event reminder scheduler stopped before shutdown was requested");
-            }
-            result = &mut retention_task => {
-                result.context("retention worker task failed")?;
-                bail!("retention worker stopped before shutdown was requested");
-            }
-            result = &mut event_sync_task => {
-                result.context("event sync worker task failed")?;
-                bail!("event sync worker stopped before shutdown was requested");
-            }
-            result = &mut draw_task => {
-                result.context("weighted draw worker task failed")?;
-                bail!("weighted draw worker stopped before shutdown was requested");
-            }
-            result = &mut autopilot_task => {
-                result.context("ViryaOS Autopilot worker task failed")?;
-                bail!("ViryaOS Autopilot worker stopped before shutdown was requested");
-            }
-            result = &mut team_email_task => {
-                result.context("ViryaOS team-email worker task failed")?;
-                bail!("ViryaOS team-email worker stopped before shutdown was requested");
-            }
-            result = &mut push_delivery_task => {
-                result.context("fan push delivery worker task failed")?;
-                bail!("fan push delivery worker stopped before shutdown was requested");
-            }
-            result = &mut ops_watchdog_task => {
-                result.context("CrowdRelay ops watchdog task failed")?;
-                bail!("CrowdRelay ops watchdog stopped before shutdown was requested");
+            first_exit = runtime_tasks.join_next() => {
+                break unexpected_worker_exit(first_exit);
             }
             () = &mut shutdown => {
                 tracing::info!("shutdown requested");
-                break;
+                break Ok(());
             }
             _ = checks.tick() => {
                 let is_available = database::ping(
@@ -367,66 +345,20 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
                 }
             }
         }
-    }
+    };
 
     let _ = shutdown_sender.send(true);
-    let graceful_deadline = config
-        .database
-        .operation_timeout
-        .saturating_mul(2)
-        .saturating_add(Duration::from_secs(2));
-    let shutdown_deadline = match Instant::now().checked_add(graceful_deadline) {
-        Some(deadline) => deadline,
-        None => {
-            tracing::error!("graceful shutdown deadline overflowed; aborting workers");
-            Instant::now()
-        }
-    };
-    let outbox_result =
-        await_worker_shutdown(outbox_task, "outbox worker", shutdown_deadline).await;
-    let reminder_result =
-        await_worker_shutdown(reminder_task, "event reminder scheduler", shutdown_deadline).await;
-    let retention_result =
-        await_worker_shutdown(retention_task, "retention worker", shutdown_deadline).await;
-    let event_sync_result =
-        await_worker_shutdown(event_sync_task, "event sync worker", shutdown_deadline).await;
-    let draw_result =
-        await_worker_shutdown(draw_task, "weighted draw worker", shutdown_deadline).await;
-    let autopilot_result = await_worker_shutdown(
-        autopilot_task,
-        "ViryaOS Autopilot worker",
-        shutdown_deadline,
+    let shutdown_result = drain_worker_tasks(
+        &mut runtime_tasks,
+        config
+            .database
+            .operation_timeout
+            .saturating_mul(2)
+            .saturating_add(Duration::from_secs(2)),
     )
     .await;
-    let team_email_result = await_worker_shutdown(
-        team_email_task,
-        "ViryaOS team-email worker",
-        shutdown_deadline,
-    )
-    .await;
-    let push_delivery_result = await_worker_shutdown(
-        push_delivery_task,
-        "fan push delivery worker",
-        shutdown_deadline,
-    )
-    .await;
-    let ops_watchdog_result = await_worker_shutdown(
-        ops_watchdog_task,
-        "CrowdRelay ops watchdog",
-        shutdown_deadline,
-    )
-    .await;
-    outbox_result?;
-    reminder_result?;
-    retention_result?;
-    event_sync_result?;
-    draw_result?;
-    autopilot_result?;
-    team_email_result?;
-    push_delivery_result?;
-    ops_watchdog_result?;
 
-    Ok(())
+    runtime_result.and(shutdown_result)
 }
 
 async fn trusted_workspace_id(database: &PgPool, config: &Config) -> Result<WorkspaceId> {
@@ -453,25 +385,63 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
-async fn await_worker_shutdown(
-    mut task: tokio::task::JoinHandle<()>,
-    task_name: &'static str,
-    shutdown_deadline: Instant,
+fn unexpected_worker_exit(
+    exit: Option<std::result::Result<&'static str, tokio::task::JoinError>>,
 ) -> Result<()> {
-    match timeout_at(shutdown_deadline, &mut task).await {
-        Ok(result) => result.with_context(|| format!("{task_name} failed during shutdown")),
+    match exit {
+        Some(Ok(task_name)) => Err(anyhow!("{task_name} stopped before shutdown was requested")),
+        Some(Err(error)) => Err(anyhow!("critical worker task failed: {error}")),
+        None => Err(anyhow!(
+            "all worker runtime tasks stopped before shutdown was requested"
+        )),
+    }
+}
+
+async fn drain_worker_tasks(
+    runtime_tasks: &mut JoinSet<&'static str>,
+    deadline: Duration,
+) -> Result<()> {
+    match timeout(deadline, drain_worker_tasks_inner(runtime_tasks)).await {
+        Ok(result) => result,
         Err(_) => {
-            tracing::error!(task_name, "worker exceeded graceful shutdown deadline");
-            task.abort();
-            match task.await {
-                Ok(()) => tracing::debug!(task_name, "worker stopped after abort request"),
-                Err(error) if error.is_cancelled() => {
-                    tracing::debug!(task_name, "worker cancellation completed");
+            tracing::error!("worker runtime tasks exceeded graceful shutdown deadline");
+            runtime_tasks.abort_all();
+            while let Some(result) = runtime_tasks.join_next().await {
+                match result {
+                    Ok(task_name) => {
+                        tracing::debug!(task_name, "worker stopped after abort request")
+                    }
+                    Err(error) if error.is_cancelled() => {
+                        tracing::debug!("worker task cancellation completed");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "worker task failed while aborting");
+                    }
                 }
-                Err(error) => tracing::error!(task_name, %error, "worker failed while aborting"),
             }
-            Ok(())
+            Err(anyhow!(
+                "worker runtime tasks exceeded graceful shutdown deadline"
+            ))
         }
+    }
+}
+
+async fn drain_worker_tasks_inner(runtime_tasks: &mut JoinSet<&'static str>) -> Result<()> {
+    let mut first_error: Option<anyhow::Error> = None;
+    while let Some(result) = runtime_tasks.join_next().await {
+        match result {
+            Ok(task_name) => tracing::debug!(task_name, "worker stopped cleanly"),
+            Err(error) => {
+                tracing::error!(%error, "worker task failed during shutdown");
+                if first_error.is_none() {
+                    first_error = Some(anyhow!("worker task failed during shutdown: {error}"));
+                }
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 

@@ -13,6 +13,14 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+def drain_bounded(response) -> None:
+    body = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ValueError("benchmark response exceeds size limit")
+
 
 @dataclass
 class Sample:
@@ -36,10 +44,10 @@ def fetch(url: str, path: str, timeout: float) -> Sample:
         request = urllib.request.Request(url.rstrip("/") + path, headers={"User-Agent": "crowdrelay-perf-harness/1"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.status
-            response.read()
+            drain_bounded(response)
     except urllib.error.HTTPError as error:
         status = error.code
-        error.read()
+        drain_bounded(error)
     except Exception:
         status = 0
     return Sample(path=path, elapsed_ms=(time.perf_counter() - started) * 1000.0, status=status)

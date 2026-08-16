@@ -13,10 +13,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
 DEFAULT_API_BASE = "https://signal-api.virya.music/v1"
+MAX_RESPONSE_BYTES = 2_000_000
+MAX_ERROR_BYTES = 16_384
 
 
 class OperatorError(RuntimeError):
@@ -31,7 +34,11 @@ def env(name: str, *, required: bool = True) -> str:
 
 
 def api_base() -> str:
-    return os.environ.get("CROWDRELAY_API_BASE", DEFAULT_API_BASE).strip().rstrip("/")
+    value = os.environ.get("CROWDRELAY_API_BASE", DEFAULT_API_BASE).strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise OperatorError("CROWDRELAY_API_BASE must be HTTPS without embedded credentials")
+    return value
 
 
 def request_json(
@@ -57,9 +64,11 @@ def request_json(
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
-            raw = response.read(2_000_000)
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise OperatorError(f"response too large for {path}")
     except urllib.error.HTTPError as error:
-        detail = error.read(16_384).decode("utf-8", "replace")
+        detail = error.read(MAX_ERROR_BYTES).decode("utf-8", "replace")
         raise OperatorError(f"HTTP {error.code} {path}: {detail}") from error
     except urllib.error.URLError as error:
         raise OperatorError(f"request failed for {path}: {error.reason}") from error

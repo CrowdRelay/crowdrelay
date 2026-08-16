@@ -12,6 +12,7 @@ use super::{crypto, repository::ClaimedDelivery};
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const MAX_SERVICE_ACCOUNT_BYTES: u64 = 128 * 1024;
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
@@ -416,10 +417,11 @@ impl FcmProvider {
                 response.status()
             )));
         }
-        let token: OAuthTokenResponse = response
-            .json()
+        let body = read_limited_provider_response(response)
             .await
-            .map_err(|error| TokenError::Fatal(error.into()))?;
+            .map_err(TokenError::Fatal)?;
+        let token: OAuthTokenResponse =
+            serde_json::from_slice(&body).map_err(|error| TokenError::Fatal(error.into()))?;
         if token.access_token.trim().is_empty() || !(60..=7200).contains(&token.expires_in) {
             return Err(TokenError::Fatal(anyhow!(
                 "FCM OAuth returned invalid token metadata"
@@ -431,6 +433,33 @@ impl FcmProvider {
         });
         Ok(token.access_token)
     }
+}
+
+async fn read_limited_provider_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
+    {
+        bail!("push provider response exceeds size limit");
+    }
+
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(4 * 1024)
+        .min(MAX_PROVIDER_RESPONSE_BYTES);
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("read push provider response")?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_PROVIDER_RESPONSE_BYTES {
+            bail!("push provider response exceeds size limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn classify_fcm_response(
@@ -452,10 +481,10 @@ async fn classify_fcm_response(
     };
     let status = response.status();
     if status.is_success() {
-        let reference = response
-            .json::<FcmSuccess>()
+        let reference = read_limited_provider_response(response)
             .await
             .ok()
+            .and_then(|body| serde_json::from_slice::<FcmSuccess>(&body).ok())
             .and_then(|value| value.name)
             .filter(|value| value.len() <= 240);
         return ProviderOutcome::Accepted { reference };
@@ -465,7 +494,11 @@ async fn classify_fcm_response(
             code: "fcm_rate_limited",
         };
     }
-    let body = response.text().await.unwrap_or_default();
+    let body = read_limited_provider_response(response)
+        .await
+        .ok()
+        .and_then(|body| String::from_utf8(body).ok())
+        .unwrap_or_default();
     let invalid_endpoint = status == StatusCode::NOT_FOUND
         || body.contains("UNREGISTERED")
         || body.contains("registration-token-not-registered");

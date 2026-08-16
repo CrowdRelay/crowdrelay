@@ -26,6 +26,19 @@ class LatarnikOperatorContract(unittest.TestCase):
         self.assertIn('CROWDRELAY_COMMERCE_API_KEY', source)
         self.assertNotIn("CROWDRELAY_ADMIN_API_KEY=", source)
 
+    def test_operator_api_base_rejects_plaintext_and_embedded_credentials(self) -> None:
+        previous = os.environ.get("CROWDRELAY_API_BASE")
+        try:
+            for value in ("http://signal-api.virya.music/v1", "https://user:pass@example.com/v1"):
+                os.environ["CROWDRELAY_API_BASE"] = value
+                with self.assertRaises(module.OperatorError):
+                    module.api_base()
+        finally:
+            if previous is None:
+                os.environ.pop("CROWDRELAY_API_BASE", None)
+            else:
+                os.environ["CROWDRELAY_API_BASE"] = previous
+
     def test_sensitive_output_is_owner_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "invites.json"

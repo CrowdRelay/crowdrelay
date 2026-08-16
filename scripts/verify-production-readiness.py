@@ -13,6 +13,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,13 @@ ALL_COMPONENTS = (*CODE_COMPONENTS, "n8n")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+MAX_LEDGER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def fetch_release_ledger(base_url: str, admin_key: str, timeout: float) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("production readiness base URL must be HTTPS without credentials")
     url = base_url.rstrip("/") + "/v1/admin/autopilot/release-ledger"
     request = urllib.request.Request(
         url,
@@ -38,7 +43,10 @@ def fetch_release_ledger(base_url: str, admin_key: str, timeout: float) -> dict[
     with urllib.request.urlopen(request, timeout=timeout) as response:
         if response.status != 200:
             raise ValueError(f"release ledger returned HTTP {response.status}")
-        return json.loads(response.read())
+        raw = response.read(MAX_LEDGER_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_LEDGER_RESPONSE_BYTES:
+            raise ValueError("release ledger response exceeds size limit")
+        return json.loads(raw)
 
 
 def is_sha256(value: Any) -> bool:
