@@ -5,7 +5,7 @@
 //! atomically upserts the normalized result. A failed provider call never removes
 //! or hides previously persisted concerts.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, env, time::Duration};
 
 use reqwest::{Client, Url};
 use serde::Deserialize;
@@ -56,6 +56,7 @@ pub struct EventSyncWorker {
     pool: PgPool,
     client: Client,
     config: EventSyncWorkerConfig,
+    bandsintown_api_key: Option<String>,
 }
 
 impl EventSyncWorker {
@@ -67,6 +68,8 @@ impl EventSyncWorker {
         {
             return Err(EventSyncError::InvalidConfiguration);
         }
+        let bandsintown_api_key =
+            normalize_provider_api_key(env::var("CROWDRELAY_BANDSINTOWN_API_KEY").ok())?;
         let client = Client::builder()
             .timeout(config.http_timeout)
             .connect_timeout(config.http_timeout.min(Duration::from_secs(5)))
@@ -80,6 +83,7 @@ impl EventSyncWorker {
             pool,
             client,
             config,
+            bandsintown_api_key,
         })
     }
 
@@ -162,13 +166,17 @@ impl EventSyncWorker {
         &self,
         source: &EventSourceRow,
     ) -> Result<Vec<NormalizedExternalEvent>, EventSyncError> {
+        let app_id = self
+            .bandsintown_api_key
+            .as_deref()
+            .unwrap_or(source.app_id.as_str());
         let mut url = Url::parse(&format!(
             "https://rest.bandsintown.com/artists/{}/events",
             encode_path_segment(&source.artist_name)
         ))
         .map_err(|_| EventSyncError::InvalidSource)?;
         url.query_pairs_mut()
-            .append_pair("app_id", &source.app_id)
+            .append_pair("app_id", app_id)
             .append_pair("date", "upcoming");
 
         let response = self
@@ -178,6 +186,11 @@ impl EventSyncWorker {
             .send()
             .await
             .map_err(|_| EventSyncError::ProviderUnavailable)?;
+        if matches!(response.status().as_u16(), 401 | 403) {
+            return Err(EventSyncError::ProviderAuthentication(
+                response.status().as_u16(),
+            ));
+        }
         if !response.status().is_success() {
             return Err(EventSyncError::ProviderStatus(response.status().as_u16()));
         }
@@ -237,6 +250,8 @@ pub enum EventSyncError {
     Database,
     #[error("event source provider is unavailable")]
     ProviderUnavailable,
+    #[error("event source provider rejected the configured API key (HTTP {0})")]
+    ProviderAuthentication(u16),
     #[error("event source provider returned HTTP {0}")]
     ProviderStatus(u16),
     #[error("event source provider returned an invalid payload")]
@@ -561,6 +576,21 @@ fn clean_optional(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_provider_api_key(value: Option<String>) -> Result<Option<String>, EventSyncError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 512
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+    {
+        return Err(EventSyncError::InvalidConfiguration);
+    }
+    Ok(Some(value.to_owned()))
+}
+
 fn valid_http_url(value: Option<String>) -> Option<String> {
     let value = clean_optional(value)?;
     let url = Url::parse(&value).ok()?;
@@ -786,6 +816,19 @@ mod tests {
         assert_eq!(country_code(Some("Poland"), "XX"), "PL");
         assert_eq!(country_code(Some("Czechia"), "XX"), "CZ");
         assert_eq!(country_code(Some("Unknown"), "PL"), "PL");
+    }
+
+    #[test]
+    fn bandsintown_api_key_override_is_trimmed_and_validated() {
+        assert_eq!(
+            normalize_provider_api_key(Some("  artist-key_123  ".to_owned()))
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("artist-key_123")
+        );
+        assert!(normalize_provider_api_key(Some("bad key".to_owned())).is_err());
+        assert!(normalize_provider_api_key(Some(String::new())).is_err());
     }
 }
 
