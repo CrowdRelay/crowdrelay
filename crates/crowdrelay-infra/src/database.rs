@@ -139,12 +139,39 @@ pub async fn migrate(pool: &PgPool) -> Result<(), DatabaseError> {
 }
 
 fn pool_options(config: &DatabaseConfig) -> PgPoolOptions {
+    // Apply the query deadlines once per connection instead of relying solely on
+    // the transaction-local `set_config` each write path issues.
+    //
+    // Two reasons. Statements executed straight against the pool never open a
+    // transaction, so until now they ran with no statement_timeout at all: a
+    // single slow read could occupy a connection indefinitely. And a session
+    // default makes the per-transaction round trip redundant rather than
+    // load-bearing, so it can be retired without changing behaviour.
+    //
+    // The values are constants from configuration, so a session default and a
+    // transaction-local override resolve to the same deadline; the transaction
+    // helpers remain correct while they exist.
+    let statement_ms = config.operation_timeout.as_millis();
+    let lock_ms = config.lock_timeout.as_millis();
     PgPoolOptions::new()
         .min_connections(1)
         .max_connections(config.max_connections)
         .acquire_timeout(config.connect_timeout)
         .idle_timeout(Some(Duration::from_secs(5 * 60)))
         .max_lifetime(Some(Duration::from_secs(30 * 60)))
+        .after_connect(move |connection, _meta| {
+            Box::pin(async move {
+                sqlx::query(
+                    "SELECT set_config('statement_timeout', $1, false), \
+                     set_config('lock_timeout', $2, false)",
+                )
+                .bind(format!("{statement_ms}ms"))
+                .bind(format!("{lock_ms}ms"))
+                .execute(connection)
+                .await?;
+                Ok(())
+            })
+        })
 }
 
 /// Error returned when database pool creation, readiness, or migration fails.
