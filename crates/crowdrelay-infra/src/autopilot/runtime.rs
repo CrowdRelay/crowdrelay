@@ -159,13 +159,19 @@ async fn record_show_growth_receipt(
             };
             let beacon_id = receipt_text(activation, "beacon_id", 64)
                 .and_then(|value| uuid::Uuid::parse_str(value).ok());
+            let reply_recorded_at = activation
+                .get("reply_received")
+                .and_then(Value::as_bool)
+                .filter(|value| *value)
+                .map(|_| occurred_at);
             sqlx::query(
                 r#"
                 INSERT INTO viryaos_grassroots_activations(
                     workspace_id,event_id,beacon_id,activation_kind,destination_key,status,
                     canonical_url,public_receipt_url,attributable_reach,attributed_clicks,
-                    attributed_rsvps,attributed_ticket_orders,receipt,created_at,updated_at
-                ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+                    attributed_rsvps,attributed_ticket_orders,reply_recorded_at,receipt,
+                    created_at,updated_at
+                ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
                 ON CONFLICT(workspace_id,event_id,activation_kind,destination_key) DO UPDATE SET
                     beacon_id=COALESCE(EXCLUDED.beacon_id,viryaos_grassroots_activations.beacon_id),
                     status=EXCLUDED.status,
@@ -175,6 +181,7 @@ async fn record_show_growth_receipt(
                     attributed_clicks=GREATEST(viryaos_grassroots_activations.attributed_clicks,EXCLUDED.attributed_clicks),
                     attributed_rsvps=GREATEST(viryaos_grassroots_activations.attributed_rsvps,EXCLUDED.attributed_rsvps),
                     attributed_ticket_orders=GREATEST(viryaos_grassroots_activations.attributed_ticket_orders,EXCLUDED.attributed_ticket_orders),
+                    reply_recorded_at=COALESCE(viryaos_grassroots_activations.reply_recorded_at,EXCLUDED.reply_recorded_at),
                     receipt=viryaos_grassroots_activations.receipt || EXCLUDED.receipt,
                     updated_at=EXCLUDED.updated_at
                 "#,
@@ -191,6 +198,7 @@ async fn record_show_growth_receipt(
             .bind(receipt_count(activation, "clicks"))
             .bind(receipt_count(activation, "rsvps"))
             .bind(receipt_count(activation, "ticket_orders"))
+            .bind(reply_recorded_at)
             .bind(activation.get("receipt").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({})))
             .bind(occurred_at)
             .execute(&mut **transaction)

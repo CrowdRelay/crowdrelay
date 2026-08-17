@@ -197,6 +197,9 @@ pub enum AutopilotMeasurementKind {
     OutreachReply7d,
     AudienceTicketRevenue72h,
     ShowTicketRevenue7d,
+    ShowGrowthSurfaceClicks7d,
+    ShowGrowthAttributedTicketOrders7d,
+    GrassrootsActivationReplies14d,
 }
 
 impl AutopilotMeasurementKind {
@@ -210,6 +213,9 @@ impl AutopilotMeasurementKind {
             Self::OutreachReply7d => "outreach_reply_7d",
             Self::AudienceTicketRevenue72h => "audience_ticket_revenue_72h",
             Self::ShowTicketRevenue7d => "show_ticket_revenue_7d",
+            Self::ShowGrowthSurfaceClicks7d => "show_growth_surface_clicks_7d",
+            Self::ShowGrowthAttributedTicketOrders7d => "show_growth_attributed_ticket_orders_7d",
+            Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
         }
     }
 

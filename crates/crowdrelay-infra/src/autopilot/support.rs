@@ -207,6 +207,15 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "outreach_reply_7d" => Ok(AutopilotMeasurementKind::OutreachReply7d),
         "audience_ticket_revenue_72h" => Ok(AutopilotMeasurementKind::AudienceTicketRevenue72h),
         "show_ticket_revenue_7d" => Ok(AutopilotMeasurementKind::ShowTicketRevenue7d),
+        "show_growth_surface_clicks_7d" => {
+            Ok(AutopilotMeasurementKind::ShowGrowthSurfaceClicks7d)
+        }
+        "show_growth_attributed_ticket_orders_7d" => {
+            Ok(AutopilotMeasurementKind::ShowGrowthAttributedTicketOrders7d)
+        }
+        "grassroots_activation_replies_14d" => {
+            Ok(AutopilotMeasurementKind::GrassrootsActivationReplies14d)
+        }
         _ => Err(RepositoryError::Unexpected),
     }
 }

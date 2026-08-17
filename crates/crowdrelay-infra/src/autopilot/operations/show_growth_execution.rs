@@ -155,7 +155,11 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "community_posts_are_manual_or_moderator_approved_and_never_automated_cold_spam",
                 "never_bypass_group_rules_posting_limits_or_moderation",
                 "no_reciprocal_commitment_outside_configured_authority"
-            ]
+            ],
+            "receipt_contract": {
+                "activation_fields": ["activation_kind", "destination_key", "status", "reply_received"],
+                "reply_received_semantics": "true_only_after_an_explicit_inbound_human_reply"
+            }
         }),
         ShowGrowthLever::GrassrootsSceneRelay => json!({
             "objective": "activate a small trusted local scene graph around the show so reach comes through real relationships rather than anonymous cold promotion",
@@ -201,6 +205,8 @@ pub(in crate::autopilot) async fn execute_show_growth(
             },
             "receipt_contract": {
                 "metadata": ["activated_relationships", "warm_intros", "public_urls", "qr_placements", "manual_steps", "skipped_with_reason"],
+                "activation_fields": ["activation_kind", "destination_key", "status", "reply_received"],
+                "reply_received_semantics": "true_only_after_an_explicit_inbound_human_reply",
                 "manual_steps_must_include": ["destination", "what_to_do", "why_it_matters", "consent_or_moderation_requirement"]
             }
         }),

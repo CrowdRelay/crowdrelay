@@ -5,7 +5,8 @@ pub(super) async fn schedule_effect_measurement(
     payload: &AutopilotActionPayload,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
-    let plan = match payload {
+    let mut plans = Vec::with_capacity(4);
+    match payload {
         AutopilotActionPayload::ChangeTicketPrice { ticket_type_id, .. } => {
             let baseline = sqlx::query_scalar::<_, f64>(
                 r#"
@@ -27,12 +28,12 @@ pub(super) async fn schedule_effect_measurement(
             .fetch_one(&mut **transaction)
             .await
             .map_err(map_sqlx)?;
-            Some((
+            plans.push((
                 AutopilotMeasurementKind::TicketRevenue72h,
                 ticket_type_id.into_uuid(),
                 baseline,
                 now + time::Duration::hours(72),
-            ))
+            ));
         }
         AutopilotActionPayload::ChangeMerchPrice {
             product_id,
@@ -64,30 +65,30 @@ pub(super) async fn schedule_effect_measurement(
             .await
             .map_err(map_sqlx)?;
             let baseline = baseline_units * (*from_minor as f64);
-            Some((
+            plans.push((
                 AutopilotMeasurementKind::MerchGrossProxy7d,
                 product_id.into_uuid(),
                 baseline,
                 now + time::Duration::days(7),
-            ))
+            ));
         }
         AutopilotActionPayload::RequestPromotionBudgetChange {
             campaign_id,
             roas_basis_points,
             ..
-        } => Some((
+        } => plans.push((
             AutopilotMeasurementKind::PromotionRoas7d,
             campaign_id.into_uuid(),
             f64::from(*roas_basis_points),
             now + time::Duration::days(7),
         )),
-        AutopilotActionPayload::RequestBookingOutreach { target_id, .. } => Some((
+        AutopilotActionPayload::RequestBookingOutreach { target_id, .. } => plans.push((
             AutopilotMeasurementKind::BookingReply7d,
             target_id.into_uuid(),
             0.0,
             now + time::Duration::days(7),
         )),
-        AutopilotActionPayload::RequestOutreach { target_id, .. } => Some((
+        AutopilotActionPayload::RequestOutreach { target_id, .. } => plans.push((
             AutopilotMeasurementKind::OutreachReply7d,
             target_id.into_uuid(),
             0.0,
@@ -112,47 +113,94 @@ pub(super) async fn schedule_effect_measurement(
             .fetch_one(&mut **transaction)
             .await
             .map_err(map_sqlx)?;
-            Some((
+            plans.push((
                 AutopilotMeasurementKind::AudienceTicketRevenue72h,
                 event_id.into_uuid(),
                 baseline,
                 now + time::Duration::hours(72),
-            ))
+            ));
         }
-        AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. }
+        AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => {
+            use crowdrelay_domain::show_growth::ShowGrowthLever;
+
             if !matches!(
                 lever,
-                crowdrelay_domain::show_growth::ShowGrowthLever::MerchBuyerOffer
-                    | crowdrelay_domain::show_growth::ShowGrowthLever::PostShowMerchFollowUp
-            ) => {
-            let baseline = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
-                FROM ticket_orders AS ticket_order
-                JOIN ticket_sales AS sale
-                  ON sale.workspace_id=ticket_order.workspace_id
-                 AND sale.id=ticket_order.ticket_sale_id
-                WHERE ticket_order.workspace_id=$1
-                  AND sale.event_id=$2
-                  AND ticket_order.status IN ('paid','partially_refunded','refunded')
-                  AND ticket_order.paid_at >= $3 - INTERVAL '7 days'
-                  AND ticket_order.paid_at < $3
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(event_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
-            Some((
-                AutopilotMeasurementKind::ShowTicketRevenue7d,
-                event_id.into_uuid(),
-                baseline,
-                now + time::Duration::days(7),
-            ))
+                ShowGrowthLever::MerchBuyerOffer | ShowGrowthLever::PostShowMerchFollowUp
+            ) {
+                let baseline = sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
+                    FROM ticket_orders AS ticket_order
+                    JOIN ticket_sales AS sale
+                      ON sale.workspace_id=ticket_order.workspace_id
+                     AND sale.id=ticket_order.ticket_sale_id
+                    WHERE ticket_order.workspace_id=$1
+                      AND sale.event_id=$2
+                      AND ticket_order.status IN ('paid','partially_refunded','refunded')
+                      AND ticket_order.paid_at >= $3 - INTERVAL '7 days'
+                      AND ticket_order.paid_at < $3
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(event_id.into_uuid())
+                .bind(now)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?;
+                plans.push((
+                    AutopilotMeasurementKind::ShowTicketRevenue7d,
+                    event_id.into_uuid(),
+                    baseline,
+                    now + time::Duration::days(7),
+                ));
+            }
+
+            // External show-growth execution writes durable, cumulative provider
+            // receipts. Snapshot those counters at action completion and compare the
+            // same counters after seven days; this measures only growth after the action.
+            if !lever.is_first_party_campaign() {
+                let (baseline_clicks, baseline_orders) = sqlx::query_as::<_, (f64, f64)>(
+                    r#"
+                    SELECT
+                        COALESCE(SUM(attributed_clicks),0)::double precision,
+                        COALESCE(SUM(attributed_ticket_orders),0)::double precision
+                    FROM viryaos_show_growth_surfaces
+                    WHERE workspace_id=$1 AND event_id=$2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(event_id.into_uuid())
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?;
+                plans.push((
+                    AutopilotMeasurementKind::ShowGrowthSurfaceClicks7d,
+                    event_id.into_uuid(),
+                    baseline_clicks,
+                    now + time::Duration::days(7),
+                ));
+                plans.push((
+                    AutopilotMeasurementKind::ShowGrowthAttributedTicketOrders7d,
+                    event_id.into_uuid(),
+                    baseline_orders,
+                    now + time::Duration::days(7),
+                ));
+            }
+
+            // A reply is only a reply when the executor records the explicit
+            // reply_received signal; sent/delivered/introduced states are not inferred.
+            if matches!(
+                lever,
+                ShowGrowthLever::PartnerCrossPromo | ShowGrowthLever::GrassrootsSceneRelay
+            ) {
+                plans.push((
+                    AutopilotMeasurementKind::GrassrootsActivationReplies14d,
+                    event_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(14),
+                ));
+            }
         }
-        AutopilotActionPayload::RequestShowGrowth { .. } => None,
         AutopilotActionPayload::ChangeTicketCapacity { .. }
         | AutopilotActionPayload::RequestFanLifecycleMessage { .. }
         | AutopilotActionPayload::RequestMerchReorder { .. }
@@ -167,34 +215,34 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::ApplyLiveOpportunity { .. }
         | AutopilotActionPayload::PrepareFundingPackage { .. }
         | AutopilotActionPayload::SubmitFundingApplication { .. }
-        | AutopilotActionPayload::SendTeamAssignmentEmail { .. } => None,
-    };
-    let Some((kind, subject_id, baseline_value, due_at)) = plan else {
-        return Ok(());
-    };
-    if !baseline_value.is_finite() || baseline_value < 0.0 {
-        return Err(RepositoryError::Unexpected);
+        | AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {}
     }
-    sqlx::query(
-        r#"
-        INSERT INTO viryaos_autopilot_measurements (
-            id, workspace_id, action_id, measurement_kind, subject_id,
-            action_finished_at, baseline_value, due_at, available_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
-        ON CONFLICT (workspace_id, action_id, measurement_kind) DO NOTHING
-        "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(workspace_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .bind(kind.as_str())
-    .bind(subject_id)
-    .bind(now)
-    .bind(baseline_value)
-    .bind(due_at)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
+
+    for (kind, subject_id, baseline_value, due_at) in plans {
+        if !baseline_value.is_finite() || baseline_value < 0.0 {
+            return Err(RepositoryError::Unexpected);
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_autopilot_measurements (
+                id, workspace_id, action_id, measurement_kind, subject_id,
+                action_finished_at, baseline_value, due_at, available_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+            ON CONFLICT (workspace_id, action_id, measurement_kind) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(action_id.into_uuid())
+        .bind(kind.as_str())
+        .bind(subject_id)
+        .bind(now)
+        .bind(baseline_value)
+        .bind(due_at)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
     Ok(())
 }
 pub(super) async fn record_execution_outcome(

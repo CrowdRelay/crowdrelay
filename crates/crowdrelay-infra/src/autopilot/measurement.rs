@@ -79,8 +79,34 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // Parse while the claim transaction is still open. A DB/Rust enum
+            // drift must never commit a whole batch as `processing` and strand the
+            // valid rows behind stale-recovery. Quarantine only the unsupported row.
+            let mut claimed = Vec::with_capacity(rows.len());
+            for row in rows {
+                let measurement_id = row.id;
+                match claimed_measurement(row) {
+                    Ok(measurement) => claimed.push(measurement),
+                    Err(_) => {
+                        sqlx::query(
+                            r#"
+                            UPDATE viryaos_autopilot_measurements
+                            SET status='failed', finished_at=$3,
+                                last_error_kind='unsupported_measurement_kind'
+                            WHERE workspace_id=$1 AND id=$2 AND status='processing'
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(measurement_id)
+                        .bind(now)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                    }
+                }
+            }
             transaction.commit().await.map_err(map_sqlx)?;
-            rows.into_iter().map(claimed_measurement).collect()
+            Ok(claimed)
         })
         .await
     }
@@ -248,6 +274,51 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .fetch_one(&self.pool)
                 .await
                 .map_err(map_sqlx)?,
+                AutopilotMeasurementKind::ShowGrowthSurfaceClicks7d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COALESCE(SUM(attributed_clicks),0)::double precision
+                        FROM viryaos_show_growth_surfaces
+                        WHERE workspace_id=$1 AND event_id=$2
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                AutopilotMeasurementKind::ShowGrowthAttributedTicketOrders7d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COALESCE(SUM(attributed_ticket_orders),0)::double precision
+                        FROM viryaos_show_growth_surfaces
+                        WHERE workspace_id=$1 AND event_id=$2
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                AutopilotMeasurementKind::GrassrootsActivationReplies14d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM viryaos_grassroots_activations
+                        WHERE workspace_id=$1 AND event_id=$2
+                          AND reply_recorded_at >= $3
+                          AND reply_recorded_at < $3 + INTERVAL '14 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
             };
             if observed.is_finite() && observed >= 0.0 {
                 Ok(observed)
@@ -327,14 +398,20 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT context
                         FROM viryaos_autopilot_actions
                         WHERE workspace_id=$1 AND id=$2
-                    ), recent AS (
-                        SELECT outcome.effect_assessment
+                    ), latest_per_action AS (
+                        SELECT DISTINCT ON (outcome.action_id)
+                               outcome.action_id, outcome.effect_assessment,
+                               outcome.observed_at, outcome.id
                         FROM viryaos_autopilot_outcomes outcome
                         JOIN viryaos_autopilot_actions action
                           ON action.workspace_id=outcome.workspace_id AND action.id=outcome.action_id
                         JOIN action_context ON action.context=action_context.context
                         WHERE outcome.workspace_id=$1 AND outcome.measurement_id IS NOT NULL
-                        ORDER BY outcome.observed_at DESC, outcome.id DESC
+                        ORDER BY outcome.action_id, outcome.observed_at DESC, outcome.id DESC
+                    ), recent AS (
+                        SELECT effect_assessment
+                        FROM latest_per_action
+                        ORDER BY observed_at DESC, id DESC
                         LIMIT 2
                     ), qualifies AS (
                         SELECT count(*)=2 AND bool_and(effect_assessment='worsened') AS should_guard
