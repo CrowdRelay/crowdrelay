@@ -166,10 +166,8 @@ impl EventSyncWorker {
         &self,
         source: &EventSourceRow,
     ) -> Result<Vec<NormalizedExternalEvent>, EventSyncError> {
-        let app_id = self
-            .bandsintown_api_key
-            .as_deref()
-            .unwrap_or(source.app_id.as_str());
+        let app_id =
+            resolve_bandsintown_app_id(self.bandsintown_api_key.as_deref(), source.app_id.as_str());
         let mut url = Url::parse(&format!(
             "https://rest.bandsintown.com/artists/{}/events",
             encode_path_segment(&source.artist_name)
@@ -591,6 +589,13 @@ fn normalize_provider_api_key(value: Option<String>) -> Result<Option<String>, E
     Ok(Some(value.to_owned()))
 }
 
+fn resolve_bandsintown_app_id<'a>(
+    configured_api_key: Option<&'a str>,
+    source_app_id: &'a str,
+) -> &'a str {
+    configured_api_key.unwrap_or(source_app_id)
+}
+
 fn valid_http_url(value: Option<String>) -> Option<String> {
     let value = clean_optional(value)?;
     let url = Url::parse(&value).ok()?;
@@ -829,6 +834,18 @@ mod tests {
         );
         assert!(normalize_provider_api_key(Some("bad key".to_owned())).is_err());
         assert!(normalize_provider_api_key(Some(String::new())).is_err());
+    }
+
+    #[test]
+    fn bandsintown_environment_key_overrides_stale_source_app_id() {
+        assert_eq!(
+            resolve_bandsintown_app_id(Some("environment-key"), "stale-database-app-id"),
+            "environment-key"
+        );
+        assert_eq!(
+            resolve_bandsintown_app_id(None, "legacy-database-app-id"),
+            "legacy-database-app-id"
+        );
     }
 }
 
