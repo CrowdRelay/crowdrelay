@@ -23,8 +23,6 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             }
 
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout)
-                .await?;
 
             let natural = sqlx::query_as::<_, (Uuid, i64)>(
                 "SELECT id, version FROM viryaos_release_plans \
@@ -195,7 +193,6 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
             }
 
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
 
             let natural = sqlx::query_as::<_, (Uuid, i64)>(
                 "SELECT id, version FROM viryaos_team_opportunities \
@@ -413,8 +410,6 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout)
-                .await?;
             let operation_id = Uuid::now_v7();
             let progress = match command.progress {
                 TeamOpportunityProgress::PackageReady => "package_ready",

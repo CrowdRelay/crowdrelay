@@ -129,24 +129,6 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         .and_then(|value| value.code())
         .is_some_and(|code| code.as_ref() == "23505")
 }
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-) -> Result<(), AccountingError> {
-    sqlx::query(
-        "SELECT set_config('statement_timeout',$1,true),set_config('lock_timeout',$2,true)",
-    )
-    .bind(format!(
-        "{}ms",
-        state.ticketing.operation_timeout().as_millis()
-    ))
-    .bind(format!("{}ms", state.ticketing.lock_timeout().as_millis()))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|_| AccountingError::Unavailable)?;
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug)]
 enum AccountingError {
     NotFound,

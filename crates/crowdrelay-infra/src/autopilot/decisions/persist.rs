@@ -7,8 +7,6 @@ macro_rules! decision_persist {
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             if matches!(
                 candidate.disposition,
                 PolicyDisposition::RequireApproval | PolicyDisposition::AutoExecute

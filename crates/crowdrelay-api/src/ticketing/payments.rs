@@ -135,7 +135,6 @@ async fn bind_stripe_checkout_inner(
     request_id_value: Option<&str>,
 ) -> Result<StripeCheckoutBindingResponse, TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
     let order = sqlx::query_as::<_, OrderRow>(ORDER_ROW_BY_ID_FOR_UPDATE)
         .bind(state.workspace_id.into_uuid())
         .bind(order_id)
@@ -243,7 +242,6 @@ async fn cancel_order_inner(
     request_id_value: Option<&str>,
 ) -> Result<TicketOrderView, TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
     let order = sqlx::query_as::<_, OrderRow>(ORDER_ROW_BY_ID_FOR_UPDATE)
         .bind(state.workspace_id.into_uuid())
         .bind(order_id)
@@ -300,7 +298,6 @@ async fn stripe_event_inner(
     request_id_value: Option<&str>,
 ) -> Result<StripeTicketEventResponse, TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
     let order = if let Some(session_id) = request.stripe_checkout_session_id.as_deref() {
         sqlx::query_as::<_, OrderRow>(ORDER_ROW_BY_STRIPE_SESSION_FOR_UPDATE)
             .bind(state.workspace_id.into_uuid())

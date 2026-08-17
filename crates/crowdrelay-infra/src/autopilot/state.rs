@@ -14,8 +14,6 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
     ) -> Result<BookingTargetMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             if command.expected_version < 0
                 || command.priority > 100
                 || command.relationship_score > 100
@@ -209,8 +207,6 @@ impl AutopilotMerchStateRepository for PostgresAutopilotRepository {
     ) -> Result<MerchProductEconomicsMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
 
             let operation_id = Uuid::now_v7();
             let details = json!({
@@ -355,7 +351,6 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let details = json!({
                 "currency": &command.currency,
@@ -472,7 +467,6 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
     ) -> Result<PromotionCampaignStateMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
 
             let existing_campaign_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
@@ -619,8 +613,6 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
     ) -> Result<CityMarketSignalMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
 
             let city_exists =
                 sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM cities WHERE id = $1)")
@@ -753,8 +745,6 @@ impl AutopilotTicketStateRepository for PostgresAutopilotRepository {
     ) -> Result<TicketAllocationGuardrailMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             let operation_id = Uuid::now_v7();
             let details = json!({
                 "minimum_capacity": command.minimum_capacity,

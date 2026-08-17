@@ -50,8 +50,6 @@ pub struct RetentionWorker {
     pool: PgPool,
     poll_interval: Duration,
     operation_timeout: Duration,
-    statement_timeout_ms: i64,
-    lock_timeout_ms: i64,
     terminal_outbox_retention_ms: i64,
     consumed_token_retention_ms: i64,
     batch_size: i64,
@@ -67,8 +65,6 @@ impl RetentionWorker {
             pool,
             poll_interval: config.poll_interval,
             operation_timeout: config.operation_timeout,
-            statement_timeout_ms: duration_milliseconds(config.operation_timeout)?,
-            lock_timeout_ms: duration_milliseconds(config.lock_timeout)?,
             terminal_outbox_retention_ms: duration_milliseconds(config.terminal_outbox_retention)?,
             consumed_token_retention_ms: duration_milliseconds(config.consumed_token_retention)?,
             batch_size: i64::from(config.batch_size),
@@ -223,12 +219,6 @@ impl RetentionWorker {
             .begin()
             .await
             .map_err(RetentionRunError::Database)?;
-        configure_transaction(
-            &mut transaction,
-            self.statement_timeout_ms,
-            self.lock_timeout_ms,
-        )
-        .await?;
 
         let changed = match step {
             RetentionStep::ExpiredIdempotencyKeys => {

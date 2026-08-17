@@ -44,7 +44,6 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 return Err(RepositoryError::Conflict);
             }
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let target_id = command.target_id.unwrap_or_else(|| OutreachTargetId::from_uuid(operation_id));
             let details = json!({
@@ -141,7 +140,6 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             let subject_key = command.subject_key.trim();
             let template_key = command.template_key.trim();
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
 
             // Resolve the natural-key row before creating the operator audit record.
             // This makes idempotent replays return the actual persisted opportunity id
@@ -284,12 +282,6 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(
-                &mut transaction,
-                self.operation_timeout,
-                self.lock_timeout,
-            )
-            .await?;
 
             let operation_id = Uuid::now_v7();
             let disposition = outreach_reply_str(command.disposition);
@@ -479,12 +471,6 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(
-                &mut transaction,
-                self.operation_timeout,
-                self.lock_timeout,
-            )
-            .await?;
             let operation_id = Uuid::now_v7();
             let source_id = command
                 .source_id
@@ -647,12 +633,6 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(
-                &mut transaction,
-                self.operation_timeout,
-                self.lock_timeout,
-            )
-            .await?;
             let operation_id = Uuid::now_v7();
             let experiment_id = ExperimentId::from_uuid(operation_id);
             let details = json!({
@@ -743,12 +723,6 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(
-                &mut transaction,
-                self.operation_timeout,
-                self.lock_timeout,
-            )
-            .await?;
             let operation_id = Uuid::now_v7();
             let details = json!({
                 "experiment_id": command.experiment_id,

@@ -76,7 +76,6 @@ async fn fulfill_reward_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let row = sqlx::query_as::<_, FulfillmentMutationRow>(
         r#"

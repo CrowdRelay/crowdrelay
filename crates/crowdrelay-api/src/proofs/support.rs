@@ -365,30 +365,6 @@ async fn append_outbox(
     Ok(())
 }
 
-async fn configure_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-) -> Result<(), ProofError> {
-    let statement_ms = state.ticketing.operation_timeout().as_millis();
-    let lock_ms = state.ticketing.lock_timeout().as_millis();
-    if statement_ms == 0
-        || lock_ms == 0
-        || statement_ms > i32::MAX as u128
-        || lock_ms > i32::MAX as u128
-    {
-        return Err(ProofError::Unexpected);
-    }
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **tx)
-    .await
-    .map_err(ProofError::sqlx)?;
-    Ok(())
-}
-
 async fn run<T>(
     state: &crate::AppState,
     future: impl Future<Output = Result<T, ProofError>>,

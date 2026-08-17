@@ -1,19 +1,3 @@
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    statement_timeout_ms: i64,
-    lock_timeout_ms: i64,
-) -> Result<(), RetentionRunError> {
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_timeout_ms}ms"))
-    .bind(format!("{lock_timeout_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(RetentionRunError::Database)?;
-    Ok(())
-}
-
 async fn delete_expired_idempotency_keys(
     transaction: &mut Transaction<'_, Postgres>,
     batch_size: i64,

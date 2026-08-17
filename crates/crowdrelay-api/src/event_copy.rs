@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::FromRow;
 use time::OffsetDateTime;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -172,7 +172,6 @@ async fn apply_event_copy_inner(
         .begin()
         .await
         .map_err(|_| ApplyCopyError::Unavailable)?;
-    configure_transaction(&mut transaction, state).await?;
 
     let enrichment = sqlx::query_as::<_, EnrichmentRow>(
         r#"
@@ -310,23 +309,6 @@ async fn apply_event_copy_inner(
         enrichment_id: request.enrichment_id,
         updated_at: updated.unwrap_or_else(OffsetDateTime::now_utc),
     })
-}
-
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-) -> Result<(), ApplyCopyError> {
-    let statement_ms = state.ticketing.operation_timeout().as_millis();
-    let lock_ms = state.ticketing.lock_timeout().as_millis();
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|_| ApplyCopyError::Unavailable)?;
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]

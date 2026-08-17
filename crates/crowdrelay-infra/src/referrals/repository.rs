@@ -5,7 +5,6 @@ impl PostgresReferralRepository {
             pool,
             workspace_slug,
             operation_timeout: database.operation_timeout,
-            lock_timeout: database.lock_timeout,
         }
     }
 
@@ -71,7 +70,6 @@ impl PostgresReferralRepository {
             .begin()
             .await
             .map_err(ReferralStoreError::from_sqlx)?;
-        configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
 
         let fan_id = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -327,7 +325,6 @@ impl PostgresReferralRepository {
             .begin()
             .await
             .map_err(ReferralStoreError::from_sqlx)?;
-        configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
 
         let workspace_id =
             trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;

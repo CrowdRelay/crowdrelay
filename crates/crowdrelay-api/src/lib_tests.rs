@@ -352,7 +352,6 @@ mod tests {
             workspace_id,
             database.clone(),
             Duration::from_millis(50),
-            Duration::from_millis(50),
             Some(sha2::Sha256::digest(b"test-admin-api-key-123456789012").into()),
             Some(sha2::Sha256::digest(b"test-staff-api-key-123456789012").into()),
             Some(sha2::Sha256::digest(b"test-commerce-api-key-1234567890").into()),
@@ -361,7 +360,6 @@ mod tests {
         let ops = OpsState::new(workspace_id, database.clone(), Duration::from_millis(50));
         let autopilot = PostgresAutopilotRepository::new_with_timeouts(
             database.clone(),
-            Duration::from_millis(50),
             Duration::from_millis(50),
         );
         Ok(AppState::new(

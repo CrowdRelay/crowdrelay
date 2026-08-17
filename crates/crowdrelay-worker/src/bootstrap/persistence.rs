@@ -7,7 +7,7 @@ pub async fn bootstrap(
     validate_database_timeouts(database)?;
     timeout(
         database.operation_timeout,
-        bootstrap_inner(pool, workspace_slug, database, spec),
+        bootstrap_inner(pool, workspace_slug, spec),
     )
     .await
     .map_err(|_| BootstrapError::TimedOut)?
@@ -16,11 +16,9 @@ pub async fn bootstrap(
 async fn bootstrap_inner(
     pool: &PgPool,
     workspace_slug: &WorkspaceSlug,
-    database: &DatabaseConfig,
     spec: &BootstrapSpec,
 ) -> Result<BootstrapResult, BootstrapError> {
     let mut transaction = pool.begin().await.map_err(|_| BootstrapError::Database)?;
-    configure_transaction(&mut transaction, database).await?;
     acquire_workspace_lock(&mut transaction, workspace_slug).await?;
 
     let mut changes = BootstrapChanges::default();
@@ -97,27 +95,6 @@ async fn bootstrap_inner(
         changes,
         audit_recorded,
     })
-}
-
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    database: &DatabaseConfig,
-) -> Result<(), BootstrapError> {
-    let statement_timeout = duration_milliseconds(database.operation_timeout)?;
-    let lock_timeout = duration_milliseconds(database.lock_timeout)?;
-    sqlx::query(
-        r#"
-        SELECT
-            set_config('statement_timeout', $1, true),
-            set_config('lock_timeout', $2, true)
-        "#,
-    )
-    .bind(format!("{statement_timeout}ms"))
-    .bind(format!("{lock_timeout}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|_| BootstrapError::Database)?;
-    Ok(())
 }
 
 async fn acquire_workspace_lock(

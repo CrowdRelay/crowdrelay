@@ -210,7 +210,6 @@ async fn create_audit_batch(
         .begin()
         .await
         .map_err(ProofError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("{workspace_id}:external-proof-audit"))
         .execute(&mut *tx)

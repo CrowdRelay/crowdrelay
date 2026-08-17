@@ -98,7 +98,6 @@ impl WeightedDrawWorker {
 
     async fn process_one(&self) -> Result<bool, DrawWorkerError> {
         let mut transaction = self.pool.begin().await.map_err(DrawWorkerError::sqlx)?;
-        configure_transaction(&mut transaction, &self.config).await?;
 
         let Some(draw) = lock_due_draw(&mut transaction).await? else {
             transaction.commit().await.map_err(DrawWorkerError::sqlx)?;
@@ -217,31 +216,6 @@ struct DrawSummary {
     eligible_count: i32,
     total_entries: i64,
     selected_winners: i32,
-}
-
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    config: &WeightedDrawWorkerConfig,
-) -> Result<(), DrawWorkerError> {
-    let statement_ms = duration_milliseconds(config.operation_timeout)?;
-    let lock_ms = duration_milliseconds(config.lock_timeout)?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(DrawWorkerError::sqlx)?;
-    Ok(())
-}
-
-fn duration_milliseconds(value: Duration) -> Result<u128, DrawWorkerError> {
-    let milliseconds = value.as_millis();
-    if milliseconds == 0 || milliseconds > 2_147_483_647_u128 {
-        return Err(DrawWorkerError::InvalidConfiguration);
-    }
-    Ok(milliseconds)
 }
 
 async fn lock_due_draw(

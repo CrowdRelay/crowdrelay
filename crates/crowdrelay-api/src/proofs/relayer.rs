@@ -19,7 +19,6 @@ async fn claim_batches(
         .begin()
         .await
         .map_err(ProofError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     sqlx::query(
         r#"
         WITH recovered AS (
@@ -142,7 +141,6 @@ async fn confirm_batch(
         .begin()
         .await
         .map_err(ProofError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     let existing = sqlx::query_as::<_, BatchRow>(
         r#"
         SELECT id, proof_kind, schema_version, hash_algorithm, tree_algorithm,
@@ -277,7 +275,6 @@ async fn fail_batch(
         .begin()
         .await
         .map_err(ProofError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     #[derive(FromRow)]
     struct FailureState {
         attempts: i32,

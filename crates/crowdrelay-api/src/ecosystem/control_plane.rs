@@ -22,7 +22,6 @@ async fn update_flag_inner(
         .begin()
         .await
         .map_err(EcosystemError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     lock_mutation(&mut tx, state, &idempotency_key).await?;
     if let Some(existing) = existing_mutation(&mut tx, state, &idempotency_key).await? {
         validate_replay(
@@ -118,7 +117,6 @@ async fn reconcile_inner(
         .begin()
         .await
         .map_err(EcosystemError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     lock_mutation(&mut tx, state, &idempotency_key).await?;
     if let Some(existing) = existing_mutation(&mut tx, state, &idempotency_key).await? {
         validate_replay(
@@ -503,7 +501,6 @@ async fn update_checklist_inner(
         .begin()
         .await
         .map_err(EcosystemError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     lock_mutation(&mut tx, state, &idempotency_key).await?;
     if let Some(existing) = existing_mutation(&mut tx, state, &idempotency_key).await? {
         validate_replay(
@@ -569,7 +566,6 @@ async fn emit_due_inner(
         .begin()
         .await
         .map_err(EcosystemError::sqlx)?;
-    configure_transaction(&mut tx, state).await?;
     let emitted = sqlx::query_scalar::<_, i64>(
         r#"
         WITH due AS (

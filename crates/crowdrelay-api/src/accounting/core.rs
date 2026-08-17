@@ -390,7 +390,6 @@ async fn finalize_document(
         .begin()
         .await
         .map_err(|_| AccountingError::Unavailable)?;
-    configure_transaction(&mut transaction, state).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "ticket-accounting:{}:{}:{}",

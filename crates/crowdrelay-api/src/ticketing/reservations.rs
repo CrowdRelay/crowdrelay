@@ -6,7 +6,6 @@ async fn configure_sale_inner(
     request_id_value: Option<&str>,
 ) -> Result<(), TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
 
     let (event_id, event_starts_at) = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
         r#"
@@ -245,7 +244,6 @@ async fn reserve_order_inner(
     checkout_token_key: &[u8; 32],
 ) -> Result<TicketReservationResponse, TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
 
     if let Some(existing) =
         load_order_row_by_reservation_key(&mut transaction, state.workspace_id, idempotency_key)

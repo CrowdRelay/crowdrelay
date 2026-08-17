@@ -47,8 +47,6 @@ impl PostgresAutopilotRepository {
     ) -> Result<Vec<ClaimedAutopilotAction>, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             sqlx::query(
                 r#"
                 UPDATE viryaos_autopilot_actions
@@ -178,7 +176,6 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             match &action.payload {
                 AutopilotActionPayload::ChangeTicketPrice {
                     ticket_type_id,
@@ -853,8 +850,6 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             let attempt = sqlx::query_scalar::<_, i32>(
                 r#"
                 UPDATE viryaos_autopilot_actions

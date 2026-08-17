@@ -12,7 +12,6 @@ pub async fn bootstrap_team_operations(
     validate_database_timeouts(database)?;
     timeout(database.operation_timeout, async {
         let mut transaction = pool.begin().await.map_err(|_| BootstrapError::Database)?;
-        configure_transaction(&mut transaction, database).await?;
         acquire_workspace_lock(&mut transaction, workspace_slug).await?;
         let workspace_id =
             sqlx::query_scalar::<_, Uuid>("SELECT id FROM workspaces WHERE slug = $1 FOR SHARE")

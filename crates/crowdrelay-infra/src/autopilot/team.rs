@@ -70,7 +70,6 @@ impl PostgresAutopilotRepository {
     ) -> Result<u32, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
 
             close_resolved_assignments(&mut tx, workspace_id, now).await?;
             let team = load_team_routing(&mut tx, workspace_id, now).await?;
@@ -272,7 +271,6 @@ impl PostgresAutopilotRepository {
     ) -> Result<u32, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
             super::ensure_executor_capability_strict(&mut tx, workspace_id, "team.email").await?;
             let rows = sqlx::query_as::<_, ReminderRow>(
                 r#"

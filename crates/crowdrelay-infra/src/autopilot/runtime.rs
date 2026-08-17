@@ -227,8 +227,6 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
     ) -> Result<ExecutionClaimMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             let emitted = sqlx::query_scalar::<_, bool>(
                 r#"SELECT EXISTS (
                     SELECT 1 FROM viryaos_autopilot_action_emissions
@@ -356,7 +354,6 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
     ) -> Result<ExecutionReportMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let mut preserve_succeeded_claim = false;
             if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed) {
                 let claim = sqlx::query_as::<_, (Uuid, String)>(
@@ -689,7 +686,6 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
     ) -> Result<ExecutorHeartbeatMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let heartbeat_write = sqlx::query(
                 r#"
                 INSERT INTO viryaos_executor_instances (

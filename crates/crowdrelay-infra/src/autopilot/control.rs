@@ -354,7 +354,6 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 return Err(RepositoryError::Unexpected);
             }
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let details = json!({
                 "config_key": "booking_policy",
@@ -456,7 +455,6 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let details = json!({
                 "context": command.context.as_str(),
@@ -554,7 +552,6 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             }
 
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let details = json!({"member_key": member_key.clone()});
             if let Some(existing) = insert_operator_action(
@@ -722,7 +719,6 @@ impl PostgresAutopilotRepository {
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let details = json!({"requested_status": target_status});
             let replay = insert_operator_action(

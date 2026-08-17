@@ -1,23 +1,3 @@
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    operation_timeout: Duration,
-    lock_timeout: Duration,
-) -> Result<(), RepositoryError> {
-    let statement_ms =
-        u64::try_from(operation_timeout.as_millis()).map_err(|_| RepositoryError::Unexpected)?;
-    let lock_ms =
-        u64::try_from(lock_timeout.as_millis()).map_err(|_| RepositoryError::Unexpected)?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(())
-}
-
 fn map_sqlx(error: sqlx::Error) -> RepositoryError {
     match classify_sqlx_error(&error) {
         SqlxErrorClass::NotFound => RepositoryError::NotFound,

@@ -37,8 +37,6 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             }
 
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout)
-                .await?;
             // Match the same identity policy enforced by migration 0053: use
             // email when known, otherwise a public destination URL. Treating
             // NULL email as an identity used to collapse every email-less
@@ -215,7 +213,6 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
     ) -> Result<AutopilotControlMutation, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::configure_transaction(&mut tx, self.operation_timeout, self.lock_timeout).await?;
             let operation_id = Uuid::now_v7();
             let disposition = beacon_reply_str(command.disposition);
             let details = json!({

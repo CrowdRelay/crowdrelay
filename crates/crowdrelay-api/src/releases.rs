@@ -14,7 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::FromRow;
 use time::{Date, Month};
 use tokio::time::timeout;
 use url::Url;
@@ -232,7 +232,6 @@ async fn announce_release_inner(
         .begin()
         .await
         .map_err(|_| AnnounceReleaseError::Unavailable)?;
-    configure_transaction(&mut transaction, state).await?;
 
     let claimed = sqlx::query_scalar::<_, i32>(
         r#"
@@ -443,27 +442,6 @@ async fn announce_release_inner(
         .await
         .map_err(|_| AnnounceReleaseError::Unavailable)?;
     Ok(response)
-}
-
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-) -> Result<(), AnnounceReleaseError> {
-    let statement_ms = state
-        .ticketing
-        .operation_timeout()
-        .saturating_mul(3)
-        .as_millis();
-    let lock_ms = state.ticketing.lock_timeout().as_millis();
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|_| AnnounceReleaseError::Unavailable)?;
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]

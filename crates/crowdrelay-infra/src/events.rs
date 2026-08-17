@@ -43,7 +43,6 @@ pub struct PostgresEventRepository {
     workspace_slug: WorkspaceSlug,
     workspace_id: Arc<OnceCell<WorkspaceId>>,
     operation_timeout: Duration,
-    lock_timeout: Duration,
     reminder_offsets_minutes: Arc<Vec<u32>>,
 }
 
@@ -60,7 +59,6 @@ impl PostgresEventRepository {
             workspace_slug,
             workspace_id: Arc::new(OnceCell::new()),
             operation_timeout: database.operation_timeout,
-            lock_timeout: database.lock_timeout,
             reminder_offsets_minutes: Arc::new(reminder_offsets_minutes),
         }
     }
@@ -244,7 +242,6 @@ impl PostgresEventRepository {
             .begin()
             .await
             .map_err(EventStoreError::from_sqlx)?;
-        configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
         let workspace_id =
             trusted_workspace_id_in_transaction(&mut transaction, &self.workspace_slug).await?;
         if workspace_id != command.workspace_id() {

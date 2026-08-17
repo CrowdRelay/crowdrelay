@@ -113,7 +113,6 @@ async fn inventory_stocktake_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     sqlx::query(
         "INSERT INTO inventory_activation_state (workspace_id) VALUES ($1) ON CONFLICT (workspace_id) DO NOTHING",
@@ -273,7 +272,6 @@ async fn mark_inventory_ready_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     sqlx::query(
         "INSERT INTO inventory_activation_state (workspace_id) VALUES ($1) ON CONFLICT (workspace_id) DO NOTHING",

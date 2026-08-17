@@ -24,7 +24,6 @@ pub struct EventReminderScheduler {
     pool: PgPool,
     poll_interval: Duration,
     operation_timeout: Duration,
-    lock_timeout: Duration,
     batch_size: i64,
 }
 
@@ -43,7 +42,6 @@ impl EventReminderScheduler {
             pool,
             poll_interval,
             operation_timeout,
-            lock_timeout,
             batch_size: DEFAULT_BATCH_SIZE,
         })
     }
@@ -81,7 +79,6 @@ impl EventReminderScheduler {
             .begin()
             .await
             .map_err(ReminderSchedulerError::Database)?;
-        configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
         cancel_ineligible_jobs(&mut transaction).await?;
         let rows = sqlx::query_as::<_, DueReminderRow>(
             r#"
@@ -459,26 +456,6 @@ async fn cancel_ineligible_jobs(
     Ok(())
 }
 
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    operation_timeout: Duration,
-    lock_timeout: Duration,
-) -> Result<(), ReminderSchedulerError> {
-    let statement_ms = i64::try_from(operation_timeout.as_millis())
-        .map_err(|_| ReminderSchedulerError::DurationOverflow)?;
-    let lock_ms = i64::try_from(lock_timeout.as_millis())
-        .map_err(|_| ReminderSchedulerError::DurationOverflow)?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(ReminderSchedulerError::Database)?;
-    Ok(())
-}
-
 #[derive(FromRow)]
 struct DueReminderRow {
     id: Uuid,
@@ -508,8 +485,6 @@ pub struct ReminderSchedulerBuildError;
 enum ReminderSchedulerError {
     #[error("event reminder scheduler database operation failed")]
     Database(#[source] sqlx::Error),
-    #[error("event reminder scheduler timeout exceeds PostgreSQL limits")]
-    DurationOverflow,
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
 ) -> Result<AutopilotControlMutation, RepositoryError> {
     repo.bounded(async{
         if matches!(command.disposition, BookingReplyDisposition::None) { return Err(RepositoryError::Unexpected); }
-        let mut tx=repo.pool.begin().await.map_err(map_sqlx)?; super::configure_transaction(&mut tx,repo.operation_timeout,repo.lock_timeout).await?;
+        let mut tx=repo.pool.begin().await.map_err(map_sqlx)?;
         let operation_id=Uuid::now_v7(); let disposition=booking_reply_str(command.disposition);
         let details=json!({"target_id":command.target_id,"disposition":disposition,"occurred_at":command.occurred_at});
         if let Some(existing)=super::insert_operator_action(&mut tx,workspace_id,operation_id,"record_autopilot_booking_reply","booking_target",command.target_id.into_uuid(),idempotency_key,request_id,&details).await?{

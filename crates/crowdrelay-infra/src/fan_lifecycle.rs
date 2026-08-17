@@ -36,7 +36,6 @@ pub struct PostgresFanLifecycleRepository {
     pool: PgPool,
     workspace_slug: WorkspaceSlug,
     operation_timeout: Duration,
-    lock_timeout: Duration,
     sensitive_response_codec: SensitiveResponseCodec,
 }
 
@@ -53,7 +52,6 @@ impl PostgresFanLifecycleRepository {
             pool,
             workspace_slug,
             operation_timeout: database.operation_timeout,
-            lock_timeout: database.lock_timeout,
             sensitive_response_codec,
         }
     }
@@ -77,7 +75,6 @@ impl PostgresFanLifecycleRepository {
             .begin()
             .await
             .map_err(LifecycleStoreError::from_sqlx)?;
-        configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
         self.verify_workspace(&mut transaction, workspace_id)
             .await?;
         let request_hash = confirmation_request_hash(command);
@@ -452,7 +449,6 @@ impl PostgresFanLifecycleRepository {
             .begin()
             .await
             .map_err(LifecycleStoreError::from_sqlx)?;
-        configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout).await?;
         self.verify_workspace(&mut transaction, workspace_id)
             .await?;
 
@@ -790,26 +786,6 @@ async fn decrement_city_aggregates(
     Ok(())
 }
 
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    operation_timeout: Duration,
-    lock_timeout: Duration,
-) -> Result<(), LifecycleStoreError> {
-    sqlx::query(
-        r#"
-        SELECT
-            set_config('statement_timeout', $1, true),
-            set_config('lock_timeout', $2, true)
-        "#,
-    )
-    .bind(format!("{}ms", duration_millis(operation_timeout)?))
-    .bind(format!("{}ms", duration_millis(lock_timeout)?))
-    .execute(&mut **transaction)
-    .await
-    .map_err(LifecycleStoreError::from_sqlx)?;
-    Ok(())
-}
-
 async fn append_outbox(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -848,10 +824,6 @@ fn confirmation_request_hash(command: &ConfirmFanCommand) -> [u8; 32] {
     digest.update(command.workspace_id.into_uuid().as_bytes());
     digest.update(sha256_bytes(command.token.as_str()));
     digest.finalize().into()
-}
-
-fn duration_millis(value: Duration) -> Result<i64, LifecycleStoreError> {
-    i64::try_from(value.as_millis()).map_err(|_| LifecycleStoreError::Unexpected)
 }
 
 fn parse_fan_status(value: &str) -> Result<FanStatus, LifecycleStoreError> {

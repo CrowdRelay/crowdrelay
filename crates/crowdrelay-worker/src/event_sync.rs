@@ -109,12 +109,9 @@ impl EventSyncWorker {
 
     async fn process_due_sources(&self) -> Result<(), EventSyncError> {
         for _ in 0..MAX_SOURCES_PER_TICK {
-            let source = timeout(
-                self.config.operation_timeout,
-                claim_source(&self.pool, &self.config),
-            )
-            .await
-            .map_err(|_| EventSyncError::TimedOut)??;
+            let source = timeout(self.config.operation_timeout, claim_source(&self.pool))
+                .await
+                .map_err(|_| EventSyncError::TimedOut)??;
             let Some(source) = source else {
                 break;
             };
@@ -129,13 +126,7 @@ impl EventSyncWorker {
                 Ok(events) => {
                     timeout(
                         self.config.operation_timeout.saturating_mul(2),
-                        persist_success(
-                            &self.pool,
-                            &self.config,
-                            &source,
-                            sync_started_at,
-                            &events,
-                        ),
+                        persist_success(&self.pool, &source, sync_started_at, &events),
                     )
                     .await
                     .map_err(|_| EventSyncError::TimedOut)??;
@@ -433,12 +424,8 @@ fn normalize_bandsintown_event(
     })
 }
 
-async fn claim_source(
-    pool: &PgPool,
-    config: &EventSyncWorkerConfig,
-) -> Result<Option<EventSourceRow>, EventSyncError> {
+async fn claim_source(pool: &PgPool) -> Result<Option<EventSourceRow>, EventSyncError> {
     let mut transaction = pool.begin().await.map_err(EventSyncError::sqlx)?;
-    configure_transaction(&mut transaction, config).await?;
     let mut row = sqlx::query_as::<_, EventSourceRow>(
         r#"
         SELECT
@@ -480,31 +467,6 @@ async fn claim_source(
     }
     transaction.commit().await.map_err(EventSyncError::sqlx)?;
     Ok(row)
-}
-
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    config: &EventSyncWorkerConfig,
-) -> Result<(), EventSyncError> {
-    let statement_ms = duration_milliseconds(config.operation_timeout)?;
-    let lock_ms = duration_milliseconds(config.lock_timeout)?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(EventSyncError::sqlx)?;
-    Ok(())
-}
-
-fn duration_milliseconds(value: Duration) -> Result<u128, EventSyncError> {
-    let value = value.as_millis();
-    if value == 0 || value > 2_147_483_647_u128 {
-        return Err(EventSyncError::InvalidConfiguration);
-    }
-    Ok(value)
 }
 
 include!("event_sync/persistence.rs");

@@ -309,7 +309,6 @@ async fn cleanup_expired_reservations(
     event_slug: &str,
 ) -> Result<(), TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
     let sale = lock_sale(&mut transaction, state.workspace_id, event_slug).await?;
     expire_active_reservations(
         &mut transaction,

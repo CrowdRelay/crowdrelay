@@ -158,24 +158,6 @@ fn interest_request_hash(
     Ok(Sha256::digest(encoded).to_vec())
 }
 
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    operation_timeout: Duration,
-    lock_timeout: Duration,
-) -> Result<(), EventStoreError> {
-    let statement_ms = duration_as_milliseconds(operation_timeout)?;
-    let lock_ms = duration_as_milliseconds(lock_timeout)?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(EventStoreError::from_sqlx)?;
-    Ok(())
-}
-
 async fn trusted_workspace_id_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_slug: &WorkspaceSlug,

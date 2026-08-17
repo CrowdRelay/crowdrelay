@@ -745,30 +745,6 @@ fn deterministic_id(namespace: &str, value: &str) -> Uuid {
     Uuid::from_bytes(id)
 }
 
-async fn configure_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-) -> Result<(), EcosystemError> {
-    let statement_ms = state.ticketing.operation_timeout().as_millis();
-    let lock_ms = state.ticketing.lock_timeout().as_millis();
-    if statement_ms == 0
-        || lock_ms == 0
-        || statement_ms > i32::MAX as u128
-        || lock_ms > i32::MAX as u128
-    {
-        return Err(EcosystemError::Unexpected);
-    }
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    Ok(())
-}
-
 async fn lock_mutation(
     tx: &mut Transaction<'_, Postgres>,
     state: &crate::AppState,

@@ -87,7 +87,6 @@ const EXTERNAL_ACTION_EVENT_VERSION: i32 = 1;
 pub struct PostgresAutopilotRepository {
     pool: PgPool,
     operation_timeout: Duration,
-    lock_timeout: Duration,
 }
 
 impl PostgresAutopilotRepository {
@@ -96,20 +95,14 @@ impl PostgresAutopilotRepository {
         Self {
             pool,
             operation_timeout: database.operation_timeout,
-            lock_timeout: database.lock_timeout,
         }
     }
 
     #[must_use]
-    pub fn new_with_timeouts(
-        pool: PgPool,
-        operation_timeout: Duration,
-        lock_timeout: Duration,
-    ) -> Self {
+    pub fn new_with_timeouts(pool: PgPool, operation_timeout: Duration) -> Self {
         Self {
             pool,
             operation_timeout,
-            lock_timeout,
         }
     }
 

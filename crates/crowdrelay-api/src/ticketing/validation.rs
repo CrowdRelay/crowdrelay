@@ -466,7 +466,6 @@ async fn request_ticket_delivery(
     signing_key: &[u8; 32],
 ) -> Result<TicketDeliveryRequestResponse, TicketingError> {
     let mut transaction = state.pool.begin().await.map_err(TicketingError::sqlx)?;
-    configure_transaction(&mut transaction, state).await?;
     if !valid_checkout_token(token) {
         return Err(TicketingError::NotFound);
     }
@@ -705,31 +704,6 @@ fn clone_order_row(row: &OrderRow) -> OrderRow {
         doors_at: row.doors_at,
         ends_at: row.ends_at,
     }
-}
-
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    state: &TicketingState,
-) -> Result<(), TicketingError> {
-    let statement_ms = duration_milliseconds(state.operation_timeout)?;
-    let lock_ms = duration_milliseconds(state.lock_timeout)?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(TicketingError::sqlx)?;
-    Ok(())
-}
-
-fn duration_milliseconds(value: Duration) -> Result<u128, TicketingError> {
-    let milliseconds = value.as_millis();
-    if milliseconds == 0 || milliseconds > 2_147_483_647_u128 {
-        return Err(TicketingError::Unexpected);
-    }
-    Ok(milliseconds)
 }
 
 async fn append_outbox(

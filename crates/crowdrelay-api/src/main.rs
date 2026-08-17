@@ -217,7 +217,6 @@ async fn main() -> Result<()> {
         workspace_id,
         database.clone(),
         config.database.operation_timeout,
-        config.database.lock_timeout,
         config.admission_security.admin_api_key_sha256,
         config.admission_security.staff_api_key_sha256,
         config.commerce_api_key_sha256,

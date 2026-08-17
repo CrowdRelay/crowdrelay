@@ -155,7 +155,6 @@ async fn upsert_catalog_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     for product in payload.products {
         let product_id: Uuid = sqlx::query_scalar(
@@ -250,7 +249,6 @@ async fn adjust_inventory_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let availability = lock_variant_availability(&mut transaction, workspace_id, &sku).await?;
     if let Some(existing) = sqlx::query_as::<_, ExistingLedgerMutation>(

@@ -51,7 +51,6 @@ pub struct TicketingState {
     workspace_id: WorkspaceId,
     pool: PgPool,
     operation_timeout: Duration,
-    lock_timeout: Duration,
     admin_api_key_sha256: Option<[u8; 32]>,
     staff_api_key_sha256: Option<[u8; 32]>,
     commerce_api_key_sha256: Option<[u8; 32]>,
@@ -66,7 +65,6 @@ impl TicketingState {
         workspace_id: WorkspaceId,
         pool: PgPool,
         operation_timeout: Duration,
-        lock_timeout: Duration,
         admin_api_key_sha256: Option<[u8; 32]>,
         staff_api_key_sha256: Option<[u8; 32]>,
         commerce_api_key_sha256: Option<[u8; 32]>,
@@ -76,7 +74,6 @@ impl TicketingState {
             workspace_id,
             pool,
             operation_timeout,
-            lock_timeout,
             admin_api_key_sha256,
             staff_api_key_sha256,
             commerce_api_key_sha256,
@@ -94,10 +91,6 @@ impl TicketingState {
 
     pub(crate) fn operation_timeout(&self) -> Duration {
         self.operation_timeout
-    }
-
-    pub(crate) fn lock_timeout(&self) -> Duration {
-        self.lock_timeout
     }
 
     pub(crate) fn checkout_token_key(&self) -> Option<[u8; 32]> {

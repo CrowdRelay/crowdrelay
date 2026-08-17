@@ -33,7 +33,6 @@ pub struct PostgresReferralRepository {
     pool: PgPool,
     workspace_slug: WorkspaceSlug,
     operation_timeout: Duration,
-    lock_timeout: Duration,
 }
 
 include!("referrals/repository.rs");
@@ -70,28 +69,6 @@ impl ReferralRepository for PostgresReferralRepository {
 }
 
 include!("referrals/reward_lifecycle.rs");
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    operation_timeout: Duration,
-    lock_timeout: Duration,
-) -> Result<(), ReferralStoreError> {
-    let statement_timeout = duration_as_milliseconds(operation_timeout)?;
-    let lock_timeout = duration_as_milliseconds(lock_timeout)?;
-    sqlx::query(
-        r#"
-        SELECT
-            set_config('statement_timeout', $1, true),
-            set_config('lock_timeout', $2, true)
-        "#,
-    )
-    .bind(format!("{statement_timeout}ms"))
-    .bind(format!("{lock_timeout}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(ReferralStoreError::from_sqlx)?;
-    Ok(())
-}
-
 async fn trusted_workspace_id_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_slug: &WorkspaceSlug,

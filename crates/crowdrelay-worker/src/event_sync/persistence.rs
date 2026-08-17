@@ -1,12 +1,10 @@
 async fn persist_success(
     pool: &PgPool,
-    config: &EventSyncWorkerConfig,
     source: &EventSourceRow,
     sync_started_at: OffsetDateTime,
     events: &[NormalizedExternalEvent],
 ) -> Result<(), EventSyncError> {
     let mut transaction = pool.begin().await.map_err(EventSyncError::sqlx)?;
-    configure_transaction(&mut transaction, config).await?;
 
     sqlx::query(
         r#"

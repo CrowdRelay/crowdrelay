@@ -4,10 +4,7 @@
 //! Public reads are cacheable and bounded; every stock mutation is transactional,
 //! idempotent and workspace-scoped.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json,

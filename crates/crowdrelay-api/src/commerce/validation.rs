@@ -1,28 +1,3 @@
-async fn configure_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    state: &crate::ticketing::TicketingState,
-) -> Result<(), CommerceError> {
-    let statement_ms = duration_milliseconds(state.operation_timeout())?;
-    let lock_ms = duration_milliseconds(state.lock_timeout())?;
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
-    )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{lock_ms}ms"))
-    .execute(&mut **transaction)
-    .await
-    .map_err(CommerceError::sqlx)?;
-    Ok(())
-}
-
-fn duration_milliseconds(value: Duration) -> Result<u128, CommerceError> {
-    let milliseconds = value.as_millis();
-    if milliseconds == 0 || milliseconds > 2_147_483_647_u128 {
-        return Err(CommerceError::Unexpected);
-    }
-    Ok(milliseconds)
-}
-
 fn normalize_reservation(
     payload: ReserveInventoryRequest,
 ) -> Result<ReserveInventoryRequest, CommerceError> {

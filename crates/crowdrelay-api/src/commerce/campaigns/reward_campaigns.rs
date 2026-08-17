@@ -121,7 +121,6 @@ async fn create_reward_campaign_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let already_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM reward_draws WHERE workspace_id = $1 AND slug = $2)",
@@ -312,7 +311,6 @@ async fn schedule_reward_campaign_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let changed = sqlx::query(
         r#"
@@ -353,7 +351,6 @@ async fn cancel_reward_campaign_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let row = sqlx::query_as::<_, (String, Uuid, Uuid)>(
         r#"

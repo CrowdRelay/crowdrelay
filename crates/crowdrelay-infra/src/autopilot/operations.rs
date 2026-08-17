@@ -23,8 +23,8 @@ use uuid::Uuid;
 
 use super::control::insert_operator_action;
 use super::{
-    MAX_SNAPSHOTS_PER_CONTEXT, PostgresAutopilotRepository, configure_transaction, map_sqlx,
-    parse_confidence, parse_context,
+    MAX_SNAPSHOTS_PER_CONTEXT, PostgresAutopilotRepository, map_sqlx, parse_confidence,
+    parse_context,
 };
 use crowdrelay_application::autopilot::{AutopilotControlMutation, RecordBookingReply};
 use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};

@@ -12,7 +12,6 @@ async fn reserve_inventory_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
     expire_due_reservations(&mut transaction, workspace_id).await?;
 
     if let Some(existing) = sqlx::query_as::<_, ReservationRow>(
@@ -102,7 +101,6 @@ async fn commit_inventory_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let row = sqlx::query_as::<_, ReservationRow>(
         r#"
@@ -193,7 +191,6 @@ async fn release_inventory_inner(
         .begin()
         .await
         .map_err(CommerceError::sqlx)?;
-    configure_transaction(&mut transaction, &state.ticketing).await?;
 
     let status: Option<String> = sqlx::query_scalar(
         r#"

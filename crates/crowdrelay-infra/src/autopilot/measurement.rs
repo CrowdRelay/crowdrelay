@@ -12,8 +12,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
     ) -> Result<Vec<ClaimedAutopilotMeasurement>, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             sqlx::query(
                 r#"
                 UPDATE viryaos_autopilot_measurements
@@ -342,8 +340,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 return Err(RepositoryError::Unexpected);
             }
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            configure_transaction(&mut transaction, self.operation_timeout, self.lock_timeout)
-                .await?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
             sqlx::query(
