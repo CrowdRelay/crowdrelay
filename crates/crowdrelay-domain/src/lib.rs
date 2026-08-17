@@ -34,6 +34,7 @@ pub mod acquisition;
 pub mod admission;
 pub mod audience_lifecycle;
 pub mod autonomy;
+pub mod beacon_release;
 pub mod beacons;
 pub mod booking;
 pub mod campaign_lifecycle;
@@ -67,6 +68,9 @@ pub use admission::{
     AdmissionPassClaimed, AdmissionPassIssued, AdmissionPassStatus, AdmissionPassView,
     AdmissionQrClaims, AdmissionQrError, AdmissionRedemptionResult, AdmissionRedemptionStatus,
     PassClaimToken, PassClaimTokenError, PassSessionToken, PassSessionTokenError,
+};
+pub use beacon_release::{
+    BeaconReleaseCampaignState, BeaconReleaseRecipientState, BeaconReleaseStateError,
 };
 pub use events::{
     EventAction, EventActionError, EventActionKind, EventCity, EventInterestResult, EventStatus,

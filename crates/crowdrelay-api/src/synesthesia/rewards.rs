@@ -9,6 +9,7 @@ async fn authorize_completed_run(
         SELECT EXISTS (
             SELECT 1 FROM synesthesia_runs
             WHERE workspace_id = $1 AND id = $2 AND run_token_hash = $3
+              AND NOT synthetic
               AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
         )
         "#,
@@ -76,6 +77,7 @@ pub async fn link_completed_run_to_fan(
         WHERE workspace_id = $1
           AND handoff_token_hash = $2
           AND handoff_expires_at > now()
+          AND NOT synthetic
           AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
           AND (fan_id IS NULL OR fan_id = $3)
         RETURNING id, next_room_index, COALESCE(client_total_elapsed_ms, 0)
@@ -177,6 +179,7 @@ async fn enter_reward_draw_inner(
         SELECT id, campaign_slug
         FROM synesthesia_runs
         WHERE workspace_id = $1 AND run_token_hash = $2
+          AND NOT synthetic
           AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
         FOR SHARE
         "#,
@@ -253,6 +256,7 @@ async fn enter_reward_draw_inner(
         SET fan_id = $3, linked_at = COALESCE(linked_at, now()),
             handoff_token_hash = NULL, handoff_expires_at = NULL, updated_at = now()
         WHERE workspace_id = $1 AND id = $2
+          AND NOT synthetic
           AND (fan_id IS NULL OR fan_id = $3)
         "#,
     )

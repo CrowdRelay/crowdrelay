@@ -75,6 +75,7 @@ pub(super) async fn mint_invite_batch_tx(
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status, '') <> 'active'
+          AND NOT (profile.status='invited' AND profile.invite_expires_at > now())
         ORDER BY beacon.id
         FOR UPDATE OF beacon
         "#,

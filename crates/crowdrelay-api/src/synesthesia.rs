@@ -56,6 +56,8 @@ pub struct StartRunRequest {
     app_version: String,
     attempt_id: Option<String>,
     locale: Option<String>,
+    #[serde(default)]
+    synthetic: bool,
 }
 
 #[derive(Debug, Serialize)]

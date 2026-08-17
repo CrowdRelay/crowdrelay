@@ -648,7 +648,11 @@ paths:
       summary: List physical Virya releases allocated to the authenticated Latarnik
       security: [{ beaconBearer: [] }]
       responses:
-        '200': { description: Physical-release campaigns and the Latarnik fulfillment state. }
+        '200':
+          description: Physical-release campaigns and the Latarnik fulfillment state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BeaconMemberReleaseCampaigns' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /beacon/me/releases/{campaign_id}/delivery:
@@ -2363,7 +2367,11 @@ paths:
       summary: Read Latarnik discovery runs, review queue and invitation delivery jobs
       security: [{ adminBearer: [] }]
       responses:
-        '200': { description: Network acquisition state. }
+        '200':
+          description: Network acquisition state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BeaconNetworkAcquisition' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
     post:
@@ -2412,7 +2420,11 @@ paths:
       summary: Read the active Latarnik release pool and physical-release campaigns
       security: [{ adminBearer: [] }]
       responses:
-        '200': { description: Pool counts, campaigns and current recipient fulfillment state. }
+        '200':
+          description: Pool counts, campaigns and current recipient fulfillment state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BeaconReleaseCampaignsAdmin' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
     post:
@@ -2486,7 +2498,11 @@ paths:
         required: true
         schema: { type: string, format: uuid }
       responses:
-        '200': { description: Current recipient fulfillment rows. }
+        '200':
+          description: Current recipient fulfillment rows.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BeaconReleaseRecipientsAdmin' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
@@ -6204,6 +6220,152 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    BeaconNetworkDiscoveryRun:
+      type: object
+      additionalProperties: false
+      required: [id, countryCode, targetCount, status, discoveredCount, requestedAt]
+      properties:
+        id: { type: string, format: uuid }
+        countryCode: { type: string, pattern: '^[A-Z]{2}$' }
+        targetCount: { type: integer, minimum: 1, maximum: 500 }
+        status: { type: string, enum: [requested, running, ready, failed, cancelled] }
+        discoveredCount: { type: integer, minimum: 0 }
+        reportFilename: { type: [string, 'null'], maxLength: 240 }
+        reportSha256: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+        requestedAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        failureKind: { type: [string, 'null'], maxLength: 96 }
+    BeaconNetworkCandidate:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, beaconKind, verified, acceptsOutreach, doNotContact, metadata]
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        beaconKind: { type: string }
+        contactEmail: { type: [string, 'null'] }
+        destinationUrl: { type: [string, 'null'], format: uri }
+        sourceUrl: { type: [string, 'null'], format: uri }
+        verified: { type: boolean }
+        acceptsOutreach: { type: boolean }
+        doNotContact: { type: boolean }
+        metadata: { type: object, additionalProperties: true }
+    BeaconInviteDeliveryJob:
+      type: object
+      additionalProperties: false
+      required: [id, status, beaconCount, ttlDays, radiusKm, locale, providerSummary, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, claimed, completed, failed, ambiguous, cancelled] }
+        beaconCount: { type: integer, minimum: 1, maximum: 200 }
+        ttlDays: { type: integer, minimum: 1, maximum: 30 }
+        radiusKm: { type: integer, minimum: 1, maximum: 500 }
+        locale: { type: string }
+        claimedBy: { type: [string, 'null'] }
+        claimedAt: { type: [string, 'null'], format: date-time }
+        claimExpiresAt: { type: [string, 'null'], format: date-time }
+        reportedAt: { type: [string, 'null'], format: date-time }
+        providerSummary: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+    BeaconNetworkAcquisition:
+      type: object
+      additionalProperties: false
+      required: [discoveryRuns, pendingCandidates, approvedCandidates, inviteJobs]
+      properties:
+        discoveryRuns: { type: array, items: { $ref: '#/components/schemas/BeaconNetworkDiscoveryRun' } }
+        pendingCandidates: { type: array, items: { $ref: '#/components/schemas/BeaconNetworkCandidate' } }
+        approvedCandidates: { type: array, items: { $ref: '#/components/schemas/BeaconNetworkCandidate' } }
+        inviteJobs: { type: array, items: { $ref: '#/components/schemas/BeaconInviteDeliveryJob' } }
+    BeaconReleasePoolSummary:
+      type: object
+      additionalProperties: false
+      required: [activeReleaseLatarnicy, contactableLatarnicy, missingEmail]
+      properties:
+        activeReleaseLatarnicy: { type: integer, format: int64, minimum: 0 }
+        contactableLatarnicy: { type: integer, format: int64, minimum: 0 }
+        missingEmail: { type: integer, format: int64, minimum: 0 }
+    BeaconReleaseCampaign:
+      type: object
+      additionalProperties: false
+      required: [id, slug, title, sku, productName, variantLabel, status, claimDeadline, eligibleCount, reservedQuantity, createdAt, notifiedCount, confirmedCount, preparedCount, sentCount, deliveredCount, declinedCount, expiredCount]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        sku: { type: string }
+        productName: { type: string }
+        variantLabel: { type: string }
+        status: { type: string, enum: [draft, open, closed, cancelled] }
+        claimDeadline: { type: string, format: date-time }
+        eligibleCount: { type: integer, minimum: 0 }
+        reservedQuantity: { type: integer, minimum: 0 }
+        reservationId: { type: [string, 'null'], format: uuid }
+        launchedAt: { type: [string, 'null'], format: date-time }
+        closedAt: { type: [string, 'null'], format: date-time }
+        cancelledAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        notifiedCount: { type: integer, format: int64, minimum: 0 }
+        confirmedCount: { type: integer, format: int64, minimum: 0 }
+        preparedCount: { type: integer, format: int64, minimum: 0 }
+        sentCount: { type: integer, format: int64, minimum: 0 }
+        deliveredCount: { type: integer, format: int64, minimum: 0 }
+        declinedCount: { type: integer, format: int64, minimum: 0 }
+        expiredCount: { type: integer, format: int64, minimum: 0 }
+    BeaconReleaseRecipient:
+      type: object
+      additionalProperties: false
+      required: [campaignId, beaconId, displayName, beaconKind, status]
+      properties:
+        campaignId: { type: string, format: uuid }
+        beaconId: { type: string, format: uuid }
+        displayName: { type: string }
+        beaconKind: { type: string }
+        city: { type: [string, 'null'] }
+        status: { type: string, enum: [eligible, notified, confirmed, prepared, sent, delivered, declined, expired, cancelled] }
+        recipientName: { type: [string, 'null'] }
+        recipientPhone: { type: [string, 'null'] }
+        parcelLockerCode: { type: [string, 'null'] }
+        confirmedAt: { type: [string, 'null'], format: date-time }
+        preparedAt: { type: [string, 'null'], format: date-time }
+        sentAt: { type: [string, 'null'], format: date-time }
+        deliveredAt: { type: [string, 'null'], format: date-time }
+    BeaconReleaseCampaignsAdmin:
+      type: object
+      additionalProperties: false
+      required: [pool, campaigns, recipients]
+      properties:
+        pool: { $ref: '#/components/schemas/BeaconReleasePoolSummary' }
+        campaigns: { type: array, items: { $ref: '#/components/schemas/BeaconReleaseCampaign' } }
+        recipients: { type: array, items: { $ref: '#/components/schemas/BeaconReleaseRecipient' } }
+    BeaconReleaseRecipientsAdmin:
+      type: object
+      additionalProperties: false
+      required: [campaignId, recipients]
+      properties:
+        campaignId: { type: string, format: uuid }
+        recipients: { type: array, items: { $ref: '#/components/schemas/BeaconReleaseRecipient' } }
+    BeaconMemberReleaseCampaign:
+      type: object
+      additionalProperties: false
+      required: [campaignId, slug, title, productName, variantLabel, status, recipientStatus, claimDeadline]
+      properties:
+        campaignId: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        productName: { type: string }
+        variantLabel: { type: string }
+        status: { type: string, enum: [open, closed] }
+        recipientStatus: { type: string, enum: [eligible, notified, confirmed, prepared, sent, delivered, declined, expired, cancelled] }
+        claimDeadline: { type: string, format: date-time }
+        recipientName: { type: [string, 'null'] }
+        recipientPhone: { type: [string, 'null'] }
+        parcelLockerCode: { type: [string, 'null'] }
+    BeaconMemberReleaseCampaigns:
+      type: object
+      additionalProperties: false
+      required: [campaigns]
+      properties:
+        campaigns: { type: array, items: { $ref: '#/components/schemas/BeaconMemberReleaseCampaign' } }
     CreateStaffPairingCodeRequest:
       type: object
       additionalProperties: false

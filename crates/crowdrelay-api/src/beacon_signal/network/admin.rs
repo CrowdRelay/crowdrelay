@@ -62,6 +62,7 @@ pub async fn admin_beacon_network(
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status,'') <> 'active'
+          AND NOT (profile.status='invited' AND profile.invite_expires_at > now())
         ORDER BY beacon.updated_at DESC,beacon.id DESC
         LIMIT 300
         "#,
@@ -79,7 +80,7 @@ pub async fn admin_beacon_network(
     let invite_jobs = match sqlx::query_as::<_, InviteJobView>(
         r#"
         SELECT id,status,cardinality(beacon_ids)::integer AS beacon_count,ttl_days,radius_km,
-               locale,claimed_by,claimed_at,reported_at,provider_summary,created_at
+               locale,claimed_by,claimed_at,claim_expires_at,reported_at,provider_summary,created_at
         FROM viryaos_beacon_invite_delivery_jobs
         WHERE workspace_id=$1
         ORDER BY created_at DESC,id DESC
@@ -407,6 +408,7 @@ async fn queue_invites(
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status,'') <> 'active'
+          AND NOT (profile.status='invited' AND profile.invite_expires_at > now())
           AND (
             NOT (beacon.metadata ? 'network_discovery_run_id')
             OR (

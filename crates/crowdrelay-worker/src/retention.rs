@@ -104,6 +104,12 @@ impl RetentionWorker {
                                 fan_action_tokens_deleted = stats.fan_action_tokens_deleted,
                                 expired_admission_passes_reconciled =
                                     stats.expired_admission_passes_reconciled,
+                                expired_beacon_release_claims_reconciled =
+                                    stats.expired_beacon_release_claims_reconciled,
+                                stale_beacon_invite_claims_marked_ambiguous =
+                                    stats.stale_beacon_invite_claims_marked_ambiguous,
+                                synthetic_synesthesia_runs_deleted =
+                                    stats.synthetic_synesthesia_runs_deleted,
                                 outbox_payloads_scrubbed = stats.outbox_payloads_scrubbed,
                                 terminal_outbox_events_deleted =
                                     stats.terminal_outbox_events_deleted,
@@ -175,6 +181,18 @@ impl RetentionWorker {
             RetentionStep::ExpiredAdmissionPasses
         );
         execute_step!(
+            expired_beacon_release_claims_reconciled,
+            RetentionStep::ExpiredBeaconReleaseClaims
+        );
+        execute_step!(
+            stale_beacon_invite_claims_marked_ambiguous,
+            RetentionStep::StaleBeaconInviteClaims
+        );
+        execute_step!(
+            synthetic_synesthesia_runs_deleted,
+            RetentionStep::SyntheticSynesthesiaRuns
+        );
+        execute_step!(
             terminal_outbox_events_deleted,
             RetentionStep::OldTerminalOutboxEvents
         );
@@ -239,6 +257,15 @@ impl RetentionWorker {
             RetentionStep::ExpiredAdmissionPasses => {
                 reconcile_expired_admission_passes(&mut transaction, self.batch_size).await?
             }
+            RetentionStep::ExpiredBeaconReleaseClaims => {
+                reconcile_expired_beacon_release_claims(&mut transaction, self.batch_size).await?
+            }
+            RetentionStep::StaleBeaconInviteClaims => {
+                mark_stale_beacon_invite_claims_ambiguous(&mut transaction, self.batch_size).await?
+            }
+            RetentionStep::SyntheticSynesthesiaRuns => {
+                delete_old_synthetic_synesthesia_runs(&mut transaction, self.batch_size).await?
+            }
             RetentionStep::OldTerminalOutboxEvents => {
                 delete_old_terminal_outbox_events(
                     &mut transaction,
@@ -272,6 +299,9 @@ enum RetentionStep {
     TerminalMemberSessions,
     TerminalFanActionTokens,
     ExpiredAdmissionPasses,
+    ExpiredBeaconReleaseClaims,
+    StaleBeaconInviteClaims,
+    SyntheticSynesthesiaRuns,
     OldTerminalOutboxEvents,
     TerminalOutboxSecrets,
     BeaconReleaseDeliveryPii,
@@ -287,6 +317,9 @@ impl RetentionStep {
             Self::TerminalMemberSessions => "terminal_member_sessions",
             Self::TerminalFanActionTokens => "terminal_fan_action_tokens",
             Self::ExpiredAdmissionPasses => "expired_admission_passes",
+            Self::ExpiredBeaconReleaseClaims => "expired_beacon_release_claims",
+            Self::StaleBeaconInviteClaims => "stale_beacon_invite_claims",
+            Self::SyntheticSynesthesiaRuns => "synthetic_synesthesia_runs",
             Self::OldTerminalOutboxEvents => "old_terminal_outbox_events",
             Self::TerminalOutboxSecrets => "terminal_outbox_secrets",
             Self::BeaconReleaseDeliveryPii => "beacon_release_delivery_pii",
@@ -304,6 +337,9 @@ pub struct RetentionStats {
     pub member_sessions_deleted: u64,
     pub fan_action_tokens_deleted: u64,
     pub expired_admission_passes_reconciled: u64,
+    pub expired_beacon_release_claims_reconciled: u64,
+    pub stale_beacon_invite_claims_marked_ambiguous: u64,
+    pub synthetic_synesthesia_runs_deleted: u64,
     pub outbox_payloads_scrubbed: u64,
     pub terminal_outbox_events_deleted: u64,
     pub beacon_release_delivery_pii_purged: u64,
@@ -319,6 +355,9 @@ impl RetentionStats {
             || self.member_sessions_deleted > 0
             || self.fan_action_tokens_deleted > 0
             || self.expired_admission_passes_reconciled > 0
+            || self.expired_beacon_release_claims_reconciled > 0
+            || self.stale_beacon_invite_claims_marked_ambiguous > 0
+            || self.synthetic_synesthesia_runs_deleted > 0
             || self.outbox_payloads_scrubbed > 0
             || self.terminal_outbox_events_deleted > 0
             || self.beacon_release_delivery_pii_purged > 0

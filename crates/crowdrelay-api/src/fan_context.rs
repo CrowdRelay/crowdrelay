@@ -318,7 +318,7 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
             SELECT run.id, run.workspace_id, run.next_room_index, run.completed_at,
                    run.recovery_completed_at, run.client_total_elapsed_ms, run.linked_at
             FROM synesthesia_runs AS run
-            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3
+            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3 AND NOT run.synthetic
             ORDER BY run.updated_at DESC, run.id DESC
             LIMIT 1
         ), stats AS (
@@ -329,13 +329,14 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
                 COUNT(*) FILTER (WHERE run.completed_at IS NOT NULL OR run.recovery_completed_at IS NOT NULL)::bigint AS completed_runs,
                 COALESCE(BOOL_OR(run.leaderboard_name IS NOT NULL), false) AS leaderboard_published
             FROM synesthesia_runs AS run
-            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3
+            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3 AND NOT run.synthetic
         ), public_best AS (
             SELECT DISTINCT ON (run.fan_id)
                 run.fan_id, run.client_total_elapsed_ms AS elapsed_ms, run.completed_at, run.id
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $3
+              AND NOT run.synthetic
               AND run.fan_id IS NOT NULL
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL

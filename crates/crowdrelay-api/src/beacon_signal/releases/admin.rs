@@ -32,7 +32,8 @@ pub async fn admin_list_release_campaigns(
         JOIN viryaos_beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         LEFT JOIN cities city ON city.id=beacon.city_id
-        WHERE recipient.workspace_id=$1 AND campaign.status='open'
+        WHERE recipient.workspace_id=$1
+          AND (campaign.status='open' OR recipient.status IN ('confirmed','prepared','sent'))
         ORDER BY campaign.created_at DESC,recipient.campaign_id,
           CASE recipient.status WHEN 'confirmed' THEN 0 WHEN 'prepared' THEN 1 WHEN 'sent' THEN 2 WHEN 'notified' THEN 3 ELSE 4 END,
           beacon.display_name,beacon.id
@@ -348,52 +349,81 @@ pub async fn admin_launch_release_campaign(
         return BeaconSignalError::Unavailable.response(request_id_value);
     }
 
+    let eligible_ids = eligible.iter().map(|row| row.0).collect::<Vec<_>>();
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO viryaos_beacon_release_recipients
+          (workspace_id,campaign_id,beacon_id,status)
+        SELECT $1,$2,beacon_id,'eligible'
+        FROM unnest($3::uuid[]) AS beacon_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(campaign_id)
+    .bind(&eligible_ids)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(%error, "Latarnik release recipient snapshot failed");
+        return BeaconSignalError::Unavailable.response(request_id_value);
+    }
+
+    let mut mail_beacon_ids = Vec::with_capacity(eligible.len());
+    let mut mail_display_names = Vec::with_capacity(eligible.len());
+    let mut mail_contact_emails = Vec::with_capacity(eligible.len());
+    let mut mail_subjects = Vec::with_capacity(eligible.len());
+    let mut mail_texts = Vec::with_capacity(eligible.len());
+    let mut mail_request_ids = Vec::with_capacity(eligible.len());
     for (beacon_id, display_name, contact_email, locale) in &eligible {
         let delivery = release_delivery_copy(locale, display_name, &campaign.2, campaign.3);
-        if let Err(error) = sqlx::query(
-            r#"
-            INSERT INTO viryaos_beacon_release_recipients
-              (workspace_id,campaign_id,beacon_id,status,notified_at)
-            VALUES ($1,$2,$3,'notified',now())
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(campaign_id)
-        .bind(beacon_id)
-        .execute(&mut *tx)
-        .await
-        {
-            tracing::warn!(%error, %beacon_id, "Latarnik release recipient snapshot failed");
-            return BeaconSignalError::Unavailable.response(request_id_value);
-        }
-        if let Err(error) = sqlx::query(
-            r#"
-            INSERT INTO outbox_events
-              (workspace_id,event_type,event_version,payload,request_id,max_attempts)
-            VALUES ($1,'viryaos.beacon.release_delivery_confirmation_requested',1,$2,$3,12)
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(json!({
-            "campaign_id": campaign_id,
-            "campaign_slug": &campaign.1,
-            "release_title": &campaign.2,
-            "beacon_id": beacon_id,
-            "display_name": display_name,
-            "contact_email": contact_email,
-            "claim_deadline": campaign.3,
-            "member_url": RELEASE_MEMBER_URL,
-            "template_key": "beacon_physical_release_confirmation_v1",
-            "subject": delivery.subject,
-            "text": delivery.text,
-        }))
-        .bind(format!("beacon-release:{campaign_id}:{beacon_id}"))
-        .execute(&mut *tx)
-        .await
-        {
-            tracing::warn!(%error, %beacon_id, "Latarnik release notification outbox insert failed");
-            return BeaconSignalError::Unavailable.response(request_id_value);
-        }
+        mail_beacon_ids.push(*beacon_id);
+        mail_display_names.push(display_name.clone());
+        mail_contact_emails.push(contact_email.clone());
+        mail_subjects.push(delivery.subject);
+        mail_texts.push(delivery.text);
+        mail_request_ids.push(format!("beacon-release:{campaign_id}:{beacon_id}"));
+    }
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO outbox_events
+          (workspace_id,event_type,event_version,payload,request_id,max_attempts)
+        SELECT $1,'viryaos.beacon.release_delivery_confirmation_requested',1,
+               jsonb_build_object(
+                 'campaign_id',$2,
+                 'campaign_slug',$3,
+                 'release_title',$4,
+                 'beacon_id',mail.beacon_id,
+                 'display_name',mail.display_name,
+                 'contact_email',mail.contact_email,
+                 'claim_deadline',$5,
+                 'member_url',$6,
+                 'template_key','beacon_physical_release_confirmation_v1',
+                 'subject',mail.subject,
+                 'text',mail.body_text
+               ),
+               mail.request_id,12
+        FROM unnest(
+          $7::uuid[],$8::text[],$9::text[],$10::text[],$11::text[],$12::text[]
+        ) AS mail(beacon_id,display_name,contact_email,subject,body_text,request_id)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(campaign_id)
+    .bind(&campaign.1)
+    .bind(&campaign.2)
+    .bind(campaign.3)
+    .bind(RELEASE_MEMBER_URL)
+    .bind(&mail_beacon_ids)
+    .bind(&mail_display_names)
+    .bind(&mail_contact_emails)
+    .bind(&mail_subjects)
+    .bind(&mail_texts)
+    .bind(&mail_request_ids)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(%error, "Latarnik release notification bulk outbox insert failed");
+        return BeaconSignalError::Unavailable.response(request_id_value);
     }
 
     if let Err(error) = sqlx::query(
@@ -670,14 +700,14 @@ pub async fn admin_update_release_recipient(
             "campaignId": campaign_id, "beaconId": beacon_id, "status": payload.status, "replayed": true
         }));
     }
-    let row = match sqlx::query_as::<_, (String, Uuid, Uuid)>(
+    let row = match sqlx::query_as::<_, (String, Uuid, Uuid, String)>(
         r#"
-        SELECT recipient.status,campaign.variant_id,campaign.reservation_id
+        SELECT recipient.status,campaign.variant_id,campaign.reservation_id,campaign.status
         FROM viryaos_beacon_release_recipients recipient
         JOIN viryaos_beacon_release_campaigns campaign
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         WHERE recipient.workspace_id=$1 AND recipient.campaign_id=$2 AND recipient.beacon_id=$3
-          AND campaign.status='open'
+          AND campaign.status IN ('open','closed')
         FOR UPDATE OF recipient,campaign
         "#,
     )
@@ -691,18 +721,19 @@ pub async fn admin_update_release_recipient(
         Ok(None) => return BeaconSignalError::NotFound.response(request_id_value),
         Err(_) => return BeaconSignalError::Unavailable.response(request_id_value),
     };
-    let valid = matches!(
-        (row.0.as_str(), payload.status.as_str()),
-        ("confirmed", "prepared")
-            | ("confirmed", "sent")
-            | ("prepared", "sent")
-            | ("sent", "delivered")
-            | ("eligible", "cancelled")
-            | ("notified", "cancelled")
-            | ("confirmed", "cancelled")
-            | ("prepared", "cancelled")
-    );
-    if !valid {
+    let current_state = match BeaconReleaseRecipientState::try_from(row.0.as_str()) {
+        Ok(value) => value,
+        Err(_) => return BeaconSignalError::Conflict.response(request_id_value),
+    };
+    let next_state = match BeaconReleaseRecipientState::try_from(payload.status.as_str()) {
+        Ok(value) => value,
+        Err(_) => return BeaconSignalError::BadRequest.response(request_id_value),
+    };
+    let campaign_state = match BeaconReleaseCampaignState::try_from(row.3.as_str()) {
+        Ok(value) => value,
+        Err(_) => return BeaconSignalError::Conflict.response(request_id_value),
+    };
+    if !current_state.can_transition_to(next_state, campaign_state) {
         return BeaconSignalError::Conflict.response(request_id_value);
     }
 
@@ -745,9 +776,13 @@ pub async fn admin_update_release_recipient(
             sqlx::query("UPDATE inventory_reservation_items SET quantity=quantity-1 WHERE workspace_id=$1 AND reservation_id=$2 AND variant_id=$3 AND quantity>1")
                 .bind(workspace_id).bind(row.2).bind(row.1).execute(&mut *tx).await
         };
-        if let Err(error) = reservation_result {
-            tracing::warn!(%error, "Latarnik release reservation decrement failed");
-            return BeaconSignalError::Unavailable.response(request_id_value);
+        match reservation_result {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => return BeaconSignalError::Conflict.response(request_id_value),
+            Err(error) => {
+                tracing::warn!(%error, "Latarnik release reservation decrement failed");
+                return BeaconSignalError::Unavailable.response(request_id_value);
+            }
         }
     } else if payload.status == "cancelled" {
         let decremented = match sqlx::query(

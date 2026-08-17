@@ -61,7 +61,9 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
             ".execute(&mut *tx)", 1
         )[0]
         for field in ("subject", "text", "contact_email", "member_url"):
-            self.assertIn(f'"{field}"', launch)
+            self.assertRegex(launch, rf"[\"\']{re.escape(field)}[\"\']")
+        self.assertIn("FROM unnest(", launch)
+        self.assertIn("AS mail(beacon_id,display_name,contact_email,subject,body_text,request_id)", launch)
         for shipping_pii in ("recipient_name", "recipient_phone", "parcel_locker_code"):
             self.assertNotIn(shipping_pii, launch)
         confirmed = MEMBER.split("viryaos.beacon.release_delivery_confirmed", 1)[1].split(
@@ -162,7 +164,7 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         for route in routes:
             self.assertIn(route, ROUTER)
             self.assertIn(route.removeprefix("/v1") + ":", OPENAPI)
-        self.assertIn("SCHEMA_VERSION: u32 = 59", META)
+        self.assertIn("SCHEMA_VERSION: u32 = 61", META)
         self.assertIn('(\"beacon_physical_releases_v1\", true)', META)
 
 

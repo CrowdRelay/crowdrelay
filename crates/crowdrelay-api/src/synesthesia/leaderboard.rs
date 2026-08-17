@@ -55,6 +55,7 @@ pub async fn list_leaderboard(
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $2
+              AND NOT run.synthetic
               AND run.fan_id IS NOT NULL
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL
@@ -123,6 +124,7 @@ pub async fn publish_leaderboard(
         INNER JOIN fans AS fan
           ON fan.workspace_id = run.workspace_id AND fan.id = run.fan_id
         WHERE run.workspace_id = $1 AND run.id = $2 AND run.run_token_hash = $3
+          AND NOT run.synthetic
           AND run.completed_at IS NOT NULL
         FOR SHARE OF run, fan
         "#,
@@ -152,6 +154,7 @@ pub async fn publish_leaderboard(
             leaderboard_published_at = COALESCE(leaderboard_published_at, now()),
             updated_at = now()
         WHERE workspace_id = $1 AND campaign_slug = $2 AND fan_id = $3
+          AND NOT synthetic
           AND completed_at IS NOT NULL AND client_total_elapsed_ms IS NOT NULL
         "#,
     )
@@ -176,6 +179,7 @@ pub async fn publish_leaderboard(
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $2
+              AND NOT run.synthetic
               AND run.fan_id IS NOT NULL
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL

@@ -184,6 +184,7 @@ macro_rules! decision_core_reads {
                      AND run.id = entry.run_id
                     WHERE entry.workspace_id = fan.workspace_id
                       AND entry.fan_id = fan.id
+                      AND NOT run.synthetic
                       AND run.completed_at IS NOT NULL
                     ORDER BY run.completed_at DESC, run.id DESC
                     LIMIT 1

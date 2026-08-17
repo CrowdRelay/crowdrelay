@@ -279,6 +279,176 @@ async fn reconcile_expired_admission_passes(
     u64::try_from(expired_count).map_err(|_| RetentionRunError::Invariant)
 }
 
+
+async fn reconcile_expired_beacon_release_claims(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let (expired_count, released_capacity) = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        WITH candidates AS (
+            SELECT recipient.workspace_id,recipient.campaign_id,recipient.beacon_id,
+                   campaign.reservation_id,campaign.variant_id
+            FROM viryaos_beacon_release_recipients AS recipient
+            JOIN viryaos_beacon_release_campaigns AS campaign
+              ON campaign.workspace_id=recipient.workspace_id
+             AND campaign.id=recipient.campaign_id
+            WHERE campaign.status='open'
+              AND campaign.claim_deadline <= now()
+              AND recipient.status IN ('eligible','notified')
+            ORDER BY campaign.claim_deadline,recipient.campaign_id,recipient.beacon_id
+            FOR UPDATE OF recipient,campaign SKIP LOCKED
+            LIMIT $1
+        ),
+        expired AS (
+            UPDATE viryaos_beacon_release_recipients AS recipient
+            SET status='expired',expired_at=now(),recipient_name=NULL,recipient_phone=NULL,
+                parcel_locker_code=NULL,delivery_details_purge_after=NULL,
+                pii_purged_at=COALESCE(pii_purged_at,now())
+            FROM candidates
+            WHERE recipient.workspace_id=candidates.workspace_id
+              AND recipient.campaign_id=candidates.campaign_id
+              AND recipient.beacon_id=candidates.beacon_id
+              AND recipient.status IN ('eligible','notified')
+            RETURNING candidates.workspace_id,candidates.reservation_id,candidates.variant_id
+        ),
+        decrements AS (
+            SELECT workspace_id,reservation_id,variant_id,count(*)::integer AS released_count
+            FROM expired
+            GROUP BY workspace_id,reservation_id,variant_id
+        ),
+        updated_items AS (
+            UPDATE inventory_reservation_items AS item
+            SET quantity=item.quantity-decrements.released_count
+            FROM decrements
+            WHERE item.workspace_id=decrements.workspace_id
+              AND item.reservation_id=decrements.reservation_id
+              AND item.variant_id=decrements.variant_id
+              AND item.quantity > decrements.released_count
+            RETURNING decrements.released_count
+        ),
+        deleted_items AS (
+            DELETE FROM inventory_reservation_items AS item
+            USING decrements
+            WHERE item.workspace_id=decrements.workspace_id
+              AND item.reservation_id=decrements.reservation_id
+              AND item.variant_id=decrements.variant_id
+              AND item.quantity = decrements.released_count
+            RETURNING decrements.released_count
+        ),
+        released_reservations AS (
+            UPDATE inventory_reservations AS reservation
+            SET status='released',released_at=COALESCE(released_at,now()),
+                release_reason=COALESCE(release_reason,'Latarnik claim deadline expired')
+            WHERE reservation.status='active'
+              AND EXISTS (
+                SELECT 1 FROM decrements
+                WHERE decrements.workspace_id=reservation.workspace_id
+                  AND decrements.reservation_id=reservation.id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM inventory_reservation_items AS item
+                WHERE item.workspace_id=reservation.workspace_id
+                  AND item.reservation_id=reservation.id
+              )
+            RETURNING reservation.id
+        ),
+        closed_campaigns AS (
+            UPDATE viryaos_beacon_release_campaigns AS campaign
+            SET status='closed',closed_at=COALESCE(closed_at,now())
+            WHERE campaign.status='open'
+              AND campaign.claim_deadline <= now()
+              AND NOT EXISTS (
+                SELECT 1 FROM viryaos_beacon_release_recipients AS recipient
+                WHERE recipient.workspace_id=campaign.workspace_id
+                  AND recipient.campaign_id=campaign.id
+                  AND recipient.status IN ('eligible','notified','confirmed','prepared','sent')
+              )
+            RETURNING campaign.id
+        )
+        SELECT
+            (SELECT count(*)::bigint FROM expired),
+            COALESCE((SELECT sum(released_count)::bigint FROM updated_items),0)
+              + COALESCE((SELECT sum(released_count)::bigint FROM deleted_items),0)
+        "#,
+    )
+    .bind(batch_size)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    if expired_count != released_capacity {
+        return Err(RetentionRunError::Invariant);
+    }
+    u64::try_from(expired_count).map_err(|_| RetentionRunError::Invariant)
+}
+
+async fn mark_stale_beacon_invite_claims_ambiguous(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT job.workspace_id,job.id
+            FROM viryaos_beacon_invite_delivery_jobs AS job
+            WHERE job.status='claimed' AND job.claim_expires_at <= now()
+            ORDER BY job.claim_expires_at,job.id
+            FOR UPDATE OF job SKIP LOCKED
+            LIMIT $1
+        )
+        UPDATE viryaos_beacon_invite_delivery_jobs AS job
+        SET status='ambiguous',reported_at=COALESCE(reported_at,now()),
+            provider_summary=jsonb_build_object(
+                'automatic',true,
+                'reason','claim_lease_expired',
+                'claimedBy',job.claimed_by,
+                'claimedAt',job.claimed_at,
+                'claimExpiresAt',job.claim_expires_at
+            )
+        FROM candidates
+        WHERE job.workspace_id=candidates.workspace_id
+          AND job.id=candidates.id
+          AND job.status='claimed'
+          AND job.claim_expires_at <= now()
+        "#,
+    )
+    .bind(batch_size)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}
+
+async fn delete_old_synthetic_synesthesia_runs(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM synesthesia_runs AS run
+        WHERE (run.workspace_id,run.id) IN (
+            SELECT candidate.workspace_id,candidate.id
+            FROM synesthesia_runs AS candidate
+            WHERE candidate.synthetic
+              AND candidate.updated_at < now() - interval '7 days'
+              AND candidate.fan_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM synesthesia_reward_entries AS reward
+                WHERE reward.workspace_id=candidate.workspace_id AND reward.run_id=candidate.id
+              )
+            ORDER BY candidate.updated_at,candidate.id
+            FOR UPDATE OF candidate SKIP LOCKED
+            LIMIT $1
+        )
+        "#,
+    )
+    .bind(batch_size)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}
+
 async fn delete_old_terminal_outbox_events(
     transaction: &mut Transaction<'_, Postgres>,
     batch_size: i64,

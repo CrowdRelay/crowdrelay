@@ -81,6 +81,8 @@ struct InviteJobView {
     #[serde(with = "time::serde::rfc3339::option")]
     claimed_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
+    claim_expires_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     reported_at: Option<OffsetDateTime>,
     provider_summary: Value,
     #[serde(with = "time::serde::rfc3339")]

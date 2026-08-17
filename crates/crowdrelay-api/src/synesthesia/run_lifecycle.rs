@@ -25,12 +25,13 @@ pub async fn start_run(
         r#"
         INSERT INTO synesthesia_runs (
             workspace_id, campaign_slug, install_hash, run_token_hash,
-            app_version, attempt_id, locale
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            app_version, attempt_id, locale, synthetic
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (workspace_id, campaign_slug, install_hash, attempt_id) DO UPDATE
         SET run_token_hash = EXCLUDED.run_token_hash,
             app_version = EXCLUDED.app_version,
             locale = EXCLUDED.locale,
+            synthetic = EXCLUDED.synthetic,
             updated_at = now()
         RETURNING id, next_room_index
         "#,
@@ -42,6 +43,7 @@ pub async fn start_run(
     .bind(payload.app_version.trim())
     .bind(clean_attempt_id(payload.attempt_id.as_deref()).unwrap_or_else(|| "legacy".to_owned()))
     .bind(clean_locale(payload.locale.as_deref()))
+    .bind(payload.synthetic)
     .fetch_one(state.ticketing.pool())
     .await;
 
@@ -356,9 +358,9 @@ async fn completion_response(
     run_id: Uuid,
     issue_handoff: bool,
 ) -> Result<CompleteRunResponse, SynesthesiaError> {
-    let linked_to_fan = sqlx::query_scalar::<_, bool>(
+    let (linked_to_fan, synthetic) = sqlx::query_as::<_, (bool, bool)>(
         r#"
-        SELECT fan_id IS NOT NULL
+        SELECT fan_id IS NOT NULL, synthetic
         FROM synesthesia_runs
         WHERE workspace_id = $1 AND id = $2
           AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
@@ -371,7 +373,7 @@ async fn completion_response(
     .map_err(SynesthesiaError::sqlx)?
     .ok_or(SynesthesiaError::Conflict)?;
 
-    let (handoff_code, handoff_expires_at) = if linked_to_fan || !issue_handoff {
+    let (handoff_code, handoff_expires_at) = if linked_to_fan || synthetic || !issue_handoff {
         (None, None)
     } else {
         let code = random_token().map_err(|()| SynesthesiaError::Unavailable)?;
@@ -383,6 +385,7 @@ async fn completion_response(
             UPDATE synesthesia_runs
             SET handoff_token_hash = $3, handoff_expires_at = $4, updated_at = now()
             WHERE workspace_id = $1 AND id = $2 AND fan_id IS NULL
+              AND NOT synthetic
               AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
             "#,
         )

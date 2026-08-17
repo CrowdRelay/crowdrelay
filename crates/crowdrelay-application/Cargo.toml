@@ -13,5 +13,3 @@ time.workspace = true
 uuid.workspace = true
 crowdrelay-domain = { path = "../crowdrelay-domain" }
 
-[dev-dependencies]
-tokio.workspace = true

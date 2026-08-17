@@ -65,6 +65,7 @@ pub async fn internal_ingest_discovered_beacons(
     if !matches!(run.0.as_str(), "requested" | "running") {
         return BeaconSignalError::Conflict.response(request_id_value);
     }
+
     let mut inserted = 0usize;
     let mut existing = 0usize;
     for candidate in payload.candidates {
@@ -76,15 +77,45 @@ pub async fn internal_ingest_discovered_beacons(
         let destination_url = candidate
             .destination_url
             .map(|value| value.trim().to_owned());
+        if contact_email.is_none() && destination_url.is_none() {
+            continue;
+        }
         let source_url = candidate.source_url.trim().to_owned();
+        let source_note = candidate.source_note.map(|value| value.trim().to_owned());
         let relevance = candidate.relevance_basis_points.unwrap_or(5000);
         let confidence = candidate.confidence_basis_points.unwrap_or(5000);
+
+        // A partial unique index protects the database, while this deterministic
+        // transaction lock makes two concurrent discovery runs idempotent rather
+        // than surfacing a uniqueness race as a 503.
+        let identity_key = if let Some(email) = contact_email.as_deref() {
+            format!("email:{email}")
+        } else if let Some(url) = destination_url.as_deref() {
+            format!("destination:{url}")
+        } else {
+            continue;
+        };
+        let identity = format!(
+            "beacon-discovery:{workspace_id}:{beacon_kind}:{}:{identity_key}",
+            candidate
+                .city_id
+                .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+        );
+        if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(&identity)
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::warn!(%error, "Latarnik discovery identity lock failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+
         let metadata = json!({
             "network_discovery_run_id": run_id,
             "network_discovery": {
-                "country_code": run.1,
-                "source_url": source_url,
-                "source_note": candidate.source_note,
+                "country_code": &run.1,
+                "source_url": &source_url,
+                "source_note": source_note.as_deref(),
                 "human_review_required": true,
                 "marketing_email_consent_confirmed": false,
                 "discovered_at": OffsetDateTime::now_utc(),
@@ -113,9 +144,13 @@ pub async fn internal_ingest_discovered_beacons(
         .await
         {
             Ok(value) => value,
-            Err(_) => return BeaconSignalError::Unavailable.response(request_id_value),
+            Err(error) => {
+                tracing::warn!(%error, "Latarnik discovery candidate lookup failed");
+                return BeaconSignalError::Unavailable.response(request_id_value);
+            }
         };
-        if let Some(beacon_id) = found {
+
+        let beacon_id = if let Some(beacon_id) = found {
             if let Err(error) = sqlx::query(
                 r#"
                 UPDATE viryaos_beacons
@@ -130,7 +165,7 @@ pub async fn internal_ingest_discovered_beacons(
             .bind(workspace_id)
             .bind(beacon_id)
             .bind(&source_url)
-            .bind(metadata)
+            .bind(&metadata)
             .bind(relevance)
             .bind(confidence)
             .execute(&mut *tx)
@@ -140,52 +175,93 @@ pub async fn internal_ingest_discovered_beacons(
                 return BeaconSignalError::Unavailable.response(request_id_value);
             }
             existing += 1;
-            continue;
-        }
-        if contact_email.is_none() && destination_url.is_none() {
-            continue;
-        }
-        let result = sqlx::query(
-            r#"
-            INSERT INTO viryaos_beacons (
-                id,workspace_id,city_id,beacon_kind,display_name,contact_email,destination_url,
-                source_url,active,verified,accepts_outreach,do_not_contact,
-                relationship_score,relevance_basis_points,confidence_basis_points,metadata
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,false,false,false,50,$9,$10,$11)
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(workspace_id)
-        .bind(candidate.city_id)
-        .bind(&beacon_kind)
-        .bind(&display_name)
-        .bind(contact_email)
-        .bind(destination_url)
-        .bind(&source_url)
-        .bind(relevance)
-        .bind(confidence)
-        .bind(metadata)
-        .execute(&mut *tx)
-        .await;
-        match result {
-            Ok(_) => inserted += 1,
-            Err(error) => {
+            beacon_id
+        } else {
+            let beacon_id = Uuid::now_v7();
+            if let Err(error) = sqlx::query(
+                r#"
+                INSERT INTO viryaos_beacons (
+                    id,workspace_id,city_id,beacon_kind,display_name,contact_email,destination_url,
+                    source_url,active,verified,accepts_outreach,do_not_contact,
+                    relationship_score,relevance_basis_points,confidence_basis_points,metadata
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,false,false,false,50,$9,$10,$11)
+                "#,
+            )
+            .bind(beacon_id)
+            .bind(workspace_id)
+            .bind(candidate.city_id)
+            .bind(&beacon_kind)
+            .bind(&display_name)
+            .bind(contact_email.as_deref())
+            .bind(destination_url.as_deref())
+            .bind(&source_url)
+            .bind(relevance)
+            .bind(confidence)
+            .bind(&metadata)
+            .execute(&mut *tx)
+            .await
+            {
                 tracing::warn!(%error, "Latarnik discovery candidate insert failed");
                 return BeaconSignalError::Unavailable.response(request_id_value);
             }
+            inserted += 1;
+            beacon_id
+        };
+
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO viryaos_beacon_network_discovery_observations
+              (workspace_id,run_id,beacon_id,source_url,source_note,relevance_basis_points,confidence_basis_points)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            ON CONFLICT (workspace_id,run_id,beacon_id) DO UPDATE SET
+              source_url=EXCLUDED.source_url,
+              source_note=EXCLUDED.source_note,
+              relevance_basis_points=GREATEST(viryaos_beacon_network_discovery_observations.relevance_basis_points,EXCLUDED.relevance_basis_points),
+              confidence_basis_points=GREATEST(viryaos_beacon_network_discovery_observations.confidence_basis_points,EXCLUDED.confidence_basis_points)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(run_id)
+        .bind(beacon_id)
+        .bind(&source_url)
+        .bind(source_note.as_deref())
+        .bind(relevance)
+        .bind(confidence)
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::warn!(%error, %beacon_id, "Latarnik discovery observation persistence failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
         }
     }
+
+    let discovered_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)::bigint FROM viryaos_beacon_network_discovery_observations WHERE workspace_id=$1 AND run_id=$2",
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik discovery observation count failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
+    let Ok(discovered_count) = i32::try_from(discovered_count) else {
+        return BeaconSignalError::Conflict.response(request_id_value);
+    };
     if let Err(error) = sqlx::query(
         r#"
         UPDATE viryaos_beacon_network_discovery_runs
-        SET status='running',started_at=COALESCE(started_at,now()),
-            discovered_count=GREATEST(discovered_count,$3)
+        SET status='running',started_at=COALESCE(started_at,now()),discovered_count=$3
         WHERE workspace_id=$1 AND id=$2
         "#,
     )
     .bind(workspace_id)
     .bind(run_id)
-    .bind((inserted + existing) as i32)
+    .bind(discovered_count)
     .execute(&mut *tx)
     .await
     {
@@ -197,7 +273,13 @@ pub async fn internal_ingest_discovered_beacons(
     }
     private_json(
         StatusCode::OK,
-        json!({"runId": run_id, "inserted": inserted, "existing": existing, "reviewRequired": true}),
+        json!({
+            "runId": run_id,
+            "inserted": inserted,
+            "existing": existing,
+            "discoveredCount": discovered_count,
+            "reviewRequired": true
+        }),
     )
 }
 
@@ -232,30 +314,49 @@ pub async fn internal_report_discovery_run(
         return BeaconSignalError::BadRequest.response(request_id_value);
     }
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let result = sqlx::query(
+    // `discoveredCount` is retained in the executor contract for diagnostics,
+    // but PostgreSQL owns the canonical count. Never let a stale/smaller final
+    // report overwrite the cumulative observations recorded by earlier batches.
+    let result = sqlx::query_scalar::<_, i32>(
         r#"
-        UPDATE viryaos_beacon_network_discovery_runs
-        SET status=$3,discovered_count=$4,report_filename=$5,report_sha256=$6,
-            failure_kind=$7,completed_at=COALESCE(completed_at,now()),
+        UPDATE viryaos_beacon_network_discovery_runs AS run
+        SET status=$3,
+            discovered_count=(
+              SELECT count(*)::integer
+              FROM viryaos_beacon_network_discovery_observations AS observation
+              WHERE observation.workspace_id=run.workspace_id AND observation.run_id=run.id
+            ),
+            report_filename=$4,report_sha256=$5,
+            failure_kind=$6,completed_at=COALESCE(completed_at,now()),
             started_at=COALESCE(started_at,requested_at)
         WHERE workspace_id=$1 AND id=$2 AND status IN ('requested','running')
+        RETURNING discovered_count
         "#,
     )
     .bind(workspace_id)
     .bind(run_id)
     .bind(&payload.status)
-    .bind(payload.discovered_count)
     .bind(payload.report_filename.as_deref())
     .bind(payload.report_sha256.as_deref())
     .bind(payload.failure_kind.as_deref())
-    .execute(state.ticketing.pool())
+    .fetch_optional(state.ticketing.pool())
     .await;
     match result {
-        Ok(value) if value.rows_affected() == 1 => private_json(
-            StatusCode::OK,
-            json!({"runId": run_id, "status": payload.status, "discoveredCount": payload.discovered_count}),
-        ),
-        Ok(_) => BeaconSignalError::Conflict.response(request_id_value),
+        Ok(Some(discovered_count)) => {
+            if discovered_count != payload.discovered_count {
+                tracing::info!(
+                    run_id=%run_id,
+                    executor_count=payload.discovered_count,
+                    canonical_count=discovered_count,
+                    "Latarnik discovery final count reconciled to canonical observations"
+                );
+            }
+            private_json(
+                StatusCode::OK,
+                json!({"runId": run_id, "status": payload.status, "discoveredCount": discovered_count}),
+            )
+        }
+        Ok(None) => BeaconSignalError::Conflict.response(request_id_value),
         Err(error) => {
             tracing::warn!(%error, "Latarnik discovery report failed");
             BeaconSignalError::Unavailable.response(request_id_value)
@@ -325,7 +426,8 @@ pub async fn internal_claim_invite_delivery_job(
     if let Err(error) = sqlx::query(
         r#"
         UPDATE viryaos_beacon_invite_delivery_jobs
-        SET status='claimed',claim_token_hash=$3,claimed_by=$4,claimed_at=now()
+        SET status='claimed',claim_token_hash=$3,claimed_by=$4,claimed_at=now(),
+            claim_expires_at=now()+interval '60 minutes'
         WHERE workspace_id=$1 AND id=$2 AND status='queued'
         "#,
     )
@@ -377,9 +479,9 @@ pub async fn internal_report_invite_delivery_job(
         Ok(value) => value,
         Err(_) => return BeaconSignalError::Unavailable.response(request_id_value),
     };
-    let current = match sqlx::query_as::<_, (String, Option<Vec<u8>>)>(
+    let current = match sqlx::query_as::<_, (String, Option<Vec<u8>>, serde_json::Value)>(
         r#"
-        SELECT status,claim_token_hash
+        SELECT status,claim_token_hash,provider_summary
         FROM viryaos_beacon_invite_delivery_jobs
         WHERE workspace_id=$1 AND id=$2
         FOR UPDATE
@@ -399,7 +501,7 @@ pub async fn internal_report_invite_delivery_job(
         return BeaconSignalError::Unauthorized.response(request_id_value);
     }
     if matches!(current.0.as_str(), "completed" | "failed" | "ambiguous") {
-        if current.0 != payload.status {
+        if current.0 != payload.status || current.2 != payload.provider_summary {
             return BeaconSignalError::Conflict.response(request_id_value);
         }
         if tx.commit().await.is_err() {

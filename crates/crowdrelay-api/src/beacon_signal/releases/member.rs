@@ -217,8 +217,8 @@ pub async fn decline_release_delivery(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
-    if updated == 0
-        && let Err(error) = sqlx::query(
+    if updated == 0 {
+        match sqlx::query(
             "DELETE FROM inventory_reservation_items WHERE workspace_id=$1 AND reservation_id=$2 AND variant_id=$3 AND quantity=1",
         )
         .bind(workspace_id)
@@ -226,9 +226,14 @@ pub async fn decline_release_delivery(
         .bind(row.1)
         .execute(&mut *tx)
         .await
-    {
-        tracing::warn!(%error, "Latarnik decline final reservation unit release failed");
-        return BeaconSignalError::Unavailable.response(request_id_value);
+        {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => return BeaconSignalError::Conflict.response(request_id_value),
+            Err(error) => {
+                tracing::warn!(%error, "Latarnik decline final reservation unit release failed");
+                return BeaconSignalError::Unavailable.response(request_id_value);
+            }
+        }
     }
     if let Err(error) = sqlx::query(
         r#"

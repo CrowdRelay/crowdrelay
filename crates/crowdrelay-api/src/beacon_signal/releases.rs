@@ -9,6 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
+use crowdrelay_domain::{BeaconReleaseCampaignState, BeaconReleaseRecipientState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};

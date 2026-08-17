@@ -208,7 +208,7 @@ pub async fn fan_detail(
             JOIN synesthesia_runs run
               ON run.workspace_id = entry.workspace_id
              AND run.id = entry.run_id
-            WHERE entry.workspace_id = $1 AND entry.fan_id = $2
+            WHERE entry.workspace_id = $1 AND entry.fan_id = $2 AND NOT run.synthetic
             ORDER BY entry.entered_at DESC, entry.id DESC
             LIMIT 50
             "#,
