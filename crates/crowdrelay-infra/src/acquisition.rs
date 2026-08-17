@@ -57,7 +57,6 @@ pub struct PostgresAcquisitionRepository {
     workspace_slug: WorkspaceSlug,
     default_country_code: CountryCode,
     operation_timeout: Duration,
-    lock_timeout: Duration,
     require_double_opt_in: bool,
     sensitive_response_codec: SensitiveResponseCodec,
 }

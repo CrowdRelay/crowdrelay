@@ -1,24 +1,4 @@
 impl PostgresAdmissionRepository {
-    async fn configure_transaction(
-        &self,
-        transaction: &mut Transaction<'_, Postgres>,
-    ) -> Result<(), AdmissionStoreError> {
-        let statement_ms = i64::try_from(self.operation_timeout.as_millis())
-            .map_err(|_| AdmissionStoreError::Unexpected)?;
-        let lock_ms = i64::try_from(self.lock_timeout.as_millis())
-            .map_err(|_| AdmissionStoreError::Unexpected)?;
-        sqlx::query(
-            "SELECT set_config('statement_timeout', $1, true), \
-             set_config('lock_timeout', $2, true)",
-        )
-        .bind(format!("{statement_ms}ms"))
-        .bind(format!("{lock_ms}ms"))
-        .execute(&mut **transaction)
-        .await
-        .map_err(AdmissionStoreError::sqlx)?;
-        Ok(())
-    }
-
     async fn workspace_id(
         &self,
         transaction: &mut Transaction<'_, Postgres>,

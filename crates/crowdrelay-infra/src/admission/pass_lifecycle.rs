@@ -5,7 +5,6 @@ impl PostgresAdmissionRepository {
         session: &PassSessionToken,
     ) -> Result<AdmissionPassView, AdmissionStoreError> {
         let mut transaction = self.pool.begin().await.map_err(AdmissionStoreError::sqlx)?;
-        self.configure_transaction(&mut transaction).await?;
         let trusted_workspace = self.workspace_id(&mut transaction).await?;
         if trusted_workspace != workspace_id {
             return Err(AdmissionStoreError::NotFound);
@@ -58,7 +57,6 @@ impl PostgresAdmissionRepository {
     ) -> Result<AdmissionRedemptionResult, AdmissionStoreError> {
         let request_hash = redeem_request_hash(command);
         let mut transaction = self.pool.begin().await.map_err(AdmissionStoreError::sqlx)?;
-        self.configure_transaction(&mut transaction).await?;
         let workspace_id = self.workspace_id(&mut transaction).await?;
         if workspace_id != command.workspace_id {
             return Err(AdmissionStoreError::NotFound);
@@ -213,7 +211,6 @@ impl PostgresAdmissionRepository {
     ) -> Result<AdmissionPassView, AdmissionStoreError> {
         let request_hash = Sha256::digest(command.public_reference.as_bytes()).to_vec();
         let mut transaction = self.pool.begin().await.map_err(AdmissionStoreError::sqlx)?;
-        self.configure_transaction(&mut transaction).await?;
         let workspace_id = self.workspace_id(&mut transaction).await?;
         if workspace_id != command.workspace_id {
             return Err(AdmissionStoreError::NotFound);

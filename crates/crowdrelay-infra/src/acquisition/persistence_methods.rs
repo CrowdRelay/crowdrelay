@@ -1,25 +1,4 @@
 impl PostgresAcquisitionRepository {
-    async fn configure_transaction(
-        &self,
-        transaction: &mut Transaction<'_, Postgres>,
-    ) -> Result<(), StoreError> {
-        let statement_timeout = duration_as_milliseconds(self.operation_timeout)?;
-        let lock_timeout = duration_as_milliseconds(self.lock_timeout)?;
-        sqlx::query(
-            r#"
-            SELECT
-                set_config('statement_timeout', $1, true),
-                set_config('lock_timeout', $2, true)
-            "#,
-        )
-        .bind(format!("{statement_timeout}ms"))
-        .bind(format!("{lock_timeout}ms"))
-        .execute(&mut **transaction)
-        .await
-        .map_err(StoreError::from_sqlx)?;
-        Ok(())
-    }
-
     async fn trusted_workspace_id_in_transaction(
         &self,
         transaction: &mut Transaction<'_, Postgres>,

@@ -13,7 +13,6 @@ impl PostgresAcquisitionRepository {
             workspace_slug,
             default_country_code,
             operation_timeout: database.operation_timeout,
-            lock_timeout: database.lock_timeout,
             require_double_opt_in,
             sensitive_response_codec,
         }
@@ -250,7 +249,6 @@ impl PostgresAcquisitionRepository {
         let request_bytes = serde_json::to_vec(signup).map_err(|_| StoreError::Unexpected)?;
         let request_hash = Sha256::digest(request_bytes).to_vec();
         let mut transaction = self.pool.begin().await.map_err(StoreError::from_sqlx)?;
-        self.configure_transaction(&mut transaction).await?;
 
         let workspace_id = self
             .trusted_workspace_id_in_transaction(&mut transaction)
