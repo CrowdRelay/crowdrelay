@@ -41,6 +41,17 @@ url = "2"
 uuid = { version = "1", features = ["serde", "v7"] }
 zeroize = "1"
 
+# Dev and test builds carried full debug info, which dominates codegen, link time
+# and the on-disk target tree that CI caches save and restore. Line tables keep
+# file/line in panics, backtraces and profiles, which is what this backend is
+# actually debugged with; full variable inspection in a debugger is the trade.
+# Neither profile affects the release artifact.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
 [profile.release]
 lto = true
 codegen-units = 1
