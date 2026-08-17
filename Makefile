@@ -24,6 +24,7 @@ contract-tests:
 runtime-contracts:
 	python3 scripts/check-ci-policy.py
 	python3 scripts/source-size-ratchet.py
+	python3 scripts/api-sql-ratchet.py
 	python3 scripts/test-modularity-contract.py
 	python3 scripts/check-postgres-major.py
 	python3 scripts/postgres18_runtime_contract.py
