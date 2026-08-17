@@ -90,7 +90,9 @@ class RuntimePerformanceContract(unittest.TestCase):
         )
 
     def test_feature_flag_cache_is_bounded(self):
-        source = (ROOT / "crates/crowdrelay-api/src/ecosystem.rs").read_text()
+        source = (ROOT / "crates/crowdrelay-api/src/ecosystem.rs").read_text() + (
+            ROOT / "crates/crowdrelay-api/src/ecosystem/tests.rs"
+        ).read_text()
         self.assertIn("const MAX_FLAG_CACHE_ENTRIES: usize = 256;", source)
         self.assertIn("cache.retain(|_, entry| entry.expires_at > now);", source)
         self.assertIn("feature_flag_cache_is_strictly_bounded", source)

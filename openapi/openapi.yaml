@@ -9947,6 +9947,7 @@ components:
       - status
       - referral_url
       - fan_session_token
+      - email
       properties:
         fan_id:
           type: string
@@ -9962,6 +9963,14 @@ components:
           minLength: 24
           maxLength: 4096
           description: Opaque native-client session credential. Browser clients should continue using the HttpOnly cookie.
+        email:
+          type: string
+          format: email
+          description: Canonical fan email resolved from the one-time token.
+        display_name:
+          type: [string, 'null']
+          maxLength: 100
+          description: Canonical display name stored for the confirmed fan.
     FanUnsubscribeResponse:
       type: object
       additionalProperties: false

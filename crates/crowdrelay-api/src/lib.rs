@@ -78,6 +78,7 @@ mod routing;
 mod security;
 mod staff_sessions;
 mod synesthesia;
+pub mod tenant;
 mod ticket_qr;
 mod ticketing;
 
@@ -132,6 +133,8 @@ pub struct AppState {
     pub(crate) autopilot: PostgresAutopilotRepository,
     pub(crate) autopilot_runtime_enabled: bool,
     pub(crate) push: push::PushPublicState,
+    #[expect(dead_code)] // Tenants are disabled, but prepared for future use
+    pub(crate) tenant: tenant::TenantProfile,
 }
 
 impl AppState {
@@ -152,6 +155,7 @@ impl AppState {
         autopilot: PostgresAutopilotRepository,
         autopilot_runtime_enabled: bool,
         push: push::PushPublicState,
+        tenant: tenant::TenantProfile,
     ) -> Self {
         Self {
             database,
@@ -167,6 +171,7 @@ impl AppState {
             autopilot,
             autopilot_runtime_enabled,
             push,
+            tenant,
         }
     }
 }

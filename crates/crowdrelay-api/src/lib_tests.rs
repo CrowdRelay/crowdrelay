@@ -382,6 +382,16 @@ mod tests {
                 web_push_vapid_public_key: None,
                 fcm_project_id: None,
             },
+            crate::tenant::TenantProfile {
+                slug: "test".to_owned(),
+                display_name: "Test".to_owned(),
+                palette: crate::tenant::TenantPalette::default(),
+                products: crate::tenant::TenantProducts {
+                    crowdrelay: true,
+                    signal: true,
+                    synesthesia: false,
+                },
+            },
         ))
     }
 

@@ -22,6 +22,7 @@ use crowdrelay_api::{
     ClickMetricsReader, ClickMetricsSnapshot, ClickSubmitter, ConcertQrState,
     EventActionMetricsReader, EventActionMetricsSnapshot, EventActionSubmitter, EventState,
     FanLifecycleState, HttpConfig, OpsState, PushPublicState, ReferralState, TicketingState,
+    tenant::TenantProfile,
 };
 use crowdrelay_application::{
     AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, EventCache,
@@ -71,6 +72,8 @@ async fn main() -> Result<()> {
         config.require_double_opt_in,
         sensitive_response_codec.clone(),
     ));
+    let tenant_profile = TenantProfile::from_process_env(&config.workspace_slug)
+        .context("invalid tenant profile configuration")?;
     let workspace_id = postgres_repository
         .resolve_workspace(&config.workspace_slug)
         .await
@@ -254,6 +257,7 @@ async fn main() -> Result<()> {
                 web_push_vapid_public_key: config.push_delivery.web_push_vapid_public_key.clone(),
                 fcm_project_id: config.push_delivery.fcm_project_id.clone(),
             },
+            tenant_profile,
         ),
         http_config,
     );

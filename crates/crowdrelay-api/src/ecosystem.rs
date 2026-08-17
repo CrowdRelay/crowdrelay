@@ -182,6 +182,27 @@ pub struct EcosystemOverview {
     last_reconciliation: Option<ReconciliationRun>,
     open_findings: i64,
     next_event: Option<OverviewEvent>,
+    bandsintown_sync: Option<BandsintownSyncStatus>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct BandsintownSyncStatus {
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_synced_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_success_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
+    next_sync_at: OffsetDateTime,
+    consecutive_failures: i32,
+    last_error: Option<String>,
+    in_progress: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ManualEventSyncResult {
+    provider: &'static str,
+    queued: bool,
+    already_running: bool,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -256,11 +277,12 @@ struct ExistingMutation {
 pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let future = async {
         ensure_default_flags(&state).await?;
-        let (flags, last_reconciliation, open_findings, next_event) = tokio::try_join!(
+        let (flags, last_reconciliation, open_findings, next_event, bandsintown_sync) = tokio::try_join!(
             load_flags(&state),
             load_last_reconciliation(&state),
             count_open_findings(&state),
             load_next_event(&state),
+            load_bandsintown_sync(&state),
         )?;
         Ok::<_, EcosystemError>(EcosystemOverview {
             schema_version: SHOW_SNAPSHOT_SCHEMA,
@@ -268,6 +290,7 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
             last_reconciliation,
             open_findings,
             next_event,
+            bandsintown_sync,
         })
     };
     respond(run(&state, future).await, request_id(&headers))
@@ -308,6 +331,15 @@ pub async fn reconcile(
         Ok(value) => value,
         Err(_) => return EcosystemError::BadRequest.into_response(request_id_value),
     };
+    if payload.trigger == "bandsintown_sync" {
+        return respond(
+            run(&state, request_bandsintown_sync(&state, &headers)).await,
+            request_id_value,
+        );
+    }
+    if payload.trigger != "manual" {
+        return EcosystemError::BadRequest.into_response(request_id_value);
+    }
     respond(
         run(&state, reconcile_inner(&state, &headers, &payload.trigger)).await,
         request_id_value,
@@ -525,6 +557,78 @@ async fn count_open_findings(state: &crate::AppState) -> Result<i64, EcosystemEr
     .fetch_one(state.ticketing.pool())
     .await
     .map_err(EcosystemError::sqlx)
+}
+
+async fn load_bandsintown_sync(
+    state: &crate::AppState,
+) -> Result<Option<BandsintownSyncStatus>, EcosystemError> {
+    sqlx::query_as::<_, BandsintownSyncStatus>(
+        r#"
+        SELECT last_synced_at, last_success_at, next_sync_at, consecutive_failures, last_error,
+               (sync_lease_until IS NOT NULL AND sync_lease_until > now()) AS in_progress
+        FROM event_sources
+        WHERE workspace_id = $1 AND provider = 'bandsintown' AND active
+        ORDER BY id
+        LIMIT 1
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .fetch_optional(state.ticketing.pool())
+    .await
+    .map_err(EcosystemError::sqlx)
+}
+
+async fn request_bandsintown_sync(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+) -> Result<ManualEventSyncResult, EcosystemError> {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let source = sqlx::query_as::<_, (Uuid, bool)>(
+        r#"
+        SELECT id, (sync_lease_until IS NOT NULL AND sync_lease_until > now()) AS in_progress
+        FROM event_sources
+        WHERE workspace_id = $1 AND provider = 'bandsintown' AND active
+        ORDER BY id
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(state.ticketing.pool())
+    .await
+    .map_err(EcosystemError::sqlx)?;
+    let Some((source_id, already_running)) = source else {
+        return Err(EcosystemError::NotFound);
+    };
+    let queued = if already_running {
+        false
+    } else {
+        sqlx::query(
+            "UPDATE event_sources SET next_sync_at=now() WHERE workspace_id=$1 AND id=$2 AND (sync_lease_until IS NULL OR sync_lease_until <= now())",
+        )
+        .bind(workspace_id)
+        .bind(source_id)
+        .execute(state.ticketing.pool())
+        .await
+        .map_err(EcosystemError::sqlx)?
+        .rows_affected() == 1
+    };
+    if queued {
+        sqlx::query(
+            "INSERT INTO audit_events (workspace_id, actor_kind, action, target_type, target_id, request_id, metadata) VALUES ($1,'staff','event_source.sync_requested','event_source',$2,$3,$4)",
+        )
+        .bind(workspace_id)
+        .bind(source_id.to_string())
+        .bind(request_id(headers))
+        .bind(serde_json::json!({"provider":"bandsintown"}))
+        .execute(state.ticketing.pool())
+        .await
+        .map_err(EcosystemError::sqlx)?;
+    }
+    Ok(ManualEventSyncResult {
+        provider: "bandsintown",
+        queued,
+        already_running,
+    })
 }
 
 async fn load_next_event(state: &crate::AppState) -> Result<Option<OverviewEvent>, EcosystemError> {
@@ -865,109 +969,4 @@ mod basic_tests {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_event() -> ShowModeEvent {
-        ShowModeEvent {
-            slug: "virya-live".to_owned(),
-            title: "Virya Live".to_owned(),
-            venue: Some("Club".to_owned()),
-            starts_at: "2026-08-02T18:00:00Z".to_owned(),
-        }
-    }
-
-    fn sample_pass() -> ShowModePass {
-        ShowModePass {
-            public_reference: "VRY-TICKET-1".to_owned(),
-            holder_name: Some("Fan".to_owned()),
-            holder_email_masked: "f***@example.com".to_owned(),
-            ticket_type_name: Some("Regular".to_owned()),
-            offline_eligible: true,
-            qr_sha256: Some("ab".repeat(32)),
-        }
-    }
-
-    #[test]
-    fn snapshot_checksum_is_stable_and_sensitive() {
-        let event = sample_event();
-        let pass = sample_pass();
-        let checksum = snapshot_checksum(
-            "snapshot-1",
-            &event,
-            "generated",
-            "expires",
-            std::slice::from_ref(&pass),
-        );
-        assert_eq!(
-            checksum,
-            snapshot_checksum(
-                "snapshot-1",
-                &event,
-                "generated",
-                "expires",
-                std::slice::from_ref(&pass)
-            )
-        );
-        let mut changed = pass;
-        changed.offline_eligible = false;
-        assert_ne!(
-            checksum,
-            snapshot_checksum("snapshot-1", &event, "generated", "expires", &[changed])
-        );
-    }
-
-    #[test]
-    fn deterministic_ids_are_namespaced_and_uuid_v8() {
-        let first = deterministic_id("flag", "ticket_sales_enabled");
-        assert_eq!(first, deterministic_id("flag", "ticket_sales_enabled"));
-        assert_ne!(first, deterministic_id("checklist", "ticket_sales_enabled"));
-        assert_eq!(first.get_version_num(), 8);
-    }
-
-    #[test]
-    fn mutation_keys_reject_whitespace_and_control_bytes() {
-        let mut headers = HeaderMap::new();
-        headers.insert(IDEMPOTENCY_KEY.clone(), "valid-key-123".parse().unwrap());
-        assert_eq!(mutation_key(&headers).unwrap(), "valid-key-123");
-        headers.insert(IDEMPOTENCY_KEY.clone(), "bad key 123".parse().unwrap());
-        assert!(matches!(
-            mutation_key(&headers),
-            Err(EcosystemError::BadRequest)
-        ));
-    }
-
-    #[test]
-    fn email_masking_never_exposes_the_local_part() {
-        assert_eq!(mask_email(Some("wojciech@example.com")), "w***@example.com");
-        assert_eq!(mask_email(Some("invalid")), "—");
-        assert_eq!(mask_email(None), "—");
-    }
-
-    #[test]
-    fn all_expected_feature_flags_have_safe_defaults() {
-        assert_eq!(FLAG_KEYS.len(), 15);
-        assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
-        assert_eq!(flag_default("unknown"), None);
-    }
-
-    #[test]
-    fn feature_flag_cache_is_strictly_bounded() {
-        let now = Instant::now();
-        let mut cache = FlagCache::new();
-        for index in 0..(MAX_FLAG_CACHE_ENTRIES + 32) {
-            insert_cached_flag(
-                &mut cache,
-                Uuid::from_u128(index as u128 + 1),
-                "mailer_enabled",
-                index % 2 == 0,
-                now,
-            );
-        }
-        assert_eq!(cache.len(), MAX_FLAG_CACHE_ENTRIES);
-        assert!(cache.contains_key(&(
-            Uuid::from_u128((MAX_FLAG_CACHE_ENTRIES + 32) as u128),
-            "mailer_enabled"
-        )));
-    }
-}
+mod tests;

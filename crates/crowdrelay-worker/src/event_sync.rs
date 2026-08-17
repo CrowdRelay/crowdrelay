@@ -503,11 +503,7 @@ async fn record_source_failure(
     config: &EventSyncWorkerConfig,
 ) -> Result<(), EventSyncError> {
     let failures = source.consecutive_failures.saturating_add(1).min(16);
-    let exponent = u32::try_from(failures).map_err(|_| EventSyncError::InvalidSource)?;
-    let exponential = 2_i64.saturating_pow(exponent).min(256);
-    let retry_seconds = i64::from(source.sync_interval_seconds)
-        .saturating_mul(exponential)
-        .min(86_400);
+    let retry_seconds = retry_delay_seconds(source.sync_interval_seconds, failures)?;
     let message: String = error.to_string().chars().take(MAX_ERROR_CHARS).collect();
     timeout(
         config.operation_timeout,
@@ -538,6 +534,17 @@ async fn record_source_failure(
     .map_err(|_| EventSyncError::TimedOut)?
     .map_err(EventSyncError::sqlx)?;
     Ok(())
+}
+
+fn retry_delay_seconds(sync_interval_seconds: i32, failures: i32) -> Result<i64, EventSyncError> {
+    let interval = i64::from(sync_interval_seconds).max(60);
+    let exponent = u32::try_from(failures.saturating_sub(1).clamp(0, 8))
+        .map_err(|_| EventSyncError::InvalidSource)?;
+    // Recover transient provider/network failures quickly (5/10/20 min) but
+    // never poll more slowly than the configured healthy cadence.
+    Ok(300_i64
+        .saturating_mul(2_i64.saturating_pow(exponent))
+        .min(interval))
 }
 
 fn external_id(value: &serde_json::Value) -> Option<String> {
@@ -779,5 +786,20 @@ mod tests {
         assert_eq!(country_code(Some("Poland"), "XX"), "PL");
         assert_eq!(country_code(Some("Czechia"), "XX"), "CZ");
         assert_eq!(country_code(Some("Unknown"), "PL"), "PL");
+    }
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::*;
+
+    #[test]
+    fn transient_event_sync_retries_before_normal_cadence() {
+        assert_eq!(retry_delay_seconds(1800, 1).ok(), Some(300));
+        assert_eq!(retry_delay_seconds(1800, 2).ok(), Some(600));
+        assert_eq!(retry_delay_seconds(1800, 3).ok(), Some(1200));
+        assert_eq!(retry_delay_seconds(1800, 4).ok(), Some(1800));
+        assert_eq!(retry_delay_seconds(3600, 4).ok(), Some(2400));
+        assert_eq!(retry_delay_seconds(300, 8).ok(), Some(300));
     }
 }

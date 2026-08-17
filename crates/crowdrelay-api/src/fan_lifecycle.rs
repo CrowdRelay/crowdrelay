@@ -68,6 +68,8 @@ struct FanConfirmationResponse {
     status: FanStatus,
     referral_url: String,
     fan_session_token: String,
+    email: String,
+    display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -463,6 +465,28 @@ pub async fn confirm_fan(
                 .into_response();
         }
     };
+    let canonical_identity = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT normalized_email, display_name FROM fans WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(state.fan_lifecycle.workspace_id.into_uuid())
+    .bind(result.fan_id.into_uuid())
+    .fetch_optional(&state.database)
+    .await;
+    let (email, display_name) = match canonical_identity {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            tracing::error!(fan_id=%result.fan_id, "confirmed fan disappeared before identity response");
+            return Problem::internal(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(%error, fan_id=%result.fan_id, "could not load canonical fan identity after confirmation");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
     let cookie = match HeaderValue::from_str(&fan_session_cookie(
         result.fan_session_token.as_str(),
         state.fan_lifecycle.secure_cookies,
@@ -487,6 +511,8 @@ pub async fn confirm_fan(
             status: result.status,
             referral_url,
             fan_session_token: result.fan_session_token.as_str().to_owned(),
+            email,
+            display_name,
         }),
     )
         .into_response()
