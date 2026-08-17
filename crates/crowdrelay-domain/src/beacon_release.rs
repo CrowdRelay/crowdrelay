@@ -14,6 +14,63 @@ pub enum BeaconReleaseCampaignState {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BeaconReleaseCampaignPhase {
+    Draft,
+    ClaimsOpen,
+    Fulfillment,
+    Completed,
+    Cancelled,
+}
+
+impl BeaconReleaseCampaignPhase {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::ClaimsOpen => "claims_open",
+            Self::Fulfillment => "fulfillment",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BeaconReleaseProgress {
+    pub confirmed: i64,
+    pub prepared: i64,
+    pub sent: i64,
+}
+
+impl BeaconReleaseProgress {
+    #[must_use]
+    pub const fn has_open_fulfillment(self) -> bool {
+        self.confirmed > 0 || self.prepared > 0 || self.sent > 0
+    }
+}
+
+impl BeaconReleaseCampaignState {
+    #[must_use]
+    pub fn phase(
+        self,
+        claim_deadline: time::OffsetDateTime,
+        progress: BeaconReleaseProgress,
+        now: time::OffsetDateTime,
+    ) -> BeaconReleaseCampaignPhase {
+        match self {
+            Self::Draft => BeaconReleaseCampaignPhase::Draft,
+            Self::Cancelled => BeaconReleaseCampaignPhase::Cancelled,
+            Self::Open if now <= claim_deadline => BeaconReleaseCampaignPhase::ClaimsOpen,
+            Self::Open => BeaconReleaseCampaignPhase::Fulfillment,
+            Self::Closed if progress.has_open_fulfillment() => {
+                BeaconReleaseCampaignPhase::Fulfillment
+            }
+            Self::Closed => BeaconReleaseCampaignPhase::Completed,
+        }
+    }
+}
+
 impl TryFrom<&str> for BeaconReleaseCampaignState {
     type Error = BeaconReleaseStateError;
 
@@ -128,6 +185,36 @@ mod tests {
         assert!(
             !BeaconReleaseRecipientState::Delivered
                 .can_transition_to(BeaconReleaseRecipientState::Sent, open)
+        );
+    }
+
+    #[test]
+    fn campaign_phase_separates_claim_window_from_fulfillment() {
+        let now = time::OffsetDateTime::UNIX_EPOCH;
+        let future = now + time::Duration::days(1);
+        let past = now - time::Duration::days(1);
+        assert_eq!(
+            BeaconReleaseCampaignState::Open.phase(future, BeaconReleaseProgress::default(), now,),
+            BeaconReleaseCampaignPhase::ClaimsOpen,
+        );
+        assert_eq!(
+            BeaconReleaseCampaignState::Open.phase(past, BeaconReleaseProgress::default(), now,),
+            BeaconReleaseCampaignPhase::Fulfillment,
+        );
+        assert_eq!(
+            BeaconReleaseCampaignState::Closed.phase(
+                past,
+                BeaconReleaseProgress {
+                    sent: 1,
+                    ..BeaconReleaseProgress::default()
+                },
+                now,
+            ),
+            BeaconReleaseCampaignPhase::Fulfillment,
+        );
+        assert_eq!(
+            BeaconReleaseCampaignState::Closed.phase(past, BeaconReleaseProgress::default(), now,),
+            BeaconReleaseCampaignPhase::Completed,
         );
     }
 }

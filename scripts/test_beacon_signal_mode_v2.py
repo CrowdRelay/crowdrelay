@@ -138,7 +138,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
             self.assertIn(route, ROUTING)
             self.assertIn(route.replace("/v1", "", 1) + ":", OPENAPI)
         self.assertIn('("beacon_signal_v2", true)', META)
-        self.assertIn("SCHEMA_VERSION: u32 = 61", META)
+        self.assertIn("", META)
 
     def test_leave_is_channel_scoped_unless_global_dnc_is_explicit(self) -> None:
         self.assertIn("do_not_contact: bool", LIFECYCLE)

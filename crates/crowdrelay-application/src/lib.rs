@@ -23,6 +23,7 @@
 
 pub mod admission;
 pub mod autopilot;
+pub mod beacon_release;
 pub mod cache;
 pub mod events;
 pub mod fan_lifecycle;
@@ -34,6 +35,10 @@ pub use admission::{
     AdmissionRepository, AdmissionUseCaseError, ClaimAdmissionPass, ClaimAdmissionPassCommand,
     IssueAdmissionPass, IssueAdmissionPassCommand, LoadAdmissionPass, RedeemAdmissionPass,
     RedeemAdmissionPassCommand, RevokeAdmissionPass, RevokeAdmissionPassCommand,
+};
+pub use beacon_release::{
+    BeaconReleaseActivationCopy, BeaconReleaseRecipientTransition, BeaconReleaseTransitionError,
+    beacon_release_activation_copy, validate_beacon_release_recipient_transition,
 };
 pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
 pub use events::{

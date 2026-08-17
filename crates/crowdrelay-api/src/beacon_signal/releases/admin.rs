@@ -25,7 +25,8 @@ pub async fn admin_list_release_campaigns(
         SELECT recipient.campaign_id,recipient.beacon_id,beacon.display_name,beacon.beacon_kind,city.name AS city,
                recipient.status,recipient.recipient_name,recipient.recipient_phone,
                recipient.parcel_locker_code,recipient.confirmed_at,recipient.prepared_at,
-               recipient.sent_at,recipient.delivered_at
+               recipient.sent_at,recipient.delivered_at,recipient.activation_due_at,
+               recipient.activation_queued_at,recipient.activation_suppressed_at
         FROM viryaos_beacon_release_recipients recipient
         JOIN viryaos_beacons beacon
           ON beacon.workspace_id=recipient.workspace_id AND beacon.id=recipient.beacon_id
@@ -33,7 +34,7 @@ pub async fn admin_list_release_campaigns(
           ON campaign.workspace_id=recipient.workspace_id AND campaign.id=recipient.campaign_id
         LEFT JOIN cities city ON city.id=beacon.city_id
         WHERE recipient.workspace_id=$1
-          AND (campaign.status='open' OR recipient.status IN ('confirmed','prepared','sent'))
+          AND (campaign.status='open' OR recipient.status IN ('confirmed','prepared','sent','delivered'))
         ORDER BY campaign.created_at DESC,recipient.campaign_id,
           CASE recipient.status WHEN 'confirmed' THEN 0 WHEN 'prepared' THEN 1 WHEN 'sent' THEN 2 WHEN 'notified' THEN 3 ELSE 4 END,
           beacon.display_name,beacon.id
@@ -152,12 +153,14 @@ pub async fn admin_create_release_campaign(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "create_beacon_release_campaign",
-        "beacon_release_campaign",
-        campaign_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        json!({"slug": slug, "sku": sku, "claim_deadline": payload.claim_deadline}),
+        OperatorActionRecord {
+            action: "create_beacon_release_campaign",
+            target_type: "beacon_release_campaign",
+            target_id: campaign_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: json!({"slug": slug, "sku": sku, "claim_deadline": payload.claim_deadline}),
+        },
     )
     .await
     {
@@ -446,17 +449,19 @@ pub async fn admin_launch_release_campaign(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "launch_beacon_release_campaign",
-        "beacon_release_campaign",
-        campaign_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        json!({
-            "eligible_count": eligible_count,
-            "reserved_quantity": eligible_count,
-            "reservation_id": reservation_id,
-            "sku": availability.sku,
-        }),
+        OperatorActionRecord {
+            action: "launch_beacon_release_campaign",
+            target_type: "beacon_release_campaign",
+            target_id: campaign_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: json!({
+                "eligible_count": eligible_count,
+                "reserved_quantity": eligible_count,
+                "reservation_id": reservation_id,
+                "sku": availability.sku,
+            }),
+        },
     )
     .await
     {
@@ -570,12 +575,14 @@ pub async fn admin_close_release_campaign(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "close_beacon_release_campaign",
-        "beacon_release_campaign",
-        campaign_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        json!({"pending_fulfillment": pending_fulfillment}),
+        OperatorActionRecord {
+            action: "close_beacon_release_campaign",
+            target_type: "beacon_release_campaign",
+            target_id: campaign_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: json!({"pending_fulfillment": pending_fulfillment}),
+        },
     )
     .await
     {
@@ -621,7 +628,8 @@ pub async fn admin_list_release_recipients(
         SELECT recipient.campaign_id,recipient.beacon_id,beacon.display_name,beacon.beacon_kind,city.name AS city,
                recipient.status,recipient.recipient_name,recipient.recipient_phone,
                recipient.parcel_locker_code,recipient.confirmed_at,recipient.prepared_at,
-               recipient.sent_at,recipient.delivered_at
+               recipient.sent_at,recipient.delivered_at,recipient.activation_due_at,
+               recipient.activation_queued_at,recipient.activation_suppressed_at
         FROM viryaos_beacon_release_recipients recipient
         JOIN viryaos_beacons beacon
           ON beacon.workspace_id=recipient.workspace_id AND beacon.id=recipient.beacon_id
@@ -721,20 +729,16 @@ pub async fn admin_update_release_recipient(
         Ok(None) => return BeaconSignalError::NotFound.response(request_id_value),
         Err(_) => return BeaconSignalError::Unavailable.response(request_id_value),
     };
-    let current_state = match BeaconReleaseRecipientState::try_from(row.0.as_str()) {
-        Ok(value) => value,
+    match crowdrelay_application::validate_beacon_release_recipient_transition(
+        row.0.as_str(),
+        payload.status.as_str(),
+        row.3.as_str(),
+    ) {
+        Ok(_) => {}
+        Err(crowdrelay_application::BeaconReleaseTransitionError::InvalidRequestedState) => {
+            return BeaconSignalError::BadRequest.response(request_id_value);
+        }
         Err(_) => return BeaconSignalError::Conflict.response(request_id_value),
-    };
-    let next_state = match BeaconReleaseRecipientState::try_from(payload.status.as_str()) {
-        Ok(value) => value,
-        Err(_) => return BeaconSignalError::BadRequest.response(request_id_value),
-    };
-    let campaign_state = match BeaconReleaseCampaignState::try_from(row.3.as_str()) {
-        Ok(value) => value,
-        Err(_) => return BeaconSignalError::Conflict.response(request_id_value),
-    };
-    if !current_state.can_transition_to(next_state, campaign_state) {
-        return BeaconSignalError::Conflict.response(request_id_value);
     }
 
     if payload.status == "sent" {
@@ -820,6 +824,9 @@ pub async fn admin_update_release_recipient(
         }
     }
 
+    let activation_due_at = (payload.status == "delivered")
+        .then(|| OffsetDateTime::now_utc() + time::Duration::days(2));
+
     let (timestamp_column, purge) = match payload.status.as_str() {
         "prepared" => ("prepared_at", false),
         "sent" => ("sent_at", false),
@@ -829,7 +836,7 @@ pub async fn admin_update_release_recipient(
     };
     // Column choice comes from the closed enum above, never from user input.
     let sql = format!(
-        "UPDATE viryaos_beacon_release_recipients SET status=$4,{timestamp_column}=now(),delivery_details_purge_after=CASE WHEN $4='delivered' THEN now()+interval '30 days' ELSE delivery_details_purge_after END,recipient_name=CASE WHEN $5 THEN NULL ELSE recipient_name END,recipient_phone=CASE WHEN $5 THEN NULL ELSE recipient_phone END,parcel_locker_code=CASE WHEN $5 THEN NULL ELSE parcel_locker_code END,pii_purged_at=CASE WHEN $5 THEN now() ELSE pii_purged_at END WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3"
+        "UPDATE viryaos_beacon_release_recipients SET status=$4,{timestamp_column}=now(),delivery_details_purge_after=CASE WHEN $4='delivered' THEN now()+interval '30 days' ELSE delivery_details_purge_after END,recipient_name=CASE WHEN $5 THEN NULL ELSE recipient_name END,recipient_phone=CASE WHEN $5 THEN NULL ELSE recipient_phone END,parcel_locker_code=CASE WHEN $5 THEN NULL ELSE parcel_locker_code END,pii_purged_at=CASE WHEN $5 THEN now() ELSE pii_purged_at END,activation_due_at=COALESCE($6,activation_due_at) WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3"
     );
     if let Err(error) = sqlx::query(&sql)
         .bind(workspace_id)
@@ -837,6 +844,7 @@ pub async fn admin_update_release_recipient(
         .bind(beacon_id)
         .bind(&payload.status)
         .bind(purge)
+        .bind(activation_due_at)
         .execute(&mut *tx)
         .await
     {
@@ -846,12 +854,19 @@ pub async fn admin_update_release_recipient(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "update_beacon_release_recipient",
-        "beacon_release_recipient",
-        campaign_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        json!({"beacon_id": beacon_id, "from": row.0, "to": payload.status}),
+        OperatorActionRecord {
+            action: "update_beacon_release_recipient",
+            target_type: "beacon_release_recipient",
+            target_id: campaign_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: json!({
+                "beacon_id": beacon_id,
+                "from": row.0,
+                "to": payload.status,
+                "activation_due_at": activation_due_at,
+            }),
+        },
     )
     .await
     {

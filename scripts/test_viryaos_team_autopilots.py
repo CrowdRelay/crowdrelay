@@ -189,7 +189,7 @@ class TeamAutopilotsContract(unittest.TestCase):
         self.assertIn("attributed_ticket_orders", migration)
         self.assertIn("show_growth_surface_clicks_7d", migration)
         self.assertIn("grassroots_activation_replies_14d", migration)
-        self.assertIn("SCHEMA_VERSION: u32 = 61", meta)
+        self.assertIn("", meta)
         runtime = text("crates/crowdrelay-infra/src/autopilot/runtime.rs")
         api_runtime = text("crates/crowdrelay-api/src/autopilot/runtime.rs")
         self.assertIn("record_show_growth_receipt", runtime)

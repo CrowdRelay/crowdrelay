@@ -64,7 +64,7 @@ VIRYA OS keeps decisions in Rust and emits only provider-neutral execution inten
 
 Invitation delivery uses `/v1/internal/beacon/invite-delivery-jobs/{job_id}/claim`. The claim is one-shot and returns raw Signal invite URLs only in the response; the outbox carries only `job_id`. If the provider result becomes uncertain after any send attempt, report `ambiguous` and stop: do not retry the job automatically.
 
-Physical-release mail is separate from acquisition. CrowdRelay determines the active release pool, reserves stock and owns the exact mail copy; n8n only performs provider delivery after `beacon.release.mail` has passed production attestation.
+Physical-release mail is separate from acquisition. CrowdRelay determines the active release pool, reserves stock and owns the exact mail copy; n8n only performs provider delivery after `beacon.release.mail` has passed production attestation. The same attested envelope may carry `message_kind=activation_followup` after CrowdRelay reaches the due time and re-checks consent/contactability; n8n must not invent the recipient, timing, release intent or any shipment fields.
 
 For Gmail-backed booking/outreach, provider correlation is durable in CrowdRelay's execution-report ledger. The private executor writes the Gmail `threadId` as `provider_reference`, and inbound monitoring resolves that reference through CrowdRelay before reporting the deterministic `received` disposition. n8n keeps no durable business-correlation map and does not infer positive/negative intent.
 

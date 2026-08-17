@@ -70,8 +70,10 @@ pub use admission::{
     PassClaimToken, PassClaimTokenError, PassSessionToken, PassSessionTokenError,
 };
 pub use beacon_release::{
-    BeaconReleaseCampaignState, BeaconReleaseRecipientState, BeaconReleaseStateError,
+    BeaconReleaseCampaignPhase, BeaconReleaseCampaignState, BeaconReleaseProgress,
+    BeaconReleaseRecipientState, BeaconReleaseStateError,
 };
+pub use beacons::BeaconContactIdentity;
 pub use events::{
     EventAction, EventActionError, EventActionKind, EventCity, EventInterestResult, EventStatus,
     FanEventInterest, PublicEvent, PublicEventError,

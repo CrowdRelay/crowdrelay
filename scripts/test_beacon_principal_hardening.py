@@ -12,7 +12,9 @@ class BeaconPrincipalHardening(unittest.TestCase):
         admin = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
         self.assertIn('Closed => matches!((self, next), (Sent, Delivered))', domain)
         self.assertIn('(Sent, Delivered)', domain)
-        self.assertIn('current_state.can_transition_to(next_state, campaign_state)', admin)
+        app = read('crates/crowdrelay-application/src/beacon_release.rs')
+        self.assertIn('validate_beacon_release_recipient_transition', app)
+        self.assertIn('crowdrelay_application::validate_beacon_release_recipient_transition', admin)
         self.assertIn("campaign.status IN ('open','closed')", admin)
 
     def test_expired_release_claims_reconcile_inventory(self):
@@ -38,10 +40,15 @@ class BeaconPrincipalHardening(unittest.TestCase):
         internal = read('crates/crowdrelay-api/src/beacon_signal/network/internal.rs')
         self.assertIn('viryaos_beacon_network_discovery_observations', migration)
         self.assertIn('pg_advisory_xact_lock(hashtextextended($1,0))', internal)
-        self.assertIn('format!("email:{email}")', internal)
-        self.assertIn('format!("destination:{url}")', internal)
-        self.assertIn('{identity_key}', internal)
-        self.assertIn('SELECT count(*)::bigint FROM viryaos_beacon_network_discovery_observations', internal)
+        domain = read('crates/crowdrelay-domain/src/beacons.rs')
+        self.assertIn('BeaconContactIdentity', domain)
+        self.assertIn('Self::Email(_) => "email"', domain)
+        self.assertIn('Self::DestinationUrl(_) => "destination"', domain)
+        self.assertIn('contact_identity.namespace()', internal)
+        self.assertIn('contact_identity.value()', internal)
+        self.assertIn('FROM unnest($3::uuid[],$4::text[],$5::text[],$6::int4[],$7::int4[])', internal)
+        self.assertIn('SELECT count(*)::integer', internal)
+        self.assertIn('FROM viryaos_beacon_network_discovery_observations', internal)
         self.assertIn('RETURNING discovered_count', internal)
         self.assertIn('canonical_count=discovered_count', internal)
 
@@ -60,7 +67,23 @@ class BeaconPrincipalHardening(unittest.TestCase):
 
     def test_closed_campaign_sent_recipients_remain_visible_to_staff(self):
         source = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
-        self.assertIn("campaign.status='open' OR recipient.status IN ('confirmed','prepared','sent')", source)
+        self.assertIn("campaign.status='open' OR recipient.status IN ('confirmed','prepared','sent','delivered')", source)
+        self.assertIn('activation_due_at', source)
+
+    def test_delivered_release_activation_is_due_then_rechecks_consent_at_send_time(self):
+        migration = read('migrations/0062_beacon_release_activation_followup.sql')
+        worker = read('crates/crowdrelay-worker/src/reminders.rs')
+        admin = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
+        self.assertIn('activation_due_at timestamptz', migration)
+        self.assertIn('activation_suppressed_at timestamptz', migration)
+        self.assertIn('status=\'delivered\'', worker)
+        self.assertIn('beacon.accepts_outreach', worker)
+        self.assertIn('NOT beacon.do_not_contact', worker)
+        self.assertIn("'releases'=ANY(profile.topics)", worker)
+        self.assertIn('FOR UPDATE OF recipient SKIP LOCKED', worker)
+        self.assertIn('activation_queued_at=now()', worker)
+        self.assertIn('activation_suppressed_at=now()', worker)
+        self.assertIn('time::Duration::days(2)', admin)
 
     def test_release_launch_bulk_materializes_outbox(self):
         source = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')

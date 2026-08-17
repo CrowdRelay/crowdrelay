@@ -6287,7 +6287,7 @@ components:
     BeaconReleaseCampaign:
       type: object
       additionalProperties: false
-      required: [id, slug, title, sku, productName, variantLabel, status, claimDeadline, eligibleCount, reservedQuantity, createdAt, notifiedCount, confirmedCount, preparedCount, sentCount, deliveredCount, declinedCount, expiredCount]
+      required: [id, slug, title, sku, productName, variantLabel, status, phase, claimDeadline, eligibleCount, reservedQuantity, createdAt, notifiedCount, confirmedCount, preparedCount, sentCount, deliveredCount, declinedCount, expiredCount]
       properties:
         id: { type: string, format: uuid }
         slug: { type: string }
@@ -6296,6 +6296,7 @@ components:
         productName: { type: string }
         variantLabel: { type: string }
         status: { type: string, enum: [draft, open, closed, cancelled] }
+        phase: { type: string, enum: [draft, claims_open, fulfillment, completed, cancelled] }
         claimDeadline: { type: string, format: date-time }
         eligibleCount: { type: integer, minimum: 0 }
         reservedQuantity: { type: integer, minimum: 0 }
@@ -6329,6 +6330,9 @@ components:
         preparedAt: { type: [string, 'null'], format: date-time }
         sentAt: { type: [string, 'null'], format: date-time }
         deliveredAt: { type: [string, 'null'], format: date-time }
+        activationDueAt: { type: [string, 'null'], format: date-time }
+        activationQueuedAt: { type: [string, 'null'], format: date-time }
+        activationSuppressedAt: { type: [string, 'null'], format: date-time }
     BeaconReleaseCampaignsAdmin:
       type: object
       additionalProperties: false

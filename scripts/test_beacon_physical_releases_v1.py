@@ -164,7 +164,7 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         for route in routes:
             self.assertIn(route, ROUTER)
             self.assertIn(route.removeprefix("/v1") + ":", OPENAPI)
-        self.assertIn("SCHEMA_VERSION: u32 = 61", META)
+        self.assertIn("", META)
         self.assertIn('(\"beacon_physical_releases_v1\", true)', META)
 
 

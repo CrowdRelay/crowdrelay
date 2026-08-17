@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
-use crowdrelay_domain::{BeaconReleaseCampaignState, BeaconReleaseRecipientState};
+use crowdrelay_domain::{BeaconReleaseCampaignState, BeaconReleaseProgress};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -103,6 +103,7 @@ struct ReleaseCampaignView {
     product_name: String,
     variant_label: String,
     status: String,
+    phase: &'static str,
     #[serde(with = "time::serde::rfc3339")]
     claim_deadline: OffsetDateTime,
     eligible_count: i32,
@@ -127,6 +128,21 @@ struct ReleaseCampaignView {
 
 impl From<ReleaseCampaignRow> for ReleaseCampaignView {
     fn from(row: ReleaseCampaignRow) -> Self {
+        let phase = BeaconReleaseCampaignState::try_from(row.status.as_str())
+            .map(|state| {
+                state
+                    .phase(
+                        row.claim_deadline,
+                        BeaconReleaseProgress {
+                            confirmed: row.confirmed_count,
+                            prepared: row.prepared_count,
+                            sent: row.sent_count,
+                        },
+                        OffsetDateTime::now_utc(),
+                    )
+                    .as_str()
+            })
+            .unwrap_or("unknown");
         Self {
             id: row.id,
             slug: row.slug,
@@ -135,6 +151,7 @@ impl From<ReleaseCampaignRow> for ReleaseCampaignView {
             product_name: row.product_name,
             variant_label: row.variant_label,
             status: row.status,
+            phase,
             claim_deadline: row.claim_deadline,
             eligible_count: row.eligible_count,
             reserved_quantity: row.reserved_quantity,
@@ -206,6 +223,12 @@ struct AdminReleaseRecipientView {
     sent_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
     delivered_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    activation_due_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    activation_queued_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    activation_suppressed_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -381,19 +404,19 @@ async fn inventory_availability_tx(
     .await
 }
 
-// The arguments intentionally mirror one append-only operator_actions record.
-// Keeping them explicit at this transaction boundary is clearer than a second
-// DTO that would only be unpacked immediately into the SQL bind list.
-#[allow(clippy::too_many_arguments)]
+pub(super) struct OperatorActionRecord<'a> {
+    pub action: &'a str,
+    pub target_type: &'a str,
+    pub target_id: Uuid,
+    pub idempotency_key: &'a str,
+    pub request_id: Option<&'a str>,
+    pub details: serde_json::Value,
+}
+
 pub(super) async fn record_operator_action(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
-    action: &str,
-    target_type: &str,
-    target_id: Uuid,
-    idempotency_key: &str,
-    request_id_value: Option<&str>,
-    details: serde_json::Value,
+    record: OperatorActionRecord<'_>,
 ) -> Result<bool, sqlx::Error> {
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -406,12 +429,12 @@ pub(super) async fn record_operator_action(
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(idempotency_key)
-    .bind(request_id_value)
-    .bind(details)
+    .bind(record.action)
+    .bind(record.target_type)
+    .bind(record.target_id)
+    .bind(record.idempotency_key)
+    .bind(record.request_id)
+    .bind(record.details)
     .fetch_optional(&mut **tx)
     .await?;
     Ok(inserted.is_some())

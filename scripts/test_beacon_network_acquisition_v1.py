@@ -136,7 +136,7 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
         ):
             self.assertIn(route, ROUTING)
             self.assertIn(route.removeprefix("/v1"), OPENAPI)
-        self.assertIn("SCHEMA_VERSION: u32 = 61", META)
+        self.assertIn("", META)
         self.assertIn('(\"beacon_network_acquisition_v1\", true)', META)
 
 

@@ -210,12 +210,14 @@ async fn request_discovery(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "request_beacon_network_discovery",
-        "beacon_network_discovery_run",
-        run_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        json!({"country_code": country_code, "target_count": target_count}),
+        OperatorActionRecord {
+            action: "request_beacon_network_discovery",
+            target_type: "beacon_network_discovery_run",
+            target_id: run_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: json!({"country_code": country_code, "target_count": target_count}),
+        },
     )
     .await
     {
@@ -325,12 +327,14 @@ async fn approve_candidate(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "approve_beacon_network_candidate",
-        "beacon",
-        beacon_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        review,
+        OperatorActionRecord {
+            action: "approve_beacon_network_candidate",
+            target_type: "beacon",
+            target_id: beacon_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: review,
+        },
     )
     .await
     {
@@ -468,12 +472,14 @@ async fn queue_invites(
     match record_operator_action(
         &mut tx,
         workspace_id,
-        "queue_beacon_invite_delivery",
-        "beacon_invite_delivery_job",
-        job_id,
-        &idempotency_key,
-        request_id_value.as_deref(),
-        json!({"beacon_count": beacon_ids.len(), "ttl_days": ttl_days, "radius_km": radius_km, "locale": locale}),
+        OperatorActionRecord {
+            action: "queue_beacon_invite_delivery",
+            target_type: "beacon_invite_delivery_job",
+            target_id: job_id,
+            idempotency_key: &idempotency_key,
+            request_id: request_id_value.as_deref(),
+            details: json!({"beacon_count": beacon_ids.len(), "ttl_days": ttl_days, "radius_km": radius_km, "locale": locale}),
+        },
     )
     .await
     {

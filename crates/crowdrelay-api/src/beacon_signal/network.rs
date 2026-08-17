@@ -17,7 +17,9 @@ use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
 
-use super::releases::{executor_capability_available_tx, record_operator_action};
+use super::releases::{
+    OperatorActionRecord, executor_capability_available_tx, record_operator_action,
+};
 use super::*;
 
 mod admin;

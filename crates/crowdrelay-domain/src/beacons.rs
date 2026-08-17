@@ -11,6 +11,49 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{BeaconId, EventId, autonomy::Confidence};
 
+/// Canonical identity used when discovery reconciles a contact with an existing Beacon.
+///
+/// A normalized e-mail address is authoritative when present. Destination URL is
+/// only the fallback for contacts without e-mail. Keeping this rule in the domain
+/// prevents API adapters and database locks from drifting apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BeaconContactIdentity<'a> {
+    Email(&'a str),
+    DestinationUrl(&'a str),
+}
+
+impl<'a> BeaconContactIdentity<'a> {
+    #[must_use]
+    pub fn from_normalized(
+        contact_email: Option<&'a str>,
+        destination_url: Option<&'a str>,
+    ) -> Option<Self> {
+        contact_email
+            .filter(|value| !value.is_empty())
+            .map(Self::Email)
+            .or_else(|| {
+                destination_url
+                    .filter(|value| !value.is_empty())
+                    .map(Self::DestinationUrl)
+            })
+    }
+
+    #[must_use]
+    pub const fn namespace(self) -> &'static str {
+        match self {
+            Self::Email(_) => "email",
+            Self::DestinationUrl(_) => "destination",
+        }
+    }
+
+    #[must_use]
+    pub const fn value(self) -> &'a str {
+        match self {
+            Self::Email(value) | Self::DestinationUrl(value) => value,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BeaconKind {
@@ -438,6 +481,8 @@ const fn valid_policy(policy: BeaconCampaignPolicy) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::BeaconContactIdentity;
+
     use super::*;
 
     fn now() -> OffsetDateTime {
@@ -563,5 +608,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn contact_identity_prefers_email_and_falls_back_to_destination() {
+        assert_eq!(
+            BeaconContactIdentity::from_normalized(
+                Some("media@example.com"),
+                Some("https://media.example/")
+            ),
+            Some(BeaconContactIdentity::Email("media@example.com")),
+        );
+        assert_eq!(
+            BeaconContactIdentity::from_normalized(None, Some("https://media.example/")),
+            Some(BeaconContactIdentity::DestinationUrl(
+                "https://media.example/"
+            )),
+        );
+        assert_eq!(BeaconContactIdentity::from_normalized(None, None), None);
     }
 }
