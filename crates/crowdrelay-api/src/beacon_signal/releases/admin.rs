@@ -38,9 +38,13 @@ pub async fn admin_list_release_campaigns(
         ORDER BY campaign.created_at DESC,recipient.campaign_id,
           CASE recipient.status WHEN 'confirmed' THEN 0 WHEN 'prepared' THEN 1 WHEN 'sent' THEN 2 WHEN 'notified' THEN 3 ELSE 4 END,
           beacon.display_name,beacon.id
+        LIMIT $2
         "#,
     )
     .bind(workspace_id)
+    // Read one past the bound so truncation is detectable without a second
+    // count query over the same growing table.
+    .bind(MAX_ADMIN_RELEASE_RECIPIENTS + 1)
     .fetch_all(state.ticketing.pool())
     .await
     {
@@ -50,12 +54,23 @@ pub async fn admin_list_release_campaigns(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
+    let mut recipients = recipients;
+    let limit = usize::try_from(MAX_ADMIN_RELEASE_RECIPIENTS).unwrap_or(usize::MAX);
+    let recipients_truncated = recipients.len() > limit;
+    if recipients_truncated {
+        recipients.truncate(limit);
+        tracing::warn!(
+            limit = MAX_ADMIN_RELEASE_RECIPIENTS,
+            "Latarnik release recipient roster truncated"
+        );
+    }
     private_json(
         StatusCode::OK,
         AdminReleaseCampaignsResponse {
             pool,
             campaigns,
             recipients,
+            recipients_truncated,
         },
     )
 }

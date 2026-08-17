@@ -91,6 +91,22 @@ class BeaconPrincipalHardening(unittest.TestCase):
         self.assertIn('AS mail(beacon_id,display_name,contact_email,subject,body_text,request_id)', source)
         self.assertNotIn('for (beacon_id, display_name, contact_email, locale) in &eligible {\n        let delivery = release_delivery_copy(locale, display_name, &campaign.2, campaign.3);\n        if let Err(error) = sqlx::query(', source)
 
+    def test_admin_release_recipient_roster_is_bounded(self):
+        # Delivered recipients accumulate for the lifetime of the workspace, so
+        # this admin listing must never load and serialise the whole history.
+        releases = read('crates/crowdrelay-api/src/beacon_signal/releases.rs')
+        admin = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
+        self.assertIn('const MAX_ADMIN_RELEASE_RECIPIENTS', releases)
+        listing = admin.split('pub async fn admin_list_release_campaigns(', 1)[1]
+        listing = listing.split('\npub async fn ', 1)[0]
+        self.assertIn('LIMIT $2', listing)
+        self.assertIn('MAX_ADMIN_RELEASE_RECIPIENTS + 1', listing)
+        # Truncation must be visible to the operator, not silently partial.
+        self.assertIn('recipients_truncated', listing)
+        self.assertIn('recipients_truncated: bool', releases)
+        # A bounded read is only correct with a deterministic order.
+        self.assertIn('ORDER BY campaign.created_at DESC', listing)
+
     def test_openapi_has_structural_network_and_release_read_models(self):
         spec = read('openapi/openapi.yaml')
         self.assertIn('BeaconNetworkAcquisition:', spec)

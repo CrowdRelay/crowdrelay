@@ -6336,11 +6336,18 @@ components:
     BeaconReleaseCampaignsAdmin:
       type: object
       additionalProperties: false
-      required: [pool, campaigns, recipients]
+      required: [pool, campaigns, recipients, recipientsTruncated]
       properties:
         pool: { $ref: '#/components/schemas/BeaconReleasePoolSummary' }
         campaigns: { type: array, items: { $ref: '#/components/schemas/BeaconReleaseCampaign' } }
         recipients: { type: array, items: { $ref: '#/components/schemas/BeaconReleaseRecipient' } }
+        recipientsTruncated:
+          type: boolean
+          description: >-
+            True when the recipient roster was cut off at the server-side bound.
+            Delivered recipients accumulate for the lifetime of the workspace, so
+            this listing is bounded; clients must surface truncation rather than
+            present a partial roster as the whole release.
     BeaconReleaseRecipientsAdmin:
       type: object
       additionalProperties: false

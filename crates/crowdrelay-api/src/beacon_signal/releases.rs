@@ -29,6 +29,14 @@ pub use admin::{
 pub use member::{confirm_release_delivery, decline_release_delivery, my_release_campaigns};
 
 const RELEASE_MEMBER_URL: &str = "https://virya.music/pl/latarnik/#wydania";
+/// Upper bound on the recipient roster returned by the admin release listing.
+///
+/// Delivered recipients accumulate for the lifetime of the workspace, so an
+/// unbounded read here grows with every release ever shipped and is loaded into
+/// memory and serialised in full on each admin page load. The ordering is
+/// deterministic, so the bound always keeps the most recent campaigns and the
+/// recipients that still need operator action.
+const MAX_ADMIN_RELEASE_RECIPIENTS: i64 = 2_000;
 const MAX_TITLE_LEN: usize = 200;
 const MAX_SLUG_LEN: usize = 128;
 const MAX_SKU_LEN: usize = 128;
@@ -195,6 +203,10 @@ struct AdminReleaseCampaignsResponse {
     pool: PoolSummary,
     campaigns: Vec<ReleaseCampaignView>,
     recipients: Vec<AdminReleaseRecipientView>,
+    /// True when the recipient roster was cut off at [`MAX_ADMIN_RELEASE_RECIPIENTS`].
+    /// The operator UI must say so rather than present a silently partial roster
+    /// as if it were the whole release.
+    recipients_truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
