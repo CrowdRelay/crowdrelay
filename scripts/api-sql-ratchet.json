@@ -33,7 +33,7 @@
     "crates/crowdrelay-api/src/commerce/inventory/stocktake.rs": 6,
     "crates/crowdrelay-api/src/concert_qr.rs": 6,
     "crates/crowdrelay-api/src/ecosystem.rs": 4,
-    "crates/crowdrelay-api/src/ecosystem/control_plane.rs": 8,
+    "crates/crowdrelay-api/src/ecosystem/control_plane.rs": 7,
     "crates/crowdrelay-api/src/event_copy.rs": 1,
     "crates/crowdrelay-api/src/fan_lifecycle.rs": 2,
     "crates/crowdrelay-api/src/mobile_fan.rs": 5,

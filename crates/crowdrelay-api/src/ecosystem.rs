@@ -18,6 +18,7 @@ use axum::{
 };
 use crowdrelay_application::{
     EcosystemControlPlaneRepository, EcosystemRepositoryError, UpdateFeatureFlagCommand,
+    UpdateShowChecklistCommand,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -874,7 +875,9 @@ pub(crate) enum EcosystemError {
 impl From<EcosystemRepositoryError> for EcosystemError {
     fn from(error: EcosystemRepositoryError) -> Self {
         match error {
-            EcosystemRepositoryError::UnknownFlag => Self::NotFound,
+            EcosystemRepositoryError::UnknownFlag | EcosystemRepositoryError::NotFound => {
+                Self::NotFound
+            }
             EcosystemRepositoryError::Conflict => Self::Conflict,
             EcosystemRepositoryError::Unexpected => Self::Unexpected,
         }

@@ -44,7 +44,8 @@ pub use beacon_release::{
 pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
 pub use ecosystem::{
     EcosystemControlPlaneRepository, EcosystemRepositoryError, FeatureFlagMutation,
-    FeatureFlagState, UpdateFeatureFlagCommand,
+    FeatureFlagState, ShowChecklistItemState, ShowChecklistMutation, UpdateFeatureFlagCommand,
+    UpdateShowChecklistCommand,
 };
 pub use events::{
     EventCache, EventCacheError, EventRepository, EventSnapshot, ListFanEventInterests, LoadEvents,

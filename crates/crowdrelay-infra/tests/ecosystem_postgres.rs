@@ -1,5 +1,6 @@
 use crowdrelay_application::{
     EcosystemControlPlaneRepository, EcosystemRepositoryError, UpdateFeatureFlagCommand,
+    UpdateShowChecklistCommand,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{database, ecosystem::PostgresEcosystemRepository};
@@ -118,6 +119,61 @@ async fn feature_flag_updates_are_idempotent_audited_and_replay_safe()
         .await?;
     assert!(created.flag.enabled);
     assert_eq!(created.flag.version, 1);
+
+    // --- checklist: same replay rules, different aggregate -------------------
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at) \
+         VALUES ($1, $2, $3, 'Checklist show', now() + interval '30 days', 'published', now())",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("show-{suffix}"))
+    .execute(&pool)
+    .await?;
+
+    let checklist = |idem: &str, status: &str| UpdateShowChecklistCommand {
+        workspace_id,
+        event_slug: format!("show-{suffix}"),
+        item_key: "load-in".to_owned(),
+        status: status.to_owned(),
+        note: Some("  backline at 16:00  ".to_owned()),
+        idempotency_key: idem.to_owned(),
+        request_id: Some("req-checklist-1".to_owned()),
+    };
+
+    let applied = repository
+        .update_show_checklist(&checklist(&format!("{key}-cl"), "done"))
+        .await?;
+    assert!(!applied.replayed);
+    let item = applied
+        .items
+        .iter()
+        .find(|item| item.item_key == "load-in")
+        .expect("the written item should come back");
+    assert_eq!(item.status, "done");
+    assert_eq!(item.note.as_deref(), Some("backline at 16:00"));
+
+    let replayed = repository
+        .update_show_checklist(&checklist(&format!("{key}-cl"), "done"))
+        .await?;
+    assert!(replayed.replayed);
+
+    let conflict = repository
+        .update_show_checklist(&checklist(&format!("{key}-cl"), "blocked"))
+        .await
+        .expect_err("reusing a checklist key with a new status must conflict");
+    assert_eq!(conflict, EcosystemRepositoryError::Conflict);
+
+    // An unresolvable event is reported, not silently created.
+    let missing = repository
+        .update_show_checklist(&UpdateShowChecklistCommand {
+            event_slug: "no-such-show".to_owned(),
+            idempotency_key: format!("{key}-cl-missing"),
+            ..checklist(&format!("{key}-cl"), "done")
+        })
+        .await
+        .expect_err("an unknown event slug must not create a checklist");
+    assert_eq!(missing, EcosystemRepositoryError::NotFound);
 
     Ok(())
 }

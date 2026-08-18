@@ -409,6 +409,8 @@ async fn update_checklist_inner(
     item_key: &str,
     payload: UpdateChecklistRequest,
 ) -> Result<ShowChecklist, EcosystemError> {
+    // Which statuses and key shapes are legal is HTTP input policy; the
+    // transaction, replay window and audit row belong to the repository.
     if !matches!(
         payload.status.as_str(),
         "pending" | "done" | "blocked" | "skipped"
@@ -421,81 +423,16 @@ async fn update_checklist_inner(
     {
         return Err(EcosystemError::BadRequest);
     }
-    let idempotency_key = mutation_key(headers)?;
-    let request_hash = hash_json(&json!({
-        "event_slug": event_slug,
-        "item_key": item_key,
-        "status": payload.status,
-        "note": payload.note,
-    }));
-    let event = sqlx::query_as::<_, OverviewEvent>(
-        "SELECT id, slug, title, venue, starts_at FROM events WHERE workspace_id = $1 AND slug = $2",
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(event_slug)
-    .fetch_optional(state.ticketing.pool())
-    .await
-    .map_err(EcosystemError::sqlx)?
-    .ok_or(EcosystemError::NotFound)?;
-    let target_id = deterministic_id("checklist", &format!("{}:{item_key}", event.id));
-    let mut tx = state
-        .ticketing
-        .pool()
-        .begin()
-        .await
-        .map_err(EcosystemError::sqlx)?;
-    lock_mutation(&mut tx, state, &idempotency_key).await?;
-    if let Some(existing) = existing_mutation(&mut tx, state, &idempotency_key).await? {
-        validate_replay(
-            &existing,
-            "show_checklist.updated",
-            "show_checklist",
-            target_id,
-            &request_hash,
-        )?;
-        tx.commit().await.map_err(EcosystemError::sqlx)?;
-        return load_checklist(state, event_slug).await;
-    }
-    sqlx::query(
-        r#"
-        INSERT INTO show_checklist_items (
-            workspace_id, event_id, item_key, status, note, updated_by_request_id
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (workspace_id, event_id, item_key) DO UPDATE
-        SET status = EXCLUDED.status,
-            note = EXCLUDED.note,
-            updated_at = now(),
-            updated_by_request_id = EXCLUDED.updated_by_request_id
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(event.id)
-    .bind(item_key)
-    .bind(payload.status)
-    .bind(
-        payload
-            .note
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-    )
-    .bind(request_id(headers))
-    .execute(&mut *tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    append_action(
-        &mut tx,
-        state,
-        "show_checklist.updated",
-        "show_checklist",
-        target_id,
-        &idempotency_key,
-        request_id(headers).as_deref(),
-        &request_hash,
-        json!({"event_id": event.id, "item_key": item_key}),
-    )
-    .await?;
-    tx.commit().await.map_err(EcosystemError::sqlx)?;
+    let command = UpdateShowChecklistCommand {
+        workspace_id: state.ticketing.workspace_id(),
+        event_slug: event_slug.to_owned(),
+        item_key: item_key.to_owned(),
+        status: payload.status,
+        note: payload.note,
+        idempotency_key: mutation_key(headers)?,
+        request_id: request_id(headers),
+    };
+    state.ecosystem.update_show_checklist(&command).await?;
     load_checklist(state, event_slug).await
 }
 
