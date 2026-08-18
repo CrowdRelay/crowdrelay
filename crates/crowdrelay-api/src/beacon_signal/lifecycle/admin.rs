@@ -42,6 +42,7 @@ pub async fn create_invite_batch(
         payload.ttl_days,
         payload.radius_km,
         &locale,
+        None,
     )
     .await
     {

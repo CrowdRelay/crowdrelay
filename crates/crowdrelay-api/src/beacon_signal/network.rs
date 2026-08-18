@@ -87,6 +87,14 @@ struct InviteJobView {
     #[serde(with = "time::serde::rfc3339::option")]
     reported_at: Option<OffsetDateTime>,
     provider_summary: Value,
+    exchanged_count: i64,
+    web_count: i64,
+    android_count: i64,
+    ios_count: i64,
+    active_count: i64,
+    push_enabled_count: i64,
+    helping_count: i64,
+    coverage_count: i64,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
 }

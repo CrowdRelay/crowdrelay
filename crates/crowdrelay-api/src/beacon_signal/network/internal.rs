@@ -443,6 +443,7 @@ pub async fn internal_claim_invite_delivery_job(
         i64::from(job.1),
         job.2,
         &job.3,
+        Some(job_id),
     )
     .await
     {

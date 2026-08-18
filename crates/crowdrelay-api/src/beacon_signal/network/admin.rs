@@ -62,7 +62,10 @@ pub async fn admin_beacon_network(
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status,'') <> 'active'
-          AND NOT (profile.status='invited' AND profile.invite_expires_at > now())
+          -- A never-invited beacon has no profile row at all. Three-valued logic
+          -- turns the bare NOT(...) into NULL there and silently drops exactly the
+          -- first-wave candidates this flow exists to reach, so fold NULL to false.
+          AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
         ORDER BY beacon.updated_at DESC,beacon.id DESC
         LIMIT 300
         "#,
@@ -79,12 +82,90 @@ pub async fn admin_beacon_network(
     };
     let invite_jobs = match sqlx::query_as::<_, InviteJobView>(
         r#"
-        SELECT id,status,cardinality(beacon_ids)::integer AS beacon_count,ttl_days,radius_km,
-               locale,claimed_by,claimed_at,claim_expires_at,reported_at,provider_summary,created_at
-        FROM viryaos_beacon_invite_delivery_jobs
-        WHERE workspace_id=$1
-        ORDER BY created_at DESC,id DESC
-        LIMIT 50
+        WITH recent_jobs AS (
+            SELECT id,workspace_id,status,beacon_ids,ttl_days,radius_km,locale,claimed_by,
+                   claimed_at,claim_expires_at,reported_at,provider_summary,created_at
+            FROM viryaos_beacon_invite_delivery_jobs
+            WHERE workspace_id=$1
+            ORDER BY created_at DESC,id DESC
+            LIMIT 50
+        ), session_metrics AS (
+            SELECT session.source_invite_job_id AS job_id,
+                   count(DISTINCT session.beacon_id)::bigint AS exchanged_count,
+                   count(DISTINCT session.beacon_id) FILTER (WHERE session.client_kind='web')::bigint AS web_count,
+                   count(DISTINCT session.beacon_id) FILTER (WHERE session.client_kind='android')::bigint AS android_count,
+                   count(DISTINCT session.beacon_id) FILTER (WHERE session.client_kind='ios')::bigint AS ios_count,
+                   count(DISTINCT session.beacon_id) FILTER (
+                       WHERE session.revoked_at IS NULL AND session.expires_at > now()
+                         AND profile.status='active'
+                   )::bigint AS active_count
+            FROM viryaos_beacon_signal_sessions session
+            JOIN recent_jobs job
+              ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
+            JOIN viryaos_beacon_signal_profiles profile
+              ON profile.workspace_id=session.workspace_id AND profile.beacon_id=session.beacon_id
+            GROUP BY session.source_invite_job_id
+        ), push_metrics AS (
+            SELECT session.source_invite_job_id AS job_id,
+                   count(DISTINCT session.beacon_id)::bigint AS push_enabled_count
+            FROM viryaos_beacon_signal_sessions session
+            JOIN recent_jobs job
+              ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
+            JOIN fan_push_endpoints endpoint
+              ON endpoint.workspace_id=session.workspace_id
+             AND endpoint.principal_hash=session.token_hash
+             AND endpoint.audience_kind='beacon'
+             AND endpoint.active AND endpoint.invalidated_at IS NULL
+            WHERE session.revoked_at IS NULL AND session.expires_at > now()
+            GROUP BY session.source_invite_job_id
+        ), engagement_metrics AS (
+            SELECT session.source_invite_job_id AS job_id,
+                   count(DISTINCT engagement.beacon_id) FILTER (
+                       WHERE engagement.status IN ('helping','completed')
+                         AND engagement.updated_at >= session.created_at
+                         AND engagement.updated_at < session.expires_at
+                         AND (session.revoked_at IS NULL OR engagement.updated_at < session.revoked_at)
+                   )::bigint AS helping_count
+            FROM viryaos_beacon_signal_sessions session
+            JOIN recent_jobs job
+              ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
+            JOIN viryaos_beacon_signal_event_engagements engagement
+              ON engagement.workspace_id=session.workspace_id
+             AND engagement.beacon_id=session.beacon_id
+            GROUP BY session.source_invite_job_id
+        ), coverage_metrics AS (
+            SELECT session.source_invite_job_id AS job_id,
+                   count(DISTINCT coverage.beacon_id) FILTER (
+                       WHERE coverage.created_at >= session.created_at
+                         AND coverage.created_at < session.expires_at
+                         AND (session.revoked_at IS NULL OR coverage.created_at < session.revoked_at)
+                   )::bigint AS coverage_count
+            FROM viryaos_beacon_signal_sessions session
+            JOIN recent_jobs job
+              ON job.workspace_id=session.workspace_id AND job.id=session.source_invite_job_id
+            JOIN viryaos_beacon_signal_coverage coverage
+              ON coverage.workspace_id=session.workspace_id
+             AND coverage.beacon_id=session.beacon_id
+            GROUP BY session.source_invite_job_id
+        )
+        SELECT job.id,job.status,cardinality(job.beacon_ids)::integer AS beacon_count,
+               job.ttl_days,job.radius_km,job.locale,job.claimed_by,job.claimed_at,
+               job.claim_expires_at,job.reported_at,job.provider_summary,
+               COALESCE(session_metrics.exchanged_count,0)::bigint AS exchanged_count,
+               COALESCE(session_metrics.web_count,0)::bigint AS web_count,
+               COALESCE(session_metrics.android_count,0)::bigint AS android_count,
+               COALESCE(session_metrics.ios_count,0)::bigint AS ios_count,
+               COALESCE(session_metrics.active_count,0)::bigint AS active_count,
+               COALESCE(push_metrics.push_enabled_count,0)::bigint AS push_enabled_count,
+               COALESCE(engagement_metrics.helping_count,0)::bigint AS helping_count,
+               COALESCE(coverage_metrics.coverage_count,0)::bigint AS coverage_count,
+               job.created_at
+        FROM recent_jobs job
+        LEFT JOIN session_metrics ON session_metrics.job_id=job.id
+        LEFT JOIN push_metrics ON push_metrics.job_id=job.id
+        LEFT JOIN engagement_metrics ON engagement_metrics.job_id=job.id
+        LEFT JOIN coverage_metrics ON coverage_metrics.job_id=job.id
+        ORDER BY job.created_at DESC,job.id DESC
         "#,
     )
     .bind(workspace_id)
@@ -114,12 +195,15 @@ pub async fn admin_beacon_network_action(
     payload: Result<Json<AdminNetworkActionRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    let Some(idempotency_key) = idempotency_key(&headers) else {
-        return BeaconSignalError::BadRequest.response(request_id_value);
-    };
     let Json(payload) = match payload {
         Ok(value) => value,
         Err(_) => return BeaconSignalError::BadRequest.response(request_id_value),
+    };
+    if payload.action == "preview_invites" {
+        return preview_invites(&state, &headers, payload).await;
+    }
+    let Some(idempotency_key) = idempotency_key(&headers) else {
+        return BeaconSignalError::BadRequest.response(request_id_value);
     };
     match payload.action.as_str() {
         "discover" => request_discovery(&state, &headers, payload, idempotency_key).await,
@@ -351,6 +435,97 @@ async fn approve_candidate(
     )
 }
 
+async fn preview_invites(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    payload: AdminNetworkActionRequest,
+) -> Response {
+    let request_id_value = request_id(headers);
+    let Some(mut beacon_ids) = payload.beacon_ids else {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    };
+    beacon_ids.sort_unstable();
+    let before = beacon_ids.len();
+    beacon_ids.dedup();
+    let ttl_days = payload.ttl_days.unwrap_or(DEFAULT_INVITE_TTL_DAYS as i32);
+    let radius_km = payload.radius_km.unwrap_or(DEFAULT_RADIUS_KM);
+    let locale = payload.locale.unwrap_or_else(default_locale);
+    if beacon_ids.is_empty()
+        || beacon_ids.len() > MAX_INVITE_BATCH
+        || beacon_ids.len() != before
+        || !(1..=MAX_INVITE_TTL_DAYS as i32).contains(&ttl_days)
+        || !valid_radius(radius_km)
+        || !valid_locale(&locale)
+    {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    }
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let rows = match sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT beacon.beacon_kind,count(*)::bigint
+        FROM viryaos_beacons beacon
+        LEFT JOIN viryaos_beacon_signal_profiles profile
+          ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
+        WHERE beacon.workspace_id=$1 AND beacon.id=ANY($2)
+          AND beacon.active AND beacon.verified AND beacon.accepts_outreach
+          AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
+          AND COALESCE(profile.status,'') <> 'active'
+          -- A never-invited beacon has no profile row at all. Three-valued logic
+          -- turns the bare NOT(...) into NULL there and silently drops exactly the
+          -- first-wave candidates this flow exists to reach, so fold NULL to false.
+          AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
+          AND (
+            NOT (beacon.metadata ? 'network_discovery_run_id')
+            OR (
+              beacon.metadata #>> '{network_review,source_verified}' = 'true'
+              AND beacon.metadata #>> '{network_review,marketing_email_consent_confirmed}' = 'true'
+              AND COALESCE(beacon.metadata #>> '{network_review,consent_evidence_url}','') LIKE 'https://%'
+            )
+          )
+        GROUP BY beacon.beacon_kind
+        ORDER BY beacon.beacon_kind
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&beacon_ids)
+    .fetch_all(state.ticketing.pool())
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik invite preview eligibility lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
+    let eligible_count: i64 = rows.iter().map(|(_, count)| *count).sum();
+    if eligible_count != beacon_ids.len() as i64 {
+        return BeaconSignalError::Conflict.response(request_id_value);
+    }
+    let by_kind = rows
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let path = if locale.starts_with("pl") {
+        "pl/latarnik"
+    } else {
+        "latarnik"
+    };
+    let placeholder_url = format!("https://virya.music/{path}?invite=<jednorazowy-link>");
+    let delivery = invite_delivery_copy(&locale, "{{displayName}}", &placeholder_url);
+    private_json(
+        StatusCode::OK,
+        json!({
+            "version": 1,
+            "beaconCount": beacon_ids.len(),
+            "ttlDays": ttl_days,
+            "radiusKm": radius_km,
+            "locale": locale,
+            "byKind": by_kind,
+            "delivery": delivery,
+            "tokensMinted": false,
+        }),
+    )
+}
+
 async fn queue_invites(
     state: &crate::AppState,
     headers: &HeaderMap,
@@ -412,7 +587,10 @@ async fn queue_invites(
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status,'') <> 'active'
-          AND NOT (profile.status='invited' AND profile.invite_expires_at > now())
+          -- A never-invited beacon has no profile row at all. Three-valued logic
+          -- turns the bare NOT(...) into NULL there and silently drops exactly the
+          -- first-wave candidates this flow exists to reach, so fold NULL to false.
+          AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
           AND (
             NOT (beacon.metadata ? 'network_discovery_run_id')
             OR (

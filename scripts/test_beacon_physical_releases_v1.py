@@ -141,14 +141,16 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertIn("pii_purged_at=now()", RETENTION_STEPS)
         self.assertIn("OR pii_purged_at IS NOT NULL", MIGRATION)
 
-    def test_invitation_explains_help_release_program_and_direct_contact(self) -> None:
+    def test_invitation_explains_selected_release_access_without_quid_pro_quo(self) -> None:
         for phrase in (
-            "każdą nową fizyczną płytę Viryi",
-            "recenzja, artykuł albo wzmianka",
-            "radio, podcast lub wywiad",
-            "784947481",
+            "wybranych materiałów i pul promocyjnych",
+            "akredytację",
+            "publikacja za wejściówkę",
+            "Nie ma obowiązku publikowania",
+            "odpisz na tę wiadomość",
         ):
             self.assertIn(phrase, INVITE_COPY)
+        self.assertNotIn("każdą nową fizyczną płytę Viryi", INVITE_COPY)
 
     def test_route_meta_and_openapi_contract_are_complete(self) -> None:
         routes = (

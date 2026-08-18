@@ -142,6 +142,8 @@ pub struct ExchangeInviteRequest {
     locale: Option<String>,
     #[serde(default)]
     topics: Option<Vec<String>>,
+    #[serde(default)]
+    client_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +156,7 @@ struct ExchangeInviteResponse {
     beacon_kind: String,
     bearer_token: String,
     session_id: Uuid,
+    client_kind: String,
     #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
     preferences: BeaconPreferences,
@@ -448,7 +451,7 @@ pub async fn create_invite(
             locale = EXCLUDED.locale,
             invite_count = viryaos_beacon_signal_profiles.invite_count + 1,
             last_invited_at = now(), paused_at = NULL, revoked_at = NULL,
-            updated_at = now()
+            pending_invite_job_id = NULL, updated_at = now()
         "#,
     )
     .bind(workspace_id)
@@ -539,6 +542,10 @@ pub async fn exchange_invite(
         },
         None => None,
     };
+    let client_kind = payload.client_kind.as_deref().unwrap_or("web").trim();
+    if !matches!(client_kind, "web" | "android" | "ios") {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    }
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let mut tx = match state.ticketing.pool().begin().await {
         Ok(tx) => tx,
@@ -558,12 +565,14 @@ pub async fn exchange_invite(
             Vec<String>,
             bool,
             OffsetDateTime,
+            Option<Uuid>,
         ),
     >(
         r#"
         SELECT profile.beacon_id, beacon.display_name, beacon.beacon_kind,
                profile.radius_km, profile.locale, profile.topics,
-               profile.nearby_gigs_enabled, profile.invite_expires_at
+               profile.nearby_gigs_enabled, profile.invite_expires_at,
+               profile.pending_invite_job_id
         FROM viryaos_beacon_signal_profiles profile
         JOIN viryaos_beacons beacon
           ON beacon.workspace_id = profile.workspace_id AND beacon.id = profile.beacon_id
@@ -588,6 +597,7 @@ pub async fn exchange_invite(
         stored_topics,
         nearby_gigs_enabled,
         _,
+        source_invite_job_id,
     ) = match row {
         Ok(Some(row)) if row.7 >= OffsetDateTime::now_utc() => row,
         Ok(_) => return BeaconSignalError::Unauthorized.response(request_id_value),
@@ -608,7 +618,7 @@ pub async fn exchange_invite(
         r#"
         UPDATE viryaos_beacon_signal_profiles
         SET status='active', invite_token_hash=NULL, invite_expires_at=NULL,
-            radius_km=$3, locale=$4, topics=$5,
+            pending_invite_job_id=NULL, radius_km=$3, locale=$4, topics=$5,
             joined_at=COALESCE(joined_at, now()), last_seen_at=now(), updated_at=now()
         WHERE workspace_id=$1 AND beacon_id=$2
         "#,
@@ -623,8 +633,8 @@ pub async fn exchange_invite(
     let session_insert = sqlx::query(
         r#"
         INSERT INTO viryaos_beacon_signal_sessions
-            (workspace_id, id, beacon_id, token_hash, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
+            (workspace_id, id, beacon_id, token_hash, expires_at, client_kind, source_invite_job_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(workspace_id)
@@ -632,6 +642,8 @@ pub async fn exchange_invite(
     .bind(beacon_id)
     .bind(token_hash(&bearer_token))
     .bind(expires_at)
+    .bind(client_kind)
+    .bind(source_invite_job_id)
     .execute(&mut *tx)
     .await;
     if profile_update.is_err() || session_insert.is_err() || tx.commit().await.is_err() {
@@ -648,6 +660,7 @@ pub async fn exchange_invite(
             beacon_kind,
             bearer_token,
             session_id,
+            client_kind: client_kind.to_owned(),
             expires_at,
             preferences: BeaconPreferences {
                 radius_km: final_radius,

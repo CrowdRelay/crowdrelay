@@ -29,4 +29,4 @@ make contract-tests
 echo "==> Runtime/release contracts"
 make runtime-contracts
 
-echo "LATARNIK_RELEASE_GATE=PASS schema=57 openapi_paths=228"
+echo "LATARNIK_RELEASE_GATE=PASS schema=64 openapi_paths=242"

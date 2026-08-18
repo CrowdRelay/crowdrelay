@@ -49,9 +49,10 @@ if signal.exists():
             signal / "src-tauri/src/api/fan.rs",
             signal / "src-tauri/src/api/public.rs",
             signal / "src-tauri/src/api/ticketing.rs",
+            signal / "src-tauri/src/api/beacon.rs",
         ]
     )
-    for capability in ["signal_fan_context_v1", "area_wallet_postgres_v2", "ticketing_v1"]:
+    for capability in ["signal_fan_context_v1", "beacon_native_signal_v1", "area_wallet_postgres_v2", "ticketing_v1"]:
         if capability not in native:
             errors.append(f"Signal does not gate capability: {capability}")
     if '"meta"' not in native or "ecosystem_meta" not in native:

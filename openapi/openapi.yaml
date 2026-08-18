@@ -602,6 +602,7 @@ paths:
                   type: [array, 'null']
                   items: { type: string, enum: [shows, press_materials, releases, interviews, accreditation] }
                   maxItems: 5
+                clientKind: { type: [string, 'null'], enum: [web, android, ios, null], default: web }
       responses:
         '201': { description: Latarnik session created; bearer token is returned once. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
@@ -2376,7 +2377,7 @@ paths:
         '503': { $ref: '#/components/responses/PrivateProblem' }
     post:
       operationId: mutateBeaconNetworkAcquisition
-      summary: Request discovery, approve a reviewed candidate, or queue reviewed invitations
+      summary: Request discovery, approve a reviewed candidate, preview a reviewed invite wave, or queue it
       description: Discovery never grants outreach permission. Approving a discovered candidate requires explicit source verification and marketing-email consent evidence.
       security: [{ adminBearer: [] }]
       parameters:
@@ -2390,7 +2391,7 @@ paths:
               additionalProperties: false
               required: [action]
               properties:
-                action: { type: string, enum: [discover, approve, queue_invites] }
+                action: { type: string, enum: [discover, approve, preview_invites, queue_invites] }
                 countryCode: { type: string, pattern: '^[A-Z]{2}$', default: PL }
                 targetCount: { type: integer, minimum: 1, maximum: 500, default: 100 }
                 beaconId: { type: string, format: uuid }
@@ -6253,7 +6254,7 @@ components:
     BeaconInviteDeliveryJob:
       type: object
       additionalProperties: false
-      required: [id, status, beaconCount, ttlDays, radiusKm, locale, providerSummary, createdAt]
+      required: [id, status, beaconCount, ttlDays, radiusKm, locale, providerSummary, exchangedCount, webCount, androidCount, iosCount, activeCount, pushEnabledCount, helpingCount, coverageCount, createdAt]
       properties:
         id: { type: string, format: uuid }
         status: { type: string, enum: [queued, claimed, completed, failed, ambiguous, cancelled] }
@@ -6266,6 +6267,14 @@ components:
         claimExpiresAt: { type: [string, 'null'], format: date-time }
         reportedAt: { type: [string, 'null'], format: date-time }
         providerSummary: { type: object, additionalProperties: true }
+        exchangedCount: { type: integer, format: int64, minimum: 0 }
+        webCount: { type: integer, format: int64, minimum: 0 }
+        androidCount: { type: integer, format: int64, minimum: 0 }
+        iosCount: { type: integer, format: int64, minimum: 0 }
+        activeCount: { type: integer, format: int64, minimum: 0 }
+        pushEnabledCount: { type: integer, format: int64, minimum: 0 }
+        helpingCount: { type: integer, format: int64, minimum: 0 }
+        coverageCount: { type: integer, format: int64, minimum: 0 }
         createdAt: { type: string, format: date-time }
     BeaconNetworkAcquisition:
       type: object

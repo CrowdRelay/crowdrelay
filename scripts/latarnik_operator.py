@@ -308,10 +308,31 @@ def network_approve(args: argparse.Namespace) -> Any:
     )
 
 
+def network_preview(args: argparse.Namespace) -> Any:
+    beacon_ids = list(dict.fromkeys(args.beacon_id or []))
+    if not beacon_ids:
+        raise OperatorError("network-preview requires at least one --beacon-id")
+    if len(beacon_ids) > 200:
+        raise OperatorError("invite preview is hard-limited to 200 contacts")
+    return admin_request(
+        "POST",
+        "admin/autopilot/beacon-network",
+        {
+            "action": "preview_invites",
+            "beaconIds": beacon_ids,
+            "ttlDays": args.ttl_days,
+            "radiusKm": args.radius_km,
+            "locale": args.locale,
+        },
+    )
+
+
 def network_invite(args: argparse.Namespace) -> Any:
     beacon_ids = list(dict.fromkeys(args.beacon_id or []))
     if not beacon_ids:
         raise OperatorError("network-invite requires at least one --beacon-id")
+    if len(beacon_ids) > 200:
+        raise OperatorError("invite batch is hard-limited to 200 contacts")
     return admin_request(
         "POST",
         "admin/autopilot/beacon-network",
@@ -414,10 +435,17 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--consent-evidence-url", type=https_url, required=True)
     command.set_defaults(handler=network_approve)
 
+    command = sub.add_parser("network-preview", help="preview a reviewed invitation wave without minting capabilities")
+    command.add_argument("--beacon-id", action="append", type=uuid_value, required=True)
+    command.add_argument("--ttl-days", type=bounded_int(1, 30), default=14)
+    command.add_argument("--radius-km", type=bounded_int(10, 500), default=100)
+    command.add_argument("--locale", choices=("pl", "en"), default="pl")
+    command.set_defaults(handler=network_preview)
+
     command = sub.add_parser("network-invite", help="queue invites for already approved reviewed candidates")
     command.add_argument("--beacon-id", action="append", type=uuid_value, required=True)
-    command.add_argument("--ttl-days", type=bounded_int(1, 90), default=14)
-    command.add_argument("--radius-km", type=bounded_int(1, 500), default=100)
+    command.add_argument("--ttl-days", type=bounded_int(1, 30), default=14)
+    command.add_argument("--radius-km", type=bounded_int(10, 500), default=100)
     command.add_argument("--locale", choices=("pl", "en"), default="pl")
     command.set_defaults(handler=network_invite)
     return parser

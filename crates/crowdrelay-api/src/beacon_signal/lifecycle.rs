@@ -64,6 +64,7 @@ pub(super) async fn mint_invite_batch_tx(
     ttl_days: i64,
     radius_km: i32,
     locale: &str,
+    source_invite_job_id: Option<Uuid>,
 ) -> Result<BatchInviteResponse, BeaconSignalError> {
     let eligible = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
@@ -75,7 +76,10 @@ pub(super) async fn mint_invite_batch_tx(
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status, '') <> 'active'
-          AND NOT (profile.status='invited' AND profile.invite_expires_at > now())
+          -- A never-invited beacon has no profile row at all. Three-valued logic
+          -- turns the bare NOT(...) into NULL there and silently drops exactly the
+          -- first-wave candidates this flow exists to reach, so fold NULL to false.
+          AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
         ORDER BY beacon.id
         FOR UPDATE OF beacon
         "#,
@@ -106,14 +110,15 @@ pub(super) async fn mint_invite_batch_tx(
             INSERT INTO viryaos_beacon_signal_profiles (
                 workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
                 radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at,
-                paused_at, revoked_at
-            ) VALUES ($1,$2,'invited',$3,$4,$5,$6,true,1,now(),NULL,NULL)
+                paused_at, revoked_at, pending_invite_job_id
+            ) VALUES ($1,$2,'invited',$3,$4,$5,$6,true,1,now(),NULL,NULL,$7)
             ON CONFLICT (workspace_id, beacon_id) DO UPDATE SET
                 status='invited', invite_token_hash=EXCLUDED.invite_token_hash,
                 invite_expires_at=EXCLUDED.invite_expires_at, radius_km=EXCLUDED.radius_km,
                 locale=EXCLUDED.locale, nearby_gigs_enabled=true,
                 invite_count=viryaos_beacon_signal_profiles.invite_count + 1,
-                last_invited_at=now(), paused_at=NULL, revoked_at=NULL, updated_at=now()
+                last_invited_at=now(), paused_at=NULL, revoked_at=NULL,
+                pending_invite_job_id=EXCLUDED.pending_invite_job_id, updated_at=now()
             WHERE viryaos_beacon_signal_profiles.status <> 'active'
             "#,
         )
@@ -123,6 +128,7 @@ pub(super) async fn mint_invite_batch_tx(
         .bind(expires_at)
         .bind(radius_km)
         .bind(locale)
+        .bind(source_invite_job_id)
         .execute(&mut **tx)
         .await;
         match result {
