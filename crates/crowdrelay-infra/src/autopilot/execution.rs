@@ -848,7 +848,22 @@ pub(in crate::autopilot) async fn ensure_executor_capability_strict(
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    if available { Ok(()) } else { Err(RepositoryError::Unavailable) }
+    if available {
+        return Ok(());
+    }
+    // A missing, expired or breaker-guarded capability returns the same
+    // RepositoryError::Unavailable that a bounded() timeout produces, and the
+    // caller only logs the error's Display. From "acquisition repository is
+    // temporarily unavailable" alone an operator cannot tell a slow database
+    // from "nothing currently advertises this capability" — the second fails
+    // identically on every tick and never recovers on its own. Name the gate.
+    tracing::warn!(
+        workspace_id = %workspace_id.into_uuid(),
+        capability,
+        "autopilot executor capability unavailable: no unexpired executor \
+         advertises it, or its circuit breaker is still guarding"
+    );
+    Err(RepositoryError::Unavailable)
 }
 
 pub(in crate::autopilot) async fn reserve_contact_window(
