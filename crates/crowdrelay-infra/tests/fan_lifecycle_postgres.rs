@@ -17,6 +17,15 @@ use crowdrelay_infra::{
 use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
+/// fan_action_tokens.token_hash is globally unique, so fixed literals made this
+/// suite pass once and then fail on 23505 against any reused database. A simple
+/// UUID is 32 hex chars; doubling the per-run suffix gives the 64 the token
+/// grammar needs, and the tag keeps the tokens in one run distinct.
+fn run_token(suffix: &str, tag: char) -> String {
+    let doubled = format!("{suffix}{suffix}");
+    format!("{tag}{}", &doubled[1..])
+}
+
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL and disposable PostgreSQL"]
 async fn pending_fan_confirms_once_and_unsubscribes_idempotently()
@@ -112,7 +121,7 @@ async fn pending_fan_confirms_once_and_unsubscribes_idempotently()
     assert_eq!(
         lifecycle
             .confirm(&ConfirmFanCommand {
-                token: FanActionToken::parse("f".repeat(64))?,
+                token: FanActionToken::parse(run_token(&suffix, 'f'))?,
                 request_id: RequestId::parse("request-primary-confirmation-conflict")?,
                 ..confirmation
             })
@@ -120,7 +129,7 @@ async fn pending_fan_confirms_once_and_unsubscribes_idempotently()
         Err(RepositoryError::Conflict)
     );
 
-    let recovery_token = FanActionToken::parse("2".repeat(64))?;
+    let recovery_token = FanActionToken::parse(run_token(&suffix, '2'))?;
     insert_action_token(
         &pool,
         workspace_id,
@@ -144,7 +153,7 @@ async fn pending_fan_confirms_once_and_unsubscribes_idempotently()
             .await?,
         recovered
     );
-    let stale_recovery_token = FanActionToken::parse("3".repeat(64))?;
+    let stale_recovery_token = FanActionToken::parse(run_token(&suffix, '3'))?;
     insert_action_token(
         &pool,
         workspace_id,
@@ -234,8 +243,11 @@ async fn assert_late_confirmation_cannot_reverse_unsubscribe(
         .bind(pending.fan_id.into_uuid())
         .execute(pool)
         .await?;
-    let unsubscribe =
-        FanActionToken::parse("1111111111111111111111111111111111111111111111111111111111111111")?;
+    // fan_action_tokens.token_hash is globally unique, so a fixed token made
+    // this suite pass once and then fail on 23505 against any reused database.
+    // A simple UUID is 32 hex chars; doubling the per-run suffix gives the 64
+    // the token grammar requires.
+    let unsubscribe = FanActionToken::parse(run_token(suffix, '4'))?;
     sqlx::query(
         r#"
         INSERT INTO fan_action_tokens (

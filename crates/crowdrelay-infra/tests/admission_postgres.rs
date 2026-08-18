@@ -31,7 +31,10 @@ async fn limited_pass_claims_and_redeems_exactly_once() -> Result<(), Box<dyn st
     let workspace_id = WorkspaceId::new();
     let suffix = workspace_id.into_uuid().simple().to_string();
     let workspace_slug = WorkspaceSlug::parse(format!("admission-{suffix}"))?;
-    let staff_key_hash: [u8; 32] = Sha256::digest(b"integration-staff-key").into();
+    // workspace_member_sessions.session_token_hash is globally unique, so a
+    // fixed key made this suite pass once and then fail on 23505 against any
+    // reused database. Derive it from the same per-run suffix as the slug.
+    let staff_key_hash: [u8; 32] = Sha256::digest(format!("integration-staff-key-{suffix}")).into();
     seed_fixture(&pool, workspace_id, &workspace_slug, staff_key_hash).await?;
 
     let database = DatabaseConfig {
