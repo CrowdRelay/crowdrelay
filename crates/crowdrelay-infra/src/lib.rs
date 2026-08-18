@@ -25,6 +25,7 @@ pub mod admission;
 pub mod autopilot;
 pub mod config;
 pub mod database;
+pub mod ecosystem;
 pub mod events;
 pub mod fan_lifecycle;
 pub mod observability;

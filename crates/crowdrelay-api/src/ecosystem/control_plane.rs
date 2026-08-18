@@ -4,6 +4,8 @@ async fn update_flag_inner(
     key: &str,
     payload: UpdateFlagRequest,
 ) -> Result<FlagMutationResult, EcosystemError> {
+    // The HTTP layer still owns input shape and the declared flag set; the
+    // transaction, replay window and audit row belong to the repository.
     if flag_default(key).is_none()
         || payload
             .reason
@@ -12,94 +14,35 @@ async fn update_flag_inner(
     {
         return Err(EcosystemError::BadRequest);
     }
-    let idempotency_key = mutation_key(headers)?;
-    let request_hash =
-        hash_json(&json!({"key": key, "enabled": payload.enabled, "reason": payload.reason}));
-    let target_id = deterministic_id("feature_flag", key);
-    let mut tx = state
-        .ticketing
-        .pool()
-        .begin()
-        .await
-        .map_err(EcosystemError::sqlx)?;
-    lock_mutation(&mut tx, state, &idempotency_key).await?;
-    if let Some(existing) = existing_mutation(&mut tx, state, &idempotency_key).await? {
-        validate_replay(
-            &existing,
-            "feature_flag.updated",
-            "feature_flag",
-            target_id,
-            &request_hash,
-        )?;
-        let flag = load_flag_tx(&mut tx, state, key).await?;
-        tx.commit().await.map_err(EcosystemError::sqlx)?;
-        if let Some((key, _)) = flag_definition(key) {
-            write_cached_flag(
-                state.ticketing.workspace_id().into_uuid(),
-                key,
-                flag.enabled,
-            )
-            .await;
-        }
-        return Ok(FlagMutationResult {
-            flag,
-            replayed: true,
-        });
-    }
-    sqlx::query(
-        r#"
-        INSERT INTO ecosystem_feature_flags (
-            workspace_id, key, enabled, reason, updated_by_request_id
-        ) VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (workspace_id, key) DO UPDATE
-        SET enabled = EXCLUDED.enabled,
-            reason = EXCLUDED.reason,
-            version = ecosystem_feature_flags.version + 1,
-            updated_at = now(),
-            updated_by_request_id = EXCLUDED.updated_by_request_id
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(key)
-    .bind(payload.enabled)
-    .bind(
-        payload
-            .reason
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-    )
-    .bind(request_id(headers))
-    .execute(&mut *tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    append_action(
-        &mut tx,
-        state,
-        "feature_flag.updated",
-        "feature_flag",
-        target_id,
-        &idempotency_key,
-        request_id(headers).as_deref(),
-        &request_hash,
-        json!({"key": key, "enabled": payload.enabled}),
-    )
-    .await?;
-    let flag = load_flag_tx(&mut tx, state, key).await?;
-    tx.commit().await.map_err(EcosystemError::sqlx)?;
+    let command = UpdateFeatureFlagCommand {
+        workspace_id: state.ticketing.workspace_id(),
+        key: key.to_owned(),
+        enabled: payload.enabled,
+        reason: payload.reason,
+        idempotency_key: mutation_key(headers)?,
+        request_id: request_id(headers),
+    };
+    let mutation = state.ecosystem.update_feature_flag(&command).await?;
     if let Some((key, _)) = flag_definition(key) {
         write_cached_flag(
             state.ticketing.workspace_id().into_uuid(),
             key,
-            flag.enabled,
+            mutation.flag.enabled,
         )
         .await;
     }
     Ok(FlagMutationResult {
-        flag,
-        replayed: false,
+        flag: FeatureFlag {
+            key: mutation.flag.key,
+            enabled: mutation.flag.enabled,
+            reason: mutation.flag.reason,
+            version: mutation.flag.version,
+            updated_at: mutation.flag.updated_at,
+        },
+        replayed: mutation.replayed,
     })
 }
+
 async fn reconcile_inner(
     state: &crate::AppState,
     headers: &HeaderMap,

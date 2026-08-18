@@ -16,6 +16,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
+use crowdrelay_application::{
+    EcosystemControlPlaneRepository, EcosystemRepositoryError, UpdateFeatureFlagCommand,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -835,21 +838,6 @@ async fn append_action(
     Ok(())
 }
 
-async fn load_flag_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-    key: &str,
-) -> Result<FeatureFlag, EcosystemError> {
-    sqlx::query_as::<_, FeatureFlag>(
-        "SELECT key, enabled, reason, version, updated_at FROM ecosystem_feature_flags WHERE workspace_id = $1 AND key = $2",
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(key)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)
-}
-
 async fn run<T>(
     state: &crate::AppState,
     future: impl Future<Output = Result<T, EcosystemError>>,
@@ -881,6 +869,16 @@ pub(crate) enum EcosystemError {
     Conflict,
     Unavailable,
     Unexpected,
+}
+
+impl From<EcosystemRepositoryError> for EcosystemError {
+    fn from(error: EcosystemRepositoryError) -> Self {
+        match error {
+            EcosystemRepositoryError::UnknownFlag => Self::NotFound,
+            EcosystemRepositoryError::Conflict => Self::Conflict,
+            EcosystemRepositoryError::Unexpected => Self::Unexpected,
+        }
+    }
 }
 
 impl EcosystemError {

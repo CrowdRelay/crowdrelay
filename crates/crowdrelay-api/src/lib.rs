@@ -39,7 +39,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, database};
+use crowdrelay_infra::{
+    autopilot::PostgresAutopilotRepository, database, ecosystem::PostgresEcosystemRepository,
+};
 use serde::Serialize;
 use sqlx::PgPool;
 use tower::ServiceBuilder;
@@ -132,6 +134,9 @@ pub struct AppState {
     pub(crate) ops: OpsState,
     pub(crate) autopilot: PostgresAutopilotRepository,
     pub(crate) autopilot_runtime_enabled: bool,
+    /// Built from the pool this state already owns, so callers do not grow
+    /// another constructor argument for it.
+    pub(crate) ecosystem: PostgresEcosystemRepository,
     pub(crate) push: push::PushPublicState,
     #[expect(dead_code)] // Tenants are disabled, but prepared for future use
     pub(crate) tenant: tenant::TenantProfile,
@@ -157,6 +162,7 @@ impl AppState {
         push: push::PushPublicState,
         tenant: tenant::TenantProfile,
     ) -> Self {
+        let ecosystem = PostgresEcosystemRepository::new(database.clone());
         Self {
             database,
             readiness_timeout,
@@ -170,6 +176,7 @@ impl AppState {
             ops,
             autopilot,
             autopilot_runtime_enabled,
+            ecosystem,
             push,
             tenant,
         }

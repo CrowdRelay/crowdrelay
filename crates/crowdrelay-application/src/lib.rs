@@ -25,6 +25,7 @@ pub mod admission;
 pub mod autopilot;
 pub mod beacon_release;
 pub mod cache;
+pub mod ecosystem;
 pub mod events;
 pub mod fan_lifecycle;
 pub mod ports;
@@ -41,6 +42,10 @@ pub use beacon_release::{
     beacon_release_activation_copy, validate_beacon_release_recipient_transition,
 };
 pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
+pub use ecosystem::{
+    EcosystemControlPlaneRepository, EcosystemRepositoryError, FeatureFlagMutation,
+    FeatureFlagState, UpdateFeatureFlagCommand,
+};
 pub use events::{
     EventCache, EventCacheError, EventRepository, EventSnapshot, ListFanEventInterests, LoadEvents,
     LoadEventsError, MAX_PUBLIC_EVENT_LIMIT, RegisterEventInterest, RegisterEventInterestCommand,
