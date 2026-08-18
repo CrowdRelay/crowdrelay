@@ -418,7 +418,7 @@ fn normalize_bandsintown_event(
                     .as_deref()
                     .is_none_or(|kind| kind.eq_ignore_ascii_case("tickets"))
         })
-        .and_then(|offer| valid_http_url(offer.url));
+        .and_then(|offer| valid_public_https_url(offer.url));
 
     Ok(NormalizedExternalEvent {
         slug: format!(
@@ -448,7 +448,7 @@ fn normalize_bandsintown_event(
         timezone: source.timezone.clone(),
         starts_at,
         ticket_url,
-        external_event_url: valid_http_url(event.url),
+        external_event_url: valid_public_https_url(event.url),
     })
 }
 
@@ -586,10 +586,15 @@ fn resolve_bandsintown_app_id<'a>(
     configured_api_key.unwrap_or(source_app_id)
 }
 
-fn valid_http_url(value: Option<String>) -> Option<String> {
+fn valid_public_https_url(value: Option<String>) -> Option<String> {
     let value = clean_optional(value)?;
     let url = Url::parse(&value).ok()?;
-    matches!(url.scheme(), "http" | "https").then_some(value)
+    (url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none())
+    .then_some(value)
 }
 
 fn country_code(country: Option<&str>, fallback: &str) -> String {
@@ -820,6 +825,26 @@ mod tests {
         let mut current = previous.clone();
         current.status = "cancelled".to_owned();
         assert!(meaningful_event_change(&previous, &current));
+    }
+
+    #[test]
+    fn provider_urls_match_public_event_https_contract() {
+        assert_eq!(
+            valid_public_https_url(Some(
+                "https://www.bandsintown.com/e/123?came_from=257".to_owned()
+            ))
+            .as_deref(),
+            Some("https://www.bandsintown.com/e/123?came_from=257")
+        );
+        for rejected in [
+            "http://www.bandsintown.com/e/123",
+            "https://user@example.com/e/123",
+            "https://user:pass@example.com/e/123",
+            "https://www.bandsintown.com/e/123#tickets",
+            "not-a-url",
+        ] {
+            assert_eq!(valid_public_https_url(Some(rejected.to_owned())), None);
+        }
     }
 
     #[test]

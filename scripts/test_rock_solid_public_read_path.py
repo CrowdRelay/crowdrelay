@@ -26,6 +26,24 @@ class RockSolidPublicReadPath(unittest.TestCase):
         self.assertIn(".min_connections(1)", pool)
         self.assertIn(".max_lifetime(Some(Duration::from_secs(30 * 60)))", pool)
         self.assertIn("/v1/health/live", compose)
+
+    def test_public_events_isolate_provider_poison_and_match_domain_url_contract(self):
+        repository = (ROOT / "crates/crowdrelay-infra/src/events.rs").read_text()
+        worker = (ROOT / "crates/crowdrelay-worker/src/event_sync.rs").read_text()
+        loader = repository[
+            repository.index("async fn load_published_events_inner"):
+            repository.index("async fn persist_event_action_inner")
+        ]
+        self.assertIn("skipping invalid published event row", loader)
+        self.assertNotIn(".collect::<Result<Vec<_>, _>>()", loader)
+        self.assertIn("fn valid_public_https_url", worker)
+        self.assertIn('url.scheme() == "https"', worker)
+        self.assertIn("url.host_str().is_some()", worker)
+        self.assertIn("url.username().is_empty()", worker)
+        self.assertIn("url.password().is_none()", worker)
+        self.assertIn("url.fragment().is_none()", worker)
+        self.assertNotIn("fn valid_http_url", worker)
+
     def test_external_production_smoke_includes_synesthesia_without_retrying_alert_post(self):
         smoke = (ROOT / ".github/workflows/production-smoke.yml").read_text()
         probe_script = (ROOT / "scripts/production-smoke.sh").read_text()

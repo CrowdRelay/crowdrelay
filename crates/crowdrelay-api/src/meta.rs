@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 const API_VERSION: &str = "1";
-pub(crate) const SCHEMA_VERSION: u32 = 64;
+pub(crate) const SCHEMA_VERSION: u32 = 65;
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
 
 pub(crate) fn git_sha() -> Option<&'static str> {
@@ -81,6 +81,6 @@ mod tests {
 
     #[test]
     fn compatibility_contract_tracks_latest_migration() {
-        assert_eq!(SCHEMA_VERSION, 64);
+        assert_eq!(SCHEMA_VERSION, 65);
     }
 }

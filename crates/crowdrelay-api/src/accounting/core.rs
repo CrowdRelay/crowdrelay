@@ -92,7 +92,23 @@ fn normalize_country_code(value: &str) -> Option<String> {
     (value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_uppercase())).then_some(value)
 }
 
-async fn load_profile(state: &crate::AppState) -> Result<AccountingProfileView, AccountingError> {
+fn unconfigured_profile() -> AccountingProfileView {
+    AccountingProfileView {
+        seller_name: String::new(),
+        tax_id: String::new(),
+        regon: None,
+        address_line1: String::new(),
+        postal_code: String::new(),
+        city: String::new(),
+        country_code: default_country_code(),
+        document_prefix: default_document_prefix(),
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
+async fn load_profile_optional(
+    state: &crate::AppState,
+) -> Result<Option<AccountingProfileView>, AccountingError> {
     sqlx::query_as::<_, AccountingProfileView>(
         r#"
         SELECT seller_name, tax_id, regon, address_line1, postal_code, city,
@@ -104,8 +120,13 @@ async fn load_profile(state: &crate::AppState) -> Result<AccountingProfileView, 
     .bind(state.ticketing.workspace_id().into_uuid())
     .fetch_optional(state.ticketing.pool())
     .await
-    .map_err(|_| AccountingError::Unavailable)?
-    .ok_or(AccountingError::NotFound)
+    .map_err(|_| AccountingError::Unavailable)
+}
+
+async fn load_profile(state: &crate::AppState) -> Result<AccountingProfileView, AccountingError> {
+    load_profile_optional(state)
+        .await?
+        .ok_or(AccountingError::NotFound)
 }
 
 async fn upsert_profile(
@@ -149,7 +170,9 @@ async fn build_preview(
     state: &crate::AppState,
     period: AccountingPeriod,
 ) -> Result<AccountingPreview, AccountingError> {
-    let profile = load_profile(state).await?;
+    let profile = load_profile_optional(state)
+        .await?
+        .unwrap_or_else(unconfigured_profile);
     let currency = period.currency();
     let sales = load_sales(state, period).await?;
     let adjustments = load_adjustments(state, period).await?;

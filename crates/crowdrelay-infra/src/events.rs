@@ -126,10 +126,21 @@ impl PostgresEventRepository {
         .await
         .map_err(EventStoreError::from_sqlx)?;
 
-        rows.into_iter()
-            .map(PublicEvent::try_from)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| EventStoreError::Unexpected)
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event_id = row.id;
+            match PublicEvent::try_from(row) {
+                Ok(event) => events.push(event),
+                Err(error) => {
+                    tracing::warn!(
+                        event_id = %event_id,
+                        error = ?error,
+                        "skipping invalid published event row"
+                    );
+                }
+            }
+        }
+        Ok(events)
     }
 
     async fn persist_event_action_inner(
