@@ -15,6 +15,8 @@ class SynesthesiaLeaderboardUnpublishContract(unittest.TestCase):
         self.assertNotIn("UPDATE synesthesia_runs", api)
         self.assertIn('"/v1/me/synesthesia/leaderboard"', routes)
         self.assertIn("delete(fan_privacy::unpublish_synesthesia_leaderboard)", routes)
+        unpublish = api.split("pub async fn unpublish_synesthesia_leaderboard", 1)[1]
+        self.assertIn("(CACHE_CONTROL, PRIVATE_NO_STORE)", unpublish)
 
     def test_infra_unpublishes_all_fan_runs_without_unlinking_history(self):
         infra = read("crates/crowdrelay-infra/src/fan_privacy.rs")

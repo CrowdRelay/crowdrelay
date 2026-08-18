@@ -40,6 +40,10 @@ class FanAccountDeletionContract(unittest.TestCase):
         self.assertIn('PostgresFanPrivacyRepository', api)
         self.assertNotIn('UPDATE fans', api)
         self.assertNotIn('DELETE FROM', api)
+        # The erasure receipt is personal and must never be cached by a shared
+        # proxy; openapi declares Cache-Control as a required response header.
+        self.assertIn("const PRIVATE_NO_STORE: &str = \"private, no-store\";", api)
+        self.assertIn('(CACHE_CONTROL, PRIVATE_NO_STORE)', api)
         routing = (ROOT / 'crates/crowdrelay-api/src/routing.rs').read_text()
         self.assertIn('/v1/me/account', routing)
         self.assertIn('delete(fan_privacy::delete_account)', routing)

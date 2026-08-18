@@ -6,13 +6,15 @@
 use axum::{
     Json,
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
 use crowdrelay_infra::fan_privacy::{FanPrivacyError, PostgresFanPrivacyRepository};
 use serde::Serialize;
 
 use crate::{Problem, acquisition::fan_session_from_headers, request_id};
+
+const PRIVATE_NO_STORE: &str = "private, no-store";
 
 #[derive(Serialize)]
 struct DeleteAccountResponse {
@@ -41,7 +43,12 @@ pub async fn delete_account(State(state): State<crate::AppState>, headers: Heade
         )
         .await
     {
-        Ok(_) => Json(DeleteAccountResponse { deleted: true }).into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(DeleteAccountResponse { deleted: true }),
+        )
+            .into_response(),
         Err(FanPrivacyError::Unauthorized) => Problem::unauthorized(request_id_value)
             .private()
             .into_response(),
@@ -70,11 +77,15 @@ pub async fn unpublish_synesthesia_leaderboard(
         )
         .await
     {
-        Ok(receipt) => Json(LeaderboardUnpublishResponse {
-            published: false,
-            changed: receipt.changed,
-        })
-        .into_response(),
+        Ok(receipt) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(LeaderboardUnpublishResponse {
+                published: false,
+                changed: receipt.changed,
+            }),
+        )
+            .into_response(),
         Err(FanPrivacyError::Unauthorized) => Problem::unauthorized(request_id_value)
             .private()
             .into_response(),
