@@ -1,6 +1,6 @@
 use crowdrelay_application::{
-    EcosystemControlPlaneRepository, EcosystemRepositoryError, UpdateFeatureFlagCommand,
-    UpdateShowChecklistCommand,
+    EcosystemControlPlaneRepository, EcosystemRepositoryError, RunReconciliationCommand,
+    UpdateFeatureFlagCommand, UpdateShowChecklistCommand,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{database, ecosystem::PostgresEcosystemRepository};
@@ -174,6 +174,59 @@ async fn feature_flag_updates_are_idempotent_audited_and_replay_safe()
         .await
         .expect_err("an unknown event slug must not create a checklist");
     assert_eq!(missing, EcosystemRepositoryError::NotFound);
+
+    // --- reconciliation: a pass is never run twice for one key ---------------
+    let reconcile = |idem: &str, trigger: &str| RunReconciliationCommand {
+        workspace_id,
+        trigger: trigger.to_owned(),
+        idempotency_key: idem.to_owned(),
+        request_id: Some("req-reconcile-1".to_owned()),
+    };
+
+    let first_pass = repository
+        .run_reconciliation(&reconcile(&format!("{key}-rec"), "manual"))
+        .await?;
+    assert!(!first_pass.replayed);
+    assert_eq!(first_pass.run.status, "completed");
+    assert_eq!(first_pass.run.trigger, "manual");
+    assert!(first_pass.run.finished_at.is_some());
+    assert_eq!(
+        first_pass.run.finding_count as usize,
+        first_pass.findings.len(),
+        "the stored count must match the findings the run actually raised"
+    );
+
+    // A replay returns the original run rather than starting a second pass, so
+    // findings cannot be double-counted and their outbox events not re-emitted.
+    let replayed_pass = repository
+        .run_reconciliation(&reconcile(&format!("{key}-rec"), "manual"))
+        .await?;
+    assert!(replayed_pass.replayed);
+    assert_eq!(replayed_pass.run.id, first_pass.run.id);
+
+    let runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM reconciliation_runs WHERE workspace_id = $1")
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        runs, 1,
+        "a replayed reconciliation must not start a new run"
+    );
+
+    // The same key with a different trigger is a different request.
+    let conflict = repository
+        .run_reconciliation(&reconcile(&format!("{key}-rec"), "scheduled"))
+        .await
+        .expect_err("reusing a reconciliation key with a new trigger must conflict");
+    assert_eq!(conflict, EcosystemRepositoryError::Conflict);
+
+    // A fresh key starts a genuinely new pass.
+    let second_pass = repository
+        .run_reconciliation(&reconcile(&format!("{key}-rec2"), "deploy"))
+        .await?;
+    assert!(!second_pass.replayed);
+    assert_ne!(second_pass.run.id, first_pass.run.id);
 
     Ok(())
 }

@@ -48,272 +48,46 @@ async fn reconcile_inner(
     headers: &HeaderMap,
     trigger: &str,
 ) -> Result<ReconciliationResult, EcosystemError> {
+    // The trigger vocabulary is HTTP input policy; the pass itself, its findings
+    // and its replay window are the repository's.
     if !matches!(trigger, "manual" | "scheduled" | "deploy" | "restore_drill") {
         return Err(EcosystemError::BadRequest);
     }
-    let idempotency_key = mutation_key(headers)?;
-    let request_hash = hash_json(&json!({"trigger": trigger}));
-    let target_id = deterministic_id("reconciliation", &idempotency_key);
-    let mut tx = state
-        .ticketing
-        .pool()
-        .begin()
-        .await
-        .map_err(EcosystemError::sqlx)?;
-    lock_mutation(&mut tx, state, &idempotency_key).await?;
-    if let Some(existing) = existing_mutation(&mut tx, state, &idempotency_key).await? {
-        validate_replay(
-            &existing,
-            "reconciliation.run",
-            "reconciliation",
-            target_id,
-            &request_hash,
-        )?;
-        let run_id = existing
-            .details
-            .get("run_id")
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or(EcosystemError::Conflict)?;
-        let result = load_reconciliation_tx(&mut tx, state, run_id).await?;
-        tx.commit().await.map_err(EcosystemError::sqlx)?;
-        return Ok(ReconciliationResult {
-            replayed: true,
-            ..result
-        });
-    }
-
-    let run_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO reconciliation_runs (id, workspace_id, status, trigger, request_id)
-        VALUES ($1, $2, 'running', $3, $4)
-        "#,
-    )
-    .bind(run_id)
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(trigger)
-    .bind(request_id(headers))
-    .execute(&mut *tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-
-    insert_reconciliation_findings(&mut tx, state, run_id).await?;
-    let finding_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)::bigint FROM reconciliation_findings WHERE workspace_id = $1 AND run_id = $2",
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(run_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    let finding_count_i32 = i32::try_from(finding_count).map_err(|_| EcosystemError::Unexpected)?;
-    sqlx::query(
-        r#"
-        UPDATE reconciliation_runs
-        SET status = 'completed', finding_count = $3, finished_at = now()
-        WHERE workspace_id = $1 AND id = $2 AND status = 'running'
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(run_id)
-    .bind(finding_count_i32)
-    .execute(&mut *tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, request_id)
-        SELECT finding.workspace_id,
-               'reconciliation.finding_raised',
-               1,
-               jsonb_build_object(
-                   'finding_id', finding.id,
-                   'run_id', finding.run_id,
-                   'kind', finding.kind,
-                   'severity', finding.severity,
-                   'entity_id', finding.entity_id,
-                   'entity_label', finding.entity_label,
-                   'summary', finding.summary,
-                   'suggested_action', finding.suggested_action
-               ),
-               $3
-        FROM reconciliation_findings AS finding
-        WHERE finding.workspace_id = $1 AND finding.run_id = $2
-          AND finding.severity IN ('warning', 'critical')
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(run_id)
-    .bind(request_id(headers))
-    .execute(&mut *tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-
-    append_action(
-        &mut tx,
-        state,
-        "reconciliation.run",
-        "reconciliation",
-        target_id,
-        &idempotency_key,
-        request_id(headers).as_deref(),
-        &request_hash,
-        json!({"run_id": run_id, "finding_count": finding_count_i32, "trigger": trigger}),
-    )
-    .await?;
-    let result = load_reconciliation_tx(&mut tx, state, run_id).await?;
-    tx.commit().await.map_err(EcosystemError::sqlx)?;
+    let command = RunReconciliationCommand {
+        workspace_id: state.ticketing.workspace_id(),
+        trigger: trigger.to_owned(),
+        idempotency_key: mutation_key(headers)?,
+        request_id: request_id(headers),
+    };
+    let outcome = state.ecosystem.run_reconciliation(&command).await?;
     Ok(ReconciliationResult {
-        replayed: false,
-        ..result
-    })
-}
-
-async fn insert_reconciliation_findings(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-    run_id: Uuid,
-) -> Result<(), EcosystemError> {
-    sqlx::query(
-        r#"
-        INSERT INTO reconciliation_findings (
-            workspace_id, run_id, kind, severity, entity_type, entity_id,
-            entity_label, summary, suggested_action, metadata
-        )
-        SELECT $1, $2, 'ticket.pass_count_mismatch', 'critical', 'ticket_order',
-               ticket_order.id, ticket_order.public_reference,
-               'Paid ticket order does not have the expected number of admission passes',
-               'inspect_ticket_order',
-               jsonb_build_object('expected', expected.quantity, 'actual', actual.quantity)
-        FROM ticket_orders AS ticket_order
-        JOIN LATERAL (
-            SELECT COALESCE(sum(item.quantity), 0)::bigint AS quantity
-            FROM ticket_order_items AS item
-            WHERE item.workspace_id = ticket_order.workspace_id
-              AND item.ticket_order_id = ticket_order.id
-        ) AS expected ON true
-        JOIN LATERAL (
-            SELECT count(pass.id)::bigint AS quantity
-            FROM admission_passes AS pass
-            JOIN ticket_order_items AS item
-              ON item.workspace_id = pass.workspace_id
-             AND item.id = pass.ticket_order_item_id
-            WHERE item.workspace_id = ticket_order.workspace_id
-              AND item.ticket_order_id = ticket_order.id
-              AND pass.issuance_method = 'paid'
-        ) AS actual ON true
-        WHERE ticket_order.workspace_id = $1
-          AND ticket_order.status IN ('paid', 'partially_refunded', 'refunded')
-          AND expected.quantity <> actual.quantity
-
-        UNION ALL
-
-        SELECT $1, $2, 'ticket.paid_event_missing', 'warning', 'ticket_order',
-               ticket_order.id, ticket_order.public_reference,
-               'Paid ticket order has no durable ticket.order.paid outbox event',
-               'inspect_outbox', '{}'::jsonb
-        FROM ticket_orders AS ticket_order
-        WHERE ticket_order.workspace_id = $1
-          AND ticket_order.status IN ('paid', 'partially_refunded', 'refunded')
-          AND NOT EXISTS (
-              SELECT 1 FROM outbox_events AS event
-              WHERE event.workspace_id = ticket_order.workspace_id
-                AND event.event_type = 'ticket.order.paid'
-                AND event.payload ->> 'order_id' = ticket_order.id::text
-          )
-
-        UNION ALL
-
-        SELECT $1, $2, 'ticket.delivery_event_missing', 'warning', 'ticket_order',
-               request.ticket_order_id, ticket_order.public_reference,
-               'Ticket delivery request has no matching durable outbox event',
-               'request_delivery_retry',
-               jsonb_build_object('delivery_request_id', request.id)
-        FROM ticket_delivery_requests AS request
-        JOIN ticket_orders AS ticket_order
-          ON ticket_order.workspace_id = request.workspace_id
-         AND ticket_order.id = request.ticket_order_id
-        WHERE request.workspace_id = $1
-          AND NOT EXISTS (
-              SELECT 1 FROM outbox_events AS event
-              WHERE event.workspace_id = request.workspace_id
-                AND event.event_type = 'ticket.order.delivery_requested'
-                AND event.payload ->> 'order_id' = request.ticket_order_id::text
-                AND event.created_at >= request.created_at - interval '5 seconds'
-          )
-
-        UNION ALL
-
-        SELECT $1, $2, 'outbox.dead', 'critical', 'outbox_event', event.id,
-               event.event_type,
-               'Outbox event exhausted automatic retries', 'retry_outbox',
-               jsonb_build_object('attempts', event.attempts, 'error_kind', event.last_error_kind)
-        FROM outbox_events AS event
-        WHERE event.workspace_id = $1 AND event.status = 'dead'
-
-        UNION ALL
-
-        SELECT $1, $2, 'webhook.dead', 'critical', 'webhook_delivery', delivery.id,
-               endpoint.name,
-               'Webhook delivery exhausted automatic retries', 'retry_delivery',
-               jsonb_build_object(
-                   'attempts', delivery.attempt_count,
-                   'error_kind', delivery.last_error_kind,
-                   'endpoint_active', endpoint.active
-               )
-        FROM webhook_deliveries AS delivery
-        JOIN webhook_endpoints AS endpoint
-          ON endpoint.workspace_id = delivery.workspace_id
-         AND endpoint.id = delivery.endpoint_id
-        WHERE delivery.workspace_id = $1 AND delivery.status = 'dead'
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(run_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    Ok(())
-}
-
-async fn load_reconciliation_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-    run_id: Uuid,
-) -> Result<ReconciliationResult, EcosystemError> {
-    let run = sqlx::query_as::<_, ReconciliationRun>(
-        r#"
-        SELECT id, status, trigger, finding_count, started_at, finished_at
-        FROM reconciliation_runs
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(run_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    let findings = sqlx::query_as::<_, ReconciliationFinding>(
-        r#"
-        SELECT id, run_id, kind, severity, entity_type, entity_id,
-               entity_label, summary, suggested_action, metadata,
-               created_at, resolved_at
-        FROM reconciliation_findings
-        WHERE workspace_id = $1 AND run_id = $2
-        ORDER BY severity DESC, created_at, id
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(run_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    Ok(ReconciliationResult {
-        run,
-        findings,
-        replayed: false,
+        run: ReconciliationRun {
+            id: outcome.run.id,
+            status: outcome.run.status,
+            trigger: outcome.run.trigger,
+            finding_count: outcome.run.finding_count,
+            started_at: outcome.run.started_at,
+            finished_at: outcome.run.finished_at,
+        },
+        findings: outcome
+            .findings
+            .into_iter()
+            .map(|finding| ReconciliationFinding {
+                id: finding.id,
+                run_id: finding.run_id,
+                kind: finding.kind,
+                severity: finding.severity,
+                entity_type: finding.entity_type,
+                entity_id: finding.entity_id,
+                entity_label: finding.entity_label,
+                summary: finding.summary,
+                suggested_action: finding.suggested_action,
+                metadata: finding.metadata,
+                created_at: finding.created_at,
+                resolved_at: finding.resolved_at,
+            })
+            .collect(),
+        replayed: outcome.replayed,
     })
 }
 

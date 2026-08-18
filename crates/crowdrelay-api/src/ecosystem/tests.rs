@@ -50,14 +50,6 @@ fn snapshot_checksum_is_stable_and_sensitive() {
 }
 
 #[test]
-fn deterministic_ids_are_namespaced_and_uuid_v8() {
-    let first = deterministic_id("flag", "ticket_sales_enabled");
-    assert_eq!(first, deterministic_id("flag", "ticket_sales_enabled"));
-    assert_ne!(first, deterministic_id("checklist", "ticket_sales_enabled"));
-    assert_eq!(first.get_version_num(), 8);
-}
-
-#[test]
 fn mutation_keys_reject_whitespace_and_control_bytes() {
     let mut headers = HeaderMap::new();
     headers.insert(IDEMPOTENCY_KEY.clone(), "valid-key-123".parse().unwrap());

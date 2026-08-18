@@ -91,6 +91,51 @@ pub struct ShowChecklistMutation {
     pub replayed: bool,
 }
 
+/// A completed reconciliation pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationRunState {
+    pub id: uuid::Uuid,
+    pub status: String,
+    pub trigger: String,
+    pub finding_count: i32,
+    pub started_at: OffsetDateTime,
+    pub finished_at: Option<OffsetDateTime>,
+}
+
+/// One discrepancy the pass found between two authoritative records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationFindingState {
+    pub id: uuid::Uuid,
+    pub run_id: uuid::Uuid,
+    pub kind: String,
+    pub severity: String,
+    pub entity_type: String,
+    pub entity_id: Option<uuid::Uuid>,
+    pub entity_label: Option<String>,
+    pub summary: String,
+    pub suggested_action: Option<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: OffsetDateTime,
+    pub resolved_at: Option<OffsetDateTime>,
+}
+
+/// An operator request to run reconciliation.
+#[derive(Debug, Clone)]
+pub struct RunReconciliationCommand {
+    pub workspace_id: WorkspaceId,
+    pub trigger: String,
+    pub idempotency_key: String,
+    pub request_id: Option<String>,
+}
+
+/// The run and everything it raised, plus whether the replay window served it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationOutcome {
+    pub run: ReconciliationRunState,
+    pub findings: Vec<ReconciliationFindingState>,
+    pub replayed: bool,
+}
+
 /// Persistence boundary for the ecosystem control plane.
 #[async_trait]
 pub trait EcosystemControlPlaneRepository: Send + Sync {
@@ -118,4 +163,16 @@ pub trait EcosystemControlPlaneRepository: Send + Sync {
         &self,
         command: &UpdateShowChecklistCommand,
     ) -> Result<ShowChecklistMutation, EcosystemRepositoryError>;
+
+    /// Runs one reconciliation pass: raises findings, closes the run, emits an
+    /// outbox event per actionable finding and records the operator action, all
+    /// in one transaction.
+    ///
+    /// A replay returns the original run rather than starting a second pass, so
+    /// a retried request cannot double-count findings or re-emit their events.
+    /// The caller validates the trigger vocabulary.
+    async fn run_reconciliation(
+        &self,
+        command: &RunReconciliationCommand,
+    ) -> Result<ReconciliationOutcome, EcosystemRepositoryError>;
 }

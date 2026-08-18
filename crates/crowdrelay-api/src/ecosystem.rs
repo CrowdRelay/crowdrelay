@@ -17,13 +17,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::{
-    EcosystemControlPlaneRepository, EcosystemRepositoryError, UpdateFeatureFlagCommand,
-    UpdateShowChecklistCommand,
+    EcosystemControlPlaneRepository, EcosystemRepositoryError, RunReconciliationCommand,
+    UpdateFeatureFlagCommand, UpdateShowChecklistCommand,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::FromRow;
 use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{sync::RwLock, time::timeout};
 use uuid::Uuid;
@@ -268,14 +268,6 @@ struct ShowPassRow {
     issuance_method: String,
     status: String,
     ticket_type_name: Option<String>,
-}
-
-#[derive(Debug, FromRow)]
-struct ExistingMutation {
-    action: String,
-    target_type: String,
-    target_id: Uuid,
-    details: Value,
 }
 
 pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -732,113 +724,6 @@ fn mutation_key(headers: &HeaderMap) -> Result<String, EcosystemError> {
         .ok_or(EcosystemError::BadRequest)
 }
 
-fn hash_json(value: &Value) -> String {
-    hex::encode(Sha256::digest(value.to_string().as_bytes()))
-}
-
-fn deterministic_id(namespace: &str, value: &str) -> Uuid {
-    let mut digest = Sha256::new();
-    digest.update(namespace.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    let bytes: [u8; 32] = digest.finalize().into();
-    let mut id = [0_u8; 16];
-    id.copy_from_slice(&bytes[..16]);
-    id[6] = (id[6] & 0x0f) | 0x80;
-    id[8] = (id[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(id)
-}
-
-async fn lock_mutation(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-    idempotency_key: &str,
-) -> Result<(), EcosystemError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 0)))")
-        .bind(state.ticketing.workspace_id().into_uuid().to_string())
-        .bind(idempotency_key)
-        .execute(&mut **tx)
-        .await
-        .map_err(EcosystemError::sqlx)?;
-    Ok(())
-}
-
-async fn existing_mutation(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-    idempotency_key: &str,
-) -> Result<Option<ExistingMutation>, EcosystemError> {
-    sqlx::query_as::<_, ExistingMutation>(
-        r#"
-        SELECT action, target_type, target_id, details
-        FROM operator_actions
-        WHERE workspace_id = $1 AND idempotency_key = $2
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(idempotency_key)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)
-}
-
-fn validate_replay(
-    existing: &ExistingMutation,
-    action: &str,
-    target_type: &str,
-    target_id: Uuid,
-    request_hash: &str,
-) -> Result<(), EcosystemError> {
-    let existing_hash = existing.details.get("request_hash").and_then(Value::as_str);
-    if existing.action == action
-        && existing.target_type == target_type
-        && existing.target_id == target_id
-        && existing_hash == Some(request_hash)
-    {
-        Ok(())
-    } else {
-        Err(EcosystemError::Conflict)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn append_action(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &crate::AppState,
-    action: &str,
-    target_type: &str,
-    target_id: Uuid,
-    idempotency_key: &str,
-    request_id_value: Option<&str>,
-    request_hash: &str,
-    mut details: Value,
-) -> Result<(), EcosystemError> {
-    let object = details.as_object_mut().ok_or(EcosystemError::Unexpected)?;
-    object.insert(
-        "request_hash".to_owned(),
-        Value::String(request_hash.to_owned()),
-    );
-    sqlx::query(
-        r#"
-        INSERT INTO operator_actions (
-            workspace_id, action, target_type, target_id,
-            idempotency_key, request_id, details
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(idempotency_key)
-    .bind(request_id_value)
-    .bind(details)
-    .execute(&mut **tx)
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    Ok(())
-}
-
 async fn run<T>(
     state: &crate::AppState,
     future: impl Future<Output = Result<T, EcosystemError>>,
@@ -925,15 +810,7 @@ impl std::fmt::Display for EcosystemError {
 
 #[cfg(test)]
 mod basic_tests {
-    use super::{deterministic_id, flag_default, hash_json};
-    use serde_json::json;
-
-    #[test]
-    fn identifiers_and_request_hashes_are_stable() {
-        assert_eq!(deterministic_id("flag", "x"), deterministic_id("flag", "x"));
-        assert_ne!(deterministic_id("flag", "x"), deterministic_id("flag", "y"));
-        assert_eq!(hash_json(&json!({"a": 1})), hash_json(&json!({"a": 1})));
-    }
+    use super::flag_default;
 
     #[test]
     fn only_known_feature_flags_are_addressable() {
