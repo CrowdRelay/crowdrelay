@@ -13,7 +13,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{
+    OffsetDateTime, PrimitiveDateTime,
+    format_description::well_known::{Iso8601, Rfc3339},
+};
+use time_tz::{OffsetResult, PrimitiveDateTimeExt, timezones};
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
@@ -353,13 +357,37 @@ struct InsertedEventRow {
     inserted: bool,
 }
 
+fn parse_bandsintown_datetime(
+    value: &str,
+    timezone: &str,
+) -> Result<OffsetDateTime, EventSyncError> {
+    // Accept an explicit provider offset if Bandsintown starts returning one.
+    if let Ok(datetime) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Ok(datetime);
+    }
+
+    // Bandsintown currently returns artist-event timestamps as local ISO 8601
+    // wall-clock time, e.g. `2026-09-11T20:00:00`, without a UTC offset.
+    // Resolve that value through the source's IANA timezone so DST is correct.
+    let local = PrimitiveDateTime::parse(value, &Iso8601::DEFAULT)
+        .map_err(|_| EventSyncError::InvalidProviderPayload)?;
+    let timezone = timezones::get_by_name(timezone).ok_or(EventSyncError::InvalidSource)?;
+
+    match local.assume_timezone(timezone) {
+        OffsetResult::Some(datetime) => Ok(datetime),
+        // Never guess during a DST fold or gap.
+        OffsetResult::Ambiguous(_, _) | OffsetResult::None => {
+            Err(EventSyncError::InvalidProviderPayload)
+        }
+    }
+}
+
 fn normalize_bandsintown_event(
     event: BandsintownEvent,
     source: &EventSourceRow,
 ) -> Result<NormalizedExternalEvent, EventSyncError> {
     let source_event_id = external_id(&event.id).ok_or(EventSyncError::InvalidProviderPayload)?;
-    let starts_at = OffsetDateTime::parse(&event.datetime, &Rfc3339)
-        .map_err(|_| EventSyncError::InvalidProviderPayload)?;
+    let starts_at = parse_bandsintown_datetime(&event.datetime, &source.timezone)?;
     let city_name = clean_optional(event.venue.city);
     let country_code = country_code(event.venue.country.as_deref(), &source.default_country_code);
     let city_slug = city_name
@@ -696,6 +724,22 @@ fn encode_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bandsintown_local_datetime_respects_warsaw_dst() {
+        let summer = parse_bandsintown_datetime("2026-09-11T20:00:00", "Europe/Warsaw")
+            .expect("summer Bandsintown timestamp should parse");
+        let winter = parse_bandsintown_datetime("2026-10-30T19:00:00", "Europe/Warsaw")
+            .expect("winter Bandsintown timestamp should parse");
+
+        let expected_summer = OffsetDateTime::parse("2026-09-11T18:00:00Z", &Rfc3339)
+            .expect("test timestamp should parse");
+        let expected_winter = OffsetDateTime::parse("2026-10-30T18:00:00Z", &Rfc3339)
+            .expect("test timestamp should parse");
+
+        assert_eq!(summer.unix_timestamp(), expected_summer.unix_timestamp());
+        assert_eq!(winter.unix_timestamp(), expected_winter.unix_timestamp());
+    }
 
     fn event_snapshot() -> PersistedEventSnapshot {
         PersistedEventSnapshot {
