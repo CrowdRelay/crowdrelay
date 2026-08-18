@@ -1,0 +1,14 @@
+{
+    auto_https off
+    admin off
+}
+
+:18080 {
+    @area path /v1/control-plane/area /v1/control-plane/area/*
+
+    handle @area {
+        reverse_proxy http://api:8080
+    }
+
+    respond 404
+}

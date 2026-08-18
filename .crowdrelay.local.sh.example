@@ -12,6 +12,9 @@ CROWDRELAY_PUBLIC_BASE_URL="https://api.example.com"
 CROWDRELAY_BACKUP_BEFORE_DEPLOY="false"
 CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS="180"
 
+# Optional narrow Control Plane -> AREA management sidecar.
+CROWDRELAY_AREA_MANAGEMENT_ENABLED="false"
+
 # Optional remote deployment.
 CROWDRELAY_SSH_TARGET="deploy@example.com"
 CROWDRELAY_REMOTE_INSTALL_DIR="/srv/crowdrelay"

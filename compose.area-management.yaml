@@ -1,0 +1,41 @@
+services:
+  api:
+    environment:
+      CROWDRELAY_CONTROL_PLANE_AREA_API_KEY: ${CROWDRELAY_CONTROL_PLANE_AREA_API_KEY:?AREA API key missing}
+
+  area-management-proxy:
+    image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+
+    depends_on:
+      api:
+        condition: service_healthy
+
+    ports:
+      - "${CROWDRELAY_AREA_MANAGEMENT_BIND_IP:?AREA management bind IP missing}:18080:18080/tcp"
+
+    volumes:
+      - ./deploy/area-management.Caddyfile:/etc/caddy/Caddyfile:ro
+
+    read_only: true
+
+    tmpfs:
+      - /data
+      - /config
+      - /tmp
+
+    cap_drop:
+      - ALL
+
+    cap_add:
+      - NET_BIND_SERVICE
+
+    security_opt:
+      - no-new-privileges:true
+
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.10
+
+    networks:
+      - runtime

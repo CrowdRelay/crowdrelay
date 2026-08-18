@@ -17,6 +17,7 @@ CROWDRELAY_PUBLIC_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-}"
 CROWDRELAY_LEDGER_COMMERCE_API_KEY="${CROWDRELAY_LEDGER_COMMERCE_API_KEY:-}"
 CROWDRELAY_BACKUP_BEFORE_DEPLOY="${CROWDRELAY_BACKUP_BEFORE_DEPLOY:-false}"
 CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS="${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}"
+CROWDRELAY_AREA_MANAGEMENT_ENABLED="${CROWDRELAY_AREA_MANAGEMENT_ENABLED:-false}"
 CROWDRELAY_SSH_TARGET="${CROWDRELAY_SSH_TARGET:-}"
 CROWDRELAY_REMOTE_INSTALL_DIR="${CROWDRELAY_REMOTE_INSTALL_DIR:-/srv/crowdrelay}"
 CROWDRELAY_REMOTE_ARCHIVE="${CROWDRELAY_REMOTE_ARCHIVE:-/tmp/crowdrelay-deploy.tar.gz}"
@@ -126,15 +127,28 @@ report_release_ledger() {
 
 compose() {
   local env_file compose_file
+  local -a compose_args
+
   env_file="$(absolute_path "$CROWDRELAY_ENV_FILE")"
   compose_file="$(absolute_path "$CROWDRELAY_COMPOSE_FILE")"
+
   export CROWDRELAY_ENV_FILE="$env_file"
   export CROWDRELAY_BOOTSTRAP_HOST_FILE="$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
   export CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
   export CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE="$(absolute_path "$CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE")"
   export CROWDRELAY_DOCKER_NETWORK
   export CROWDRELAY_IMAGE_TAG="sha-${CROWDRELAY_IMAGE_SHA}"
-  docker compose --env-file "$env_file" --file "$compose_file" "$@"
+
+  compose_args=(
+    --env-file "$env_file"
+    --file "$compose_file"
+  )
+
+  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then
+    compose_args+=(--file "$ROOT_DIR/compose.area-management.yaml")
+  fi
+
+  docker compose "${compose_args[@]}" "$@"
 }
 
 runtime_owner_uid() {
@@ -215,6 +229,20 @@ doctor() {
   require_regular_file "$(absolute_path "$CROWDRELAY_ENV_FILE")"
   require_regular_file "$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")"
   require_regular_file "$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
+
+  case "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" in
+    true)
+      require_regular_file "$ROOT_DIR/compose.area-management.yaml"
+      require_regular_file "$ROOT_DIR/deploy/area-management.Caddyfile"
+      ;;
+    false)
+      ;;
+    *)
+      echo "CROWDRELAY_AREA_MANAGEMENT_ENABLED must be true or false." >&2
+      exit 1
+      ;;
+  esac
+
   compose config --quiet
   echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
 }
@@ -330,7 +358,13 @@ deploy() {
   run_hook crowdrelay_before_deploy
   compose pull
   compose run --rm setup
-  compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans api worker
+  local -a deploy_services=(api worker)
+
+  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then
+    deploy_services+=(area-management-proxy)
+  fi
+
+  compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans "${deploy_services[@]}"
   verify_exact_release_identity
   run_hook crowdrelay_before_verify
   verify
@@ -353,10 +387,15 @@ package_deploy() (
   cp scripts/report-release-component.sh "$staging/scripts/report-release-component.sh"
   cp scripts/production-smoke.sh "$staging/scripts/production-smoke.sh"
   cp Cargo.lock "$staging/Cargo.lock"
-  chmod 700 "$staging/scripts/report-release-component.sh"
-  chmod 755 "$staging/scripts/production-smoke.sh"
+  chmod 700 "$staging/scripts/report-release-component.sh" "$staging/scripts/production-smoke.sh"
   cp -R deploy/systemd "$staging/deploy/systemd"
   cp "$(absolute_path "$CROWDRELAY_COMPOSE_FILE")" "$staging/compose.production.yaml"
+
+  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then
+    cp "$ROOT_DIR/compose.area-management.yaml" "$staging/compose.area-management.yaml"
+    cp "$ROOT_DIR/deploy/area-management.Caddyfile" "$staging/deploy/area-management.Caddyfile"
+  fi
+
   cp "$LOCAL_CONFIG" "$staging/.crowdrelay.local.sh"
   cp "$(absolute_path "$CROWDRELAY_ENV_FILE")" "$staging/deploy/.env.production"
   cp "$(absolute_path "$CROWDRELAY_BOOTSTRAP_FILE")" "$staging/deploy/bootstrap.production.json"
