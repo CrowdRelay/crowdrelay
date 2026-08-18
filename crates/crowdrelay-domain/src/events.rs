@@ -96,7 +96,7 @@ impl PublicEvent {
         validate_required_text(&self.title, 300).map_err(|_| PublicEventError::InvalidTitle)?;
         validate_required_text(&self.timezone, 128)
             .map_err(|_| PublicEventError::InvalidTimezone)?;
-        validate_optional_text(self.description.as_deref(), 10_000)?;
+        validate_optional_multiline_text(self.description.as_deref(), 10_000)?;
         validate_optional_text(self.venue.as_deref(), 500)?;
         validate_optional_text(self.venue_address.as_deref(), 500)?;
 
@@ -158,6 +158,31 @@ fn validate_optional_text(
         Some(value) => validate_required_text(value, maximum_bytes),
         None => Ok(()),
     }
+}
+
+/// A concert description is prose: promoters write paragraphs, and providers
+/// hand them to us with the line breaks intact. Treating `\n` as a control
+/// character silently dropped otherwise-valid events out of the public feed.
+///
+/// Deliberately separate from `validate_optional_text` rather than loosening
+/// it, so `venue`, `venue_address` and the rest stay strictly single-line.
+fn validate_optional_multiline_text(
+    value: Option<&str>,
+    maximum_bytes: usize,
+) -> Result<(), PublicEventError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim() != value
+        || value.is_empty()
+        || value.len() > maximum_bytes
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(PublicEventError::InvalidText);
+    }
+    Ok(())
 }
 
 fn validate_optional_https_url(value: Option<&str>) -> Result<(), PublicEventError> {
@@ -281,4 +306,78 @@ pub enum EventActionError {
     /// The referrer host was empty, too long, or contained invalid characters.
     #[error("event action referrer is invalid")]
     InvalidReferrer,
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    fn event(description: Option<&str>, venue: Option<&str>) -> PublicEvent {
+        PublicEvent {
+            id: EventId::new(),
+            slug: EventSlug::parse("wlacz-sie-na-nowe").expect("slug should parse"),
+            title: "WŁĄCZ SIĘ NA NOWE".to_owned(),
+            description: description.map(ToOwned::to_owned),
+            city: None,
+            venue: venue.map(ToOwned::to_owned),
+            venue_address: None,
+            timezone: "Europe/Warsaw".to_owned(),
+            starts_at: OffsetDateTime::UNIX_EPOCH,
+            doors_at: None,
+            ends_at: None,
+            ticket_url: None,
+            listen_url: None,
+            image_url: None,
+            trailer_url: None,
+            external_event_url: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// The shape that actually fell out of the public feed: a real promoter
+    /// description with paragraphs, no outer whitespace, rejected only because
+    /// every `\n` counted as a control character.
+    #[test]
+    fn multiline_promoter_description_stays_publishable() {
+        let description = concat!(
+            "WŁĄCZ SIĘ NA NOWE!\n",
+            "Zapraszamy na kolejny koncert cyklu!\n\n",
+            "11.09.2026 (piątek) klub Łącznik\n",
+            "start 20:00\n\n",
+            "https://open.spotify.com/artist/1apVNEUv0uRWxeR7gLuKmf"
+        );
+        assert!(event(Some(description), None).validate().is_ok());
+    }
+
+    #[test]
+    fn tabs_and_carriage_returns_are_accepted_too() {
+        assert!(
+            event(Some("line one\r\n\tindented"), None)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn other_control_characters_are_still_rejected() {
+        assert!(
+            event(Some("paragraph\u{0}injected"), None)
+                .validate()
+                .is_err()
+        );
+        assert!(event(Some("bell\u{7}"), None).validate().is_err());
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_still_rejected() {
+        assert!(event(Some("\nleading"), None).validate().is_err());
+        assert!(event(Some("trailing\n"), None).validate().is_err());
+    }
+
+    /// Loosening description must not loosen the single-line fields.
+    #[test]
+    fn venue_remains_single_line() {
+        assert!(event(None, Some("Klub Łącznik")).validate().is_ok());
+        assert!(event(None, Some("Klub\nŁącznik")).validate().is_err());
+    }
 }
