@@ -32,6 +32,7 @@
 
 pub mod acquisition;
 pub mod admission;
+pub mod area;
 pub mod audience_lifecycle;
 pub mod autonomy;
 pub mod beacon_release;
@@ -68,6 +69,11 @@ pub use admission::{
     AdmissionPassClaimed, AdmissionPassIssued, AdmissionPassStatus, AdmissionPassView,
     AdmissionQrClaims, AdmissionQrError, AdmissionRedemptionResult, AdmissionRedemptionStatus,
     PassClaimToken, PassClaimTokenError, PassSessionToken, PassSessionTokenError,
+};
+pub use area::{
+    AreaCollectible, AreaDropDraft, AreaDropStatus, AreaLocalizedClue, AreaValidationIssue,
+    MAX_AREA_CLUE_CHARS, MAX_AREA_COLLECTIBLE_LINE_CHARS, MAX_AREA_LABEL_CHARS,
+    changed_area_fields, derive_area_status, live_change_confirmation_issues, valid_area_drop_id,
 };
 pub use beacon_release::{
     BeaconReleaseCampaignPhase, BeaconReleaseCampaignState, BeaconReleaseProgress,

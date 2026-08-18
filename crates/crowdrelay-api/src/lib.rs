@@ -40,7 +40,8 @@ use axum::{
     routing::{get, post},
 };
 use crowdrelay_infra::{
-    autopilot::PostgresAutopilotRepository, database, ecosystem::PostgresEcosystemRepository,
+    area_admin::PostgresAreaAdminRepository, autopilot::PostgresAutopilotRepository, database,
+    ecosystem::PostgresEcosystemRepository,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -56,6 +57,7 @@ mod accounting;
 mod acquisition;
 mod admission;
 mod area;
+mod area_admin;
 mod audience;
 mod autopilot;
 mod beacon_signal;
@@ -117,6 +119,7 @@ enum PrivilegedAuthorization {
     Admin,
     Operator,
     Commerce,
+    AreaManagement,
 }
 
 /// Shared HTTP state assembled by the API composition root.
@@ -131,6 +134,8 @@ pub struct AppState {
     pub(crate) concert_qr: ConcertQrState,
     pub(crate) fan_lifecycle: FanLifecycleState,
     pub(crate) ticketing: TicketingState,
+    pub(crate) area_admin: crowdrelay_application::AreaAdminService,
+    area_management_api_key_sha256: Option<[u8; 32]>,
     pub(crate) ops: OpsState,
     pub(crate) autopilot: PostgresAutopilotRepository,
     pub(crate) autopilot_runtime_enabled: bool,
@@ -156,6 +161,7 @@ impl AppState {
         concert_qr: ConcertQrState,
         fan_lifecycle: FanLifecycleState,
         ticketing: TicketingState,
+        area_management_api_key_sha256: Option<[u8; 32]>,
         ops: OpsState,
         autopilot: PostgresAutopilotRepository,
         autopilot_runtime_enabled: bool,
@@ -163,6 +169,9 @@ impl AppState {
         tenant: tenant::TenantProfile,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
+        let area_admin = crowdrelay_application::AreaAdminService::new(Arc::new(
+            PostgresAreaAdminRepository::new(database.clone()),
+        ));
         Self {
             database,
             readiness_timeout,
@@ -173,6 +182,8 @@ impl AppState {
             concert_qr,
             fan_lifecycle,
             ticketing,
+            area_admin,
+            area_management_api_key_sha256,
             ops,
             autopilot,
             autopilot_runtime_enabled,
@@ -257,8 +268,13 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .layer(cors);
 
     routing::application_routes(state.clone())
+        .merge(area_admin::router(state.clone()))
         .layer(from_fn_with_state(state, enforce_privileged_namespace))
         .layer(middleware)
+}
+
+fn is_area_management_path(path: &str) -> bool {
+    path == "/v1/control-plane/area" || path.starts_with("/v1/control-plane/area/")
 }
 
 async fn enforce_privileged_namespace(
@@ -277,6 +293,8 @@ async fn enforce_privileged_namespace(
         authorization == Some(PrivilegedAuthorization::Operator)
     } else if path.starts_with("/v1/commerce/") || path.starts_with("/v1/internal/") {
         authorization == Some(PrivilegedAuthorization::Commerce)
+    } else if is_area_management_path(path) {
+        authorization == Some(PrivilegedAuthorization::AreaManagement)
     } else {
         true
     };
@@ -315,21 +333,27 @@ async fn normalize_request_id(
     let privileged = path.starts_with("/v1/admin/")
         || path.starts_with("/v1/staff/")
         || path.starts_with("/v1/internal/")
-        || path.starts_with("/v1/commerce/");
-    let authorization =
-        if path.starts_with("/v1/admin/") && state.ticketing.admin_authorized(request.headers()) {
-            Some(PrivilegedAuthorization::Admin)
-        } else if path.starts_with("/v1/staff/")
-            && state.ticketing.operator_authorized(request.headers()).await
-        {
-            Some(PrivilegedAuthorization::Operator)
-        } else if (path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/"))
-            && state.ticketing.commerce_authorized(request.headers())
-        {
-            Some(PrivilegedAuthorization::Commerce)
-        } else {
-            None
-        };
+        || path.starts_with("/v1/commerce/")
+        || is_area_management_path(path);
+    let authorization = if path.starts_with("/v1/admin/")
+        && state.ticketing.admin_authorized(request.headers())
+    {
+        Some(PrivilegedAuthorization::Admin)
+    } else if path.starts_with("/v1/staff/")
+        && state.ticketing.operator_authorized(request.headers()).await
+    {
+        Some(PrivilegedAuthorization::Operator)
+    } else if (path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/"))
+        && state.ticketing.commerce_authorized(request.headers())
+    {
+        Some(PrivilegedAuthorization::Commerce)
+    } else if is_area_management_path(path)
+        && security::bearer_sha256_matches(request.headers(), state.area_management_api_key_sha256)
+    {
+        Some(PrivilegedAuthorization::AreaManagement)
+    } else {
+        None
+    };
     if let Some(authorization) = authorization {
         request.extensions_mut().insert(authorization);
     }

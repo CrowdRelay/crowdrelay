@@ -248,6 +248,7 @@ async fn main() -> Result<()> {
             concert_qr,
             fan_lifecycle,
             ticketing,
+            config.control_plane_area_api_key_sha256,
             ops,
             autopilot,
             config.autopilot_enabled,

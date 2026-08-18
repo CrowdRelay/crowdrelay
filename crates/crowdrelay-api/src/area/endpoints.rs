@@ -1,4 +1,4 @@
-/// Returns the public 12-drop catalogue without exact claim coordinates.
+/// Returns the public tenant AREA catalogue without exact claim coordinates.
 pub async fn public_drops(State(state): State<crate::AppState>) -> Response {
     match load_drops(&state, None).await {
         Ok(rows) => {
@@ -221,7 +221,7 @@ pub async fn internal_import_claims(
             );
         }
     };
-    if payload.claims.len() > 12
+    if payload.claims.len() > 500
         || payload.claims.iter().any(|claim| {
             !valid_drop_id(&claim.drop_id)
                 || claim
@@ -281,7 +281,7 @@ pub async fn internal_import_claims(
     }
 
     for claim in claims {
-        let drop = match lock_drop(&mut transaction, workspace_id, &claim.drop_id, player_id).await
+        let drop = match lock_drop(&mut transaction, workspace_id, &claim.drop_id, player_id, false).await
         {
             Ok(Some(drop)) => drop,
             Ok(None) => {

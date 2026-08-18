@@ -22,6 +22,7 @@
 
 pub mod acquisition;
 pub mod admission;
+pub mod area_admin;
 pub mod autopilot;
 pub mod config;
 pub mod database;

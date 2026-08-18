@@ -32,6 +32,14 @@ async fn issue_challenge(
             FROM area_drops
             WHERE workspace_id = $1
               AND id = $2
+              AND published_at IS NOT NULL
+              AND archived_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM area_workspace_settings AS area_settings
+                  WHERE area_settings.workspace_id = area_drops.workspace_id
+                    AND area_settings.enabled
+              )
               AND active
               AND exact_lat IS NOT NULL
               AND exact_lng IS NOT NULL

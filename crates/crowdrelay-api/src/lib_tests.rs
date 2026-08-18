@@ -372,6 +372,7 @@ mod tests {
             concert_qr,
             fan_lifecycle_state(workspace_id)?,
             ticketing,
+            Some(sha2::Sha256::digest(b"test-area-management-key-1234567890").into()),
             ops,
             autopilot,
             false,
@@ -686,12 +687,17 @@ mod tests {
         const ADMIN_KEY: &str = "test-admin-api-key-123456789012";
         const STAFF_KEY: &str = "test-staff-api-key-123456789012";
         const COMMERCE_KEY: &str = "test-commerce-api-key-1234567890";
+        const AREA_KEY: &str = "test-area-management-key-1234567890";
 
         let app = test_router()?;
         for (uri, token) in [
             ("/v1/admin/events/test-show/ticketing", STAFF_KEY),
             ("/v1/admin/ops/summary", STAFF_KEY),
             ("/v1/staff/events/test-show/ticketing", COMMERCE_KEY),
+            ("/v1/control-plane/area", ADMIN_KEY),
+            ("/v1/control-plane/area", STAFF_KEY),
+            ("/v1/control-plane/area", COMMERCE_KEY),
+            ("/v1/admin/ops/summary", AREA_KEY),
         ] {
             let response = app
                 .clone()
@@ -736,6 +742,7 @@ mod tests {
         }
 
         let internal_with_commerce = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -746,6 +753,16 @@ mod tests {
             )
             .await?;
         assert_ne!(internal_with_commerce.status(), StatusCode::UNAUTHORIZED);
+
+        let area_with_area_key = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/control-plane/area")
+                    .header(AUTHORIZATION, format!("Bearer {AREA_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_ne!(area_with_area_key.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
 

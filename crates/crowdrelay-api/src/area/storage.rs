@@ -49,6 +49,14 @@ async fn load_drops(
             END AS player_claimed
         FROM area_drops AS area_drop
         WHERE area_drop.workspace_id = $1
+          AND area_drop.published_at IS NOT NULL
+          AND area_drop.archived_at IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM area_workspace_settings AS area_settings
+              WHERE area_settings.workspace_id = area_drop.workspace_id
+                AND area_settings.enabled
+          )
         ORDER BY area_drop.number, area_drop.id
         "#,
     )

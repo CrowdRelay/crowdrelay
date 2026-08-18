@@ -398,7 +398,7 @@ fn parse_admission_security(
     })
 }
 
-fn parse_optional_secret_hash(
+pub(super) fn parse_optional_secret_hash(
     value: Option<&String>,
     name: &'static str,
 ) -> Result<Option<[u8; 32]>, ConfigError> {

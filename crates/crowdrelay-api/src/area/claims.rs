@@ -3,17 +3,33 @@ async fn lock_drop(
     workspace_id: Uuid,
     drop_id: &str,
     player_id: Uuid,
+    require_enabled: bool,
 ) -> Result<Option<DropRow>, sqlx::Error> {
     let locked = sqlx::query_scalar::<_, String>(
         r#"
         SELECT id
         FROM area_drops
-        WHERE workspace_id = $1 AND id = $2
+        WHERE workspace_id = $1
+          AND id = $2
+          AND (
+              NOT $3
+              OR (
+                  published_at IS NOT NULL
+                  AND archived_at IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM area_workspace_settings AS area_settings
+                      WHERE area_settings.workspace_id = area_drops.workspace_id
+                        AND area_settings.enabled
+                  )
+              )
+          )
         FOR UPDATE
         "#,
     )
     .bind(workspace_id)
     .bind(drop_id)
+    .bind(require_enabled)
     .fetch_optional(&mut **transaction)
     .await?;
     if locked.is_none() {
@@ -219,7 +235,7 @@ async fn claim_drop(
         );
     }
 
-    let drop = match lock_drop(&mut transaction, workspace_id, &payload.drop_id, player_id).await {
+    let drop = match lock_drop(&mut transaction, workspace_id, &payload.drop_id, player_id, true).await {
         Ok(Some(drop)) => drop,
         Ok(None) => {
             return error_response(

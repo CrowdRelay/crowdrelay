@@ -22,6 +22,7 @@
 //! the redirect and event-discovery fast paths.
 
 pub mod admission;
+pub mod area_admin;
 pub mod autopilot;
 pub mod beacon_release;
 pub mod cache;
@@ -36,6 +37,11 @@ pub use admission::{
     AdmissionRepository, AdmissionUseCaseError, ClaimAdmissionPass, ClaimAdmissionPassCommand,
     IssueAdmissionPass, IssueAdmissionPassCommand, LoadAdmissionPass, RedeemAdmissionPass,
     RedeemAdmissionPassCommand, RevokeAdmissionPass, RevokeAdmissionPassCommand,
+};
+pub use area_admin::{
+    AreaAdminError, AreaAdminRepository, AreaAdminService, AreaCity, AreaDropDetail,
+    AreaDropSummary, AreaOverview, AreaValidationResult, CreateAreaCityCommand,
+    CreateAreaDropCommand,
 };
 pub use beacon_release::{
     BeaconReleaseActivationCopy, BeaconReleaseRecipientTransition, BeaconReleaseTransitionError,
