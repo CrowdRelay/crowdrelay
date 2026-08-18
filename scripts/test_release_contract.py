@@ -58,8 +58,14 @@ class ReleaseContract(unittest.TestCase):
         openapi = (ROOT / "openapi/openapi.yaml").read_text()
         self.assertIn('ARG CROWDRELAY_GIT_SHA=""', dockerfile)
         self.assertIn('ARG CROWDRELAY_BUILD_TIMESTAMP=""', dockerfile)
-        self.assertIn("CROWDRELAY_GIT_SHA=${{ env.IMAGE_SHA }}", publish)
-        self.assertIn("CROWDRELAY_BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }}", publish)
+        bake = (ROOT / "docker-bake.hcl").read_text()
+        # API and worker are baked together, so the workflow passes the build
+        # identity as bake variables rather than per-step build-args. The
+        # bake file must then forward both into the Dockerfile ARGs above.
+        self.assertIn("CROWDRELAY_GIT_SHA: ${{ env.IMAGE_SHA }}", publish)
+        self.assertIn("CROWDRELAY_BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}", publish)
+        self.assertIn("CROWDRELAY_GIT_SHA         = CROWDRELAY_GIT_SHA", bake)
+        self.assertIn("CROWDRELAY_BUILD_TIMESTAMP = CROWDRELAY_BUILD_TIMESTAMP", bake)
         self.assertIn("git_sha: Option<&\'static str>", meta)
         self.assertIn('option_env!("CROWDRELAY_GIT_SHA")', meta)
         self.assertIn("meta::release_identity()", api)

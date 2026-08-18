@@ -55,51 +55,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish API image
-        id: api-image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      # API and worker descend from one `builder` stage. Two separate
+      # build-push-action steps compiled that stage inside two buildx
+      # invocations and each re-exported a mode=max Rust cache for it. Baking
+      # both targets together builds the shared graph once and exports the
+      # cache once.
+      - name: Build and publish API and worker images
+        id: images
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6.10.0
+        env:
+          API_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-api:sha-${{ env.IMAGE_SHA }}
+          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}
+          CROWDRELAY_GIT_SHA: ${{ env.IMAGE_SHA }}
+          CROWDRELAY_BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+          CACHE_SCOPE: ${{ env.CACHE_SCOPE }}
         with:
-          context: .
-          target: api
-          platforms: linux/amd64
+          files: docker-bake.hcl
+          targets: api,worker
           push: true
-          tags: >-
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-api:sha-${{ env.IMAGE_SHA }}
-          build-args: |
-            CROWDRELAY_GIT_SHA=${{ env.IMAGE_SHA }}
-            CROWDRELAY_BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.title=crowdrelay-api
-          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
-          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
           provenance: mode=max
           sbom: true
 
-      - name: Build and publish worker image
-        id: worker-image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          target: worker
-          platforms: linux/amd64
-          push: true
-          tags: >-
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}
-          build-args: |
-            CROWDRELAY_GIT_SHA=${{ env.IMAGE_SHA }}
-            CROWDRELAY_BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.title=crowdrelay-worker
-          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
-          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
-          provenance: mode=max
-          sbom: true
       - name: Build and publish Rekor proof anchor image
         id: rekor-image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -120,11 +96,14 @@ jobs:
           sbom: true
       - name: Record immutable image digests
         env:
-          API_DIGEST: ${{ steps.api-image.outputs.digest }}
-          WORKER_DIGEST: ${{ steps.worker-image.outputs.digest }}
+          BAKE_METADATA: ${{ steps.images.outputs.metadata }}
           REKOR_DIGEST: ${{ steps.rekor-image.outputs.digest }}
         run: |
           set -Eeuo pipefail
+          # bake reports every target in one metadata document; pull each
+          # digest out by target name rather than by step output.
+          API_DIGEST="$(jq -er '.api["containerimage.digest"]' <<<"$BAKE_METADATA")"
+          WORKER_DIGEST="$(jq -er '.worker["containerimage.digest"]' <<<"$BAKE_METADATA")"
           mkdir -p image-digests
           for value in "$API_DIGEST" "$WORKER_DIGEST" "$REKOR_DIGEST"; do
             [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid image digest: $value" >&2; exit 1; }
