@@ -76,7 +76,7 @@ pub async fn admin_create_audit_batch(
     if !(1..=MAX_AUDIT_BATCH).contains(&limit) {
         return ProofError::BadRequest.into_response(request_id_value);
     }
-    let result = create_audit_batch(&state, &headers, limit);
+    let result = create_audit_batch(&state, &headers, limit, payload.canary);
     respond_private(run(&state, result).await, request_id_value)
 }
 
@@ -200,6 +200,7 @@ async fn create_audit_batch(
     state: &crate::AppState,
     headers: &HeaderMap,
     limit: i64,
+    canary: bool,
 ) -> Result<AuditBatchResult, ProofError> {
     let idempotency_key = idempotency_key(headers)?;
     let request_id_value = request_id(headers);
@@ -229,8 +230,14 @@ async fn create_audit_batch(
     .await
     .map_err(ProofError::sqlx)?
     {
+        let existing_canary = existing
+            .details
+            .get("canary")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if existing.action != "external_proof.audit_batch_created"
             || existing.details.get("limit").and_then(Value::as_i64) != Some(limit)
+            || existing_canary != canary
         {
             return Err(ProofError::Conflict);
         }
@@ -247,6 +254,32 @@ async fn create_audit_batch(
             batch: Some(batch),
             replayed: true,
         });
+    }
+
+    // A deploy canary must exercise the complete anchor path even when the
+    // ordinary ledger is fully caught up. Seed one eligible audit event while
+    // holding the same advisory lock and transaction used for batch creation,
+    // so a concurrent scheduler cannot consume the seed before this request.
+    if canary {
+        let canary_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (
+                workspace_id, actor_kind, action, target_type,
+                target_id, request_id, metadata
+            ) VALUES (
+                $1, 'service', 'rekor.canary.seeded', 'external_proof_canary',
+                $2, $3, $4
+            )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(canary_id.to_string())
+        .bind(request_id_value.as_deref())
+        .bind(json!({"purpose": "deploy_e2e"}))
+        .execute(&mut *tx)
+        .await
+        .map_err(ProofError::sqlx)?;
     }
 
     let rows = sqlx::query_as::<_, LedgerRow>(
@@ -311,7 +344,7 @@ async fn create_audit_batch(
             no_op_id,
             &idempotency_key,
             request_id_value.as_deref(),
-            json!({"limit": limit, "empty": true}),
+            json!({"limit": limit, "empty": true, "canary": canary}),
         )
         .await?;
         append_audit(
@@ -391,7 +424,7 @@ async fn create_audit_batch(
         batch_id,
         &idempotency_key,
         request_id_value.as_deref(),
-        json!({"limit": limit, "empty": false, "leaf_count": leaf_count, "root_sha256": hex::encode(root)}),
+        json!({"limit": limit, "empty": false, "canary": canary, "leaf_count": leaf_count, "root_sha256": hex::encode(root)}),
     )
     .await?;
     append_audit(

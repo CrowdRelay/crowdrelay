@@ -212,7 +212,7 @@ def main() -> int:
         created = client.json(
             "/v1/admin/proofs/audit-batches",
             method="POST",
-            body={"limit": args.batch_limit},
+            body={"limit": args.batch_limit, "canary": True},
             admin=True,
             idempotency_key=f"rekor-canary-{run_id}-batch",
         )

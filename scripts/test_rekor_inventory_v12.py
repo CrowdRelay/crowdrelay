@@ -58,6 +58,13 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertIn('signal.signal(signal.SIGINT, _raise_interrupted)', text)
         self.assertIn('signal.signal(signal.SIGTERM, _raise_interrupted)', text)
         self.assertIn('finally:', text)
+        self.assertIn(
+            'body={"limit": args.batch_limit, "canary": True}',
+            text,
+        )
+        proofs = (ROOT / "crates/crowdrelay-api/src/proofs/admin_and_public.rs").read_text()
+        self.assertIn("'rekor.canary.seeded'", proofs)
+        self.assertIn("existing_canary != canary", proofs)
 
     def test_installer_checks_private_relayer_before_and_after_canary(self):
         installer = (ROOT / "ops/rekor/install-anchor.sh").read_text()

@@ -158,6 +158,8 @@ pub struct AuditBatchResult {
 #[serde(deny_unknown_fields)]
 pub struct CreateAuditBatchRequest {
     limit: Option<i64>,
+    #[serde(default)]
+    canary: bool,
 }
 
 #[derive(Debug, Deserialize)]
