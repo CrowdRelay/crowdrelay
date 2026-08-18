@@ -3,6 +3,7 @@ async fn persist_success(
     source: &EventSourceRow,
     sync_started_at: OffsetDateTime,
     events: &[NormalizedExternalEvent],
+    skipped: usize,
 ) -> Result<(), EventSyncError> {
     let mut transaction = pool.begin().await.map_err(EventSyncError::sqlx)?;
 
@@ -86,7 +87,11 @@ async fn persist_success(
     // response in a row is authoritative, so a genuinely empty calendar does
     // not preserve cancelled concerts forever.
     let empty_response = events.is_empty();
-    let authoritative = !empty_response || source.consecutive_empty_syncs >= 1;
+    // A batch that dropped unreadable events is not a complete view of the
+    // calendar. Cancelling on it would retire concerts the sync merely failed
+    // to parse, and announce those cancellations to fans.
+    let complete = skipped == 0;
+    let authoritative = complete && (!empty_response || source.consecutive_empty_syncs >= 1);
     let cancelled_events = if authoritative {
         let cancelled_ids = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -150,6 +155,7 @@ async fn persist_success(
         "provider": &source.provider,
         "artist_name": &source.artist_name,
         "received_events": events.len(),
+        "skipped_events": skipped,
         "cancelled_missing_events": cancelled,
         "empty_response": empty_response,
         "authoritative_response": authoritative,

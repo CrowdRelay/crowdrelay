@@ -26,6 +26,7 @@ CONTRACT = {
         "proofs/support.rs",
     ],
     "crates/crowdrelay-worker/src/event_sync.rs": [
+        "event_sync/bandsintown.rs",
         "event_sync/persistence.rs",
         "event_sync/announcements.rs",
     ],
