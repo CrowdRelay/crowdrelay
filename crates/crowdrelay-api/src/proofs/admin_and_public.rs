@@ -257,27 +257,14 @@ async fn create_audit_batch(
     }
 
     // A deploy canary must exercise the complete anchor path even when the
-    // ordinary ledger is fully caught up. Seed one eligible audit event while
-    // holding the same advisory lock and transaction used for batch creation,
-    // so a concurrent scheduler cannot consume the seed before this request.
+    // ordinary ledger is fully caught up. Keep the persistence write in infra,
+    // while this transaction and advisory lock preserve seed -> batch atomicity.
     if canary {
-        let canary_id = Uuid::now_v7();
-        sqlx::query(
-            r#"
-            INSERT INTO audit_events (
-                workspace_id, actor_kind, action, target_type,
-                target_id, request_id, metadata
-            ) VALUES (
-                $1, 'service', 'rekor.canary.seeded', 'external_proof_canary',
-                $2, $3, $4
-            )
-            "#,
+        crowdrelay_infra::proofs::seed_rekor_canary_audit_event(
+            &mut tx,
+            workspace_id,
+            request_id_value.as_deref(),
         )
-        .bind(workspace_id)
-        .bind(canary_id.to_string())
-        .bind(request_id_value.as_deref())
-        .bind(json!({"purpose": "deploy_e2e"}))
-        .execute(&mut *tx)
         .await
         .map_err(ProofError::sqlx)?;
     }

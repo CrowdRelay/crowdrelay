@@ -28,5 +28,6 @@ pub mod database;
 pub mod events;
 pub mod fan_lifecycle;
 pub mod observability;
+pub mod proofs;
 pub mod referrals;
 pub mod sensitive_response;
