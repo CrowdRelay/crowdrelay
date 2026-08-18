@@ -68,8 +68,14 @@ impl RedirectCache {
             let workspace_id = link.workspace_id();
             let slug = link.slug().clone();
             let workspace_links = replacement.links.entry(workspace_id).or_default();
-            if workspace_links.insert(slug.clone(), link).is_some() {
-                return Err(RedirectCacheError::DuplicateLink { workspace_id, slug });
+            // The displaced link carries the same slug, so the error path can
+            // recover it instead of every accepted link paying for a second
+            // copy that only a duplicate would ever read.
+            if let Some(previous) = workspace_links.insert(slug, link) {
+                return Err(RedirectCacheError::DuplicateLink {
+                    workspace_id,
+                    slug: previous.slug().clone(),
+                });
             }
             replacement.len = replacement
                 .len
