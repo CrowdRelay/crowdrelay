@@ -284,15 +284,12 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
             WHEN COALESCE(event.ends_at, event.starts_at + interval '4 hours') < now() THEN 1
             ELSE 2
           END,
-          -- "Następny sygnał" is chronological within the current phase.
-          -- City affinity is only a tie-breaker and must never skip an earlier show.
-          ABS(EXTRACT(EPOCH FROM (event.starts_at - now()))),
           CASE WHEN EXISTS(
               SELECT 1 FROM fan_city_interests AS preferred
               WHERE preferred.workspace_id = event.workspace_id
                 AND preferred.fan_id = $2 AND preferred.city_id = event.city_id
           ) THEN 0 ELSE 1 END,
-          event.id
+          ABS(EXTRACT(EPOCH FROM (event.starts_at - now()))), event.id
         LIMIT 1
         "#,
     )
