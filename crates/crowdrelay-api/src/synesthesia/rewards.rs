@@ -70,7 +70,7 @@ pub async fn link_completed_run_to_fan(
     };
 
     let handoff_hash = Sha256::digest(handoff_code.as_bytes()).to_vec();
-    let linked = sqlx::query_as::<_, (Uuid, i16, i64)>(
+    let linked = sqlx::query_as::<_, (Uuid, i16, i64, Vec<u8>, String)>(
         r#"
         UPDATE synesthesia_runs
         SET fan_id = $3, linked_at = COALESCE(linked_at, now()), updated_at = now()
@@ -80,7 +80,8 @@ pub async fn link_completed_run_to_fan(
           AND NOT synthetic
           AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
           AND (fan_id IS NULL OR fan_id = $3)
-        RETURNING id, next_room_index, COALESCE(client_total_elapsed_ms, 0)
+        RETURNING id, next_room_index, COALESCE(client_total_elapsed_ms, 0),
+                  install_hash, campaign_slug
         "#,
     )
     .bind(workspace_id)
@@ -88,11 +89,44 @@ pub async fn link_completed_run_to_fan(
     .bind(fan_id)
     .fetch_optional(&mut *transaction)
     .await;
-    let (run_id, rooms_completed, client_total_elapsed_ms) = match linked {
-        Ok(Some(value)) => value,
-        Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
-        Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
-    };
+    let (run_id, rooms_completed, client_total_elapsed_ms, install_hash, campaign_slug) =
+        match linked {
+            Ok(Some(value)) => value,
+            Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
+            Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
+        };
+    if campaign_slug != CAMPAIGN_SLUG {
+        return SynesthesiaError::Conflict.response(request_id_value);
+    }
+
+    // Consuming a handoff proves control of this installation. Claim prior
+    // completed anonymous attempts from the same installation as well, so the
+    // account best in Signal cannot become slower than the local Synesthesia PB.
+    // Never rebind a run that another fan already claimed; the fan_id IS NULL
+    // predicate also makes concurrent handoffs fail closed instead of stealing
+    // history between accounts on a shared device.
+    if let Err(error) = sqlx::query(
+        r#"
+        UPDATE synesthesia_runs
+        SET fan_id = $2, linked_at = COALESCE(linked_at, now()), updated_at = now()
+        WHERE workspace_id = $1
+          AND campaign_slug = $3
+          AND install_hash = $4
+          AND NOT synthetic
+          AND fan_id IS NULL
+          AND (completed_at IS NOT NULL OR recovery_completed_at IS NOT NULL)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(fan_id)
+    .bind(CAMPAIGN_SLUG)
+    .bind(&install_hash)
+    .execute(&mut *transaction)
+    .await
+    {
+        return SynesthesiaError::sqlx(error).response(request_id_value);
+    }
+
     if let Err(error) = transaction.commit().await {
         return SynesthesiaError::sqlx(error).response(request_id_value);
     }

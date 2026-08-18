@@ -37,7 +37,7 @@ use axum::{
     },
     middleware::{Next, from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use crowdrelay_infra::{
     area_admin::PostgresAreaAdminRepository, autopilot::PostgresAutopilotRepository, database,
@@ -68,6 +68,7 @@ mod event_copy;
 mod events;
 mod fan_context;
 mod fan_lifecycle;
+mod fan_privacy;
 mod http_metrics;
 mod meta;
 mod mobile_fan;
@@ -221,7 +222,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(config.allowed_origins)
         .allow_credentials(true)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             ACCEPT,
             CONTENT_TYPE,

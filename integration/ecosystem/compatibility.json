@@ -1,6 +1,6 @@
 {
   "apiVersion": "1",
-  "minimumSchemaVersion": 64,
+  "minimumSchemaVersion": 68,
   "minimumPostgresServerVersionNum": 180000,
   "requiredCapabilities": [
     "area_claims_v1",
@@ -13,7 +13,14 @@
     "synesthesia_runs_v1",
     "synesthesia_rewards_v1",
     "ticketing_v1",
-    "viryaos_ops_v1"
+    "viryaos_ops_v1",
+    "synesthesia_leaderboard_v1",
+    "synesthesia_leaderboard_unpublish_v1",
+    "synesthesia_recovery_v1",
+    "staff_device_sessions_v2",
+    "fan_push_delivery_v1",
+    "staff_show_checklist_push_v1",
+    "fan_account_deletion_v1"
   ],
   "readOnlyProductionSmokePaths": [
     "/v1/meta",

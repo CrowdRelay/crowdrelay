@@ -68,6 +68,15 @@ class SynesthesiaEcosystemContract(unittest.TestCase):
         link_block = api.split('pub async fn link_completed_run_to_fan', 1)[1].split('pub async fn enter_reward_draw', 1)[0]
         self.assertNotIn('handoff_token_hash = NULL', link_block)
         self.assertIn("fan.status = 'active'", link_block)
+        # Linking one completed attempt also claims earlier anonymous completed
+        # attempts from the same install. This keeps Signal account-best aligned
+        # with the local Synesthesia PB without ever rebinding another fan's run.
+        self.assertIn('RETURNING id, next_room_index, COALESCE(client_total_elapsed_ms, 0),', link_block)
+        self.assertIn('install_hash, campaign_slug', link_block)
+        self.assertIn('AND install_hash = $4', link_block)
+        self.assertNotIn('$5', link_block.split('Consuming a handoff proves control', 1)[1].split('transaction.commit', 1)[0])
+        self.assertIn('AND fan_id IS NULL', link_block)
+        self.assertIn('campaign_slug != CAMPAIGN_SLUG', link_block)
         # Reward entry must never diverge from an already-bound run identity.
         reward_block = api.split('async fn enter_reward_draw_inner', 1)[1]
         self.assertIn('if linked_run.rows_affected() != 1', reward_block)

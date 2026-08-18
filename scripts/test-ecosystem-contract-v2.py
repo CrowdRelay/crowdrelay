@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import hashlib
+import re
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
@@ -50,13 +51,32 @@ if signal.exists():
             signal / "src-tauri/src/api/public.rs",
             signal / "src-tauri/src/api/ticketing.rs",
             signal / "src-tauri/src/api/beacon.rs",
+            signal / "src-tauri/src/api/operator.rs",
+            signal / "src-tauri/src/api/synesthesia.rs",
         ]
     )
-    for capability in ["signal_fan_context_v1", "beacon_native_signal_v1", "area_wallet_postgres_v2", "ticketing_v1"]:
+    for capability in [
+        "signal_fan_context_v1",
+        "beacon_native_signal_v1",
+        "area_wallet_postgres_v2",
+        "ticketing_v1",
+        "staff_device_sessions_v2",
+        "fan_push_delivery_v1",
+        "staff_show_checklist_push_v1",
+        "synesthesia_runs_v1",
+        "synesthesia_leaderboard_v1",
+    ]:
         if capability not in native:
             errors.append(f"Signal does not gate capability: {capability}")
     if '"meta"' not in native or "ecosystem_meta" not in native:
         errors.append("Signal does not consume /v1/meta")
+    floor = re.search(r"MIN_ECOSYSTEM_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)", native)
+    if floor is None or int(floor.group(1)) != manifest["minimumSchemaVersion"]:
+        errors.append(
+            "Signal minimum schema drift: "
+            f"signal={floor.group(1) if floor else 'missing'} "
+            f"manifest={manifest['minimumSchemaVersion']}"
+        )
 
 syn = ecosystem / "synesthesia"
 if syn.exists():

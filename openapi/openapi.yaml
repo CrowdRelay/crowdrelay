@@ -1331,6 +1331,24 @@ paths:
               schema: { $ref: '#/components/schemas/FanHomeSnapshot' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/account:
+    delete:
+      operationId: deleteFanAccount
+      summary: Erase the authenticated Virya Signal fan account
+      description: Removes active authentication, push registration, profile identity, AREA account linkage and public Synesthesia identity. Consent evidence and paid-commerce records may be retained as pseudonymous/legal records.
+      security:
+      - fanSession: []
+      responses:
+        '200':
+          description: The account identity was erased and the session is no longer valid.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FanAccountDeletionResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /me/events/{slug}/context:
     get:
       operationId: getFanEventContext
@@ -1369,6 +1387,24 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '422': { $ref: '#/components/responses/PrivateProblem' }
+  /me/synesthesia/leaderboard:
+    delete:
+      operationId: unpublishMySynesthesiaLeaderboard
+      summary: Remove the authenticated fan from the public Synesthesia leaderboard
+      description: Clears the public leaderboard alias for all completed Synesthesia runs linked to this fan while keeping the account, gameplay history and best-time read model intact. The fan may publish again later from Synesthesia.
+      security:
+      - fanSession: []
+      responses:
+        '200':
+          description: Public leaderboard publication is disabled for this fan.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SynesthesiaLeaderboardUnpublishResponse' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /staff/events/{slug}/dashboard:
     get:
       operationId: getStaffEventDashboard
@@ -6957,6 +6993,27 @@ components:
         leaderboard_rank: { type: [integer, 'null'], format: int64, minimum: 1 }
         linked_at: { type: [string, 'null'], format: date-time }
         reward_entered: { type: boolean }
+    FanAccountDeletionResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties:
+        deleted: { type: boolean, const: true }
+    SynesthesiaLeaderboardUnpublishResponse:
+      type: object
+      additionalProperties: false
+      required: [published, changed]
+      properties:
+        published: { type: boolean, const: false }
+        changed: { type: boolean }
+    FanHomeProfile:
+      type: object
+      additionalProperties: false
+      required: [display_name, locale, primary_city]
+      properties:
+        display_name: { type: [string, 'null'] }
+        locale: { type: [string, 'null'] }
+        primary_city: { type: [string, 'null'] }
     FanHomeSnapshot:
       type: object
       additionalProperties: false
@@ -6964,7 +7021,7 @@ components:
       properties:
         schema_version: { type: integer, const: 1 }
         generated_at: { type: string, format: date-time }
-        profile: { type: object, additionalProperties: true }
+        profile: { $ref: '#/components/schemas/FanHomeProfile' }
         next_event:
           oneOf:
             - { $ref: '#/components/schemas/FanHomeEvent' }

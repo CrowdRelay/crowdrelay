@@ -76,6 +76,11 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/me/area/challenge", post(area::me_challenge))
         .route("/v1/me/area/claim", post(area::me_claim))
         .route("/v1/me/home", get(fan_context::fan_home))
+        .route("/v1/me/account", delete(fan_privacy::delete_account))
+        .route(
+            "/v1/me/synesthesia/leaderboard",
+            delete(fan_privacy::unpublish_synesthesia_leaderboard),
+        )
         .route("/v1/public/push/config", get(push::config))
         .route("/v1/me/push/endpoints", post(push::register_endpoint))
         .route(

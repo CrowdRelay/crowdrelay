@@ -29,6 +29,7 @@ pub mod database;
 pub mod ecosystem;
 pub mod events;
 pub mod fan_lifecycle;
+pub mod fan_privacy;
 pub mod observability;
 pub mod proofs;
 pub mod referrals;
