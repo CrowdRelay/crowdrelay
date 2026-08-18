@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-seconds", type=int, default=420)
     parser.add_argument("--poll-seconds", type=float, default=3.0)
+    parser.add_argument("--ready-timeout-seconds", type=int, default=120)
     parser.add_argument("--stalled-seconds", type=int, default=120)
     parser.add_argument("--batch-limit", type=int, default=64)
     parser.add_argument(
@@ -72,6 +73,30 @@ def require_exact_api_build(client: "Client", expected_git_sha: str) -> None:
         raise RuntimeError(
             f"API build drift: expected {expected_git_sha}, observed {git_sha!r}"
         )
+
+
+def wait_for_api_ready(
+    client: "Client",
+    timeout_seconds: int,
+    poll_seconds: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            ready = client.json("/v1/health/ready", timeout=5)
+            if isinstance(ready, dict) and ready.get("status") == "ready":
+                return
+            last_error = RuntimeError(
+                f"CrowdRelay readiness payload is invalid: {ready!r}"
+            )
+        except Exception as error:
+            last_error = error
+        time.sleep(poll_seconds)
+    detail = f": {last_error}" if last_error is not None else ""
+    raise RuntimeError(
+        f"CrowdRelay API did not become ready within {timeout_seconds}s{detail}"
+    )
 
 
 def current_flag_state(client: "Client") -> bool:
@@ -176,6 +201,8 @@ def main() -> int:
     args = parse_args()
     if not 15 <= args.timeout_seconds <= 900:
         raise ValueError("timeout must be between 15 and 900 seconds")
+    if not 15 <= args.ready_timeout_seconds <= 300:
+        raise ValueError("ready timeout must be between 15 and 300 seconds")
     if not 30 <= args.stalled_seconds <= 600:
         raise ValueError("stalled timeout must be between 30 and 600 seconds")
     if not 1 <= args.batch_limit <= 10_000:
@@ -195,10 +222,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _raise_interrupted)
 
     try:
+        wait_for_api_ready(client, args.ready_timeout_seconds)
         require_exact_api_build(client, expected_git_sha)
-        ready = client.json("/v1/health/ready")
-        if not isinstance(ready, dict):
-            raise RuntimeError("CrowdRelay readiness payload is invalid")
         previous_flag_state = current_flag_state(client)
         require_no_processing_batches(client, "preflight")
 

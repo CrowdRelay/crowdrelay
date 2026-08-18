@@ -43,6 +43,26 @@ done
 expected_git_sha="${CROWDRELAY_IMAGE_TAG#sha-}"
 [[ "$expected_git_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'Rekor canary requires an exact 40-char source SHA'
 
+# Docker health intentionally tracks liveness so a transient PostgreSQL issue
+# does not mark the API container unhealthy. Rekor, however, is a mutating
+# workflow and needs a stronger readiness barrier. Wait here, bounded, after
+# exact-SHA convergence and before the canary can mutate the feature flag.
+api_container="$(docker compose -f "$compose_file" ps -q api 2>/dev/null || true)"
+[[ -n "$api_container" ]] || fail 'CrowdRelay API container is missing before Rekor canary'
+api_ready_deadline=$((SECONDS + 120))
+api_ready=false
+while (( SECONDS < api_ready_deadline )); do
+  if docker exec "$api_container"       curl --fail --silent --show-error       --connect-timeout 2 --max-time 5       http://127.0.0.1:8080/v1/health/ready >/dev/null 2>&1; then
+    api_ready=true
+    break
+  fi
+  sleep 2
+done
+[[ "$api_ready" == true ]] || {
+  docker logs --tail=120 "$api_container" >&2 || true
+  fail 'CrowdRelay API did not become ready within 120s before Rekor canary'
+}
+
 # The relayer has no public port. Verify readiness and the durable confirmation
 # journal from inside the isolated container before the production canary.
 docker exec "$container" node -e '

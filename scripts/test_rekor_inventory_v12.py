@@ -50,6 +50,8 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertIn('previous_flag_state = current_flag_state(client)', text)
         self.assertIn('set_flag(\n                    client,\n                    previous_flag_state', text)
         self.assertIn('require_exact_api_build(client, expected_git_sha)', text)
+        self.assertIn('wait_for_api_ready(client, args.ready_timeout_seconds)', text)
+        self.assertIn('parser.add_argument("--ready-timeout-seconds"', text)
         self.assertIn('require_no_processing_batches(client, "preflight")', text)
         self.assertIn('require_no_processing_batches(client, "post-confirm")', text)
         self.assertIn('verify_rekor_entry(anchor_url, entry_id)', text)
@@ -75,7 +77,9 @@ class RekorInventoryV12Tests(unittest.TestCase):
     def test_installer_checks_private_relayer_before_and_after_canary(self):
         installer = (ROOT / "ops/rekor/install-anchor.sh").read_text()
         self.assertIn('CROWDRELAY_EXPECTED_GIT_SHA="$expected_git_sha"', installer)
-        self.assertGreaterEqual(installer.count('/health/ready'), 2)
+        self.assertIn("api_ready_deadline=$((SECONDS + 120))", installer)
+        self.assertIn("CrowdRelay API did not become ready within 120s", installer)
+        self.assertGreaterEqual(installer.count('/health/ready'), 3)
         self.assertGreaterEqual(installer.count('/data/pending-confirmation.json'), 2)
         self.assertIn('pending confirmation journal remains after confirmed canary', installer)
 
