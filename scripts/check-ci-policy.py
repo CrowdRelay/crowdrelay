@@ -58,13 +58,26 @@ else:
     ):
         if contract not in ci_text:
             failures.append(f".github/workflows/ci.yml: dependency-security contract missing: {contract}")
-    # The container gate builds the linux/arm64 production target. On an x86_64
-    # runner that is QEMU emulation of a Rust release build, which costs the job
-    # its entire timeout rather than failing outright.
-    if "linux/arm64" in ci_text and "runs-on: ubuntu-24.04-arm" not in ci_text:
-        failures.append(
-            ".github/workflows/ci.yml: arm64 container builds must run on a native arm64 runner"
-        )
+    # The container gate must exercise the same linux/amd64 platform that is
+    # published for production, and it must do so on the native x86_64 hosted
+    # runner rather than accidentally drifting back to an arm64-only contract.
+    containers_marker = "  containers:\n"
+    if containers_marker not in ci_text:
+        failures.append(".github/workflows/ci.yml: containers job is required")
+    else:
+        containers_text = ci_text.split(containers_marker, 1)[1]
+        if "--set '*.platform=linux/amd64'" not in containers_text:
+            failures.append(
+                ".github/workflows/ci.yml: container gate must build linux/amd64"
+            )
+        if "runs-on: ubuntu-24.04\n" not in containers_text:
+            failures.append(
+                ".github/workflows/ci.yml: amd64 container gate must run on native ubuntu-24.04"
+            )
+        if "ubuntu-24.04-arm" in containers_text:
+            failures.append(
+                ".github/workflows/ci.yml: arm64 runner forbidden for amd64 production container gate"
+            )
 
 security_workflow = workflow_dir / "security.yml"
 if not security_workflow.exists():

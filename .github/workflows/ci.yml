@@ -252,10 +252,11 @@ jobs:
   containers:
     name: Build container targets
     if: github.event_name == 'pull_request'
-    # linux/arm64 is the published production target, so this gate must build
-    # that architecture. On an x86_64 runner it did so through QEMU and spent
-    # its whole 30-minute budget emulating a Rust release build.
-    runs-on: ubuntu-24.04-arm
+    # linux/amd64 is the published production target, so this gate must build
+    # that architecture on a native x86_64 runner. Keeping the PR gate and the
+    # publish workflow on one production platform prevents green CI from
+    # producing an image the production host cannot pull.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -289,6 +290,6 @@ jobs:
           BUILD_CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
         run: |
           docker buildx bake \
-            --set '*.platform=linux/arm64' \
+            --set '*.platform=linux/amd64' \
             --set "*.cache-from=type=registry,ref=${BUILD_CACHE_REF}" \
             --set '*.output=type=cacheonly'

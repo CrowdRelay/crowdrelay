@@ -13,14 +13,13 @@ checks={
  'provenance': workflow.count('provenance: mode=max') >= 2,
  'sbom': workflow.count('sbom: true') >= 2,
  'baked targets attested': 'targets: api,worker' in workflow,
- # Production is Oracle/Ampere. CI already exercises the runtime images as
- # arm64; publication must not silently fall back to the x86_64 runner host.
- 'baked arm64 publication': '*.platform=linux/arm64' in workflow,
- 'rekor arm64 publication': 'platforms: linux/arm64' in workflow,
- # ...and it must reach arm64 natively. Baking the same targets on an x86_64
- # runner is silently correct and ran the Rust release build under QEMU, which
- # took publication from ~5 minutes to past its timeout.
- 'native arm64 runner': 'runs-on: ubuntu-24.04-arm' in workflow,
+ # Production Docker currently pulls linux/amd64. Publication and the Rekor
+ # relayer must both carry that platform, and the workflow must build it on the
+ # native x86_64 hosted runner. An arm64-only release is undeployable.
+ 'baked amd64 publication': '*.platform=linux/amd64' in workflow,
+ 'rekor amd64 publication': 'platforms: linux/amd64' in workflow,
+ 'native amd64 runner': 'runs-on: ubuntu-24.04' in workflow and 'ubuntu-24.04-arm' not in workflow,
+ 'no arm64-only publication': 'linux/arm64' not in workflow,
  # Digests are recorded per published image either way: bake reports both of
  # its targets in one metadata document, the single build keeps a step output.
  'digest outputs': all(x in workflow for x in ['.api["containerimage.digest"]','.worker["containerimage.digest"]','steps.rekor-image.outputs.digest']),
