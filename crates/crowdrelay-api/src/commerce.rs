@@ -555,6 +555,115 @@ pub struct RewardFulfillmentView {
 // feature flag is enabled, while the Virya site can keep rendering static
 // product cards and degrade only the small availability block.
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmMerchOrderRequest {
+    stripe_session_id: String,
+    inventory_reservation_id: Uuid,
+    buyer_email: Option<String>,
+    event_id: Option<Uuid>,
+    fulfillment_mode: String,
+    currency: String,
+    amount_gross_minor: i64,
+    goods_gross_minor: i64,
+    shipping_gross_minor: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    confirmed_at: OffsetDateTime,
+}
+
+pub async fn confirm_merch_order(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<ConfirmMerchOrderRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => return CommerceError::Invalid.response(request_id_value),
+    };
+    let valid_mode = matches!(
+        payload.fulfillment_mode.as_str(),
+        "inpost" | "event_pickup" | "none"
+    );
+    let valid_event = (payload.fulfillment_mode == "event_pickup") == payload.event_id.is_some();
+    let valid_currency = payload.currency.len() == 3
+        && payload
+            .currency
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase());
+    if payload.stripe_session_id.trim().is_empty()
+        || payload.stripe_session_id.len() > 255
+        || payload
+            .buyer_email
+            .as_ref()
+            .is_some_and(|email| email.len() > 320 || !email.contains('@'))
+        || !valid_mode
+        || !valid_event
+        || !valid_currency
+        || payload.amount_gross_minor < 0
+        || payload.goods_gross_minor < 0
+        || payload.shipping_gross_minor < 0
+    {
+        return CommerceError::Invalid.response(request_id_value);
+    }
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let input = crowdrelay_infra::commerce::ConfirmedMerchOrderInput {
+        workspace_id,
+        stripe_session_id: payload.stripe_session_id,
+        inventory_reservation_id: payload.inventory_reservation_id,
+        buyer_email: payload.buyer_email,
+        event_id: payload.event_id,
+        fulfillment_mode: payload.fulfillment_mode,
+        currency: payload.currency,
+        amount_gross_minor: payload.amount_gross_minor,
+        goods_gross_minor: payload.goods_gross_minor,
+        shipping_gross_minor: payload.shipping_gross_minor,
+        confirmed_at: payload.confirmed_at,
+    };
+    match timeout(
+        state.ticketing.operation_timeout(),
+        crowdrelay_infra::commerce::record_confirmed_merch_order(&state.database, &input),
+    )
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(crowdrelay_infra::commerce::RecordMerchOrderError::ReservationNotCommitted))
+        | Ok(Err(crowdrelay_infra::commerce::RecordMerchOrderError::Conflict)) => {
+            CommerceError::Conflict.response(request_id_value)
+        }
+        Ok(Err(crowdrelay_infra::commerce::RecordMerchOrderError::Database)) | Err(_) => {
+            CommerceError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
+pub async fn event_merch_summary(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(event_id): Path<Uuid>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match timeout(
+        state.ticketing.operation_timeout(),
+        crowdrelay_infra::commerce::event_merch_summary(&state.database, workspace_id, event_id),
+    )
+    .await
+    {
+        Ok(Ok(summary)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(summary),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::error!(%error, %event_id, "event merch summary failed");
+            CommerceError::Unavailable.response(request_id_value)
+        }
+        Err(_) => CommerceError::Unavailable.response(request_id_value),
+    }
+}
+
 // Physical sections compile into this module through `include!`.
 // This preserves the established API and item visibility while keeping
 // high-risk domains small enough to review and profile independently.

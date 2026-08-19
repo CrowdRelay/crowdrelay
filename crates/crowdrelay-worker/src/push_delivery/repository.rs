@@ -168,6 +168,38 @@ impl PushDeliveryRepository {
         .await
         .context("invalidate ineligible push deliveries")?;
 
+        // Category opt-out is terminal for already-materialized pushes. Leaving
+        // them queued would allow stale notifications to fire if the fan later
+        // re-enables a category. Quiet hours are intentionally *not* terminal;
+        // claim_due defers those until the quiet window ends.
+        sqlx::query(
+            r#"
+            UPDATE fan_push_deliveries delivery
+            SET status = 'failed',
+                error_code = 'preference_disabled',
+                completed_at = now(),
+                updated_at = now()
+            FROM fan_push_preferences preference
+            WHERE delivery.workspace_id = $1
+              AND delivery.workspace_id = preference.workspace_id
+              AND delivery.fan_id = preference.fan_id
+              AND delivery.audience_kind = 'fan'
+              AND delivery.status IN ('queued','retry_wait')
+              AND delivery.category <> 'essential'
+              AND CASE delivery.category
+                  WHEN 'shows' THEN NOT preference.shows_enabled
+                  WHEN 'releases' THEN NOT preference.releases_enabled
+                  WHEN 'community' THEN NOT preference.community_enabled
+                  WHEN 'merch' THEN NOT preference.merch_enabled
+                  ELSE false
+              END
+            "#,
+        )
+        .bind(self.workspace_id)
+        .execute(&mut *transaction)
+        .await
+        .context("suppress push deliveries disabled by fan preference")?;
+
         sqlx::query(
             r#"
             UPDATE fan_push_deliveries
@@ -237,11 +269,48 @@ impl PushDeliveryRepository {
                       ON delivery.audience_kind = 'fan'
                      AND fan.workspace_id = delivery.workspace_id
                      AND fan.id = delivery.fan_id
+                    LEFT JOIN fan_push_preferences preference
+                      ON delivery.audience_kind = 'fan'
+                     AND preference.workspace_id = delivery.workspace_id
+                     AND preference.fan_id = delivery.fan_id
                     WHERE delivery.workspace_id = $1
                       AND delivery.status IN ('queued','retry_wait')
                       AND delivery.available_at <= now()
                       AND delivery.attempt_count < $3
                       AND endpoint.active AND endpoint.invalidated_at IS NULL
+                      AND (
+                          delivery.audience_kind <> 'fan'
+                          OR delivery.category = 'essential'
+                          OR (
+                              CASE delivery.category
+                                  WHEN 'shows' THEN COALESCE(preference.shows_enabled, true)
+                                  WHEN 'releases' THEN COALESCE(preference.releases_enabled, true)
+                                  WHEN 'community' THEN COALESCE(preference.community_enabled, true)
+                                  WHEN 'merch' THEN COALESCE(preference.merch_enabled, true)
+                                  ELSE true
+                              END
+                              AND NOT (
+                                  COALESCE(preference.quiet_hours_enabled, false)
+                                  AND CASE
+                                      WHEN preference.quiet_start_minute = preference.quiet_end_minute THEN true
+                                      WHEN preference.quiet_start_minute < preference.quiet_end_minute THEN
+                                          ((extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
+                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                           >= preference.quiet_start_minute
+                                           AND (extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
+                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                           < preference.quiet_end_minute)
+                                      ELSE
+                                          ((extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
+                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                           >= preference.quiet_start_minute
+                                           OR (extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
+                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                           < preference.quiet_end_minute)
+                                  END
+                              )
+                          )
+                      )
                       AND (
                           (
                               delivery.audience_kind = 'staff'

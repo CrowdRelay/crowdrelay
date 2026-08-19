@@ -566,3 +566,91 @@ mod tests {
         ));
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShowLifecyclePhase {
+    Planning,
+    Amplify,
+    Convert,
+    Ready,
+    Live,
+    Afterglow,
+    Review,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ShowLifecycleView {
+    pub phase: ShowLifecyclePhase,
+    pub next_milestone: Option<&'static str>,
+    pub next_milestone_at: Option<OffsetDateTime>,
+}
+
+/// Human/operator lifecycle derived from the exact same timing policy used by
+/// Show Growth. It is presentation state only: it never schedules a second job.
+#[must_use]
+pub fn show_lifecycle(
+    starts_at: OffsetDateTime,
+    now: OffsetDateTime,
+    policy: ShowGrowthPolicy,
+) -> ShowLifecycleView {
+    let afterglow_end = starts_at + Duration::hours(i64::from(policy.post_show_merch_hours));
+    let live_end = starts_at + Duration::hours(6);
+    let review_end = starts_at + Duration::days(7);
+    let phase = if now >= review_end {
+        ShowLifecyclePhase::Complete
+    } else if now >= afterglow_end {
+        ShowLifecyclePhase::Review
+    } else if now >= live_end {
+        ShowLifecyclePhase::Afterglow
+    } else if now >= starts_at {
+        ShowLifecyclePhase::Live
+    } else {
+        let days = (starts_at - now).whole_days();
+        if days <= i64::from(policy.last_mile_lead_days) {
+            ShowLifecyclePhase::Ready
+        } else if days <= i64::from(policy.free_fan_channel_push_lead_days) {
+            ShowLifecyclePhase::Convert
+        } else if days <= i64::from(policy.partner_cross_promo_lead_days) {
+            ShowLifecyclePhase::Amplify
+        } else {
+            ShowLifecyclePhase::Planning
+        }
+    };
+
+    let before = |days: u32| starts_at - Duration::days(i64::from(days));
+    let milestones = [
+        ("free_listing_sweep", before(policy.free_listing_lead_days)),
+        (
+            "audience_capture",
+            before(policy.audience_capture_lead_days),
+        ),
+        (
+            "partner_cross_promo",
+            before(policy.partner_cross_promo_lead_days),
+        ),
+        (
+            "grassroots_scene_relay",
+            before(policy.grassroots_scene_relay_lead_days),
+        ),
+        ("fan_ambassadors", before(policy.fan_ambassador_lead_days)),
+        ("social_proof", before(policy.social_proof_lead_days)),
+        (
+            "fan_channel_push",
+            before(policy.free_fan_channel_push_lead_days),
+        ),
+        ("merch_offer", before(policy.merch_preorder_lead_days)),
+        ("last_mile", before(policy.last_mile_lead_days)),
+        ("show_start", starts_at),
+        ("afterglow", live_end),
+        ("post_show_merch", afterglow_end),
+        ("review_complete", review_end),
+    ];
+    let next = milestones.into_iter().find(|(_, at)| *at > now);
+    ShowLifecycleView {
+        phase,
+        next_milestone: next.map(|(name, _)| name),
+        next_milestone_at: next.map(|(_, at)| at),
+    }
+}

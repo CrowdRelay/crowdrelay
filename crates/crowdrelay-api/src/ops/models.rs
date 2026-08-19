@@ -87,6 +87,7 @@ struct OpsSummaryRow {
     push_processing: i64,
     push_delivered_24h: i64,
     push_dead: i64,
+    push_suppressed: i64,
     push_oldest_pending_seconds: i64,
 }
 
@@ -104,6 +105,7 @@ pub(crate) struct OpsMetricsSnapshot {
     pub(crate) push_pending: i64,
     pub(crate) push_processing: i64,
     pub(crate) push_dead: i64,
+    pub(crate) push_suppressed: i64,
     pub(crate) push_oldest_pending_seconds: i64,
 }
 
@@ -121,6 +123,7 @@ struct OpsMetricsRow {
     push_pending: i64,
     push_processing: i64,
     push_dead: i64,
+    push_suppressed: i64,
     push_oldest_pending_seconds: i64,
 }
 

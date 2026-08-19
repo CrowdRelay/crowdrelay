@@ -208,6 +208,37 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/push/preferences:
+    get:
+      operationId: getMyPushPreferences
+      summary: Read fan notification categories and quiet hours
+      security: [{ fanSession: [] }]
+      responses:
+        '200':
+          description: Current preferences; missing state uses backward-compatible defaults.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FanPushPreferences' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: updateMyPushPreferences
+      summary: Update fan notification categories and quiet hours
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FanPushPreferencesUpdate' }
+      responses:
+        '200':
+          description: Updated preferences.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FanPushPreferences' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /public/push/deliveries/{delivery_id}/ack:
     post:
       operationId: acknowledgePushDelivery
@@ -4148,6 +4179,58 @@ paths:
                 const: public, max-age=15, stale-while-revalidate=60
         '503':
           $ref: '#/components/responses/Problem'
+  /internal/merch/orders/confirmed:
+    post:
+      operationId: confirmMerchOrderFact
+      summary: Record a paid merch order only after its inventory reservation is committed
+      security: [{ commerceBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmedMerchOrderRequest' }
+      responses:
+        '204': { description: Order fact recorded or identical replay accepted. }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/events/{event_id}/commerce-summary:
+    get:
+      operationId: getAdminEventCommerceSummary
+      summary: Read exact confirmed merch revenue and pickup pack-list for an event
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Exact event-linked merch facts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventMerchSummary' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /staff/events/{event_id}/commerce-summary:
+    get:
+      operationId: getStaffEventCommerceSummary
+      summary: Read exact merch pickup pack-list for staff show preparation
+      security: [{ staffBearer: [] }]
+      parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Exact event-linked merch facts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventMerchSummary' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/merch/inventory/activation:
     get:
       operationId: getInternalMerchInventoryActivation
@@ -4859,6 +4942,27 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/audience/fans/{fan_id}/journey:
+    get:
+      operationId: getAdminAudienceFanJourney
+      summary: Read a bounded newest-first first-party fan journey
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Up to 200 first-party journey facts, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 200
+                items: { $ref: '#/components/schemas/FanJourneyEntry' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
   /admin/audience/fans/{fan_id}/tags:
     post:
       operationId: tagAdminAudienceFan
@@ -7014,6 +7118,35 @@ components:
         display_name: { type: [string, 'null'] }
         locale: { type: [string, 'null'] }
         primary_city: { type: [string, 'null'] }
+    FanHomeReferral:
+      type: object
+      additionalProperties: false
+      required: [qualified, pending]
+      properties:
+        qualified: { type: integer, format: int64, minimum: 0 }
+        pending: { type: integer, format: int64, minimum: 0 }
+    FanHomeCounts:
+      type: object
+      additionalProperties: false
+      required: [event_interests, active_passes, paid_orders, area_claims]
+      properties:
+        event_interests: { type: integer, format: int64, minimum: 0 }
+        active_passes: { type: integer, format: int64, minimum: 0 }
+        paid_orders: { type: integer, format: int64, minimum: 0 }
+        area_claims: { type: integer, format: int64, minimum: 0 }
+    FanRecommendedAction:
+      type: string
+      enum: [continue_synesthesia, open_wallet, open_live_event, share_post_show_feedback, get_ticket, follow_next_event, explore_signal]
+    FanRecommendedActionDetail:
+      type: object
+      additionalProperties: false
+      required: [kind, priority, target, expires_at, reason]
+      properties:
+        kind: { $ref: '#/components/schemas/FanRecommendedAction' }
+        priority: { type: integer, minimum: 0, maximum: 100 }
+        target: { type: string, maxLength: 256 }
+        expires_at: { type: [string, 'null'], format: date-time }
+        reason: { type: string, maxLength: 80 }
     FanHomeSnapshot:
       type: object
       additionalProperties: false
@@ -7027,11 +7160,13 @@ components:
             - { $ref: '#/components/schemas/FanHomeEvent' }
             - { type: 'null' }
         synesthesia: { $ref: '#/components/schemas/FanHomeSynesthesia' }
-        referral: { type: object, additionalProperties: true }
-        counts: { type: object, additionalProperties: true }
-        recommended_action:
-          type: string
-          enum: [continue_synesthesia, open_wallet, open_live_event, share_post_show_feedback, get_ticket, follow_next_event, explore_signal]
+        referral: { $ref: '#/components/schemas/FanHomeReferral' }
+        counts: { $ref: '#/components/schemas/FanHomeCounts' }
+        recommended_action: { $ref: '#/components/schemas/FanRecommendedAction' }
+        recommended:
+          oneOf:
+            - { $ref: '#/components/schemas/FanRecommendedActionDetail' }
+            - { type: 'null' }
     FanEventContext:
       type: object
       additionalProperties: false
@@ -7052,10 +7187,18 @@ components:
         paid_ticket_quantity: { type: integer, format: int64, minimum: 0 }
         ticket_sale_active: { type: boolean }
         recommended_action: { type: string, enum: [open_wallet, open_live_event, share_post_show_feedback, get_ticket, follow_event] }
+    ShowLifecycleView:
+      type: object
+      additionalProperties: false
+      required: [phase, next_milestone, next_milestone_at]
+      properties:
+        phase: { type: string, enum: [planning, amplify, convert, ready, live, afterglow, review, complete] }
+        next_milestone: { type: [string, 'null'] }
+        next_milestone_at: { type: [string, 'null'], format: date-time }
     StaffEventDashboard:
       type: object
       additionalProperties: false
-      required: [schema_version, slug, title, starts_at, interested_fans, paid_orders, paid_tickets, passes_issued, passes_claimed, passes_redeemed]
+      required: [schema_version, slug, title, starts_at, interested_fans, paid_orders, paid_tickets, passes_issued, passes_claimed, passes_redeemed, lifecycle]
       properties:
         schema_version: { type: integer, const: 1 }
         slug: { type: string }
@@ -7068,6 +7211,7 @@ components:
         passes_issued: { type: integer, format: int64, minimum: 0 }
         passes_claimed: { type: integer, format: int64, minimum: 0 }
         passes_redeemed: { type: integer, format: int64, minimum: 0 }
+        lifecycle: { $ref: '#/components/schemas/ShowLifecycleView' }
     SynesthesiaLeaderboardEntry:
       type: object
       additionalProperties: false
@@ -7955,6 +8099,78 @@ components:
         active_executor_count: { type: integer, format: int64, minimum: 0 }
         guarded_executor_count: { type: integer, format: int64, minimum: 0 }
         active_executor_manifest_shas: { type: array, maxItems: 64, items: { type: string } }
+    FanPushPreferences:
+      type: object
+      additionalProperties: false
+      required: [shows, releases, community, merch, quiet_hours_enabled, quiet_start, quiet_end, quiet_timezone]
+      properties:
+        shows: { type: boolean }
+        releases: { type: boolean }
+        community: { type: boolean }
+        merch: { type: boolean }
+        quiet_hours_enabled: { type: boolean }
+        quiet_start: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]$' }
+        quiet_end: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]$' }
+        quiet_timezone: { type: string, enum: [Europe/Warsaw] }
+    FanPushPreferencesUpdate:
+      type: object
+      additionalProperties: false
+      required: [shows, releases, community, merch, quiet_hours_enabled, quiet_start, quiet_end]
+      properties:
+        shows: { type: boolean }
+        releases: { type: boolean }
+        community: { type: boolean }
+        merch: { type: boolean }
+        quiet_hours_enabled: { type: boolean }
+        quiet_start: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]$' }
+        quiet_end: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]$' }
+    ConfirmedMerchOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [stripe_session_id, inventory_reservation_id, fulfillment_mode, currency, amount_gross_minor, goods_gross_minor, shipping_gross_minor, confirmed_at]
+      properties:
+        stripe_session_id: { type: string, minLength: 1, maxLength: 255 }
+        inventory_reservation_id: { type: string, format: uuid }
+        buyer_email: { type: [string, 'null'], format: email, maxLength: 320 }
+        event_id: { type: [string, 'null'], format: uuid }
+        fulfillment_mode: { type: string, enum: [inpost, event_pickup, none] }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        amount_gross_minor: { type: integer, format: int64, minimum: 0 }
+        goods_gross_minor: { type: integer, format: int64, minimum: 0 }
+        shipping_gross_minor: { type: integer, format: int64, minimum: 0 }
+        confirmed_at: { type: string, format: date-time }
+    EventMerchPickupItem:
+      type: object
+      additionalProperties: false
+      required: [product_name, variant_label, sku, quantity]
+      properties:
+        product_name: { type: string }
+        variant_label: { type: string }
+        sku: { type: string }
+        quantity: { type: integer, format: int64, minimum: 0 }
+    EventMerchSummary:
+      type: object
+      additionalProperties: false
+      required: [event_id, order_count, pickup_order_count, pickup_unit_count, gross_minor, goods_minor, shipping_minor, currency, pickup_items]
+      properties:
+        event_id: { type: string, format: uuid }
+        order_count: { type: integer, format: int64, minimum: 0 }
+        pickup_order_count: { type: integer, format: int64, minimum: 0 }
+        pickup_unit_count: { type: integer, format: int64, minimum: 0 }
+        gross_minor: { type: integer, format: int64, minimum: 0 }
+        goods_minor: { type: integer, format: int64, minimum: 0 }
+        shipping_minor: { type: integer, format: int64, minimum: 0 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        pickup_items: { type: array, maxItems: 1000, items: { $ref: '#/components/schemas/EventMerchPickupItem' } }
+    FanJourneyEntry:
+      type: object
+      additionalProperties: false
+      required: [kind, occurred_at, title, detail]
+      properties:
+        kind: { type: string, maxLength: 64 }
+        occurred_at: { type: string, format: date-time }
+        title: { type: string, maxLength: 240 }
+        detail: { type: object, additionalProperties: true, maxProperties: 32 }
     RumMetricSummary:
       type: object
       additionalProperties: false

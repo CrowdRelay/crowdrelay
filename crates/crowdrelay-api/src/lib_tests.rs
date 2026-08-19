@@ -457,7 +457,11 @@ mod tests {
             response.headers()[CONTENT_TYPE],
             "text/plain; version=0.0.4; charset=utf-8"
         );
-        let body = to_bytes(response.into_body(), 16 * 1024).await?;
+        // `http_metrics()` is a process-wide singleton, so every test in this
+        // binary adds route series to the same registry and /metrics grows with
+        // the suite. This is only a harness read cap; the real cardinality bound
+        // is MAX_ROUTE_SERIES, asserted in the runtime performance contract.
+        let body = to_bytes(response.into_body(), 1024 * 1024).await?;
         let body = std::str::from_utf8(&body)?;
         assert!(body.contains("crowdrelay_click_events_dropped_total 0"));
         assert!(body.contains("crowdrelay_click_events_persistence_failed_total 0"));

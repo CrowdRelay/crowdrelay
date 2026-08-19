@@ -506,7 +506,11 @@ pub async fn rum(
         ),
         "virya_signal" => matches!(
             request.metric_key.as_str(),
-            "cold_start_ms" | "api_latency_ms" | "screen_transition_ms"
+            "cold_start_ms"
+                | "api_latency_ms"
+                | "screen_transition_ms"
+                | "cached_content_ready_ms"
+                | "network_content_ready_ms"
         ),
         _ => false,
     };

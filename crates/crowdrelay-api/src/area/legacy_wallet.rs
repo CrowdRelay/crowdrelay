@@ -24,7 +24,12 @@ pub async fn internal_import_legacy_wallet(
     if !state.ticketing.commerce_authorized(&headers) {
         return error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized.");
     }
-    crate::http_metrics().record_legacy_area_wallet_import();
+    match crate::ecosystem::feature_enabled(&state, "area_legacy_imports_enabled").await {
+        Ok(true) => {}
+        Ok(false) => return error_response(StatusCode::GONE, "AREA_LEGACY_IMPORTS_DISABLED", "Legacy AREA imports are disabled."),
+        Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "AREA_LEGACY_IMPORT_GATE_UNAVAILABLE", "Legacy AREA import gate is unavailable."),
+    }
+    crate::http_metrics().record_legacy_area_wallet_import_attempt();
     if !valid_idempotency_key(&headers) {
         return error_response(StatusCode::BAD_REQUEST, "INVALID_REQUEST", "A valid Idempotency-Key is required.");
     }
@@ -325,6 +330,7 @@ pub async fn internal_import_legacy_wallet(
         tracing::error!(%error, "AREA legacy wallet commit failed");
         return temporary();
     }
+    crate::http_metrics().record_legacy_area_wallet_import();
     match wallet_for_player(&state, player_id).await {
         Ok(wallet) => (StatusCode::OK, [(CACHE_CONTROL, PRIVATE_NO_STORE)], Json(wallet)).into_response(),
         Err(error) => {

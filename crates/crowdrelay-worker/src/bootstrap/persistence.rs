@@ -28,6 +28,11 @@ async fn bootstrap_inner(
 
     ensure_autopilot_policies(&mut transaction, workspace_id).await?;
 
+    for smart_link in &spec.smart_links {
+        let changed = upsert_smart_link(&mut transaction, workspace_id, None, smart_link).await?;
+        changes.smart_links = changes.smart_links.saturating_add(u64::from(changed));
+    }
+
     for city in &spec.cities {
         let (city_id, city_changed) = upsert_city(&mut transaction, city).await?;
         changes.cities = changes.cities.saturating_add(u64::from(city_changed));
@@ -46,7 +51,7 @@ async fn bootstrap_inner(
             .saturating_add(u64::from(campaign_changed));
         for smart_link in &campaign.smart_links {
             let changed =
-                upsert_smart_link(&mut transaction, workspace_id, campaign_id, smart_link).await?;
+                upsert_smart_link(&mut transaction, workspace_id, Some(campaign_id), smart_link).await?;
             changes.smart_links = changes.smart_links.saturating_add(u64::from(changed));
         }
     }
@@ -326,7 +331,7 @@ async fn upsert_campaign(
 async fn upsert_smart_link(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
-    campaign_id: Uuid,
+    campaign_id: Option<Uuid>,
     smart_link: &SmartLinkSpec,
 ) -> Result<bool, BootstrapError> {
     let changed = sqlx::query_scalar::<_, Uuid>(

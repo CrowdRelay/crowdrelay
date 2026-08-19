@@ -53,6 +53,7 @@ pub struct BootstrapSpec {
     workspace_name: String,
     cities: Vec<CitySpec>,
     campaigns: Vec<CampaignSpec>,
+    smart_links: Vec<SmartLinkSpec>,
     webhook_endpoints: Vec<WebhookEndpointSpec>,
     event_sources: Vec<EventSourceSpec>,
     reward_rules: Vec<RewardRuleSpec>,
@@ -124,7 +125,28 @@ impl BootstrapSpec {
 
         let mut campaign_names = HashSet::with_capacity(raw.campaigns.len());
         let mut smart_link_slugs = HashSet::new();
-        let mut smart_link_count = 0_usize;
+        ensure_count("smart_links", raw.smart_links.len(), MAX_SMART_LINKS)?;
+        let mut smart_link_count = raw.smart_links.len();
+        let mut smart_links = Vec::with_capacity(raw.smart_links.len());
+        for raw_link in raw.smart_links {
+            let slug = SmartLinkSlug::parse(&raw_link.slug)
+                .map_err(|_| invalid_field("smart_links[].slug"))?;
+            if !smart_link_slugs.insert(slug.clone()) {
+                return Err(duplicate("smart-link slug"));
+            }
+            let destination_url = DestinationUrl::parse(&raw_link.destination_url)
+                .map_err(|_| invalid_field("smart_links[].destination_url"))?;
+            ensure_environment_url(
+                &destination_url,
+                production,
+                "smart_links[].destination_url",
+            )?;
+            smart_links.push(SmartLinkSpec {
+                slug,
+                destination_url,
+                active: raw_link.active,
+            });
+        }
         let mut campaigns = Vec::with_capacity(raw.campaigns.len());
         for raw_campaign in raw.campaigns {
             ensure_count(
@@ -558,6 +580,7 @@ impl BootstrapSpec {
             workspace_name,
             cities,
             campaigns,
+            smart_links,
             webhook_endpoints,
             event_sources,
             reward_rules,
@@ -577,11 +600,12 @@ impl fmt::Debug for BootstrapSpec {
             .field("campaign_count", &self.campaigns.len())
             .field(
                 "smart_link_count",
-                &self
-                    .campaigns
-                    .iter()
-                    .map(|campaign| campaign.smart_links.len())
-                    .sum::<usize>(),
+                &(self.smart_links.len()
+                    + self
+                        .campaigns
+                        .iter()
+                        .map(|campaign| campaign.smart_links.len())
+                        .sum::<usize>()),
             )
             .field("webhook_endpoint_count", &self.webhook_endpoints.len())
             .field("event_source_count", &self.event_sources.len())

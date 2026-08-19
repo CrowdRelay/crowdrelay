@@ -176,7 +176,8 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
                 count(*) FILTER (WHERE status IN ('queued','retry_wait'))::bigint AS pending,
                 count(*) FILTER (WHERE status IN ('claimed','provider_started','provider_accepted'))::bigint AS processing,
                 count(*) FILTER (WHERE status = 'delivered' AND delivered_at >= now() - interval '24 hours')::bigint AS delivered_24h,
-                count(*) FILTER (WHERE status IN ('failed','ambiguous'))::bigint AS dead,
+                count(*) FILTER (WHERE status IN ('failed','ambiguous') AND error_code IS DISTINCT FROM 'preference_disabled')::bigint AS dead,
+                count(*) FILTER (WHERE status = 'failed' AND error_code = 'preference_disabled')::bigint AS suppressed,
                 COALESCE(EXTRACT(EPOCH FROM (now() - min(available_at) FILTER (
                     WHERE status IN ('queued','retry_wait') AND available_at <= now()
                 )))::bigint, 0) AS oldest_pending_seconds
@@ -199,6 +200,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             push.processing AS push_processing,
             push.delivered_24h AS push_delivered_24h,
             push.dead AS push_dead,
+            push.suppressed AS push_suppressed,
             push.oldest_pending_seconds AS push_oldest_pending_seconds
         FROM outbox CROSS JOIN deliveries CROSS JOIN push
         "#,
@@ -276,7 +278,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             processing: row.push_processing,
             delivered_24h: row.push_delivered_24h,
             dead: row.push_dead,
-            cancelled: 0,
+            cancelled: row.push_suppressed,
             oldest_pending_seconds: row.push_oldest_pending_seconds,
         },
         watchdog,
@@ -369,7 +371,8 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             SELECT
                 count(*) FILTER (WHERE status IN ('queued','retry_wait'))::bigint AS pending,
                 count(*) FILTER (WHERE status IN ('claimed','provider_started','provider_accepted'))::bigint AS processing,
-                count(*) FILTER (WHERE status IN ('failed','ambiguous'))::bigint AS dead,
+                count(*) FILTER (WHERE status IN ('failed','ambiguous') AND error_code IS DISTINCT FROM 'preference_disabled')::bigint AS dead,
+                count(*) FILTER (WHERE status = 'failed' AND error_code = 'preference_disabled')::bigint AS suppressed,
                 COALESCE(EXTRACT(EPOCH FROM (now() - min(available_at) FILTER (
                     WHERE status IN ('queued','retry_wait') AND available_at <= now()
                 )))::bigint, 0) AS oldest_pending_seconds
@@ -389,6 +392,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             push.pending AS push_pending,
             push.processing AS push_processing,
             push.dead AS push_dead,
+            push.suppressed AS push_suppressed,
             push.oldest_pending_seconds AS push_oldest_pending_seconds
         FROM outbox CROSS JOIN deliveries CROSS JOIN push
         "#,
@@ -411,6 +415,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         push_pending: row.push_pending,
         push_processing: row.push_processing,
         push_dead: row.push_dead,
+        push_suppressed: row.push_suppressed,
         push_oldest_pending_seconds: row.push_oldest_pending_seconds,
     })
 }

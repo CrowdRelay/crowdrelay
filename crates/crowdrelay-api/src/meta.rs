@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 const API_VERSION: &str = "1";
-pub(crate) const SCHEMA_VERSION: u32 = 68;
+pub(crate) const SCHEMA_VERSION: u32 = 70;
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
 
 pub(crate) fn git_sha() -> Option<&'static str> {
@@ -56,6 +56,10 @@ pub async fn get() -> impl IntoResponse {
         ("viryaos_show_growth_v1", true),
         ("communication_delivery_ledger_v1", true),
         ("fan_push_delivery_v1", true),
+        ("fan_push_preferences_v1", true),
+        ("fan_journey_v1", true),
+        ("merch_event_attribution_v1", true),
+        ("staff_show_pack_v1", true),
         ("fan_account_deletion_v1", true),
         ("staff_show_checklist_push_v1", true),
     ]);
@@ -83,6 +87,6 @@ mod tests {
 
     #[test]
     fn compatibility_contract_tracks_latest_migration() {
-        assert_eq!(SCHEMA_VERSION, 68);
+        assert_eq!(SCHEMA_VERSION, 70);
     }
 }

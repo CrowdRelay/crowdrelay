@@ -337,3 +337,12 @@ pub struct RevenueRow {
     refunded_minor: i64,
     after_refunds_minor: i64,
 }
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct FanJourneyEntry {
+    kind: String,
+    #[serde(with = "time::serde::rfc3339")]
+    occurred_at: OffsetDateTime,
+    title: String,
+    detail: Value,
+}

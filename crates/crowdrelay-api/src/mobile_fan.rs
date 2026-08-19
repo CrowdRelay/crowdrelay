@@ -422,7 +422,7 @@ pub async fn emit_due_nearby_gigs(
         ),
         push_queued AS (
             INSERT INTO fan_push_deliveries (
-                workspace_id, fan_id, endpoint_id, source_kind, source_id,
+                workspace_id, fan_id, endpoint_id, source_kind, source_id, category,
                 title, body, target_path, collapse_key
             )
             SELECT
@@ -431,6 +431,7 @@ pub async fn emit_due_nearby_gigs(
                 endpoint.id,
                 'nearby_concert',
                 candidates.event_id,
+                'shows',
                 CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
                     THEN 'VIRYA blisko Ciebie'
                     ELSE 'VIRYA near you'

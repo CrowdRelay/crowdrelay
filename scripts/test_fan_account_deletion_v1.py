@@ -50,9 +50,9 @@ class FanAccountDeletionContract(unittest.TestCase):
 
     def test_capability_and_schema_are_release_gated(self):
         latest = max(int(p.name[:4]) for p in (ROOT / 'migrations').glob('[0-9][0-9][0-9][0-9]_*.sql'))
-        self.assertEqual(latest, 68)
+        self.assertEqual(latest, 70)
         meta = (ROOT / 'crates/crowdrelay-api/src/meta.rs').read_text()
-        self.assertIn('SCHEMA_VERSION: u32 = 68', meta)
+        self.assertIn('SCHEMA_VERSION: u32 = 70', meta)
         self.assertIn('"fan_account_deletion_v1"', meta)
         compatibility = json.loads((ROOT / 'integration/ecosystem/compatibility.json').read_text())
         self.assertEqual(compatibility['minimumSchemaVersion'], 68)

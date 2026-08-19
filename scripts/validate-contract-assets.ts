@@ -96,6 +96,7 @@ interface BootstrapPool {
 interface BootstrapDocument {
   readonly cities?: unknown;
   readonly campaigns?: unknown;
+  readonly smart_links?: unknown;
   readonly events?: unknown;
   readonly admission_pools?: unknown;
 }
@@ -409,6 +410,11 @@ function validateBootstrap(): void {
   });
 
   const smartLinkSlugs: string[] = [];
+  const workspaceLinks = requireArray<BootstrapSmartLink>(bootstrap.smart_links ?? [], "smart_links");
+  workspaceLinks.forEach((link, linkIndex) => {
+    smartLinkSlugs.push(requireNonEmptyString(link.slug, `smart_links[${linkIndex}].slug`));
+    validateOptionalUrl(link.destination_url, `smart_links[${linkIndex}].destination_url`);
+  });
   campaigns.forEach((campaign, campaignIndex) => {
     const links = requireArray<BootstrapSmartLink>(campaign.smart_links, `campaigns[${campaignIndex}].smart_links`);
     links.forEach((link, linkIndex) => {

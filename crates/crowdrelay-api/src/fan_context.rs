@@ -85,6 +85,16 @@ pub struct FanHomeProfile {
 }
 
 #[derive(Debug, Serialize)]
+pub struct FanRecommendedActionDetail {
+    kind: &'static str,
+    priority: u8,
+    target: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    expires_at: Option<OffsetDateTime>,
+    reason: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FanHomeResponse {
     schema_version: u32,
     #[serde(with = "time::serde::rfc3339")]
@@ -95,6 +105,101 @@ pub struct FanHomeResponse {
     referral: FanHomeReferral,
     counts: FanHomeCounts,
     recommended_action: &'static str,
+    recommended: FanRecommendedActionDetail,
+}
+
+fn recommended_action_detail(
+    next_event: Option<&FanHomeEvent>,
+    _synesthesia_completed: bool,
+    now: OffsetDateTime,
+) -> FanRecommendedActionDetail {
+    let action = |kind, priority, target: String, expires_at, reason| FanRecommendedActionDetail {
+        kind,
+        priority,
+        target,
+        expires_at,
+        reason,
+    };
+    if let Some(event) = next_event {
+        let event_target = format!("/live/{}", event.slug);
+        if event.phase == "live" && (event.has_pass || event.has_paid_ticket) {
+            return action(
+                "open_wallet",
+                100,
+                "/wallet".into(),
+                event.ends_at,
+                "live_admission_ready",
+            );
+        }
+        if event.phase == "live" {
+            return action(
+                "open_live_event",
+                95,
+                event_target,
+                event.ends_at,
+                "show_live_now",
+            );
+        }
+        if event.phase == "afterglow" {
+            return action(
+                "share_post_show_feedback",
+                80,
+                format!("/profile?event={}", event.slug),
+                Some(now + time::Duration::hours(48)),
+                "post_show_afterglow",
+            );
+        }
+        let admission_ready = event.has_pass || event.has_paid_ticket;
+        if admission_ready
+            && event.starts_at > now
+            && event.starts_at - now <= time::Duration::hours(48)
+        {
+            return action(
+                "open_wallet",
+                90,
+                "/wallet".into(),
+                Some(event.starts_at),
+                "admission_soon",
+            );
+        }
+        if event.ticket_sale_active && !admission_ready {
+            return action(
+                "get_ticket",
+                75,
+                event_target,
+                Some(event.starts_at),
+                "ticket_sale_active",
+            );
+        }
+        if !event.interested {
+            return action(
+                "follow_next_event",
+                60,
+                event_target,
+                Some(event.starts_at),
+                "next_show_not_followed",
+            );
+        }
+        if admission_ready {
+            return action(
+                "open_live_event",
+                50,
+                event_target,
+                Some(event.starts_at),
+                "admission_ready",
+            );
+        }
+    }
+    // Synesthesia remains an optional album experiment, not a primary fan
+    // journey. Keep its progress in Fan Home, but never promote an unfinished
+    // run above the core Signal experience as the next-best action.
+    action(
+        "explore_signal",
+        10,
+        "/signal".into(),
+        None,
+        "default_explore",
+    )
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -133,6 +238,13 @@ pub struct StaffEventDashboard {
     passes_issued: i64,
     passes_claimed: i64,
     passes_redeemed: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct StaffEventDashboardResponse {
+    #[serde(flatten)]
+    dashboard: StaffEventDashboard,
+    lifecycle: crowdrelay_domain::show_growth::ShowLifecycleView,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -448,25 +560,17 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
         paid_orders: counts.2,
         area_claims: counts.3,
     };
-    let recommended_action = match next_event.as_ref() {
-        Some(event) if event.phase == "live" && (event.has_pass || event.has_paid_ticket) => {
-            "open_wallet"
-        }
-        Some(event) if event.phase == "live" => "open_live_event",
-        Some(event) if event.phase == "afterglow" => "share_post_show_feedback",
-        Some(event) if event.has_pass || event.has_paid_ticket => "open_wallet",
-        Some(event) if event.ticket_sale_active => "get_ticket",
-        Some(event) if !event.interested => "follow_next_event",
-        _ if !synesthesia.completed => "continue_synesthesia",
-        _ => "explore_signal",
-    };
+    let generated_at = OffsetDateTime::now_utc();
+    let recommended =
+        recommended_action_detail(next_event.as_ref(), synesthesia.completed, generated_at);
+    let recommended_action = recommended.kind;
 
     (
         StatusCode::OK,
         [(CACHE_CONTROL, PRIVATE_REVALIDATE)],
         Json(FanHomeResponse {
             schema_version: SCHEMA_VERSION,
-            generated_at: OffsetDateTime::now_utc(),
+            generated_at,
             profile: FanHomeProfile {
                 display_name: fan.display_name,
                 locale: fan.locale,
@@ -477,6 +581,7 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
             referral,
             counts,
             recommended_action,
+            recommended,
         }),
     )
         .into_response()
@@ -626,12 +731,22 @@ pub async fn staff_event_dashboard(
     .await;
 
     match dashboard {
-        Ok(Some(dashboard)) => (
-            StatusCode::OK,
-            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(dashboard),
-        )
-            .into_response(),
+        Ok(Some(dashboard)) => {
+            let lifecycle = crowdrelay_domain::show_growth::show_lifecycle(
+                dashboard.starts_at,
+                OffsetDateTime::now_utc(),
+                crowdrelay_domain::show_growth::ShowGrowthPolicy::default(),
+            );
+            (
+                StatusCode::OK,
+                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+                Json(StaffEventDashboardResponse {
+                    dashboard,
+                    lifecycle,
+                }),
+            )
+                .into_response()
+        }
         Ok(None) => ContextError::NotFound.response(request_id_value),
         Err(error) => ContextError::sqlx(error).response(request_id_value),
     }

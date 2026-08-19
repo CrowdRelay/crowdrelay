@@ -783,11 +783,12 @@ pub async fn enqueue_push_campaign(
             RETURNING fan_id, status
         ), queued AS (
             INSERT INTO fan_push_deliveries (
-                workspace_id, fan_id, endpoint_id, source_kind, source_id,
+                workspace_id, fan_id, endpoint_id, source_kind, source_id, category,
                 title, body, target_path, collapse_key
             )
             SELECT $1, recipient.fan_id, endpoint.id,
                    'communication_campaign', $2,
+                   CASE WHEN $3 LIKE 'release.%' THEN 'releases' WHEN $3 LIKE 'event.%' THEN 'shows' ELSE 'community' END,
                    CASE
                      WHEN lower(COALESCE(recipient.locale, 'pl')) LIKE 'pl%' THEN
                        CASE $3

@@ -760,3 +760,148 @@ mod tests {
         assert!(!valid_installation_id("bad id with spaces"));
     }
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FanPushPreferencesResponse {
+    shows: bool,
+    releases: bool,
+    community: bool,
+    merch: bool,
+    quiet_hours_enabled: bool,
+    quiet_start: String,
+    quiet_end: String,
+    quiet_timezone: &'static str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateFanPushPreferencesRequest {
+    shows: bool,
+    releases: bool,
+    community: bool,
+    merch: bool,
+    quiet_hours_enabled: bool,
+    quiet_start: String,
+    quiet_end: String,
+}
+
+fn minute_of_day(value: &str) -> Option<i16> {
+    let (hours, minutes) = value.split_once(':')?;
+    if hours.len() != 2 || minutes.len() != 2 {
+        return None;
+    }
+    let hours = hours.parse::<i16>().ok()?;
+    let minutes = minutes.parse::<i16>().ok()?;
+    if !(0..24).contains(&hours) || !(0..60).contains(&minutes) {
+        return None;
+    }
+    Some(hours * 60 + minutes)
+}
+
+fn minute_text(value: i16) -> String {
+    format!("{:02}:{:02}", value / 60, value % 60)
+}
+
+pub async fn fan_preferences(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let request_id_value = request_id(&headers);
+    let fan_id = match current_fan_id(&state, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error.response(request_id_value),
+    };
+    let row = sqlx::query_as::<_, (bool, bool, bool, bool, bool, i16, i16)>(
+        r#"
+        SELECT shows_enabled, releases_enabled, community_enabled, merch_enabled,
+               quiet_hours_enabled, quiet_start_minute, quiet_end_minute
+        FROM fan_push_preferences
+        WHERE workspace_id = $1 AND fan_id = $2
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(fan_id)
+    .fetch_optional(&state.database)
+    .await;
+    match row {
+        Ok(row) => {
+            let (shows, releases, community, merch, quiet, start, end) =
+                row.unwrap_or((true, true, true, true, false, 1320, 480));
+            (
+                StatusCode::OK,
+                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+                Json(FanPushPreferencesResponse {
+                    shows,
+                    releases,
+                    community,
+                    merch,
+                    quiet_hours_enabled: quiet,
+                    quiet_start: minute_text(start),
+                    quiet_end: minute_text(end),
+                    quiet_timezone: "Europe/Warsaw",
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(%error, %fan_id, "could not read fan push preferences");
+            PushError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
+pub async fn update_fan_preferences(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateFanPushPreferencesRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => return PushError::BadRequest.response(request_id_value),
+    };
+    let fan_id = match current_fan_id(&state, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error.response(request_id_value),
+    };
+    let Some(start) = minute_of_day(&payload.quiet_start) else {
+        return PushError::BadRequest.response(request_id_value);
+    };
+    let Some(end) = minute_of_day(&payload.quiet_end) else {
+        return PushError::BadRequest.response(request_id_value);
+    };
+    let value = crowdrelay_infra::push_preferences::FanPushPreferencesUpdate {
+        shows_enabled: payload.shows,
+        releases_enabled: payload.releases,
+        community_enabled: payload.community,
+        merch_enabled: payload.merch,
+        quiet_hours_enabled: payload.quiet_hours_enabled,
+        quiet_start_minute: start,
+        quiet_end_minute: end,
+    };
+    match crowdrelay_infra::push_preferences::upsert_fan_push_preferences(
+        &state.database,
+        state.ticketing.workspace_id().into_uuid(),
+        fan_id,
+        value,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(FanPushPreferencesResponse {
+                shows: payload.shows,
+                releases: payload.releases,
+                community: payload.community,
+                merch: payload.merch,
+                quiet_hours_enabled: payload.quiet_hours_enabled,
+                quiet_start: minute_text(start),
+                quiet_end: minute_text(end),
+                quiet_timezone: "Europe/Warsaw",
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %fan_id, "could not update fan push preferences");
+            PushError::Unavailable.response(request_id_value)
+        }
+    }
+}

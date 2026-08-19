@@ -208,7 +208,14 @@ class RuntimePerformanceContract(unittest.TestCase):
         api = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text() + (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text())
         for bucket in ("le_50_ms", "le_100_ms", "le_250_ms", "le_500_ms", "le_1000_ms", "le_2500_ms", "le_5000_ms"):
             self.assertIn(bucket, metrics)
-        self.assertNotIn("HashMap", metrics)
+        # Route-template series are keyed in a map now, so "no HashMap" no longer
+        # expresses the rule. What must hold is that cardinality stays bounded:
+        # a hard series cap, enforced before insert, with overflow counted rather
+        # than silently growing the label space.
+        self.assertIn("MAX_ROUTE_SERIES", metrics)
+        self.assertIn("series.len() >= MAX_ROUTE_SERIES", metrics)
+        self.assertIn("route_series_dropped", metrics)
+        self.assertIn("crowdrelay_http_route_series_dropped_total", metrics)
         self.assertNotIn("path:", metrics)
         self.assertIn("server-timing", api)
         self.assertIn("x-crowdrelay-release", api)

@@ -70,7 +70,7 @@ fn email_masking_never_exposes_the_local_part() {
 
 #[test]
 fn all_expected_feature_flags_have_safe_defaults() {
-    assert_eq!(FLAG_KEYS.len(), 15);
+    assert_eq!(FLAG_KEYS.len(), 16);
     assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
     assert_eq!(flag_default("unknown"), None);
 }

@@ -4,6 +4,8 @@ struct RawBootstrapSpec {
     workspace_name: String,
     cities: Vec<RawCitySpec>,
     campaigns: Vec<RawCampaignSpec>,
+    #[serde(default)]
+    smart_links: Vec<RawSmartLinkSpec>,
     webhook_endpoints: Vec<RawWebhookEndpointSpec>,
     #[serde(default)]
     event_sources: Vec<RawEventSourceSpec>,

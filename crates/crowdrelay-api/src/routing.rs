@@ -82,6 +82,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             delete(fan_privacy::unpublish_synesthesia_leaderboard),
         )
         .route("/v1/public/push/config", get(push::config))
+        .route(
+            "/v1/me/push/preferences",
+            get(push::fan_preferences).post(push::update_fan_preferences),
+        )
         .route("/v1/me/push/endpoints", post(push::register_endpoint))
         .route(
             "/v1/me/push/endpoints/disable",
@@ -227,6 +231,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/internal/merch/reservations/{reservation_id}/release",
             post(commerce::release_inventory),
+        )
+        .route(
+            "/v1/internal/merch/orders/confirmed",
+            post(commerce::confirm_merch_order),
+        )
+        .route(
+            "/v1/admin/events/{event_id}/commerce-summary",
+            get(commerce::event_merch_summary),
+        )
+        .route(
+            "/v1/staff/events/{event_id}/commerce-summary",
+            get(commerce::event_merch_summary),
         )
         .route(
             "/v1/admin/merch/catalog",
@@ -452,6 +468,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/audience/fans/{fan_id}",
             get(audience::fan_detail),
+        )
+        .route(
+            "/v1/admin/audience/fans/{fan_id}/journey",
+            get(audience::fan_journey),
         )
         .route(
             "/v1/admin/audience/fans/{fan_id}/tags",

@@ -267,7 +267,7 @@ async fn emit_due_inner(
         ), inserted_push AS (
             INSERT INTO fan_push_deliveries (
                 workspace_id, fan_id, audience_kind, endpoint_id,
-                source_kind, source_id, title, body, target_path,
+                source_kind, source_id, category, title, body, target_path,
                 collapse_key, status, available_at
             )
             SELECT inserted.workspace_id,
@@ -276,6 +276,7 @@ async fn emit_due_inner(
                    endpoint.id,
                    'show_checklist',
                    inserted.id,
+                   'staff',
                    CASE inserted.payload ->> 'checklist'
                        WHEN 'week' THEN 'VIRYA · koncert za 7 dni'
                        WHEN 'two_days' THEN 'VIRYA · koncert za 2 dni'

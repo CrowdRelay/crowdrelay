@@ -27,7 +27,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, MatchedPath, State},
     http::{
         HeaderMap, HeaderValue, Method, Request, StatusCode,
         header::{
@@ -309,9 +309,16 @@ async fn enforce_privileged_namespace(
 
 async fn measure_request(request: Request<Body>, next: Next) -> Response {
     let started = Instant::now();
+    let method = request.method().as_str().to_owned();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_owned())
+        .unwrap_or_else(|| "<unmatched>".to_owned());
     let mut response = next.run(request).await;
     let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     http_metrics().record(elapsed_micros, response.status().as_u16());
+    http_metrics().record_route(&method, &route, elapsed_micros, response.status().as_u16());
     let elapsed_ms = elapsed_micros as f64 / 1_000.0;
     if let Ok(value) = HeaderValue::from_str(&format!("app;dur={elapsed_ms:.2}")) {
         response.headers_mut().insert(SERVER_TIMING.clone(), value);
@@ -405,7 +412,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
     let snapshot = state.acquisition.click_metrics_snapshot();
     let event_snapshot = state.events.metrics_snapshot();
     let ops_snapshot = state.ops.metrics_snapshot().await.unwrap_or_default();
-    let body = format!(
+    let mut body = format!(
         concat!(
             "# HELP crowdrelay_http_requests_total HTTP requests completed by the API.\n",
             "# TYPE crowdrelay_http_requests_total counter\n",
@@ -453,10 +460,16 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_event_actions_persistence_failed_total Event conversion actions lost after bounded persistence failure.\n",
             "# TYPE crowdrelay_event_actions_persistence_failed_total counter\n",
             "crowdrelay_event_actions_persistence_failed_total {}\n",
-            "# HELP crowdrelay_legacy_area_claim_import_total Authorized calls to the pre-PostgreSQL AREA claim import compatibility path.\n",
+            "# HELP crowdrelay_legacy_area_claim_import_attempt_total Authorized calls reaching the enabled pre-PostgreSQL AREA claim import bridge.\n",
+            "# TYPE crowdrelay_legacy_area_claim_import_attempt_total counter\n",
+            "crowdrelay_legacy_area_claim_import_attempt_total {}\n",
+            "# HELP crowdrelay_legacy_area_wallet_import_attempt_total Authorized calls reaching the enabled pre-PostgreSQL AREA wallet import bridge.\n",
+            "# TYPE crowdrelay_legacy_area_wallet_import_attempt_total counter\n",
+            "crowdrelay_legacy_area_wallet_import_attempt_total {}\n",
+            "# HELP crowdrelay_legacy_area_claim_import_total Newly applied pre-PostgreSQL AREA legacy claims; idempotent replays do not increment it.\n",
             "# TYPE crowdrelay_legacy_area_claim_import_total counter\n",
             "crowdrelay_legacy_area_claim_import_total {}\n",
-            "# HELP crowdrelay_legacy_area_wallet_import_total Authorized calls to the pre-PostgreSQL AREA wallet import compatibility path.\n",
+            "# HELP crowdrelay_legacy_area_wallet_import_total Newly applied pre-PostgreSQL AREA wallet migrations; idempotent replays do not increment it.\n",
             "# TYPE crowdrelay_legacy_area_wallet_import_total counter\n",
             "crowdrelay_legacy_area_wallet_import_total {}\n",
             "# HELP crowdrelay_legacy_static_staff_auth_total Requests authenticated with the deprecated global staff bearer instead of a device session.\n",
@@ -495,9 +508,12 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_push_delivery_processing Current in-flight or acknowledgement-wait push deliveries.\n",
             "# TYPE crowdrelay_push_delivery_processing gauge\n",
             "crowdrelay_push_delivery_processing {}\n",
-            "# HELP crowdrelay_push_delivery_dead Current failed or ambiguous push deliveries.\n",
+            "# HELP crowdrelay_push_delivery_dead Current real failed or ambiguous push deliveries, excluding intentional preference suppression.\n",
             "# TYPE crowdrelay_push_delivery_dead gauge\n",
             "crowdrelay_push_delivery_dead {}\n",
+            "# HELP crowdrelay_push_delivery_suppressed Current fan push deliveries intentionally suppressed by category preference.\n",
+            "# TYPE crowdrelay_push_delivery_suppressed gauge\n",
+            "crowdrelay_push_delivery_suppressed {}\n",
             "# HELP crowdrelay_push_delivery_oldest_pending_seconds Age of the oldest ready push delivery.\n",
             "# TYPE crowdrelay_push_delivery_oldest_pending_seconds gauge\n",
             "crowdrelay_push_delivery_oldest_pending_seconds {}\n",
@@ -523,6 +539,8 @@ async fn metrics(State(state): State<AppState>) -> Response {
         event_snapshot.persisted,
         event_snapshot.dropped,
         event_snapshot.persistence_failed,
+        http_snapshot.legacy_area_claim_import_attempts,
+        http_snapshot.legacy_area_wallet_import_attempts,
         http_snapshot.legacy_area_claim_imports,
         http_snapshot.legacy_area_wallet_imports,
         http_snapshot.legacy_static_staff_auth,
@@ -538,8 +556,33 @@ async fn metrics(State(state): State<AppState>) -> Response {
         ops_snapshot.push_pending,
         ops_snapshot.push_processing,
         ops_snapshot.push_dead,
+        ops_snapshot.push_suppressed,
         ops_snapshot.push_oldest_pending_seconds,
     );
+
+    body.push_str(&http_metrics().route_prometheus());
+    let pool = state.ticketing.pool();
+    let pool_size = pool.size();
+    let pool_idle = u32::try_from(pool.num_idle()).unwrap_or(u32::MAX);
+    let pool_in_use = pool_size.saturating_sub(pool_idle);
+    let pool_max = pool.options().get_max_connections();
+    let utilization = if pool_max == 0 {
+        0.0
+    } else {
+        f64::from(pool_in_use) / f64::from(pool_max)
+    };
+    body.push_str(&format!(concat!(
+        "# HELP crowdrelay_db_pool_size Current PostgreSQL pool size.\n# TYPE crowdrelay_db_pool_size gauge\n",
+        "crowdrelay_db_pool_size {}\n",
+        "# HELP crowdrelay_db_pool_idle Current idle PostgreSQL connections.\n# TYPE crowdrelay_db_pool_idle gauge\n",
+        "crowdrelay_db_pool_idle {}\n",
+        "# HELP crowdrelay_db_pool_in_use Current in-use PostgreSQL connections.\n# TYPE crowdrelay_db_pool_in_use gauge\n",
+        "crowdrelay_db_pool_in_use {}\n",
+        "# HELP crowdrelay_db_pool_max Configured maximum PostgreSQL connections.\n# TYPE crowdrelay_db_pool_max gauge\n",
+        "crowdrelay_db_pool_max {}\n",
+        "# HELP crowdrelay_db_pool_utilization_ratio PostgreSQL pool utilization against configured maximum.\n# TYPE crowdrelay_db_pool_utilization_ratio gauge\n",
+        "crowdrelay_db_pool_utilization_ratio {:.6}\n"
+    ), pool_size, pool_idle, pool_in_use, pool_max, utilization));
 
     (
         StatusCode::OK,

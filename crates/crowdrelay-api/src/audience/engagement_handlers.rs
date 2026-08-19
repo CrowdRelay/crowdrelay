@@ -920,3 +920,109 @@ pub async fn cancel_campaign(
     }
     campaign_response(&state, workspace_id, campaign_id, &headers).await
 }
+
+pub async fn fan_journey(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(fan_id): Path<Uuid>,
+) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let result = sqlx::query_as::<_, FanJourneyEntry>(
+        r#"
+        WITH target_fan AS (
+            SELECT id, normalized_email, created_at
+            FROM fans
+            WHERE workspace_id = $1 AND id = $2
+        ), journey AS (
+            SELECT 'fan_created'::text AS kind, fan.created_at AS occurred_at,
+                   'Signal profile created'::text AS title,
+                   jsonb_build_object('fan_id', fan.id) AS detail
+            FROM target_fan fan
+            UNION ALL
+            SELECT 'acquisition', acquisition.occurred_at,
+                   COALESCE(campaign.name, acquisition.source),
+                   jsonb_build_object('source', acquisition.source, 'campaign_id', acquisition.campaign_id)
+            FROM fan_acquisition_events acquisition
+            LEFT JOIN campaigns campaign
+              ON campaign.workspace_id = acquisition.workspace_id
+             AND campaign.id = acquisition.campaign_id
+            WHERE acquisition.workspace_id = $1 AND acquisition.fan_id = $2
+            UNION ALL
+            SELECT 'event_interest', interest.created_at, event.title,
+                   jsonb_build_object('event_id', event.id, 'event_slug', event.slug)
+            FROM event_interests interest
+            JOIN events event ON event.workspace_id = interest.workspace_id AND event.id = interest.event_id
+            WHERE interest.workspace_id = $1 AND interest.fan_id = $2
+            UNION ALL
+            SELECT 'ticket_purchase', orders.paid_at, event.title,
+                   jsonb_build_object(
+                     'event_id', event.id, 'event_slug', event.slug,
+                     'order_reference', orders.public_reference, 'status', orders.status,
+                     'currency', orders.currency, 'gross_minor', orders.amount_gross_minor,
+                     'refunded_minor', orders.amount_refunded_minor
+                   )
+            FROM ticket_orders orders
+            JOIN ticket_sales sale ON sale.workspace_id = orders.workspace_id AND sale.id = orders.ticket_sale_id
+            JOIN events event ON event.workspace_id = sale.workspace_id AND event.id = sale.event_id
+            JOIN target_fan fan ON fan.normalized_email = orders.buyer_email
+            WHERE orders.workspace_id = $1 AND orders.paid_at IS NOT NULL
+            UNION ALL
+            SELECT 'attendance', pass.redeemed_at, event.title,
+                   jsonb_build_object('event_id', event.id, 'event_slug', event.slug, 'pass_id', pass.id)
+            FROM admission_passes pass
+            JOIN events event ON event.workspace_id = pass.workspace_id AND event.id = pass.event_id
+            WHERE pass.workspace_id = $1 AND pass.fan_id = $2 AND pass.redeemed_at IS NOT NULL
+            UNION ALL
+            SELECT 'synesthesia', run.completed_at,
+                   'Synesthesia completed',
+                   jsonb_build_object(
+                     'run_id', run.id, 'campaign_slug', run.campaign_slug,
+                     'elapsed_ms', run.client_total_elapsed_ms
+                   )
+            FROM synesthesia_runs run
+            WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.completed_at IS NOT NULL
+            UNION ALL
+            SELECT 'area_claim', claim.claimed_at,
+                   ('AREA ' || claim.drop_id),
+                   jsonb_build_object(
+                     'drop_id', claim.drop_id, 'edition_number', claim.edition_number,
+                     'claim_source', claim.claim_source
+                   )
+            FROM area_claims claim
+            JOIN area_players player
+              ON player.workspace_id = claim.workspace_id AND player.id = claim.player_id
+            WHERE claim.workspace_id = $1 AND player.fan_id = $2
+            UNION ALL
+            SELECT 'merch_order', fact.confirmed_at,
+                   CASE WHEN fact.event_id IS NULL THEN 'Merch order' ELSE 'Merch for show' END,
+                   jsonb_build_object(
+                     'event_id', fact.event_id, 'fulfillment_mode', fact.fulfillment_mode,
+                     'currency', fact.currency, 'gross_minor', fact.amount_gross_minor
+                   )
+            FROM merch_order_facts fact
+            WHERE fact.workspace_id = $1 AND fact.fan_id = $2
+        )
+        SELECT kind, occurred_at, title, detail
+        FROM journey
+        WHERE occurred_at IS NOT NULL
+        ORDER BY occurred_at DESC, kind
+        LIMIT 200
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(fan_id)
+    .fetch_all(&state.database)
+    .await;
+    match result {
+        Ok(entries) if entries.is_empty() => Problem::not_found(request_id(&headers)).private().into_response(),
+        Ok(entries) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(entries),
+        ).into_response(),
+        Err(error) => {
+            tracing::error!(%error, %fan_id, "fan journey query failed");
+            Problem::service_unavailable(request_id(&headers)).private().into_response()
+        }
+    }
+}

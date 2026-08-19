@@ -28,5 +28,17 @@
   "events": [],
   "admission_pools": [],
   "event_sources": [],
-  "reward_draws": []
+  "reward_draws": [],
+  "smart_links": [
+    {
+      "slug": "thomann-qc-signal",
+      "destination_url": "https://www.thomann.pl/neural_dsp_quad_cortex.htm?offid=1&affid=4979&subid=virya_music&subid2=gear",
+      "active": true
+    },
+    {
+      "slug": "thomann-shop-signal",
+      "destination_url": "https://www.thomann.pl/?offid=1&affid=4979&subid=virya_music&subid2=shop",
+      "active": true
+    }
+  ]
 }
