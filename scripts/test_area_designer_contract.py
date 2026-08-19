@@ -81,6 +81,18 @@ class AreaDesignerContract(unittest.TestCase):
         self.assertIn(".with_state(state)", API)
         self.assertIn("area_admin::router(state.clone())", API_LIB)
 
+    def test_unparseable_management_body_is_a_client_error_not_a_conflict(self):
+        # A body that does not parse is not a race with current state. These
+        # routes answered 409, which tells the Control Plane to surface a
+        # conflict code the operator can do nothing with, while the rest of the
+        # AREA API already answers 400 INVALID_REQUEST.
+        self.assertIn("fn invalid_request() -> Response", API)
+        self.assertIn("StatusCode::BAD_REQUEST", API)
+        self.assertNotIn('Conflict("INVALID_REQUEST")', API)
+        for handler in ("create_city", "create_drop", "save_draft", "publish_drop", "duplicate_drop", "settings"):
+            body = API.split(f"async fn {handler}(", 1)[1].split("\nasync fn ", 1)[0]
+            self.assertIn("invalid_request()", body, handler)
+
     def test_list_contract_never_contains_exact_coordinates(self):
         summary = re.search(
             r"pub struct AreaDropSummary \{(?P<body>.*?)\n\}", APP, re.DOTALL
