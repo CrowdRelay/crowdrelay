@@ -62,6 +62,7 @@ pub async fn get() -> impl IntoResponse {
         ("staff_show_pack_v1", true),
         ("fan_account_deletion_v1", true),
         ("staff_show_checklist_push_v1", true),
+        ("tenant_regional_profile_v1", true),
     ]);
     (
         [(CACHE_CONTROL, CACHE)],

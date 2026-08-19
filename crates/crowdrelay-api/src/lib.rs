@@ -144,7 +144,6 @@ pub struct AppState {
     /// another constructor argument for it.
     pub(crate) ecosystem: PostgresEcosystemRepository,
     pub(crate) push: push::PushPublicState,
-    #[expect(dead_code)] // Tenants are disabled, but prepared for future use
     pub(crate) tenant: tenant::TenantProfile,
 }
 

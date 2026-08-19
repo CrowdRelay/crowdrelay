@@ -390,6 +390,26 @@ mod tests {
                     signal: true,
                     synesthesia: false,
                 },
+                regional: crate::tenant::TenantRegionalProfile {
+                    country_code: "US".to_owned(),
+                    region: "us".to_owned(),
+                    locale: "en-US".to_owned(),
+                    timezone: "America/New_York".to_owned(),
+                    currency: "USD".to_owned(),
+                    date_format: "mdy".to_owned(),
+                    number_format: "dot_decimal".to_owned(),
+                    data_region: Some("us".to_owned()),
+                },
+                regional_provenance: crate::tenant::TenantRegionalProvenance {
+                    country_code: crate::tenant::RegionalSource::TenantProfile,
+                    region: crate::tenant::RegionalSource::TenantProfile,
+                    locale: crate::tenant::RegionalSource::TenantProfile,
+                    timezone: crate::tenant::RegionalSource::TenantProfile,
+                    currency: crate::tenant::RegionalSource::TenantProfile,
+                    date_format: crate::tenant::RegionalSource::TenantProfile,
+                    number_format: crate::tenant::RegionalSource::TenantProfile,
+                    data_region: crate::tenant::RegionalSource::TenantProfile,
+                },
             },
         ))
     }

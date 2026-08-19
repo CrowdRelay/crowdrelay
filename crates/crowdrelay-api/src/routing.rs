@@ -13,6 +13,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/health/live", get(live))
         .route("/v1/health/ready", get(ready))
         .route("/v1/meta", get(meta::get))
+        .route("/v1/public/tenant/config", get(tenant::public_config))
         .route(
             "/v1/admin/staff/pairing-codes",
             post(staff_sessions::create_pairing_code),

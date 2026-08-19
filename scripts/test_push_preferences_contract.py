@@ -4,10 +4,16 @@ m=(R/'migrations/0070_fan_push_preferences.sql').read_text()
 p=(R/'crates/crowdrelay-api/src/push.rs').read_text()
 w=(R/'crates/crowdrelay-worker/src/push_delivery/repository.rs').read_text()
 assert all(x in m for x in ['fan_push_preferences','shows_enabled','quiet_start_minute','category'])
-assert all(x in p for x in ['fan_preferences','update_fan_preferences','Europe/Warsaw'])
-assert all(x in w for x in ['delivery.category = \'essential\'','preference.shows_enabled','quiet_hours_enabled','Europe/Warsaw'])
+assert all(x in p for x in ['fan_preferences','update_fan_preferences','state.tenant.regional.timezone.clone()'])
+assert 'quiet_timezone: String' in p
+assert 'quiet_timezone: "Europe/Warsaw"' not in p
+assert all(x in w for x in ['delivery.category = \'essential\'','preference.shows_enabled','quiet_hours_enabled','AT TIME ZONE $4'])
+assert "AT TIME ZONE 'Europe/Warsaw'" not in w
+worker=(R/'crates/crowdrelay-worker/src/push_delivery.rs').read_text()
+assert 'CROWDRELAY_TENANT_TIMEZONE' in worker
+assert 'PushDeliveryRepository::new' in worker
 assert 'upsert_fan_push_preferences' in (R/'crates/crowdrelay-infra/src/push_preferences.rs').read_text()
-print('PUSH_PREFERENCES_CONTRACT=PASS categories=6 quiet_hours=true essential_bypass=true')
+print('PUSH_PREFERENCES_CONTRACT=PASS categories=6 quiet_hours=true essential_bypass=true timezone=tenant')
 
 # Existing queued category deliveries must be terminally suppressed on opt-out;
 # otherwise stale pushes can fire after a later re-enable. Quiet-hours delivery

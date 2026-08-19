@@ -8,7 +8,7 @@ mod crypto;
 mod providers;
 mod repository;
 
-use std::time::Duration;
+use std::{env, time::Duration};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -41,11 +41,29 @@ impl PushDeliveryWorker {
     ) -> Result<Self> {
         let providers = PushProviders::new(ProviderConfig::from_env()?, operation_timeout)
             .context("invalid fan push provider configuration")?;
+        let workspace_slug =
+            env::var("CROWDRELAY_WORKSPACE_SLUG").unwrap_or_else(|_| "virya".to_owned());
+        let quiet_timezone = match env::var("CROWDRELAY_TENANT_TIMEZONE") {
+            Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+            _ if workspace_slug == "virya" => "Europe/Warsaw".to_owned(),
+            _ => {
+                anyhow::bail!("CROWDRELAY_TENANT_TIMEZONE is required for non-Virya push delivery")
+            }
+        };
+        if quiet_timezone.len() > 64
+            || !quiet_timezone.contains('/')
+            || !quiet_timezone
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
+        {
+            anyhow::bail!("CROWDRELAY_TENANT_TIMEZONE is not an IANA-style timezone");
+        }
         Ok(Self {
             repository: PushDeliveryRepository::new(
                 database,
                 workspace_id.into_uuid(),
                 operation_timeout,
+                quiet_timezone,
             ),
             providers,
         })

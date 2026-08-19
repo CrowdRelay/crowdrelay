@@ -770,7 +770,7 @@ pub struct FanPushPreferencesResponse {
     quiet_hours_enabled: bool,
     quiet_start: String,
     quiet_end: String,
-    quiet_timezone: &'static str,
+    quiet_timezone: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -835,7 +835,7 @@ pub async fn fan_preferences(State(state): State<crate::AppState>, headers: Head
                     quiet_hours_enabled: quiet,
                     quiet_start: minute_text(start),
                     quiet_end: minute_text(end),
-                    quiet_timezone: "Europe/Warsaw",
+                    quiet_timezone: state.tenant.regional.timezone.clone(),
                 }),
             )
                 .into_response()
@@ -895,7 +895,7 @@ pub async fn update_fan_preferences(
                 quiet_hours_enabled: payload.quiet_hours_enabled,
                 quiet_start: minute_text(start),
                 quiet_end: minute_text(end),
-                quiet_timezone: "Europe/Warsaw",
+                quiet_timezone: state.tenant.regional.timezone.clone(),
             }),
         )
             .into_response(),

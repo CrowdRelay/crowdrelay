@@ -34,14 +34,21 @@ pub struct PushDeliveryRepository {
     database: PgPool,
     workspace_id: Uuid,
     operation_timeout: Duration,
+    quiet_timezone: String,
 }
 
 impl PushDeliveryRepository {
-    pub fn new(database: PgPool, workspace_id: Uuid, operation_timeout: Duration) -> Self {
+    pub fn new(
+        database: PgPool,
+        workspace_id: Uuid,
+        operation_timeout: Duration,
+        quiet_timezone: String,
+    ) -> Self {
         Self {
             database,
             workspace_id,
             operation_timeout,
+            quiet_timezone,
         }
     }
 
@@ -294,18 +301,18 @@ impl PushDeliveryRepository {
                                   AND CASE
                                       WHEN preference.quiet_start_minute = preference.quiet_end_minute THEN true
                                       WHEN preference.quiet_start_minute < preference.quiet_end_minute THEN
-                                          ((extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
-                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                          ((extract(hour from now() AT TIME ZONE $4)::int * 60
+                                            + extract(minute from now() AT TIME ZONE $4)::int)
                                            >= preference.quiet_start_minute
-                                           AND (extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
-                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                           AND (extract(hour from now() AT TIME ZONE $4)::int * 60
+                                            + extract(minute from now() AT TIME ZONE $4)::int)
                                            < preference.quiet_end_minute)
                                       ELSE
-                                          ((extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
-                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                          ((extract(hour from now() AT TIME ZONE $4)::int * 60
+                                            + extract(minute from now() AT TIME ZONE $4)::int)
                                            >= preference.quiet_start_minute
-                                           OR (extract(hour from now() AT TIME ZONE 'Europe/Warsaw')::int * 60
-                                            + extract(minute from now() AT TIME ZONE 'Europe/Warsaw')::int)
+                                           OR (extract(hour from now() AT TIME ZONE $4)::int * 60
+                                            + extract(minute from now() AT TIME ZONE $4)::int)
                                            < preference.quiet_end_minute)
                                   END
                               )
@@ -394,6 +401,7 @@ impl PushDeliveryRepository {
             .bind(self.workspace_id)
             .bind(limit)
             .bind(MAX_ATTEMPTS)
+            .bind(&self.quiet_timezone)
             .fetch_all(&self.database),
             "claim due push deliveries",
         )
