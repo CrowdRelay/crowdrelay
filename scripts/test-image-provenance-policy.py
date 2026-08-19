@@ -17,6 +17,10 @@ checks={
  # arm64; publication must not silently fall back to the x86_64 runner host.
  'baked arm64 publication': '*.platform=linux/arm64' in workflow,
  'rekor arm64 publication': 'platforms: linux/arm64' in workflow,
+ # ...and it must reach arm64 natively. Baking the same targets on an x86_64
+ # runner is silently correct and ran the Rust release build under QEMU, which
+ # took publication from ~5 minutes to past its timeout.
+ 'native arm64 runner': 'runs-on: ubuntu-24.04-arm' in workflow,
  # Digests are recorded per published image either way: bake reports both of
  # its targets in one metadata document, the single build keeps a step output.
  'digest outputs': all(x in workflow for x in ['.api["containerimage.digest"]','.worker["containerimage.digest"]','steps.rekor-image.outputs.digest']),

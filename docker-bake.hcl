@@ -16,7 +16,8 @@ variable "CROWDRELAY_BUILD_TIMESTAMP" {
   default = ""
 }
 
-variable "CACHE_SCOPE" {
+# Registry reference for the shared BuildKit cache. Empty for local bakes.
+variable "CACHE_REF" {
   default = ""
 }
 
@@ -39,8 +40,13 @@ target "_common" {
   # Both runtime targets descend from one `builder` stage. Baking them together
   # compiles that stage once inside a single build graph, instead of running two
   # buildx invocations that each re-export a mode=max Rust cache for it.
-  cache-from = CACHE_SCOPE == "" ? [] : ["type=gha,scope=${CACHE_SCOPE}"]
-  cache-to   = CACHE_SCOPE == "" ? [] : ["type=gha,mode=max,scope=${CACHE_SCOPE}"]
+  #
+  # The cache lives in the registry, not the Actions cache. mode=max is what
+  # keeps the `cargo chef cook` layer reusable, and that export is large enough
+  # that the 10 GB Actions cache evicted it between runs. GHCR keeps it.
+  # image-manifest/oci-mediatypes are required for GHCR to accept the manifest.
+  cache-from = CACHE_REF == "" ? [] : ["type=registry,ref=${CACHE_REF}"]
+  cache-to   = CACHE_REF == "" ? [] : ["type=registry,ref=${CACHE_REF},mode=max,image-manifest=true,oci-mediatypes=true"]
 }
 
 target "api" {

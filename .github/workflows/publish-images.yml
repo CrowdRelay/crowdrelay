@@ -18,7 +18,11 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_SHA: ${{ github.event.workflow_run.head_sha }}
-  CACHE_SCOPE: crowdrelay-images
+  # The Rust build graph is cached in GHCR rather than the Actions cache. The
+  # Actions cache is a single 10 GB LRU pool shared with the Swatinem Rust
+  # caches, so a mode=max BuildKit export kept evicting itself between runs and
+  # every publish recompiled the workspace from scratch.
+  CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
 
 jobs:
   build:
@@ -28,7 +32,11 @@ jobs:
        github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
 
-    runs-on: ubuntu-24.04
+    # Production is Oracle/Ampere and the images publish as linux/arm64.
+    # Baking that target on an x86_64 runner put the whole Rust release build
+    # under QEMU emulation, which took the job from ~5 minutes to past its
+    # 40-minute timeout. GitHub's hosted arm64 runners build it natively.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
 
     steps:
@@ -68,7 +76,7 @@ jobs:
           WORKER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}
           CROWDRELAY_GIT_SHA: ${{ env.IMAGE_SHA }}
           CROWDRELAY_BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
-          CACHE_SCOPE: ${{ env.CACHE_SCOPE }}
+          CACHE_REF: ${{ env.CACHE_REF }}
         with:
           files: docker-bake.hcl
           targets: api,worker
@@ -92,8 +100,6 @@ jobs:
             org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.title=crowdrelay-rekor-proof-anchor
-          cache-from: type=gha,scope=crowdrelay-rekor-proof-anchor
-          cache-to: type=gha,mode=max,scope=crowdrelay-rekor-proof-anchor
           provenance: mode=max
           sbom: true
       - name: Record immutable image digests

@@ -80,6 +80,11 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Every pull request run used to save its own ~640 MB entry into the
+          # 10 GB Actions pool. Pull requests restore from the default branch
+          # instead; only the default branch writes.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run idempotent database and workspace setup
         run: |
@@ -247,8 +252,14 @@ jobs:
   containers:
     name: Build container targets
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    # linux/arm64 is the published production target, so this gate must build
+    # that architecture. On an x86_64 runner it did so through QEMU and spent
+    # its whole 30-minute budget emulating a Rust release build.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
 
     steps:
       - name: Check out repository
@@ -257,10 +268,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      # Read-only access to the build cache published from the default branch.
+      # Fork pull requests get a token without package scope; a failed login
+      # only costs this job its cache hit, so it must not fail the build.
+      - name: Log in to GHCR for the shared build cache
+        continue-on-error: true
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Reads the cache the publish workflow writes and deliberately writes none
+      # back: a pull request must not be able to move the cache the release
+      # build depends on. The variable is not called CACHE_REF because
+      # docker-bake.hcl reads that name from the environment, which would hand
+      # this job the writing cache-to export as well.
       - name: Build both runtime targets once
+        env:
+          BUILD_CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
         run: |
           docker buildx bake \
             --set '*.platform=linux/arm64' \
-            --set '*.cache-from=type=gha,scope=crowdrelay-runtime' \
-            --set 'api.cache-to=type=gha,mode=max,scope=crowdrelay-runtime' \
+            --set "*.cache-from=type=registry,ref=${BUILD_CACHE_REF}" \
             --set '*.output=type=cacheonly'
