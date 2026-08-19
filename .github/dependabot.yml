@@ -18,3 +18,21 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      base-images:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: "/proofs/rekor-anchor/relayer"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      base-images:
+        patterns: ["*"]

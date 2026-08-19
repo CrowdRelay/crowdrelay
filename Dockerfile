@@ -1,14 +1,22 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_IMAGE=rust:1.97.1-bookworm
+# Base images are pinned by digest. `bookworm-slim` and the Rust patch tag are
+# both rebuilt in place upstream, which silently rebased every published image
+# and invalidated the whole build cache on someone else's schedule. Dependabot
+# owns bumping these.
+ARG RUST_IMAGE=rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
 ARG CARGO_CHEF_VERSION=0.1.77
 
 FROM ${RUST_IMAGE} AS chef
 
+# Built unoptimised on purpose. cargo-chef only parses manifests and shells out
+# to cargo, so an optimised build of it buys nothing measurable while costing
+# roughly a minute of the cold-cache image build. It never ships in a runtime
+# stage, so this cannot reach a published artifact.
 ARG CARGO_CHEF_VERSION
 RUN --mount=type=cache,id=crowdrelay-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=crowdrelay-cargo-git,target=/usr/local/cargo/git/db,sharing=locked \
-    cargo install cargo-chef --locked --version "${CARGO_CHEF_VERSION}"
+    cargo install cargo-chef --locked --profile dev --version "${CARGO_CHEF_VERSION}"
 
 WORKDIR /workspace
 
@@ -56,7 +64,7 @@ RUN --mount=type=cache,id=crowdrelay-cargo-registry,target=/usr/local/cargo/regi
     && install --mode 0755 target/release/crowdrelay-api /out/crowdrelay-api \
     && install --mode 0755 target/release/crowdrelay-worker /out/crowdrelay-worker
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/wojciechbator/crowdrelay" \
       org.opencontainers.image.licenses="Apache-2.0"
