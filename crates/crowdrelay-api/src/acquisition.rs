@@ -390,27 +390,19 @@ pub async fn signup_fan(
         Ok(result) => result,
         Err(error) => return signup_error(error, request_id_value).into_response(),
     };
-    if let Err(error) = sqlx::query(
-        r#"
-        INSERT INTO fan_location_preferences (
-            workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km
+    let mobile_fan = crowdrelay_infra::mobile_fan::PostgresMobileFanRepository::new(
+        state.ticketing.pool().clone(),
+        state.acquisition.workspace_id,
+        state.ticketing.operation_timeout(),
+    );
+    if let Err(error) = mobile_fan
+        .upsert_fan_location_preference(
+            result.fan_id,
+            &requested_city_slug,
+            nearby_enabled,
+            nearby_radius_km,
         )
-        SELECT $1, $2, cities.id, $4, $5
-        FROM cities
-        WHERE cities.slug = $3
-        ON CONFLICT (workspace_id, fan_id) DO UPDATE
-        SET city_id = EXCLUDED.city_id,
-            nearby_gigs_enabled = EXCLUDED.nearby_gigs_enabled,
-            radius_km = EXCLUDED.radius_km
-        "#,
-    )
-    .bind(state.acquisition.workspace_id.into_uuid())
-    .bind(result.fan_id.into_uuid())
-    .bind(&requested_city_slug)
-    .bind(nearby_enabled)
-    .bind(nearby_radius_km)
-    .execute(state.ticketing.pool())
-    .await
+        .await
     {
         tracing::warn!(
             %error,

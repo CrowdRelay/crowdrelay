@@ -50,13 +50,8 @@ impl PushDeliveryWorker {
                 anyhow::bail!("CROWDRELAY_TENANT_TIMEZONE is required for non-Virya push delivery")
             }
         };
-        if quiet_timezone.len() > 64
-            || !quiet_timezone.contains('/')
-            || !quiet_timezone
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
-        {
-            anyhow::bail!("CROWDRELAY_TENANT_TIMEZONE is not an IANA-style timezone");
+        if !crowdrelay_infra::regional::is_known_iana_timezone(&quiet_timezone) {
+            anyhow::bail!("CROWDRELAY_TENANT_TIMEZONE is not a known IANA timezone");
         }
         Ok(Self {
             repository: PushDeliveryRepository::new(

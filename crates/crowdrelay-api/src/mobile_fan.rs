@@ -11,10 +11,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crowdrelay_application::IdempotencyKey;
+use crowdrelay_infra::mobile_fan::{
+    CityRequestCommand, MobileFanStoreError, PostgresMobileFanRepository,
+};
+
 use crate::{IDEMPOTENCY_KEY, Problem, request_id};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
-const CITY_NOTIFICATION_COOLDOWN_MINUTES: i64 = 60;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +32,7 @@ pub struct RequestCity {
 pub struct RequestedCity {
     city_slug: String,
     display_name: String,
-    status: &'static str,
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,17 +81,32 @@ fn requested_slug(name: &str, country: &str) -> String {
     format!("pending-{label}-{suffix}")
 }
 
+fn mobile_fan_repository(state: &crate::AppState) -> PostgresMobileFanRepository {
+    PostgresMobileFanRepository::new(
+        state.ticketing.pool().clone(),
+        state.ticketing.workspace_id(),
+        state.ticketing.operation_timeout(),
+    )
+}
+
 pub async fn request_city(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
     payload: Result<Json<RequestCity>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if headers.get(&IDEMPOTENCY_KEY).is_none() {
-        return Problem::bad_request(request_id_value)
-            .private()
-            .into_response();
-    }
+    let idempotency_key = match headers
+        .get(&IDEMPOTENCY_KEY)
+        .and_then(|value| value.to_str().ok())
+        .map(IdempotencyKey::parse)
+    {
+        Some(Ok(value)) => value,
+        _ => {
+            return Problem::bad_request(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
     let Json(payload) = match payload {
         Ok(value) => value,
         Err(_) => {
@@ -112,144 +131,39 @@ pub async fn request_city(
             .into_response();
     }
     let slug = requested_slug(&name, &country);
-    let mut transaction = match state.ticketing.pool().begin().await {
-        Ok(value) => value,
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
+    let command = CityRequestCommand {
+        idempotency_key,
+        request_id: request_id_value.clone(),
+        name,
+        region,
+        country_code: country,
+        slug,
     };
-
-    let approved = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT slug, name
-        FROM cities
-        WHERE country_code = $1
-          AND moderation_status = 'approved'
-          AND lower(btrim(name)) = lower($2)
-        ORDER BY
-            CASE
-                WHEN $3::text IS NOT NULL
-                 AND region IS NOT NULL
-                 AND lower(btrim(region)) = lower($3)
-                THEN 0
-                ELSE 1
-            END,
-            id
-        LIMIT 1
-        "#,
-    )
-    .bind(&country)
-    .bind(&name)
-    .bind(region.as_deref())
-    .fetch_optional(&mut *transaction)
-    .await;
-    match approved {
-        Ok(Some((city_slug, display_name))) => {
-            if transaction.commit().await.is_err() {
-                return Problem::service_unavailable(request_id_value)
-                    .private()
-                    .into_response();
-            }
-            return (
-                StatusCode::OK,
+    match mobile_fan_repository(&state).request_city(&command).await {
+        Ok(result) => {
+            let status = if result.status == "approved" {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            };
+            (
+                status,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
                 Json(RequestedCity {
-                    city_slug,
-                    display_name,
-                    status: "approved",
+                    city_slug: result.city_slug,
+                    display_name: result.display_name,
+                    status: result.status,
                 }),
             )
-                .into_response();
+                .into_response()
         }
-        Ok(None) => {}
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    }
-
-    let row = sqlx::query_as::<_, (Uuid, String, String, i32)>(
-        r#"
-        INSERT INTO cities (
-            slug, name, country_code, region, moderation_status,
-            request_count, first_requested_at, last_requested_at
-        )
-        VALUES ($1, $2, $3, $4, 'pending', 1, now(), now())
-        ON CONFLICT (country_code, slug) DO UPDATE
-        SET request_count = cities.request_count + 1,
-            last_requested_at = now(),
-            region = COALESCE(cities.region, EXCLUDED.region)
-        RETURNING id, slug, name, request_count
-        "#,
-    )
-    .bind(&slug)
-    .bind(&name)
-    .bind(&country)
-    .bind(region.as_deref())
-    .fetch_one(&mut *transaction)
-    .await;
-    let Ok((city_id, city_slug, display_name, request_count)) = row else {
-        return Problem::service_unavailable(request_id_value)
+        Err(MobileFanStoreError::Conflict) => Problem::conflict(request_id_value)
             .private()
-            .into_response();
-    };
-
-    let queued = sqlx::query(
-        r#"
-        INSERT INTO outbox_events (
-            workspace_id, event_type, event_version, payload, request_id
-        )
-        SELECT
-            $1,
-            'fan.city_requested',
-            1,
-            jsonb_build_object(
-                'city_id', $2::uuid,
-                'city_slug', $3::text,
-                'display_name', $4::text,
-                'country_code', $5::text,
-                'request_count', $6::integer
-            ),
-            $7
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM outbox_events
-            WHERE workspace_id = $1
-              AND event_type = 'fan.city_requested'
-              AND payload ->> 'city_slug' = $3
-              AND created_at > now() - ($8::bigint * interval '1 minute')
-        )
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(city_id)
-    .bind(&city_slug)
-    .bind(&display_name)
-    .bind(&country)
-    .bind(request_count)
-    .bind(request_id_value.as_deref())
-    .bind(CITY_NOTIFICATION_COOLDOWN_MINUTES)
-    .execute(&mut *transaction)
-    .await;
-    if queued.is_err() || transaction.commit().await.is_err() {
-        return Problem::service_unavailable(request_id_value)
+            .into_response(),
+        Err(MobileFanStoreError::Unavailable) => Problem::service_unavailable(request_id_value)
             .private()
-            .into_response();
+            .into_response(),
     }
-
-    (
-        StatusCode::ACCEPTED,
-        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-        Json(RequestedCity {
-            city_slug,
-            display_name,
-            status: "pending",
-        }),
-    )
-        .into_response()
 }
 
 pub async fn geocode_city(
@@ -289,32 +203,23 @@ pub async fn geocode_city(
         .region
         .as_deref()
         .and_then(|value| clean(value, 120));
-    let updated = sqlx::query(
-        r#"
-        UPDATE cities
-        SET latitude = $2,
-            longitude = $3,
-            name = COALESCE($4, name),
-            region = COALESCE($5, region)
-        WHERE id = $1
-          AND moderation_status IN ('pending', 'approved')
-        "#,
-    )
-    .bind(city_id)
-    .bind(payload.latitude)
-    .bind(payload.longitude)
-    .bind(canonical_name)
-    .bind(region)
-    .execute(state.ticketing.pool())
-    .await;
-    match updated {
-        Ok(result) if result.rows_affected() == 1 => (
+    match mobile_fan_repository(&state)
+        .geocode_city(
+            city_id,
+            payload.latitude,
+            payload.longitude,
+            canonical_name,
+            region,
+        )
+        .await
+    {
+        Ok(true) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PRIVATE_NO_STORE)],
             Json(json!({"updated": true, "city_id": city_id})),
         )
             .into_response(),
-        Ok(_) => Problem::not_found(request_id_value)
+        Ok(false) => Problem::not_found(request_id_value)
             .private()
             .into_response(),
         Err(_) => Problem::service_unavailable(request_id_value)
@@ -340,152 +245,10 @@ pub async fn emit_due_nearby_gigs(
     } else {
         false
     };
-    let queued = sqlx::query_as::<_, (i64, i64)>(
-        r#"
-        WITH candidates AS (
-            SELECT
-                fans.id AS fan_id,
-                fans.normalized_email,
-                fans.locale,
-                events.id AS event_id,
-                events.slug AS event_slug,
-                events.title AS event_title,
-                events.starts_at,
-                events.venue,
-                event_city.name AS event_city,
-                LEAST(
-                    20000,
-                    ROUND(
-                        6371 * 2 * ASIN(LEAST(1.0, SQRT(
-                            POWER(SIN(RADIANS(fan_city.latitude - event_city.latitude) / 2), 2)
-                            + COS(RADIANS(event_city.latitude))
-                            * COS(RADIANS(fan_city.latitude))
-                            * POWER(SIN(RADIANS(fan_city.longitude - event_city.longitude) / 2), 2)
-                        )))
-                    )::integer
-                ) AS distance_km,
-                preferences.radius_km
-            FROM fan_location_preferences preferences
-            INNER JOIN fans
-                ON fans.workspace_id = preferences.workspace_id
-               AND fans.id = preferences.fan_id
-            INNER JOIN cities fan_city ON fan_city.id = preferences.city_id
-            INNER JOIN events
-                ON events.workspace_id = preferences.workspace_id
-               AND events.status = 'published'
-               AND events.starts_at > now()
-               AND events.starts_at < now() + interval '365 days'
-            INNER JOIN cities event_city ON event_city.id = events.city_id
-            WHERE preferences.workspace_id = $1
-              AND preferences.nearby_gigs_enabled
-              AND fans.status = 'active'
-              AND fan_city.latitude IS NOT NULL
-              AND fan_city.longitude IS NOT NULL
-              AND event_city.latitude IS NOT NULL
-              AND event_city.longitude IS NOT NULL
-        ),
-        inserted AS (
-            INSERT INTO nearby_gig_notifications (
-                workspace_id, fan_id, event_id, distance_km
-            )
-            SELECT $1, fan_id, event_id, distance_km
-            FROM candidates
-            WHERE distance_km <= radius_km
-            ON CONFLICT DO NOTHING
-            RETURNING fan_id, event_id, distance_km
-        ),
-        queued AS (
-            INSERT INTO outbox_events (
-                workspace_id, event_type, event_version, payload, request_id
-            )
-            SELECT
-                $1,
-                'fan.nearby_concert_available',
-                1,
-                jsonb_build_object(
-                    'fan_id', candidates.fan_id,
-                    'email', candidates.normalized_email,
-                    'event_id', candidates.event_id,
-                    'event_slug', candidates.event_slug,
-                    'event_title', candidates.event_title,
-                    'starts_at', candidates.starts_at,
-                    'venue', candidates.venue,
-                    'city_name', candidates.event_city,
-                    'distance_km', inserted.distance_km
-                ),
-                $2
-            FROM inserted
-            INNER JOIN candidates
-                ON candidates.fan_id = inserted.fan_id
-               AND candidates.event_id = inserted.event_id
-            RETURNING 1
-        ),
-        push_queued AS (
-            INSERT INTO fan_push_deliveries (
-                workspace_id, fan_id, endpoint_id, source_kind, source_id, category,
-                title, body, target_path, collapse_key
-            )
-            SELECT
-                $1,
-                candidates.fan_id,
-                endpoint.id,
-                'nearby_concert',
-                candidates.event_id,
-                'shows',
-                CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
-                    THEN 'VIRYA blisko Ciebie'
-                    ELSE 'VIRYA near you'
-                END,
-                CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
-                    THEN candidates.event_title || ' — koncert około ' || inserted.distance_km || ' km od Twojego miasta.'
-                    ELSE candidates.event_title || ' — a show about ' || inserted.distance_km || ' km from your city.'
-                END,
-                CASE WHEN lower(COALESCE(candidates.locale, 'pl')) LIKE 'pl%'
-                    THEN '/pl/my-signal/?event=' || candidates.event_slug
-                    ELSE '/my-signal/?event=' || candidates.event_slug
-                END,
-                'nearby:' || candidates.event_id::text
-            FROM inserted
-            JOIN candidates
-              ON candidates.fan_id = inserted.fan_id
-             AND candidates.event_id = inserted.event_id
-            JOIN fan_push_endpoints endpoint
-              ON endpoint.workspace_id = $1
-             AND endpoint.fan_id = candidates.fan_id
-             AND endpoint.active
-             AND endpoint.invalidated_at IS NULL
-            WHERE $3::boolean
-              AND EXISTS (
-                  SELECT 1
-                  FROM fan_consents consent
-                  WHERE consent.workspace_id = $1
-                    AND consent.fan_id = candidates.fan_id
-                    AND consent.purpose = 'marketing'
-                    AND consent.granted
-                    AND consent.id = (
-                        SELECT newest.id
-                        FROM fan_consents newest
-                        WHERE newest.workspace_id = consent.workspace_id
-                          AND newest.fan_id = consent.fan_id
-                          AND newest.purpose = consent.purpose
-                        ORDER BY newest.recorded_at DESC, newest.id DESC
-                        LIMIT 1
-                    )
-              )
-            ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
-            RETURNING 1
-        )
-        SELECT
-            (SELECT count(*)::bigint FROM queued),
-            (SELECT count(*)::bigint FROM push_queued)
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .bind(request_id_value.as_deref())
-    .bind(push_enabled)
-    .fetch_one(state.ticketing.pool())
-    .await;
-    match queued {
+    match mobile_fan_repository(&state)
+        .emit_due_nearby_gigs(request_id_value.as_deref(), push_enabled)
+        .await
+    {
         Ok((event_count, push_count)) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PRIVATE_NO_STORE)],

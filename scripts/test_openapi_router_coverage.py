@@ -29,6 +29,20 @@ class OpenApiRouterCoverageContract(unittest.TestCase):
         missing = sorted(router_paths - openapi_paths)
         self.assertEqual([], missing, "literal router paths missing from OpenAPI")
 
+    def test_tenant_regional_contract_matches_runtime_shape(self) -> None:
+        operation = self.spec["paths"]["/public/tenant/config"]["get"]
+        self.assertEqual(
+            "#/components/schemas/TenantProfile",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        schemas = self.spec["components"]["schemas"]
+        timezone = schemas["FanPushPreferences"]["properties"]["quiet_timezone"]
+        self.assertNotIn("enum", timezone)
+        self.assertEqual(64, timezone.get("maxLength"))
+        regional_timezone = schemas["TenantRegionalProfile"]["properties"]["timezone"]
+        self.assertNotIn("enum", regional_timezone)
+        self.assertEqual(64, regional_timezone.get("maxLength"))
+
     def test_operation_ids_are_unique(self) -> None:
         operation_ids: list[str] = []
         for path_item in self.spec.get("paths", {}).values():

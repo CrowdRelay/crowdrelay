@@ -410,7 +410,26 @@ async fn metrics(State(state): State<AppState>) -> Response {
     let http_snapshot = http_metrics().snapshot();
     let snapshot = state.acquisition.click_metrics_snapshot();
     let event_snapshot = state.events.metrics_snapshot();
-    let ops_snapshot = state.ops.metrics_snapshot().await.unwrap_or_default();
+    let ops_snapshot = match state.ops.metrics_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(error = ?error, "operational metrics snapshot unavailable");
+            let body = concat!(
+                "# HELP crowdrelay_ops_metrics_snapshot_available Whether database-backed operational metrics are available.\n",
+                "# TYPE crowdrelay_ops_metrics_snapshot_available gauge\n",
+                "crowdrelay_ops_metrics_snapshot_available 0\n",
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [
+                    (CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8"),
+                    (CACHE_CONTROL, "no-store"),
+                ],
+                body,
+            )
+                .into_response();
+        }
+    };
     let mut body = format!(
         concat!(
             "# HELP crowdrelay_http_requests_total HTTP requests completed by the API.\n",
@@ -557,6 +576,12 @@ async fn metrics(State(state): State<AppState>) -> Response {
         ops_snapshot.push_dead,
         ops_snapshot.push_suppressed,
         ops_snapshot.push_oldest_pending_seconds,
+    );
+
+    body.push_str(
+        "# HELP crowdrelay_ops_metrics_snapshot_available Whether database-backed operational metrics are available.\n\
+# TYPE crowdrelay_ops_metrics_snapshot_available gauge\n\
+crowdrelay_ops_metrics_snapshot_available 1\n",
     );
 
     body.push_str(&http_metrics().route_prometheus());

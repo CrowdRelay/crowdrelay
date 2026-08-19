@@ -301,16 +301,11 @@ fn validate_locale(value: &str) -> Result<(), TenantConfigError> {
     }
 }
 fn validate_timezone(value: &str) -> Result<(), TenantConfigError> {
-    if (3..=64).contains(&value.len())
-        && value.contains('/')
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'+'))
-    {
+    if crowdrelay_infra::regional::is_known_iana_timezone(value) {
         Ok(())
     } else {
         Err(TenantConfigError(
-            "tenant timezone must be an explicit IANA-style zone",
+            "tenant timezone must name a known IANA timezone",
         ))
     }
 }
@@ -390,6 +385,13 @@ mod tests {
         assert_eq!(profile.palette.accent, "#f3c51a");
         assert_eq!(profile.palette.background, "#080808");
         assert!(profile.synesthesia_enabled());
+    }
+
+    #[test]
+    fn timezone_validation_rejects_shape_only_fake_zone() {
+        assert!(validate_timezone("Europe/Warsaw").is_ok());
+        assert!(validate_timezone("America/New_York").is_ok());
+        assert!(validate_timezone("Mars/Olympus").is_err());
     }
 
     #[test]

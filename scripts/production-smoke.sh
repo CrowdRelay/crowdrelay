@@ -9,8 +9,12 @@ ALERT_COOLDOWN_SECONDS="${ALERT_COOLDOWN_SECONDS:-3600}"
 mkdir -p "$SMOKE_STATE_DIR"
 
 meta_file=""
+tenant_file=""
+metrics_file=""
 cleanup() {
   [[ -z "$meta_file" ]] || rm -f "$meta_file"
+  [[ -z "$tenant_file" ]] || rm -f "$tenant_file"
+  [[ -z "$metrics_file" ]] || rm -f "$metrics_file"
 }
 trap cleanup EXIT
 
@@ -61,11 +65,21 @@ probe_edge_timing() {
 
 require_200 crowdrelay_live "${CROWDRELAY_BASE_URL%/}/v1/health/live"
 require_200 crowdrelay_ready "${CROWDRELAY_BASE_URL%/}/v1/health/ready"
-require_200 crowdrelay_metrics "${CROWDRELAY_BASE_URL%/}/metrics"
+metrics_file="$(mktemp)"
+curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
+  --retry 1 --retry-delay 1 --retry-all-errors --output "$metrics_file" "${CROWDRELAY_BASE_URL%/}/metrics"
+grep -Fxq 'crowdrelay_ops_metrics_snapshot_available 1' "$metrics_file"
+printf 'crowdrelay_metrics=ok ops_snapshot=available\n'
+tenant_file="$(mktemp)"
+curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
+  --retry 1 --retry-delay 1 --retry-all-errors --output "$tenant_file" "${CROWDRELAY_BASE_URL%/}/v1/public/tenant/config"
+jq -e '.regional.timezone | type == "string" and length > 0' "$tenant_file" >/dev/null
+jq -e '.regional.currency | type == "string" and length == 3' "$tenant_file" >/dev/null
+printf 'crowdrelay_tenant_config=ok\n'
 meta_file="$(mktemp)"
 curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
   --retry 1 --retry-delay 1 --retry-all-errors --output "$meta_file" "${CROWDRELAY_BASE_URL%/}/v1/meta"
-jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.gitSha | type == "string" and test("^[0-9a-f]{40}$")) and (.buildTimestamp | type == "string" and length > 0) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1' "$meta_file" >/dev/null
+jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.gitSha | type == "string" and test("^[0-9a-f]{40}$")) and (.buildTimestamp | type == "string" and length > 0) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1 and .capabilities.tenant_regional_profile_v1' "$meta_file" >/dev/null
 printf 'crowdrelay_meta_contract=ok\n'
 require_200 crowdrelay_area_catalog "${CROWDRELAY_BASE_URL%/}/v1/public/area/drops"
 require_200 crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"

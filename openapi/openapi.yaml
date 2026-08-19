@@ -19,6 +19,22 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/EcosystemMeta' }
+  /public/tenant/config:
+    get:
+      operationId: getPublicTenantConfig
+      summary: Read the public tenant product, branding and regional profile
+      description: Returns the startup-validated tenant profile used by first-party clients. No provider secrets or private tenant credentials are exposed.
+      responses:
+        '200':
+          description: Public tenant configuration.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=300, s-maxage=300
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantProfile' }
   /admin/staff/pairing-codes:
     post:
       operationId: createStaffPairingCode
@@ -5774,19 +5790,32 @@ paths:
                 region: { type: [string, 'null'], maxLength: 120 }
                 country_code: { type: string, pattern: '^[A-Z]{2}$' }
       responses:
-        '200': { description: Existing approved city matched. }
-        '202':
-          description: City request accepted for moderation.
+        '200':
+          description: Existing approved city matched.
           content:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
+                required: [city_slug, display_name, status]
+                properties:
+                  city_slug: { type: string }
+                  display_name: { type: string }
+                  status: { type: string, enum: [approved] }
+        '202':
+          description: City request accepted for moderation. Exact idempotent replays return the same response without incrementing demand.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
                 required: [city_slug, display_name, status]
                 properties:
                   city_slug: { type: string }
                   display_name: { type: string }
                   status: { type: string, enum: [pending] }
         '400': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
         '422': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/cities/{city_id}/geocode:
@@ -8099,6 +8128,75 @@ components:
         active_executor_count: { type: integer, format: int64, minimum: 0 }
         guarded_executor_count: { type: integer, format: int64, minimum: 0 }
         active_executor_manifest_shas: { type: array, maxItems: 64, items: { type: string } }
+    RegionalSource:
+      type: string
+      enum: [tenantProfile, platformDefault, unclassified]
+    TenantPalette:
+      type: object
+      additionalProperties: false
+      required: [background, surface, surfaceAlt, line, muted, accent, accentSoft, text, danger, success]
+      properties:
+        background: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        surface: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        surfaceAlt: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        line: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        muted: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        accent: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        accentSoft: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        text: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        danger: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        success: { type: string, pattern: '^#[0-9a-f]{6}$' }
+    TenantProducts:
+      type: object
+      additionalProperties: false
+      required: [crowdrelay, signal, synesthesia]
+      properties:
+        crowdrelay: { type: boolean }
+        signal: { type: boolean }
+        synesthesia: { type: boolean }
+    TenantRegionalProfile:
+      type: object
+      additionalProperties: false
+      required: [countryCode, region, locale, timezone, currency, dateFormat, numberFormat, dataRegion]
+      properties:
+        countryCode: { type: string, pattern: '^[A-Z]{2}$' }
+        region: { type: string, enum: [eu, us] }
+        locale: { type: string, minLength: 4, maxLength: 35 }
+        timezone:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Startup-validated IANA timezone.
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        dateFormat: { type: string, enum: [dmy, mdy, ymd] }
+        numberFormat: { type: string, enum: [comma_decimal, dot_decimal] }
+        dataRegion:
+          type: [string, 'null']
+          enum: [eu, us, null]
+    TenantRegionalProvenance:
+      type: object
+      additionalProperties: false
+      required: [countryCode, region, locale, timezone, currency, dateFormat, numberFormat, dataRegion]
+      properties:
+        countryCode: { $ref: '#/components/schemas/RegionalSource' }
+        region: { $ref: '#/components/schemas/RegionalSource' }
+        locale: { $ref: '#/components/schemas/RegionalSource' }
+        timezone: { $ref: '#/components/schemas/RegionalSource' }
+        currency: { $ref: '#/components/schemas/RegionalSource' }
+        dateFormat: { $ref: '#/components/schemas/RegionalSource' }
+        numberFormat: { $ref: '#/components/schemas/RegionalSource' }
+        dataRegion: { $ref: '#/components/schemas/RegionalSource' }
+    TenantProfile:
+      type: object
+      additionalProperties: false
+      required: [slug, displayName, palette, products, regional, regionalProvenance]
+      properties:
+        slug: { type: string, minLength: 1 }
+        displayName: { type: string, minLength: 1, maxLength: 80 }
+        palette: { $ref: '#/components/schemas/TenantPalette' }
+        products: { $ref: '#/components/schemas/TenantProducts' }
+        regional: { $ref: '#/components/schemas/TenantRegionalProfile' }
+        regionalProvenance: { $ref: '#/components/schemas/TenantRegionalProvenance' }
     FanPushPreferences:
       type: object
       additionalProperties: false
@@ -8111,7 +8209,11 @@ components:
         quiet_hours_enabled: { type: boolean }
         quiet_start: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]$' }
         quiet_end: { type: string, pattern: '^[0-2][0-9]:[0-5][0-9]$' }
-        quiet_timezone: { type: string, enum: [Europe/Warsaw] }
+        quiet_timezone:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Tenant-configured IANA timezone used for notification quiet hours.
     FanPushPreferencesUpdate:
       type: object
       additionalProperties: false

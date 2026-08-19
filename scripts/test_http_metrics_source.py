@@ -17,6 +17,17 @@ class HttpMetricsSourceContract(unittest.TestCase):
         self.assertIn('crowdrelay_http_requests_4xx_total', api)
         self.assertIn('errors_4xx: snapshot.errors_4xx', ops)
         self.assertIn('required: [requests, errors_4xx, errors_5xx, average_ms, p50_ms, p95_ms]', openapi)
+        self.assertNotIn('metrics_snapshot().await.unwrap_or_default()', api)
+        self.assertIn('crowdrelay_ops_metrics_snapshot_available 0', api)
+        self.assertIn('crowdrelay_ops_metrics_snapshot_available 1', api)
+        self.assertIn(
+            'tracing::warn!(error = ?error, "operational metrics snapshot unavailable")',
+            api,
+        )
+        self.assertNotIn(
+            'tracing::warn!(error = %error, "operational metrics snapshot unavailable")',
+            api,
+        )
 
 
 if __name__ == '__main__':

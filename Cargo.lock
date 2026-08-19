@@ -356,6 +356,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.19",
  "time",
+ "time-tz",
  "tokio",
  "tracing",
  "tracing-subscriber",

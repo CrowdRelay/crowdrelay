@@ -1,10 +1,17 @@
 {
-  "version": 1,
+  "version": 2,
   "principle": "one family, distinct product densities",
   "palette": {
-    "background": "#080808",
-    "surface": "#11110f",
-    "signal": "#f3c51a",
+    "background": "#070908",
+    "backgroundRaised": "#0b100f",
+    "surface": "#101715",
+    "surfaceHigh": "#16201d",
+    "line": "#27322f",
+    "muted": "#98a5a0",
+    "signal": "#84b4ac",
+    "signalHot": "#93c6c0",
+    "signalDeep": "#26655d",
+    "warning": "#f3c51a",
     "danger": "#e73535",
     "success": "#70db91",
     "sensoryCyan": "#71dcff"
@@ -16,7 +23,7 @@
   },
   "controls": {
     "minimumTouchPx": 44,
-    "radiusPx": 10
+    "radiusPx": 6
   },
   "motionMs": {
     "fast": 140,
@@ -24,8 +31,8 @@
     "hero": 700
   },
   "products": {
-    "virya": "editorial public surface; spacious hierarchy; signal accent reserved for action and focus",
-    "virya-signal": "utilitarian app; dense only in crew mode; explicit offline and operational state",
+    "virya": "editorial public surface; spacious hierarchy; clinical mint signal accent reserved for action and focus",
+    "virya-signal": "utilitarian app; same clinical mint family; dense only in crew mode; explicit offline and operational state",
     "synesthesia": "expressive sensory surface; room art owns the screen after reveal; red/cyan may dominate artwork",
     "crowdrelay": "control plane; metadata first; no decorative semantics in operational truth"
   }

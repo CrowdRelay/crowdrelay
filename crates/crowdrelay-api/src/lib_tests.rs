@@ -465,26 +465,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prometheus_endpoint_exposes_bounded_click_counters()
+    async fn prometheus_endpoint_fails_closed_when_ops_snapshot_is_unavailable()
     -> Result<(), Box<dyn std::error::Error>> {
         let response = test_router()?
             .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
             .await?;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(
             response.headers()[CONTENT_TYPE],
             "text/plain; version=0.0.4; charset=utf-8"
         );
-        // `http_metrics()` is a process-wide singleton, so every test in this
-        // binary adds route series to the same registry and /metrics grows with
-        // the suite. This is only a harness read cap; the real cardinality bound
-        // is MAX_ROUTE_SERIES, asserted in the runtime performance contract.
-        let body = to_bytes(response.into_body(), 1024 * 1024).await?;
+        let body = to_bytes(response.into_body(), 16 * 1024).await?;
         let body = std::str::from_utf8(&body)?;
-        assert!(body.contains("crowdrelay_click_events_dropped_total 0"));
-        assert!(body.contains("crowdrelay_click_events_persistence_failed_total 0"));
+        assert!(body.contains("crowdrelay_ops_metrics_snapshot_available 0"));
+        assert!(!body.contains("crowdrelay_outbox_pending 0"));
         Ok(())
     }
 

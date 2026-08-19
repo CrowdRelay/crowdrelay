@@ -49,6 +49,7 @@ jobs:
       CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_REFERRAL_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_RETENTION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
       CROWDRELAY_DATABASE_MAX_CONNECTIONS: 5
@@ -56,6 +57,13 @@ jobs:
       CROWDRELAY_WORKSPACE_SLUG: example
       CROWDRELAY_PUBLIC_SITE_BASE_URL: http://localhost:4321
       CROWDRELAY_DEFAULT_COUNTRY_CODE: PL
+      CROWDRELAY_TENANT_REGION: eu
+      CROWDRELAY_TENANT_LOCALE: pl-PL
+      CROWDRELAY_TENANT_TIMEZONE: Europe/Warsaw
+      CROWDRELAY_TENANT_CURRENCY: PLN
+      CROWDRELAY_TENANT_DATE_FORMAT: dmy
+      CROWDRELAY_TENANT_NUMBER_FORMAT: comma_decimal
+      CROWDRELAY_TENANT_DATA_REGION: eu
       CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
       CROWDRELAY_BOOTSTRAP_JSON: >-
         {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
@@ -91,6 +99,7 @@ jobs:
             events_postgres \
             fan_lifecycle_postgres \
             referrals_rewards_postgres \
+            mobile_fan_postgres \
             autopilot_team_email_postgres \
             ecosystem_postgres
           do
