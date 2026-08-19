@@ -35,4 +35,5 @@ pub mod observability;
 pub mod proofs;
 pub mod push_preferences;
 pub mod referrals;
+pub mod regional;
 pub mod sensitive_response;
