@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 root = Path(__file__).resolve().parents[1]
 
@@ -16,8 +17,14 @@ assert 'cp "$ROOT_DIR/deploy/area-management.Caddyfile"' in ctl
 assert "area-management-proxy:" in compose
 assert "CROWDRELAY_CONTROL_PLANE_AREA_API_KEY" in compose
 assert "CROWDRELAY_AREA_MANAGEMENT_BIND_IP" in compose
-assert "100.67.186.0" not in compose
-assert "0.0.0.0:18080" not in compose
+assert (
+    "${CROWDRELAY_AREA_MANAGEMENT_BIND_IP:?AREA management bind IP missing}"
+    ":18080:18080/tcp"
+) in compose
+assert re.search(
+    r"(?<![0-9.])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}:18080(?=:|[\\\"\\s])",
+    compose,
+) is None
 assert "caddy@sha256:" in compose
 
 assert "@area path /v1/control-plane/area /v1/control-plane/area/*" in caddy
