@@ -26,6 +26,7 @@ const MAX_DELIVERY_PLAN_LIMIT: i64 = 500;
 include!("audience/models.rs");
 
 include!("audience/engagement_handlers.rs");
+include!("audience/campaign_handlers.rs");
 include!("audience/delivery_handlers.rs");
 pub async fn funnel(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let result = sqlx::query_as::<_, FunnelRow>(

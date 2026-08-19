@@ -15,6 +15,7 @@ CONTRACT = {
     "crates/crowdrelay-api/src/audience.rs": [
         "audience/models.rs",
         "audience/engagement_handlers.rs",
+        "audience/campaign_handlers.rs",
         "audience/delivery_handlers.rs",
         "audience/query_support.rs",
     ],
