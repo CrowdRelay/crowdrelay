@@ -1,20 +1,6 @@
 name: Dependency security
 
 on:
-  push:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "crates/**/Cargo.toml"
-      - ".github/workflows/security.yml"
-  pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "crates/**/Cargo.toml"
-      - ".github/workflows/security.yml"
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
@@ -42,7 +28,14 @@ jobs:
           path: artifacts/crowdrelay-sbom.cdx.json
           if-no-files-found: error
           retention-days: 90
+      - name: Cache pinned cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-0.22.2
       - name: Install pinned cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit reachable Rust dependencies
         shell: bash

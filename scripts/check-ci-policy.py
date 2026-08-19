@@ -43,19 +43,39 @@ if netlify.exists():
     if "netlify-cli" in deploy_workflows and "--no-build" not in deploy_workflows:
         failures.append("Netlify deploy workflow must pass --no-build")
 
-# A scheduled security workflow is useful only if dependency changes also exercise it.
+# Per-change dependency security is a parallel job inside CI, so image
+# publication cannot observe CI=PASS while RustSec is red. The standalone
+# workflow owns independent weekly/manual freshness checks only.
+ci_workflow = workflow_dir / "ci.yml"
+if not ci_workflow.exists():
+    failures.append(".github/workflows/ci.yml: canonical CI workflow is required")
+else:
+    ci_text = ci_workflow.read_text()
+    for contract in (
+        "dependency-security:",
+        "cargo install cargo-audit --locked --version 0.22.2",
+        "cargo audit --ignore RUSTSEC-2023-0071",
+    ):
+        if contract not in ci_text:
+            failures.append(f".github/workflows/ci.yml: dependency-security contract missing: {contract}")
+
 security_workflow = workflow_dir / "security.yml"
 if not security_workflow.exists():
     failures.append(".github/workflows/security.yml: standalone dependency-security workflow is required")
 else:
     security_text = security_workflow.read_text()
-    for trigger in ("push", "pull_request", "schedule", "workflow_dispatch"):
+    for trigger in ("schedule", "workflow_dispatch"):
         if not re.search(rf"(?m)^  {re.escape(trigger)}:\s*$", security_text):
             failures.append(f".github/workflows/security.yml: missing {trigger} trigger")
-    if "Cargo.lock" not in security_text:
-        failures.append(".github/workflows/security.yml: dependency lockfile must trigger the audit")
+    for duplicate_trigger in ("push", "pull_request"):
+        if re.search(rf"(?m)^  {re.escape(duplicate_trigger)}:\s*$", security_text):
+            failures.append(
+                f".github/workflows/security.yml: {duplicate_trigger} duplicates CI dependency-security"
+            )
     if "cargo install cargo-audit --locked --version 0.22.2" not in security_text:
         failures.append(".github/workflows/security.yml: pinned/controlled dependency audit command is required")
+    if "cargo audit --ignore RUSTSEC-2023-0071" not in security_text:
+        failures.append(".github/workflows/security.yml: weekly/manual audit command is required")
     if "continue-on-error: true" in security_text:
         failures.append(".github/workflows/security.yml: dependency audit must fail closed")
     if "github.ref" not in security_text and "concurrency:" in security_text:

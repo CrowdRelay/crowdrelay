@@ -80,7 +80,7 @@ jobs:
             cp artifacts/performance-baseline.json artifacts/performance-previous-baseline.json
           fi
       - name: Set up PostgreSQL 18 schema and workspace
-        run: cargo run --locked --package crowdrelay-worker -- setup
+        run: cargo run --locked --release --package crowdrelay-worker -- setup
       - name: Build API once in release mode
         run: cargo build --locked --release --package crowdrelay-api
       - name: Start API

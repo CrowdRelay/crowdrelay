@@ -13,6 +13,10 @@ checks={
  'provenance': workflow.count('provenance: mode=max') >= 2,
  'sbom': workflow.count('sbom: true') >= 2,
  'baked targets attested': 'targets: api,worker' in workflow,
+ # Production is Oracle/Ampere. CI already exercises the runtime images as
+ # arm64; publication must not silently fall back to the x86_64 runner host.
+ 'baked arm64 publication': '*.platform=linux/arm64' in workflow,
+ 'rekor arm64 publication': 'platforms: linux/arm64' in workflow,
  # Digests are recorded per published image either way: bake reports both of
  # its targets in one metadata document, the single build keeps a step output.
  'digest outputs': all(x in workflow for x in ['.api["containerimage.digest"]','.worker["containerimage.digest"]','steps.rekor-image.outputs.digest']),

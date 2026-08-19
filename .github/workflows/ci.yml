@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   rust:
-    name: Format, lint, test, audit, and setup
+    name: Format, lint, test, and setup
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -73,17 +73,6 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Cache pinned cargo-audit binary
-        id: cargo-audit-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-0.22.2
-
-      - name: Install pinned cargo-audit
-        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked --version 0.22.2
-
       - name: Run idempotent database and workspace setup
         run: |
           cargo run --locked --package crowdrelay-worker -- setup
@@ -91,18 +80,6 @@ jobs:
 
       - name: Run repository checks
         run: make ci
-
-      - name: Audit Rust dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          rsa_graph="$(cargo tree --locked --workspace --all-features -i rsa 2>/dev/null)"
-          if [[ -n "$rsa_graph" ]]; then
-            echo "RUSTSEC-2023-0071 is reachable in an active dependency graph:" >&2
-            echo "$rsa_graph" >&2
-            exit 1
-          fi
-          cargo audit --ignore RUSTSEC-2023-0071
 
       - name: Test all PostgreSQL integration paths sequentially
         shell: bash
@@ -225,6 +202,38 @@ jobs:
           )"
           [[ "$(printf '%s\n' "$digest_images" | grep -c '@sha256:')" -eq 3 ]]
           ./scripts/audit-public-tree.sh
+
+  dependency-security:
+    name: Dependency security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Activate repository-pinned Rust toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+      - name: Cache pinned cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-0.22.2
+      - name: Install pinned cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit reachable Rust dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsa_graph="$(cargo tree --locked --workspace --all-features -i rsa 2>/dev/null)"
+          if [[ -n "$rsa_graph" ]]; then
+            echo "RUSTSEC-2023-0071 is reachable in an active dependency graph:" >&2
+            echo "$rsa_graph" >&2
+            exit 1
+          fi
+          cargo audit --ignore RUSTSEC-2023-0071
 
   containers:
     name: Build container targets
