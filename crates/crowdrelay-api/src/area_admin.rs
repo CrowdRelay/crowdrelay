@@ -115,6 +115,19 @@ fn error(error: AreaAdminError) -> Response {
         .into_response()
 }
 
+fn invalid_request() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+        Json(ManagementError {
+            error: "Invalid request.",
+            code: "INVALID_REQUEST",
+            issues: None,
+        }),
+    )
+        .into_response()
+}
+
 fn request_id(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(&X_CROWDRELAY_CORRELATION_ID)
@@ -149,16 +162,7 @@ async fn settings(
     payload: Result<Json<SettingsRequest>, JsonRejection>,
 ) -> Response {
     let Ok(Json(payload)) = payload else {
-        return (
-            StatusCode::BAD_REQUEST,
-            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(ManagementError {
-                error: "Invalid request.",
-                code: "INVALID_REQUEST",
-                issues: None,
-            }),
-        )
-            .into_response();
+        return invalid_request();
     };
     match state
         .area_admin
@@ -206,7 +210,7 @@ async fn create_city(
     payload: Result<Json<CreateAreaCityCommand>, JsonRejection>,
 ) -> Response {
     let Ok(Json(payload)) = payload else {
-        return error(AreaAdminError::Conflict("INVALID_REQUEST"));
+        return invalid_request();
     };
     match state
         .area_admin
@@ -252,7 +256,7 @@ async fn create_drop(
     payload: Result<Json<CreateDropRequest>, JsonRejection>,
 ) -> Response {
     let Ok(Json(payload)) = payload else {
-        return error(AreaAdminError::Conflict("INVALID_REQUEST"));
+        return invalid_request();
     };
     match state
         .area_admin
@@ -301,7 +305,7 @@ async fn save_draft(
     payload: Result<Json<SaveDraftRequest>, JsonRejection>,
 ) -> Response {
     let Ok(Json(payload)) = payload else {
-        return error(AreaAdminError::Conflict("INVALID_REQUEST"));
+        return invalid_request();
     };
     match state
         .area_admin
@@ -372,7 +376,7 @@ async fn publish_drop(
 ) -> Response {
     let confirmations = match payload {
         Ok(Json(payload)) => payload.confirmations,
-        Err(_) => return error(AreaAdminError::Conflict("INVALID_REQUEST")),
+        Err(_) => return invalid_request(),
     };
     match state
         .area_admin
@@ -466,7 +470,7 @@ async fn duplicate_drop(
     payload: Result<Json<DuplicateRequest>, JsonRejection>,
 ) -> Response {
     let Ok(Json(payload)) = payload else {
-        return error(AreaAdminError::Conflict("INVALID_REQUEST"));
+        return invalid_request();
     };
     match state
         .area_admin
