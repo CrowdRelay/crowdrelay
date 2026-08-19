@@ -212,6 +212,8 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      CROWDRELAY_ENV_FILE: .env.example
 
     steps:
       - name: Check out repository
