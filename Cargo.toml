@@ -53,8 +53,14 @@ debug = "line-tables-only"
 [profile.test]
 debug = "line-tables-only"
 
+# Fat LTO with a single codegen unit re-optimised the entire dependency graph
+# at final link time, single-threaded, on every source change. `cargo chef`
+# cannot cache that: it happens after the cached dependency layer, so every
+# image build paid it in full. Thin LTO keeps cross-crate inlining and runs the
+# optimisation in parallel; codegen-units returns to the default so codegen
+# stops being serialised. `strip` and `panic` carry the size and unwind
+# guarantees and are unchanged.
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
 strip = "symbols"
 panic = "unwind"

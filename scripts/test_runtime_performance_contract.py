@@ -60,10 +60,23 @@ def cargo_lock_packages(path):
 class RuntimePerformanceContract(unittest.TestCase):
     def test_release_profile_stays_small_without_changing_panic_semantics(self):
         manifest = ROOT / "Cargo.toml"
-        self.assertIs(toml_value(manifest, "profile.release", "lto"), True)
-        self.assertEqual(toml_value(manifest, "profile.release", "codegen-units"), 1)
+        # Thin rather than fat LTO. Cross-crate optimisation is still required,
+        # but it must stay parallelisable: fat LTO plus codegen-units=1 put a
+        # single-threaded whole-graph re-optimisation after the cargo-chef
+        # dependency layer, so every image build paid it and no cache could
+        # absorb it. Symbol stripping and unwind semantics are the actual size
+        # and behaviour guarantees, and both are unchanged.
+        self.assertEqual(toml_value(manifest, "profile.release", "lto"), "thin")
         self.assertEqual(toml_value(manifest, "profile.release", "strip"), "symbols")
         self.assertEqual(toml_value(manifest, "profile.release", "panic"), "unwind")
+
+    def test_release_profile_does_not_serialise_codegen(self):
+        # Absent means Cargo's default (16). Pinning it back to 1 would restore
+        # the serialised codegen this profile was changed to avoid, so the
+        # contract fails closed on a silent re-introduction.
+        manifest = ROOT / "Cargo.toml"
+        body = toml_section(manifest, "profile.release")
+        self.assertNotRegex(body, r"(?m)^codegen-units\s*=\s*1\s*$")
 
     def test_os_rng_uses_the_current_direct_dependency(self):
         manifest = ROOT / "Cargo.toml"
