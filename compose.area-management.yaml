@@ -13,7 +13,7 @@ services:
     # `crowdrelayctl deploy` recreate the proxy whenever its routing contract
     # changes, instead of leaving a process running an older bind-mounted file.
     labels:
-      org.crowdrelay.area-management-config-sha256: "dfb587e073b175a64ad6169486510c87cee49f16b21b6ca0bd2c63e4628f9c81"
+      org.crowdrelay.area-management-config-sha256: "${CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256:?management config digest required}"
 
     depends_on:
       api:

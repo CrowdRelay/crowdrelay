@@ -66,37 +66,30 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("compose up --detach --wait", CTL)
         self.assertIn("verify\n", CTL)
 
-    def test_safe_mac_orchestrator_reconciles_proxy_without_normal_double_restart(self) -> None:
-        self.assertIn('CANONICAL="$ROOT_DIR/scripts/deploy-production-exact.sh"', SAFE_DEPLOY)
-        self.assertIn('"$CANONICAL" "$TARGET"', SAFE_DEPLOY)
-        self.assertIn('proxy_status="$(docker inspect crowdrelay-area-management-proxy-1', SAFE_DEPLOY)
-        self.assertIn('if [[ "$proxy_status" != "running" || "$runtime_sha" != "$source_sha" ]]', SAFE_DEPLOY)
-        self.assertIn('compose run --rm --no-deps --entrypoint caddy area-management-proxy', SAFE_DEPLOY)
-        self.assertIn('ORACLE_MANAGEMENT_RECONCILE=REPAIR', SAFE_DEPLOY)
-        self.assertIn('ORACLE_MANAGEMENT_RECONCILE=NOOP', SAFE_DEPLOY)
-        self.assertIn('--force-recreate area-management-proxy', SAFE_DEPLOY)
-        self.assertLess(
-            SAFE_DEPLOY.index('if [[ "$proxy_status" != "running" || "$runtime_sha" != "$source_sha" ]]'),
-            SAFE_DEPLOY.index('--force-recreate area-management-proxy'),
-        )
+    def test_safe_mac_orchestrator_only_verifies_after_canonical_deploy(self) -> None:
+        self.assertIn("deploy-production-exact.sh", SAFE_DEPLOY)
+        self.assertIn("$CANONICAL", SAFE_DEPLOY)
+        self.assertIn("ORACLE_MANAGEMENT_RECONCILE=VERIFY_ONLY", SAFE_DEPLOY)
+        self.assertNotIn("ORACLE_MANAGEMENT_RECONCILE=REPAIR", SAFE_DEPLOY)
+        self.assertNotIn("--force-recreate area-management-proxy", SAFE_DEPLOY)
+        self.assertIn("verify_management_proxy", CTL)
+        self.assertIn("MANAGEMENT_PROXY=PASS", CTL)
+        self.assertIn("CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256", CTL)
         for route in (
-            '/v1/control-plane/area',
-            '/v1/control-plane/ops/summary',
-            '/v1/control-plane/ecosystem/flags',
-            '/v1/control-plane/autopilot/overview',
+            "/v1/control-plane/area",
+            "/v1/control-plane/ops/summary",
+            "/v1/control-plane/ecosystem/flags",
+            "/v1/control-plane/autopilot/overview",
         ):
             self.assertIn(route, SAFE_DEPLOY)
-        self.assertIn('expected=401', SAFE_DEPLOY)
-        self.assertIn('CROWDRELAY_CONTROL_PLANE_HOST:-virya-home', SAFE_DEPLOY)
-        self.assertIn('CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY', SAFE_DEPLOY)
-        self.assertIn('CONTROL_PLANE_MANAGEMENT_MASTER_KEY', SAFE_DEPLOY)
-        self.assertIn('CONTROL_PLANE_VIRYA_MANAGEMENT_URL', SAFE_DEPLOY)
-        self.assertIn('http://127.0.0.1:18080', SAFE_DEPLOY)
-        self.assertIn('/api/v1/tenants/virya/operations/summary', SAFE_DEPLOY)
-        self.assertIn('CONTROL_PLANE_CROSS_GATE=PASS', SAFE_DEPLOY)
-        self.assertIn('CROWDRELAY_SAFE_DEPLOY=PASS', SAFE_DEPLOY)
-        self.assertNotIn('docker exec "$tunnel" grep', SAFE_DEPLOY)
-        self.assertNotIn('docker exec crowdrelay-area-management-proxy-1 grep', SAFE_DEPLOY)
+        self.assertIn("expected=401", SAFE_DEPLOY)
+        self.assertIn("CROWDRELAY_CONTROL_PLANE_HOST:-virya-home", SAFE_DEPLOY)
+        self.assertIn("CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY", SAFE_DEPLOY)
+        self.assertIn("CONTROL_PLANE_MANAGEMENT_MASTER_KEY", SAFE_DEPLOY)
+        self.assertIn("CONTROL_PLANE_VIRYA_MANAGEMENT_URL", SAFE_DEPLOY)
+        self.assertIn("http://127.0.0.1:18080", SAFE_DEPLOY)
+        self.assertIn("CONTROL_PLANE_CROSS_GATE=PASS", SAFE_DEPLOY)
+        self.assertIn("CROWDRELAY_SAFE_DEPLOY=PASS", SAFE_DEPLOY)
 
     def test_publication_matches_the_real_production_architecture(self) -> None:
         self.assertIn("*.platform=linux/amd64", PUBLISH)

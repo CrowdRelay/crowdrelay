@@ -75,6 +75,15 @@ require_regular_file() {
   }
 }
 
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$file" | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$file" | awk '{print $1}'; else echo "Missing SHA-256 utility" >&2; exit 1; fi
+}
+
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d " " -f1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d " " -f1; else echo "Missing SHA-256 utility" >&2; exit 1; fi
+}
+
 validate_sha() {
   [[ "$1" =~ ^[0-9a-f]{40}$ ]] || {
     echo "Expected a full lowercase 40-character Git commit SHA." >&2
@@ -137,6 +146,7 @@ compose() {
   export CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE="$(absolute_path "$CROWDRELAY_WEBHOOK_SECRETS_FILE")"
   export CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE="$(absolute_path "$CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE")"
   export CROWDRELAY_DOCKER_NETWORK
+  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then export CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256="$(sha256_file "$ROOT_DIR/deploy/area-management.Caddyfile")"; fi
   export CROWDRELAY_IMAGE_TAG="sha-${CROWDRELAY_IMAGE_SHA}"
 
   compose_args=(
@@ -244,6 +254,7 @@ doctor() {
   esac
 
   compose config --quiet
+  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then compose run --rm --no-deps --entrypoint caddy area-management-proxy validate --config /etc/caddy/Caddyfile >/dev/null; fi
   echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
 }
 
@@ -331,6 +342,27 @@ verify() {
   echo "CrowdRelay is healthy."
 }
 
+verify_management_proxy() {
+  [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]] || return 0
+  require_command curl
+  local container status runtime_caddy source_sha runtime_sha endpoint status_code route
+  container="$(compose ps -q area-management-proxy)"
+  [[ -n "$container" ]] || { echo "Management proxy is missing after deploy." >&2; exit 1; }
+  status="$(docker inspect --format "{{.State.Status}}" "$container")"
+  [[ "$status" == "running" ]] || { echo "Management proxy is not running: $status" >&2; exit 1; }
+  runtime_caddy="$(docker exec "$container" cat /etc/caddy/Caddyfile)" || { echo "Cannot read live management Caddyfile." >&2; exit 1; }
+  source_sha="$(sha256_file "$ROOT_DIR/deploy/area-management.Caddyfile")"
+  runtime_sha="$(printf "%s\n" "$runtime_caddy" | sha256_stdin)"
+  [[ "$runtime_sha" == "$source_sha" ]] || { echo "Management proxy Caddyfile drift: runtime=$runtime_sha source=$source_sha" >&2; exit 1; }
+  docker exec "$container" caddy validate --config /etc/caddy/Caddyfile >/dev/null
+  for route in "/v1/control-plane/area" "/v1/control-plane/ops/summary" "/v1/control-plane/ecosystem/flags" "/v1/control-plane/autopilot/overview"; do grep -Fq "$route" <<<"$runtime_caddy" || { echo "Management proxy missing route: $route" >&2; exit 1; }; done
+  endpoint="$(docker port "$container" 18080/tcp | head -n1)"
+  [[ -n "$endpoint" ]] || { echo "Management proxy has no published 18080 endpoint." >&2; exit 1; }
+  status_code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 10 "http://${endpoint}/v1/control-plane/ops/summary")"
+  [[ "$status_code" == "401" ]] || { echo "Management routing gate failed: expected=401 got=$status_code" >&2; exit 1; }
+  echo "MANAGEMENT_PROXY=PASS config=current routing=401"
+}
+
 deploy() {
   prepare_runtime_file_permissions
   doctor
@@ -365,6 +397,7 @@ deploy() {
   fi
 
   compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans "${deploy_services[@]}"
+  verify_management_proxy
   verify_exact_release_identity
   run_hook crowdrelay_before_verify
   verify
