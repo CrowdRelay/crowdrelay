@@ -44,7 +44,7 @@ printf 'SOURCE_CONTRACTS=PASS\n'
 printf '\n==> 1/3 — Canonical exact-SHA CrowdRelay deploy\n'
 "$CANONICAL" "$TARGET"
 
-printf '\n==> 2/3 — Refresh and verify Oracle management proxy\n'
+printf '\n==> 2/3 — Reconcile and verify Oracle management proxy\n'
 ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" "$TARGET" <<'ORACLE_GATE'
 set -Eeuo pipefail
 repo="$1"
@@ -56,7 +56,7 @@ fail() {
   exit 1
 }
 
-for command in docker curl sha256sum; do
+for command in docker curl sha256sum grep; do
   command -v "$command" >/dev/null 2>&1 || fail "missing Oracle command: $command"
 done
 [[ "$(git rev-parse HEAD)" == "$target" ]] || fail 'Oracle source HEAD drifted after canonical deploy'
@@ -92,13 +92,24 @@ compose() {
 }
 
 compose config --quiet
-# Validate the exact source Caddyfile under the same Compose security/mount
-# profile before replacing the currently running proxy.
-compose run --rm --no-deps --entrypoint caddy area-management-proxy \
-  validate --config /etc/caddy/Caddyfile >/dev/null
-printf 'ORACLE_MANAGEMENT_PREFLIGHT=PASS caddy=valid\n'
+source_sha="$(sha256sum deploy/area-management.Caddyfile | awk '{print $1}')"
+proxy_status="$(docker inspect crowdrelay-area-management-proxy-1 --format '{{.State.Status}}' 2>/dev/null || true)"
+runtime_sha=""
+if [[ "$proxy_status" == "running" ]]; then
+  runtime_sha="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile | sha256sum | awk '{print $1}' || true)"
+fi
 
-compose up -d --no-deps --force-recreate area-management-proxy
+if [[ "$proxy_status" != "running" || "$runtime_sha" != "$source_sha" ]]; then
+  # Same-SHA reruns can repair a missing/stale process. Normal new releases do
+  # not restart twice: the config-digest label already makes canonical Compose
+  # recreate the proxy whenever tracked routing changes.
+  compose run --rm --no-deps --entrypoint caddy area-management-proxy \
+    validate --config /etc/caddy/Caddyfile >/dev/null
+  printf 'ORACLE_MANAGEMENT_RECONCILE=REPAIR previous_status=%s\n' "${proxy_status:-missing}"
+  compose up -d --no-deps --force-recreate area-management-proxy
+else
+  printf 'ORACLE_MANAGEMENT_RECONCILE=NOOP config=current\n'
+fi
 
 for _ in $(seq 1 30); do
   status="$(docker inspect crowdrelay-area-management-proxy-1 --format '{{.State.Status}}' 2>/dev/null || true)"
@@ -107,8 +118,9 @@ for _ in $(seq 1 30); do
 done
 [[ "$status" == "running" ]] || fail "management proxy failed to start: $status"
 
-runtime_sha="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile | sha256sum | awk '{print $1}')"
-source_sha="$(sha256sum deploy/area-management.Caddyfile | awk '{print $1}')"
+runtime_caddy="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile)" \
+  || fail 'cannot read live management Caddyfile'
+runtime_sha="$(printf '%s\n' "$runtime_caddy" | sha256sum | awk '{print $1}')"
 [[ "$runtime_sha" == "$source_sha" ]] || fail 'live management Caddyfile differs from source'
 docker exec crowdrelay-area-management-proxy-1 caddy validate --config /etc/caddy/Caddyfile >/dev/null
 for route in \
@@ -116,8 +128,7 @@ for route in \
   '/v1/control-plane/ops/summary' \
   '/v1/control-plane/ecosystem/flags' \
   '/v1/control-plane/autopilot/overview'; do
-  docker exec crowdrelay-area-management-proxy-1 grep -Fq "$route" /etc/caddy/Caddyfile \
-    || fail "live management proxy is missing route: $route"
+  grep -Fq "$route" <<<"$runtime_caddy" || fail "live management proxy is missing route: $route"
 done
 
 endpoint="$(docker port crowdrelay-area-management-proxy-1 18080/tcp | head -n1)"
@@ -146,6 +157,10 @@ fail() {
   exit 1
 }
 
+for command in docker curl python3 grep; do
+  command -v "$command" >/dev/null 2>&1 || fail "missing Control Plane gate command: $command"
+done
+
 app="crowdrelay-control-plane-app-1"
 tunnel="crowdrelay-control-plane-virya-area-tunnel-1"
 [[ "$(docker inspect "$app" --format '{{.State.Status}}')" == "running" ]] || fail 'Control Plane app is not running'
@@ -153,14 +168,15 @@ tunnel="crowdrelay-control-plane-virya-area-tunnel-1"
 app_id="$(docker inspect "$app" --format '{{.Id}}')"
 network_mode="$(docker inspect "$tunnel" --format '{{.HostConfig.NetworkMode}}')"
 [[ "$network_mode" == "container:${app_id}" ]] || fail "Control Plane tunnel namespace drift: $network_mode"
+tunnel_caddy="$(docker exec "$tunnel" cat /etc/caddy/Caddyfile)" || fail 'cannot read Control Plane tunnel Caddyfile'
 for route in \
   '/v1/control-plane/area' \
   '/v1/control-plane/ops/summary' \
   '/v1/control-plane/ecosystem/flags' \
   '/v1/control-plane/autopilot/overview'; do
-  docker exec "$tunnel" grep -Fq "$route" /etc/caddy/Caddyfile \
-    || fail "Control Plane tunnel lost route: $route"
+  grep -Fq "$route" <<<"$tunnel_caddy" || fail "Control Plane tunnel lost route: $route"
 done
+unset tunnel_caddy
 
 runtime_env="$(docker inspect "$app" --format '{{range .Config.Env}}{{println .}}{{end}}')"
 area_master="$(printf '%s\n' "$runtime_env" | sed -n 's/^CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY=//p')"
@@ -176,6 +192,7 @@ published="$(docker port "$app" 8090/tcp | head -n1)"
 admin="$(docker inspect "$app" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^CONTROL_PLANE_ADMIN_TOKEN=//p')"
 [[ -n "$admin" ]] || fail 'Control Plane admin token missing from runtime'
 summary="$(curl -fsS --connect-timeout 3 --max-time 10 -H "Authorization: Bearer $admin" "http://${published}/api/v1/tenants/virya/operations/summary")"
+unset admin
 printf '%s' "$summary" | python3 -c '
 import json
 import sys
