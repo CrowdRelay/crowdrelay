@@ -7,6 +7,8 @@ TARGET="${1:-}"
 WAIT_SECONDS="${CROWDRELAY_DEPLOY_WAIT_SECONDS:-3600}"
 POLL_SECONDS="${CROWDRELAY_DEPLOY_POLL_SECONDS:-3}"
 CONTROL_PLANE_HOST="${CROWDRELAY_CONTROL_PLANE_HOST:-virya-home}"
+ORACLE="${CROWDRELAY_DEPLOY_HOST:-virya-oracle}"
+ORACLE_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
 CANONICAL="$ROOT_DIR/scripts/deploy-production-safe.sh"
 
 fail() {
@@ -70,6 +72,108 @@ docker inspect "$tunnel" --format '{{.Id}}|{{.State.StartedAt}}|{{.RestartCount}
 REMOTE
 }
 
+recover_exact_runtime_convergence() {
+  printf 'RUNTIME_CONVERGENCE_RECOVERY=CHECK sha=%s\n' "$TARGET" >&2
+  ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" "$TARGET" <<'REMOTE_RECOVERY'
+set -Eeuo pipefail
+repo="$1"
+target="$2"
+cd "$repo"
+
+fail() {
+  printf 'RUNTIME_CONVERGENCE_RECOVERY=REFUSED reason=%s\n' "$*" >&2
+  exit 1
+}
+
+for command in docker python3 sha256sum; do
+  command -v "$command" >/dev/null 2>&1 || fail "missing-$command"
+done
+[[ "$(git rev-parse HEAD)" == "$target" ]] || fail 'source-head-mismatch'
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'dirty-worktree'
+[[ -f .crowdrelay.local.sh && ! -L .crowdrelay.local.sh ]] || fail 'local-config-missing'
+# shellcheck source=/dev/null
+source .crowdrelay.local.sh
+[[ "${CROWDRELAY_IMAGE_SHA:-}" == "$target" ]] || fail 'pin-mismatch'
+
+for component in api worker; do
+  image="ghcr.io/wojciechbator/crowdrelay-${component}:sha-${target}"
+  [[ "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)" == "$target" ]] \
+    || fail "target-image-invalid-$component"
+done
+
+needs_recreate=false
+for service in api worker; do
+  container="crowdrelay-${service}-1"
+  image_id="$(docker inspect "$container" --format '{{.Image}}' 2>/dev/null || true)"
+  [[ -n "$image_id" ]] || fail "runtime-missing-$service"
+  revision="$(docker image inspect "$image_id" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || fail "runtime-revision-invalid-$service"
+  if [[ "$revision" != "$target" ]]; then
+    needs_recreate=true
+  fi
+done
+[[ "$needs_recreate" == true ]] || fail 'runtime-already-exact-failure-is-not-convergence'
+
+absolute_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then printf '%s\n' "$path"; else printf '%s/%s\n' "$PWD" "$path"; fi
+}
+
+env_file="$(absolute_path "${CROWDRELAY_ENV_FILE:-deploy/.env.production}")"
+compose_file="$(absolute_path "${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}")"
+export CROWDRELAY_ENV_FILE="$env_file"
+export CROWDRELAY_BOOTSTRAP_HOST_FILE="$(absolute_path "${CROWDRELAY_BOOTSTRAP_FILE:-deploy/bootstrap.production.json}")"
+export CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE="$(absolute_path "${CROWDRELAY_WEBHOOK_SECRETS_FILE:-deploy/webhook-secrets.production.json}")"
+export CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE="$(absolute_path "${CROWDRELAY_FCM_SERVICE_ACCOUNT_FILE:-deploy/secrets/firebase-service-account.json}")"
+export CROWDRELAY_DOCKER_NETWORK
+export CROWDRELAY_IMAGE_TAG="sha-${target}"
+compose_args=(--env-file "$env_file" -f "$compose_file")
+if [[ "${CROWDRELAY_AREA_MANAGEMENT_ENABLED:-false}" == "true" ]]; then
+  [[ -f compose.area-management.yaml && ! -L compose.area-management.yaml ]] || fail 'area-overlay-missing'
+  [[ -f deploy/area-management.Caddyfile && ! -L deploy/area-management.Caddyfile ]] || fail 'area-caddyfile-missing'
+  export CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256="$(sha256sum deploy/area-management.Caddyfile | awk '{print $1}')"
+  compose_args+=(-f compose.area-management.yaml)
+fi
+compose() { docker compose "${compose_args[@]}" "$@"; }
+
+compose config --format json | python3 -c '
+import json, sys
+model=json.load(sys.stdin)
+target=sys.argv[1]
+for service, component in (("api","api"),("worker","worker")):
+    image=model["services"][service]["image"]
+    expected=f"ghcr.io/wojciechbator/crowdrelay-{component}:sha-{target}"
+    if image != expected:
+        raise SystemExit(f"effective image mismatch for {service}: {image} != {expected}")
+' "$target" || fail 'effective-compose-not-exact'
+
+# setup owns migrations/bootstrap and must complete before either long-running
+# service is replaced. Only api+worker are force-recreated; the Oracle
+# management proxy and the Home Control Plane tunnel are deliberately excluded.
+compose pull api worker setup
+compose run --rm setup
+compose up -d --no-deps --force-recreate --wait --wait-timeout "${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}" api worker
+
+for service in api worker; do
+  container="crowdrelay-${service}-1"
+  configured="$(docker inspect "$container" --format '{{.Config.Image}}')"
+  image_id="$(docker inspect "$container" --format '{{.Image}}')"
+  revision="$(docker image inspect "$image_id" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  [[ "$configured" == *":sha-${target}" ]] || fail "post-recovery-tag-mismatch-$service"
+  [[ "$revision" == "$target" ]] || fail "post-recovery-revision-mismatch-$service"
+done
+meta="$(docker exec crowdrelay-api-1 curl -fsS --connect-timeout 2 --max-time 10 http://127.0.0.1:8080/v1/meta)"
+printf '%s' "$meta" | python3 -c '
+import json, sys
+value=json.load(sys.stdin)
+expected=sys.argv[1]
+if value.get("gitSha") != expected:
+    raise SystemExit(f"runtime meta mismatch: {value.get('gitSha')} != {expected}")
+' "$target" || fail 'post-recovery-meta-mismatch'
+printf 'RUNTIME_CONVERGENCE_RECOVERY=PASS sha=%s services=api,worker proxy=untouched\n' "$target"
+REMOTE_RECOVERY
+}
+
 wait_for_workflow "CI" "CI"
 wait_for_workflow "Publish container images" "IMAGES"
 
@@ -90,5 +194,21 @@ TUNNEL_AFTER="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel
 [[ "$TUNNEL_AFTER" == "$TUNNEL_BEFORE" ]] || fail "CrowdRelay deploy touched Control Plane tunnel: before=$TUNNEL_BEFORE after=$TUNNEL_AFTER"
 printf 'CONTROL_PLANE_TUNNEL_PRESERVATION=PASS unchanged=true\n'
 
-(( deploy_status == 0 )) || exit "$deploy_status"
-printf 'MAKE_DEPLOY=PASS repo=crowdrelay sha=%s tunnel=preserved\n' "$TARGET"
+if (( deploy_status != 0 )); then
+  printf 'CANONICAL_DEPLOY=FAILED status=%d checking-bounded-convergence-recovery=true\n' "$deploy_status" >&2
+  RECOVERY_TUNNEL_BEFORE="$(control_plane_tunnel_fingerprint)"
+  if recover_exact_runtime_convergence; then
+    RECOVERY_TUNNEL_AFTER="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable after convergence recovery'
+    [[ "$RECOVERY_TUNNEL_AFTER" == "$RECOVERY_TUNNEL_BEFORE" ]] || fail "runtime convergence recovery touched Control Plane tunnel: before=$RECOVERY_TUNNEL_BEFORE after=$RECOVERY_TUNNEL_AFTER"
+    printf 'CONTROL_PLANE_TUNNEL_RECOVERY_PRESERVATION=PASS unchanged=true\n'
+    printf '==> Retrying canonical deploy once after exact runtime convergence\n'
+    bash "$CANONICAL" "$TARGET"
+  else
+    exit "$deploy_status"
+  fi
+fi
+
+TUNNEL_FINAL="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable at final receipt'
+[[ "$TUNNEL_FINAL" == "$TUNNEL_BEFORE" ]] || fail "CrowdRelay deploy changed Control Plane tunnel before final receipt: before=$TUNNEL_BEFORE after=$TUNNEL_FINAL"
+printf 'CONTROL_PLANE_TUNNEL_FINAL=PASS unchanged=true\n'
+printf 'MAKE_DEPLOY=PASS repo=crowdrelay sha=%s tunnel=preserved exact-runtime=true\n' "$TARGET"
