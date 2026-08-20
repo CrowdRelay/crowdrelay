@@ -59,7 +59,7 @@ class RockSolidPublicReadPath(unittest.TestCase):
         self.assertIn("--retry 1", probe_script)
         self.assertIn("./scripts/production-smoke.sh", smoke)
         self.assertIn("./scripts/synesthesia-production-canary.sh", smoke)
-        self.assertIn('"synthetic":true', canary_script)
+        self.assertIn("synthetic:true", canary_script)
         self.assertIn("handoff=disabled", canary_script)
         alert = smoke.split("- name: Alert Discord on failure", 1)[1]
         self.assertNotIn("--retry 2", alert)
