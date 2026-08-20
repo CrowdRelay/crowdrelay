@@ -180,7 +180,7 @@ jobs:
         env:
           CROWDRELAY_ENV_FILE: .env.example
         run: |
-          docker buildx bake --print >/dev/null
+          docker buildx bake --file docker-bake.hcl --print >/dev/null
           docker compose config --quiet
           production_images="$(
             CROWDRELAY_IMAGE_TAG=sha-0000000000000000000000000000000000000000 \
@@ -289,7 +289,7 @@ jobs:
         env:
           BUILD_CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
         run: |
-          docker buildx bake \
+          docker buildx bake --file docker-bake.hcl \
             --set '*.platform=linux/amd64' \
             --set "*.cache-from=type=registry,ref=${BUILD_CACHE_REF}" \
             --set '*.output=type=cacheonly'
