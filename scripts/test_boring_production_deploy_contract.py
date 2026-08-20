@@ -66,13 +66,25 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("compose up --detach --wait", CTL)
         self.assertIn("verify\n", CTL)
 
-    def test_safe_mac_orchestrator_repairs_management_proxy_and_cross_checks_control_plane(self) -> None:
+    def test_safe_mac_orchestrator_preflights_proxy_and_cross_checks_control_plane(self) -> None:
         self.assertIn('CANONICAL="$ROOT_DIR/scripts/deploy-production-exact.sh"', SAFE_DEPLOY)
         self.assertIn('"$CANONICAL" "$TARGET"', SAFE_DEPLOY)
+        self.assertIn('compose run --rm --no-deps --entrypoint caddy area-management-proxy', SAFE_DEPLOY)
+        self.assertIn('ORACLE_MANAGEMENT_PREFLIGHT=PASS', SAFE_DEPLOY)
         self.assertIn('--force-recreate area-management-proxy', SAFE_DEPLOY)
-        self.assertIn('/v1/control-plane/ops/summary', SAFE_DEPLOY)
+        for route in (
+            '/v1/control-plane/area',
+            '/v1/control-plane/ops/summary',
+            '/v1/control-plane/ecosystem/flags',
+            '/v1/control-plane/autopilot/overview',
+        ):
+            self.assertIn(route, SAFE_DEPLOY)
         self.assertIn('expected=401', SAFE_DEPLOY)
         self.assertIn('CROWDRELAY_CONTROL_PLANE_HOST:-virya-home', SAFE_DEPLOY)
+        self.assertIn('CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY', SAFE_DEPLOY)
+        self.assertIn('CONTROL_PLANE_MANAGEMENT_MASTER_KEY', SAFE_DEPLOY)
+        self.assertIn('CONTROL_PLANE_VIRYA_MANAGEMENT_URL', SAFE_DEPLOY)
+        self.assertIn('http://127.0.0.1:18080', SAFE_DEPLOY)
         self.assertIn('/api/v1/tenants/virya/operations/summary', SAFE_DEPLOY)
         self.assertIn('CONTROL_PLANE_CROSS_GATE=PASS', SAFE_DEPLOY)
         self.assertIn('CROWDRELAY_SAFE_DEPLOY=PASS', SAFE_DEPLOY)
