@@ -473,6 +473,7 @@ impl EcosystemControlPlaneRepository for PostgresEcosystemRepository {
             "key": command.key,
             "enabled": command.enabled,
             "reason": command.reason,
+            "expected_version": command.expected_version,
         }));
         let identity = MutationIdentity {
             action: FLAG_ACTION,
@@ -495,17 +496,26 @@ impl EcosystemControlPlaneRepository for PostgresEcosystemRepository {
             });
         }
 
-        sqlx::query(
+        let update = sqlx::query(
             r#"
             INSERT INTO ecosystem_feature_flags (
                 workspace_id, key, enabled, reason, updated_by_request_id
-            ) VALUES ($1, $2, $3, $4, $5)
+            )
+            SELECT $1, $2, $3, $4, $5
+            WHERE $6::bigint IS NULL OR EXISTS (
+                SELECT 1
+                FROM ecosystem_feature_flags AS current_flag
+                WHERE current_flag.workspace_id = $1
+                  AND current_flag.key = $2
+                  AND current_flag.version = $6
+            )
             ON CONFLICT (workspace_id, key) DO UPDATE
             SET enabled = EXCLUDED.enabled,
                 reason = EXCLUDED.reason,
                 version = ecosystem_feature_flags.version + 1,
                 updated_at = now(),
                 updated_by_request_id = EXCLUDED.updated_by_request_id
+            WHERE $6::bigint IS NULL OR ecosystem_feature_flags.version = $6
             "#,
         )
         .bind(workspace_id)
@@ -513,9 +523,14 @@ impl EcosystemControlPlaneRepository for PostgresEcosystemRepository {
         .bind(command.enabled)
         .bind(reason)
         .bind(command.request_id.as_deref())
+        .bind(command.expected_version)
         .execute(&mut *tx)
         .await
         .map_err(Self::unexpected)?;
+
+        if update.rows_affected() == 0 {
+            return Err(EcosystemRepositoryError::Conflict);
+        }
 
         append_action(
             &mut tx,

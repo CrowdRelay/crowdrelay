@@ -18,6 +18,7 @@ fn command(
         key: "ticket_sales_enabled".to_owned(),
         enabled,
         reason: Some("  integration  ".to_owned()),
+        expected_version: None,
         idempotency_key: idempotency_key.to_owned(),
         request_id: Some("req-ecosystem-1".to_owned()),
     }
@@ -104,6 +105,27 @@ async fn feature_flag_updates_are_idempotent_audited_and_replay_safe()
     assert!(!second.replayed);
     assert!(second.flag.enabled);
     assert_eq!(second.flag.version, 3);
+
+    let stale = repository
+        .update_feature_flag(&UpdateFeatureFlagCommand {
+            expected_version: Some(2),
+            idempotency_key: format!("{key}-stale"),
+            ..command(workspace_id, &key, false)
+        })
+        .await
+        .expect_err("a stale optimistic version must not overwrite a newer flag");
+    assert_eq!(stale, EcosystemRepositoryError::Conflict);
+
+    let missing_guarded = repository
+        .update_feature_flag(&UpdateFeatureFlagCommand {
+            key: "mailer_enabled".to_owned(),
+            expected_version: Some(1),
+            idempotency_key: format!("{key}-missing-guarded"),
+            ..command(workspace_id, &key, true)
+        })
+        .await
+        .expect_err("an optimistic update must not create a missing flag");
+    assert_eq!(missing_guarded, EcosystemRepositoryError::Conflict);
 
     // The declared-flag set is the caller's: update_flag rejects unknown keys
     // before reaching here, and this upsert must stay able to materialize a
