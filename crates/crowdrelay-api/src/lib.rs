@@ -289,13 +289,16 @@ fn one_segment_after(path: &str, prefix: &str) -> bool {
 }
 
 fn is_control_plane_management_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/v1/control-plane/ops/summary"
-            | "/v1/control-plane/ops/deliveries/dead/clear"
-            | "/v1/control-plane/ecosystem/flags"
-            | "/v1/control-plane/autopilot/overview"
-    ) || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
+    path.starts_with("/v1/control-plane/ops/")
+        || matches!(
+            path,
+            "/v1/control-plane/ecosystem/overview"
+                | "/v1/control-plane/ecosystem/findings"
+                | "/v1/control-plane/ecosystem/reconcile"
+                | "/v1/control-plane/ecosystem/flags"
+                | "/v1/control-plane/autopilot/overview"
+        )
+        || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
         || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
 }
 
@@ -631,7 +634,7 @@ crowdrelay_ops_metrics_snapshot_available 1\n",
         "crowdrelay_db_pool_idle {}\n",
         "# HELP crowdrelay_db_pool_in_use Current in-use PostgreSQL connections.\n# TYPE crowdrelay_db_pool_in_use gauge\n",
         "crowdrelay_db_pool_in_use {}\n",
-        "# HELP crowdrelay_db_pool_max Configured maximum PostgreSQL connections.\n# TYPE crowdrelay_db_pool_max gauge\n",
+        "# HELP crowdrelay_db_pool_max Configured PostgreSQL connections.\n# TYPE crowdrelay_db_pool_max gauge\n",
         "crowdrelay_db_pool_max {}\n",
         "# HELP crowdrelay_db_pool_utilization_ratio PostgreSQL pool utilization against configured maximum.\n# TYPE crowdrelay_db_pool_utilization_ratio gauge\n",
         "crowdrelay_db_pool_utilization_ratio {:.6}\n"
