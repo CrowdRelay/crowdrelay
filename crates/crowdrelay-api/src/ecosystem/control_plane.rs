@@ -7,6 +7,7 @@ async fn update_flag_inner(
     // The HTTP layer still owns input shape and the declared flag set; the
     // transaction, replay window and audit row belong to the repository.
     if flag_default(key).is_none()
+        || payload.expected_version.is_some_and(|version| version <= 0)
         || payload
             .reason
             .as_deref()
@@ -19,6 +20,7 @@ async fn update_flag_inner(
         key: key.to_owned(),
         enabled: payload.enabled,
         reason: payload.reason,
+        expected_version: payload.expected_version,
         idempotency_key: mutation_key(headers)?,
         request_id: request_id(headers),
     };

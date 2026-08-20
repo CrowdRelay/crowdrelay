@@ -30,6 +30,8 @@ pub struct UpdateFeatureFlagCommand {
     pub key: String,
     pub enabled: bool,
     pub reason: Option<String>,
+    /// Optional optimistic concurrency guard for newer operator clients.
+    pub expected_version: Option<i64>,
     pub idempotency_key: String,
     pub request_id: Option<String>,
 }

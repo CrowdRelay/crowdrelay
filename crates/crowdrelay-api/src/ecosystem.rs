@@ -84,6 +84,7 @@ pub struct FeatureFlag {
 pub struct UpdateFlagRequest {
     enabled: bool,
     reason: Option<String>,
+    expected_version: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]

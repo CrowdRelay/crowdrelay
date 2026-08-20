@@ -5553,6 +5553,11 @@ paths:
               properties:
                 enabled: { type: boolean }
                 reason: { type: [string, 'null'], maxLength: 500 }
+                expected_version:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: Optional optimistic concurrency guard; stale values return 409.
       responses:
         '200': { description: Updated flag plus replay marker. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
