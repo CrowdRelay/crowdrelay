@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   public-consumers:
-    name: Signal + Synesthesia compatibility
+    name: Signal + Virya + Synesthesia compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -46,6 +46,14 @@ jobs:
           repository: wojciechbator/virya-signal
           ref: main
           path: virya-signal
+          persist-credentials: false
+
+      - name: Check out Virya web consumer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: wojciechbator/virya
+          ref: main
+          path: virya
           persist-credentials: false
 
       - name: Check out Synesthesia consumer
