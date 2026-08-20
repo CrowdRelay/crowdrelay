@@ -373,6 +373,7 @@ mod tests {
             fan_lifecycle_state(workspace_id)?,
             ticketing,
             Some(sha2::Sha256::digest(b"test-area-management-key-1234567890").into()),
+            Some(sha2::Sha256::digest(b"test-control-plane-key-123456789012").into()),
             ops,
             autopilot,
             false,
@@ -708,6 +709,7 @@ mod tests {
         const STAFF_KEY: &str = "test-staff-api-key-123456789012";
         const COMMERCE_KEY: &str = "test-commerce-api-key-1234567890";
         const AREA_KEY: &str = "test-area-management-key-1234567890";
+        const CONTROL_PLANE_KEY: &str = "test-control-plane-key-123456789012";
 
         let app = test_router()?;
         for (uri, token) in [
@@ -718,6 +720,10 @@ mod tests {
             ("/v1/control-plane/area", STAFF_KEY),
             ("/v1/control-plane/area", COMMERCE_KEY),
             ("/v1/admin/ops/summary", AREA_KEY),
+            ("/v1/admin/ops/summary", CONTROL_PLANE_KEY),
+            ("/v1/control-plane/ops/summary", ADMIN_KEY),
+            ("/v1/control-plane/ops/summary", AREA_KEY),
+            ("/v1/control-plane/ecosystem/flags", STAFF_KEY),
         ] {
             let response = app
                 .clone()
@@ -773,6 +779,17 @@ mod tests {
             )
             .await?;
         assert_ne!(internal_with_commerce.status(), StatusCode::UNAUTHORIZED);
+
+        let control_plane_with_control_plane_key = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/control-plane/ops/summary")
+                    .header(AUTHORIZATION, format!("Bearer {CONTROL_PLANE_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_ne!(control_plane_with_control_plane_key.status(), StatusCode::UNAUTHORIZED);
 
         let area_with_area_key = app
             .oneshot(

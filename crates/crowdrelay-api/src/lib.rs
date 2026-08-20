@@ -63,6 +63,7 @@ mod autopilot;
 mod beacon_signal;
 mod commerce;
 mod concert_qr;
+mod control_plane;
 mod ecosystem;
 mod event_copy;
 mod events;
@@ -121,6 +122,7 @@ enum PrivilegedAuthorization {
     Operator,
     Commerce,
     AreaManagement,
+    ControlPlane,
 }
 
 /// Shared HTTP state assembled by the API composition root.
@@ -137,6 +139,7 @@ pub struct AppState {
     pub(crate) ticketing: TicketingState,
     pub(crate) area_admin: crowdrelay_application::AreaAdminService,
     area_management_api_key_sha256: Option<[u8; 32]>,
+    control_plane_api_key_sha256: Option<[u8; 32]>,
     pub(crate) ops: OpsState,
     pub(crate) autopilot: PostgresAutopilotRepository,
     pub(crate) autopilot_runtime_enabled: bool,
@@ -162,6 +165,7 @@ impl AppState {
         fan_lifecycle: FanLifecycleState,
         ticketing: TicketingState,
         area_management_api_key_sha256: Option<[u8; 32]>,
+        control_plane_api_key_sha256: Option<[u8; 32]>,
         ops: OpsState,
         autopilot: PostgresAutopilotRepository,
         autopilot_runtime_enabled: bool,
@@ -184,6 +188,7 @@ impl AppState {
             ticketing,
             area_admin,
             area_management_api_key_sha256,
+            control_plane_api_key_sha256,
             ops,
             autopilot,
             autopilot_runtime_enabled,
@@ -269,12 +274,28 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
 
     routing::application_routes(state.clone())
         .merge(area_admin::router(state.clone()))
+        .merge(control_plane::router(state.clone()))
         .layer(from_fn_with_state(state, enforce_privileged_namespace))
         .layer(middleware)
 }
 
 fn is_area_management_path(path: &str) -> bool {
     path == "/v1/control-plane/area" || path.starts_with("/v1/control-plane/area/")
+}
+
+fn one_segment_after(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'))
+}
+
+fn is_control_plane_management_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/control-plane/ops/summary"
+            | "/v1/control-plane/ecosystem/flags"
+            | "/v1/control-plane/autopilot/overview"
+    ) || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
+        || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
 }
 
 async fn enforce_privileged_namespace(
@@ -295,6 +316,8 @@ async fn enforce_privileged_namespace(
         authorization == Some(PrivilegedAuthorization::Commerce)
     } else if is_area_management_path(path) {
         authorization == Some(PrivilegedAuthorization::AreaManagement)
+    } else if is_control_plane_management_path(path) {
+        authorization == Some(PrivilegedAuthorization::ControlPlane)
     } else {
         true
     };
@@ -341,7 +364,8 @@ async fn normalize_request_id(
         || path.starts_with("/v1/staff/")
         || path.starts_with("/v1/internal/")
         || path.starts_with("/v1/commerce/")
-        || is_area_management_path(path);
+        || is_area_management_path(path)
+        || is_control_plane_management_path(path);
     let authorization = if path.starts_with("/v1/admin/")
         && state.ticketing.admin_authorized(request.headers())
     {
@@ -358,6 +382,10 @@ async fn normalize_request_id(
         && security::bearer_sha256_matches(request.headers(), state.area_management_api_key_sha256)
     {
         Some(PrivilegedAuthorization::AreaManagement)
+    } else if is_control_plane_management_path(path)
+        && security::bearer_sha256_matches(request.headers(), state.control_plane_api_key_sha256)
+    {
+        Some(PrivilegedAuthorization::ControlPlane)
     } else {
         None
     };
