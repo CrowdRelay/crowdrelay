@@ -85,16 +85,20 @@ mod tests {
     }
 
     #[test]
-    fn leaderboard_aliases_mask_identity_and_stay_bounded() {
+    fn leaderboard_names_normalize_and_match_database_bounds() {
         assert_eq!(
-            leaderboard::masked_email_alias("wojciech@example.com"),
-            Some("woj••••".to_owned())
+            leaderboard::normalize_leaderboard_name(None).expect("default name"),
+            "anonymous"
         );
         assert_eq!(
-            leaderboard::masked_email_alias("a@b.pl"),
-            Some("a••••".to_owned())
+            leaderboard::normalize_leaderboard_name(Some("  Wojtek   VIRYA  "))
+                .expect("normalized name"),
+            "Wojtek VIRYA"
         );
-        assert!(leaderboard::masked_email_alias("not-an-email").is_none());
-        assert!(leaderboard::masked_email_alias("@example.com").is_none());
+        assert!(leaderboard::normalize_leaderboard_name(Some("ab")).is_ok());
+        assert!(leaderboard::normalize_leaderboard_name(Some("12345678901234567890")).is_ok());
+        assert!(leaderboard::normalize_leaderboard_name(Some("a")).is_err());
+        assert!(leaderboard::normalize_leaderboard_name(Some("123456789012345678901")).is_err());
+        assert!(leaderboard::normalize_leaderboard_name(Some("bad\u{0007}name")).is_err());
     }
 }
