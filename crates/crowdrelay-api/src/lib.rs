@@ -292,6 +292,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
     matches!(
         path,
         "/v1/control-plane/ops/summary"
+            | "/v1/control-plane/ops/deliveries/dead/clear"
             | "/v1/control-plane/ecosystem/flags"
             | "/v1/control-plane/autopilot/overview"
     ) || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
