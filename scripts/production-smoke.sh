@@ -100,7 +100,7 @@ printf 'crowdrelay_synesthesia_cors=ok\n'
 
 require_200 virya_home "${VIRYA_BASE_URL%/}/"
 require_200 synesthesia_home "${SYNESTHESIA_BASE_URL%/}/"
-require_200 synesthesia_boot_art "${SYNESTHESIA_BASE_URL%/}/menu-eye-poster.webp"
+require_200 synesthesia_boot_art "${SYNESTHESIA_BASE_URL%/}/menu-world.webp"
 if [[ -n "${N8N_INGRESS_URL:-}" ]]; then
   status="$(request_status --request POST --header 'content-type: application/json' --data '{"external_smoke":true}' "$N8N_INGRESS_URL")"
   [[ "$status" == 400 || "$status" == 401 ]] || { printf 'n8n signed ingress returned HTTP %s, expected 400 or 401\n' "$status" >&2; exit 1; }
