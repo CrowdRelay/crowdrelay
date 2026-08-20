@@ -229,7 +229,7 @@ pub async fn publish_leaderboard(
         .into_response()
 }
 
-fn normalize_leaderboard_name(value: Option<&str>) -> Result<String, SynesthesiaError> {
+pub(super) fn normalize_leaderboard_name(value: Option<&str>) -> Result<String, SynesthesiaError> {
     let raw = value.unwrap_or("").trim();
     if raw.is_empty() {
         return Ok("anonymous".to_owned());
@@ -261,13 +261,4 @@ fn normalize_leaderboard_name(value: Option<&str>) -> Result<String, Synesthesia
     } else {
         Ok(normalized)
     }
-}
-
-pub(super) fn masked_email_alias(value: &str) -> Option<String> {
-    let (local, domain) = value.rsplit_once('@')?;
-    if local.is_empty() || domain.is_empty() {
-        return None;
-    }
-    let local_prefix: String = local.chars().take(3).collect();
-    (!local_prefix.is_empty()).then(|| format!("{local_prefix}••••"))
 }
