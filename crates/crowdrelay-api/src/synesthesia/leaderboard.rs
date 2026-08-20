@@ -250,7 +250,7 @@ pub(super) fn normalize_leaderboard_name(value: Option<&str>) -> Result<String, 
             normalized.push(character);
             previous_space = false;
         }
-        if normalized.chars().count() > 24 {
+        if normalized.chars().count() > 20 {
             return Err(SynesthesiaError::Invalid);
         }
     }
@@ -258,6 +258,8 @@ pub(super) fn normalize_leaderboard_name(value: Option<&str>) -> Result<String, 
     let normalized = normalized.trim().to_owned();
     if normalized.is_empty() {
         Ok("anonymous".to_owned())
+    } else if normalized.chars().count() < 2 {
+        Err(SynesthesiaError::Invalid)
     } else {
         Ok(normalized)
     }
