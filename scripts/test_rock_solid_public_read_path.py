@@ -44,17 +44,23 @@ class RockSolidPublicReadPath(unittest.TestCase):
         self.assertIn("url.fragment().is_none()", worker)
         self.assertNotIn("fn valid_http_url", worker)
 
-    def test_external_production_smoke_includes_synesthesia_without_retrying_alert_post(self):
+    def test_external_production_smoke_is_scheduled_and_includes_safe_synesthesia_canary(self):
         smoke = (ROOT / ".github/workflows/production-smoke.yml").read_text()
         probe_script = (ROOT / "scripts/production-smoke.sh").read_text()
+        canary_script = (ROOT / "scripts/synesthesia-production-canary.sh").read_text()
         self.assertIn("SYNESTHESIA_BASE_URL", smoke)
+        self.assertIn("schedule:", smoke)
+        self.assertIn('cron: "7 */6 * * *"', smoke)
         self.assertIn("require_200 synesthesia_home", probe_script)
         self.assertIn("require_200 synesthesia_boot_art", probe_script)
+        self.assertIn("menu-world.webp", probe_script)
         self.assertIn("--connect-timeout 4", probe_script)
         self.assertIn("--max-time 10", probe_script)
         self.assertIn("--retry 1", probe_script)
-        self.assertNotIn("schedule:", smoke)
         self.assertIn("./scripts/production-smoke.sh", smoke)
+        self.assertIn("./scripts/synesthesia-production-canary.sh", smoke)
+        self.assertIn("synthetic:true", canary_script)
+        self.assertIn("handoff=disabled", canary_script)
         alert = smoke.split("- name: Alert Discord on failure", 1)[1]
         self.assertNotIn("--retry 2", alert)
         self.assertNotIn("--retry-all-errors", alert)
