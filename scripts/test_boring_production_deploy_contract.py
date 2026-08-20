@@ -1,14 +1,22 @@
 from pathlib import Path
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-DEPLOY = (ROOT / "scripts/deploy-production-exact.sh").read_text()
+DEPLOY_PATH = ROOT / "scripts/deploy-production-exact.sh"
+SAFE_DEPLOY_PATH = ROOT / "scripts/deploy-production-safe.sh"
+DEPLOY = DEPLOY_PATH.read_text()
+SAFE_DEPLOY = SAFE_DEPLOY_PATH.read_text()
 INSTALLER = (ROOT / "scripts/install-deploy-crowdrelay-wrapper.sh").read_text()
 CTL = (ROOT / "crowdrelayctl").read_text()
 PUBLISH = (ROOT / ".github/workflows/publish-images.yml").read_text()
 
 
 class BoringProductionDeployContract(unittest.TestCase):
+    def test_shell_syntax(self) -> None:
+        subprocess.run(["bash", "-n", str(DEPLOY_PATH)], check=True)
+        subprocess.run(["bash", "-n", str(SAFE_DEPLOY_PATH)], check=True)
+
     def test_one_tracked_orchestrator_owns_the_release_path(self) -> None:
         for token in (
             "Production image gate",
@@ -58,6 +66,17 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("compose up --detach --wait", CTL)
         self.assertIn("verify\n", CTL)
 
+    def test_safe_mac_orchestrator_repairs_management_proxy_and_cross_checks_control_plane(self) -> None:
+        self.assertIn('CANONICAL="$ROOT_DIR/scripts/deploy-production-exact.sh"', SAFE_DEPLOY)
+        self.assertIn('"$CANONICAL" "$TARGET"', SAFE_DEPLOY)
+        self.assertIn('--force-recreate area-management-proxy', SAFE_DEPLOY)
+        self.assertIn('/v1/control-plane/ops/summary', SAFE_DEPLOY)
+        self.assertIn('expected=401', SAFE_DEPLOY)
+        self.assertIn('CROWDRELAY_CONTROL_PLANE_HOST:-virya-home', SAFE_DEPLOY)
+        self.assertIn('/api/v1/tenants/virya/operations/summary', SAFE_DEPLOY)
+        self.assertIn('CONTROL_PLANE_CROSS_GATE=PASS', SAFE_DEPLOY)
+        self.assertIn('CROWDRELAY_SAFE_DEPLOY=PASS', SAFE_DEPLOY)
+
     def test_publication_matches_the_real_production_architecture(self) -> None:
         self.assertIn("*.platform=linux/amd64", PUBLISH)
         self.assertIn("platforms: linux/amd64", PUBLISH)
@@ -69,13 +88,14 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn('"$TARGET" <<<"$META"', DEPLOY)
 
     def test_fish_wrapper_is_only_a_thin_launcher(self) -> None:
-        self.assertIn("deploy-production-exact.sh", INSTALLER)
+        self.assertIn("deploy-production-safe.sh", INSTALLER)
         self.assertIn("LEGACY_HELPERS=UNREFERENCED", INSTALLER)
         marker = 'cat > "$DEST" <<EOF\n'
         self.assertIn(marker, INSTALLER)
         wrapper_template = INSTALLER.split(marker, 1)[1].split("\nEOF\n", 1)[0]
 
-        self.assertIn("deploy-production-exact.sh", wrapper_template)
+        self.assertIn("deploy-production-safe.sh", wrapper_template)
+        self.assertNotIn("deploy-production-exact.sh", wrapper_template)
         self.assertNotIn(".local/libexec", wrapper_template)
         for legacy in (
             "crowdrelay-image-set-gate",
