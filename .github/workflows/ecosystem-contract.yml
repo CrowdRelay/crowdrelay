@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   public-consumers:
-    name: Signal + Virya + Synesthesia compatibility
+    name: Signal + Synesthesia compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -48,14 +48,6 @@ jobs:
           path: virya-signal
           persist-credentials: false
 
-      - name: Check out Virya web consumer
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: wojciechbator/virya
-          ref: main
-          path: virya
-          persist-credentials: false
-
       - name: Check out Synesthesia consumer
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -66,3 +58,7 @@ jobs:
 
       - name: Verify current consumers against this CrowdRelay revision
         run: python3 crowdrelay/scripts/test-ecosystem-contract-v2.py
+
+      # Virya web is private and intentionally not coupled to an extra PAT here.
+      # Its reciprocal upstream-contract workflow checks current CrowdRelay main
+      # on every relevant change and on the same six-hour cadence.
