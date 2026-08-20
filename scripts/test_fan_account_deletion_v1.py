@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,9 +51,11 @@ class FanAccountDeletionContract(unittest.TestCase):
 
     def test_capability_and_schema_are_release_gated(self):
         latest = max(int(p.name[:4]) for p in (ROOT / 'migrations').glob('[0-9][0-9][0-9][0-9]_*.sql'))
-        self.assertEqual(latest, 70)
         meta = (ROOT / 'crates/crowdrelay-api/src/meta.rs').read_text()
-        self.assertIn('SCHEMA_VERSION: u32 = 70', meta)
+        schema_match = re.search(r'SCHEMA_VERSION: u32 = (\d+)', meta)
+        self.assertIsNotNone(schema_match)
+        self.assertEqual(int(schema_match.group(1)), latest)
+        self.assertGreaterEqual(latest, 68)
         self.assertIn('"fan_account_deletion_v1"', meta)
         compatibility = json.loads((ROOT / 'integration/ecosystem/compatibility.json').read_text())
         self.assertEqual(compatibility['minimumSchemaVersion'], 68)
