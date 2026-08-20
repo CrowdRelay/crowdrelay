@@ -23,7 +23,7 @@ for command in git gh ssh bash; do require "$command"; done
 [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail 'CROWDRELAY_DEPLOY_POLL_SECONDS must be a positive integer'
 
 cd "$ROOT_DIR"
-[[ -x "$CANONICAL" ]] || fail "canonical deploy is missing or not executable: $CANONICAL"
+[[ -f "$CANONICAL" && ! -L "$CANONICAL" ]] || fail "canonical deploy is missing or unsafe: $CANONICAL"
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree must be clean'
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 [[ "$branch" == "main" ]] || fail "make deploy must run from main, got=${branch:-detached}"
@@ -38,9 +38,10 @@ REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 [[ -n "$REPO" ]] || fail 'cannot resolve GitHub repository'
 
 wait_for_workflow() {
-  local workflow="$1" label="$2" deadline run_id
+  local workflow="$1" label="$2" deadline run_id last_notice
   deadline=$((SECONDS + WAIT_SECONDS))
   run_id=""
+  last_notice=0
   printf '==> Waiting for %s for %s\n' "$label" "$TARGET"
   while (( SECONDS < deadline )); do
     run_id="$(gh run list --repo "$REPO" --workflow "$workflow" --branch main --commit "$TARGET" --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
@@ -49,6 +50,10 @@ wait_for_workflow() {
       gh run watch "$run_id" --repo "$REPO" --exit-status
       printf '%s=PASS sha=%s\n' "$label" "$TARGET"
       return 0
+    fi
+    if (( SECONDS - last_notice >= 15 )); then
+      printf '... still waiting for %s run for %s\n' "$label" "$TARGET"
+      last_notice=$SECONDS
     fi
     sleep "$POLL_SECONDS"
   done
