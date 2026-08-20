@@ -10,7 +10,7 @@ on:
       - "scripts/verify-production-readiness.py"
       - ".github/workflows/production-readiness.yml"
   schedule:
-    - cron: "11 6 * * *"
+    - cron: "11 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
       CROWDRELAY_PRODUCTION_ADMIN_API_KEY: ${{ secrets.CROWDRELAY_PRODUCTION_ADMIN_API_KEY }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Verify attested production capability, not desired state
+      - name: Reconcile attested production capability and release ledger
         run: python3 scripts/verify-production-readiness.py
       - name: Upload secretless readiness receipt
         if: always()
