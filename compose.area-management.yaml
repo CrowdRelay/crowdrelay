@@ -8,6 +8,13 @@ services:
     image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
 
+    # Docker Compose includes labels in the service config hash. Coupling this
+    # label to the exact tracked Caddyfile digest makes a normal
+    # `crowdrelayctl deploy` recreate the proxy whenever its routing contract
+    # changes, instead of leaving a process running an older bind-mounted file.
+    labels:
+      org.crowdrelay.area-management-config-sha256: "dfb587e073b175a64ad6169486510c87cee49f16b21b6ca0bd2c63e4628f9c81"
+
     depends_on:
       api:
         condition: service_healthy
