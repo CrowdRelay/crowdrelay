@@ -44,7 +44,7 @@ printf 'SOURCE_CONTRACTS=PASS\n'
 printf '\n==> 1/3 — Canonical exact-SHA CrowdRelay deploy\n'
 "$CANONICAL" "$TARGET"
 
-printf '\n==> 2/3 — Force-refresh and verify Oracle management proxy\n'
+printf '\n==> 2/3 — Refresh and verify Oracle management proxy\n'
 ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" "$TARGET" <<'ORACLE_GATE'
 set -Eeuo pipefail
 repo="$1"
@@ -56,6 +56,9 @@ fail() {
   exit 1
 }
 
+for command in docker curl sha256sum; do
+  command -v "$command" >/dev/null 2>&1 || fail "missing Oracle command: $command"
+done
 [[ "$(git rev-parse HEAD)" == "$target" ]] || fail 'Oracle source HEAD drifted after canonical deploy'
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'Oracle worktree is dirty after canonical deploy'
 [[ -f .crowdrelay.local.sh && ! -L .crowdrelay.local.sh ]] || fail 'server-local CrowdRelay config is missing or unsafe'
@@ -72,6 +75,14 @@ compose_file="${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}"
 [[ -f compose.area-management.yaml && ! -L compose.area-management.yaml ]] || fail 'AREA compose overlay is missing or unsafe'
 [[ -f deploy/area-management.Caddyfile && ! -L deploy/area-management.Caddyfile ]] || fail 'AREA Caddyfile is missing or unsafe'
 
+for route in \
+  '/v1/control-plane/area' \
+  '/v1/control-plane/ops/summary' \
+  '/v1/control-plane/ecosystem/flags' \
+  '/v1/control-plane/autopilot/overview'; do
+  grep -Fq "$route" deploy/area-management.Caddyfile || fail "source management Caddyfile is missing route: $route"
+done
+
 compose() {
   docker compose \
     --env-file "$env_file" \
@@ -81,6 +92,12 @@ compose() {
 }
 
 compose config --quiet
+# Validate the exact source Caddyfile under the same Compose security/mount
+# profile before replacing the currently running proxy.
+compose run --rm --no-deps --entrypoint caddy area-management-proxy \
+  validate --config /etc/caddy/Caddyfile >/dev/null
+printf 'ORACLE_MANAGEMENT_PREFLIGHT=PASS caddy=valid\n'
+
 compose up -d --no-deps --force-recreate area-management-proxy
 
 for _ in $(seq 1 30); do
@@ -94,7 +111,14 @@ runtime_sha="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Cad
 source_sha="$(sha256sum deploy/area-management.Caddyfile | awk '{print $1}')"
 [[ "$runtime_sha" == "$source_sha" ]] || fail 'live management Caddyfile differs from source'
 docker exec crowdrelay-area-management-proxy-1 caddy validate --config /etc/caddy/Caddyfile >/dev/null
-docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile | grep -Fq '/v1/control-plane/ops/summary' || fail 'live management proxy is missing operations route'
+for route in \
+  '/v1/control-plane/area' \
+  '/v1/control-plane/ops/summary' \
+  '/v1/control-plane/ecosystem/flags' \
+  '/v1/control-plane/autopilot/overview'; do
+  docker exec crowdrelay-area-management-proxy-1 grep -Fq "$route" /etc/caddy/Caddyfile \
+    || fail "live management proxy is missing route: $route"
+done
 
 endpoint="$(docker port crowdrelay-area-management-proxy-1 18080/tcp | head -n1)"
 [[ -n "$endpoint" ]] || fail 'management proxy has no published private endpoint'
@@ -129,7 +153,23 @@ tunnel="crowdrelay-control-plane-virya-area-tunnel-1"
 app_id="$(docker inspect "$app" --format '{{.Id}}')"
 network_mode="$(docker inspect "$tunnel" --format '{{.HostConfig.NetworkMode}}')"
 [[ "$network_mode" == "container:${app_id}" ]] || fail "Control Plane tunnel namespace drift: $network_mode"
-docker exec "$tunnel" cat /etc/caddy/Caddyfile | grep -Fq '/v1/control-plane/ops/summary' || fail 'Control Plane tunnel lost operations route'
+for route in \
+  '/v1/control-plane/area' \
+  '/v1/control-plane/ops/summary' \
+  '/v1/control-plane/ecosystem/flags' \
+  '/v1/control-plane/autopilot/overview'; do
+  docker exec "$tunnel" grep -Fq "$route" /etc/caddy/Caddyfile \
+    || fail "Control Plane tunnel lost route: $route"
+done
+
+runtime_env="$(docker inspect "$app" --format '{{range .Config.Env}}{{println .}}{{end}}')"
+area_master="$(printf '%s\n' "$runtime_env" | sed -n 's/^CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY=//p')"
+management_master="$(printf '%s\n' "$runtime_env" | sed -n 's/^CONTROL_PLANE_MANAGEMENT_MASTER_KEY=//p')"
+management_url="$(printf '%s\n' "$runtime_env" | sed -n 's/^CONTROL_PLANE_VIRYA_MANAGEMENT_URL=//p')"
+[[ -n "$area_master" ]] || fail 'Control Plane AREA management master is missing from runtime'
+[[ -n "$management_master" ]] || fail 'Control Plane operations management master is missing from runtime'
+[[ "$management_url" == "http://127.0.0.1:18080" ]] || fail "Control Plane management URL drifted: $management_url"
+unset runtime_env area_master management_master management_url
 
 published="$(docker port "$app" 8090/tcp | head -n1)"
 [[ -n "$published" ]] || fail 'Control Plane app has no published endpoint'
