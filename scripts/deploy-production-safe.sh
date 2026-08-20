@@ -92,24 +92,12 @@ compose() {
 }
 
 compose config --quiet
-source_sha="$(sha256sum deploy/area-management.Caddyfile | awk '{print $1}')"
-proxy_status="$(docker inspect crowdrelay-area-management-proxy-1 --format '{{.State.Status}}' 2>/dev/null || true)"
-runtime_sha=""
-if [[ "$proxy_status" == "running" ]]; then
-  runtime_sha="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile | sha256sum | awk '{print $1}' || true)"
-fi
-
-if [[ "$proxy_status" != "running" || "$runtime_sha" != "$source_sha" ]]; then
-  # Same-SHA reruns can repair a missing/stale process. Normal new releases do
-  # not restart twice: the config-digest label already makes canonical Compose
-  # recreate the proxy whenever tracked routing changes.
-  compose run --rm --no-deps --entrypoint caddy area-management-proxy \
-    validate --config /etc/caddy/Caddyfile >/dev/null
-  printf 'ORACLE_MANAGEMENT_RECONCILE=REPAIR previous_status=%s\n' "${proxy_status:-missing}"
-  compose up -d --no-deps --force-recreate area-management-proxy
-else
-  printf 'ORACLE_MANAGEMENT_RECONCILE=NOOP config=current\n'
-fi
+source_sha="$(sha256sum deploy/area-management.Caddyfile | cut -d " " -f1)"
+proxy_status="$(docker inspect crowdrelay-area-management-proxy-1 --format "{{.State.Status}}" 2>/dev/null || true)"
+[[ "$proxy_status" == "running" ]] || fail "management proxy is not running after canonical deploy: $proxy_status"
+runtime_sha="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile | sha256sum | cut -d " " -f1 || true)"
+[[ "$runtime_sha" == "$source_sha" ]] || fail "canonical deploy left stale management Caddyfile: runtime=$runtime_sha source=$source_sha"
+printf "ORACLE_MANAGEMENT_RECONCILE=VERIFY_ONLY config=current\n"
 
 for _ in $(seq 1 30); do
   status="$(docker inspect crowdrelay-area-management-proxy-1 --format '{{.State.Status}}' 2>/dev/null || true)"
