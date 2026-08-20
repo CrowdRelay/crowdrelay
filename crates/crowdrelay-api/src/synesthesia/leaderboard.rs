@@ -9,6 +9,13 @@ pub struct LeaderboardQuery {
     limit: Option<u16>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaderboardPublishRequest {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct LeaderboardEntryResponse {
     rank: u16,
@@ -47,7 +54,7 @@ pub async fn list_leaderboard(
     let rows = sqlx::query_as::<_, (String, i64)>(
         r#"
         WITH best AS (
-            SELECT DISTINCT ON (run.fan_id)
+            SELECT DISTINCT ON (run.install_hash)
                 run.leaderboard_name AS display_name,
                 run.client_total_elapsed_ms AS elapsed_ms,
                 run.completed_at,
@@ -56,11 +63,10 @@ pub async fn list_leaderboard(
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $2
               AND NOT run.synthetic
-              AND run.fan_id IS NOT NULL
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL
               AND run.leaderboard_name IS NOT NULL
-            ORDER BY run.fan_id, run.client_total_elapsed_ms, run.completed_at, run.id
+            ORDER BY run.install_hash, run.client_total_elapsed_ms, run.completed_at, run.id
         )
         SELECT display_name, elapsed_ms
         FROM best
@@ -105,8 +111,17 @@ pub async fn publish_leaderboard(
     State(state): State<crate::AppState>,
     Path(run_id): Path<Uuid>,
     headers: HeaderMap,
+    payload: Result<Json<LeaderboardPublishRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return SynesthesiaError::Invalid.response(request_id_value),
+    };
+    let display_name = match normalize_leaderboard_name(payload.display_name.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return error.response(request_id_value),
+    };
     let token_hash = match bearer_hash(&headers) {
         Some(hash) => hash,
         None => return SynesthesiaError::Unauthorized.response(request_id_value),
@@ -117,16 +132,15 @@ pub async fn publish_leaderboard(
         Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
     };
 
-    let authorized = sqlx::query_as::<_, (String, Uuid, String)>(
+    let authorized = sqlx::query_as::<_, (String, Vec<u8>)>(
         r#"
-        SELECT run.campaign_slug, run.fan_id, fan.normalized_email
+        SELECT run.campaign_slug, run.install_hash
         FROM synesthesia_runs AS run
-        INNER JOIN fans AS fan
-          ON fan.workspace_id = run.workspace_id AND fan.id = run.fan_id
         WHERE run.workspace_id = $1 AND run.id = $2 AND run.run_token_hash = $3
           AND NOT run.synthetic
           AND run.completed_at IS NOT NULL
-        FOR SHARE OF run, fan
+          AND run.client_total_elapsed_ms IS NOT NULL
+        FOR SHARE OF run
         "#,
     )
     .bind(workspace_id)
@@ -134,7 +148,7 @@ pub async fn publish_leaderboard(
     .bind(&token_hash)
     .fetch_optional(&mut *transaction)
     .await;
-    let (campaign_slug, fan_id, normalized_email) = match authorized {
+    let (campaign_slug, install_hash) = match authorized {
         Ok(Some(value)) => value,
         Ok(None) => return SynesthesiaError::Conflict.response(request_id_value),
         Err(error) => return SynesthesiaError::sqlx(error).response(request_id_value),
@@ -142,10 +156,6 @@ pub async fn publish_leaderboard(
     if campaign_slug != CAMPAIGN_SLUG {
         return SynesthesiaError::Conflict.response(request_id_value);
     }
-    let display_name = match masked_email_alias(&normalized_email) {
-        Some(alias) => alias,
-        None => return SynesthesiaError::Conflict.response(request_id_value),
-    };
 
     if let Err(error) = sqlx::query(
         r#"
@@ -153,14 +163,14 @@ pub async fn publish_leaderboard(
         SET leaderboard_name = $4,
             leaderboard_published_at = COALESCE(leaderboard_published_at, now()),
             updated_at = now()
-        WHERE workspace_id = $1 AND campaign_slug = $2 AND fan_id = $3
+        WHERE workspace_id = $1 AND campaign_slug = $2 AND install_hash = $3
           AND NOT synthetic
           AND completed_at IS NOT NULL AND client_total_elapsed_ms IS NOT NULL
         "#,
     )
     .bind(workspace_id)
     .bind(CAMPAIGN_SLUG)
-    .bind(fan_id)
+    .bind(&install_hash)
     .bind(&display_name)
     .execute(&mut *transaction)
     .await
@@ -171,8 +181,8 @@ pub async fn publish_leaderboard(
     let ranked = sqlx::query_as::<_, (i64, i64)>(
         r#"
         WITH best AS (
-            SELECT DISTINCT ON (run.fan_id)
-                run.fan_id,
+            SELECT DISTINCT ON (run.install_hash)
+                run.install_hash,
                 run.client_total_elapsed_ms AS elapsed_ms,
                 run.completed_at,
                 run.id
@@ -180,22 +190,21 @@ pub async fn publish_leaderboard(
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $2
               AND NOT run.synthetic
-              AND run.fan_id IS NOT NULL
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL
               AND run.leaderboard_name IS NOT NULL
-            ORDER BY run.fan_id, run.client_total_elapsed_ms, run.completed_at, run.id
+            ORDER BY run.install_hash, run.client_total_elapsed_ms, run.completed_at, run.id
         ), ranked AS (
-            SELECT fan_id, elapsed_ms,
+            SELECT install_hash, elapsed_ms,
                    ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
             FROM best
         )
-        SELECT rank, elapsed_ms FROM ranked WHERE fan_id = $3
+        SELECT rank, elapsed_ms FROM ranked WHERE install_hash = $3
         "#,
     )
     .bind(workspace_id)
     .bind(CAMPAIGN_SLUG)
-    .bind(fan_id)
+    .bind(&install_hash)
     .fetch_optional(&mut *transaction)
     .await;
     let (rank, best_elapsed_ms) = match ranked {
@@ -218,6 +227,40 @@ pub async fn publish_leaderboard(
         }),
     )
         .into_response()
+}
+
+fn normalize_leaderboard_name(value: Option<&str>) -> Result<String, SynesthesiaError> {
+    let raw = value.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Ok("anonymous".to_owned());
+    }
+
+    let mut normalized = String::new();
+    let mut previous_space = false;
+    for character in raw.chars() {
+        if character.is_control() {
+            return Err(SynesthesiaError::Invalid);
+        }
+        if character.is_whitespace() {
+            if !previous_space {
+                normalized.push(' ');
+                previous_space = true;
+            }
+        } else {
+            normalized.push(character);
+            previous_space = false;
+        }
+        if normalized.chars().count() > 24 {
+            return Err(SynesthesiaError::Invalid);
+        }
+    }
+
+    let normalized = normalized.trim().to_owned();
+    if normalized.is_empty() {
+        Ok("anonymous".to_owned())
+    } else {
+        Ok(normalized)
+    }
 }
 
 pub(super) fn masked_email_alias(value: &str) -> Option<String> {
