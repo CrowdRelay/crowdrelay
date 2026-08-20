@@ -18,7 +18,12 @@ class MakeDeployContract(unittest.TestCase):
     def test_make_deploy_is_the_guarded_entrypoint(self) -> None:
         self.assertIn("deploy:\n\tbash scripts/deploy.sh", MAKEFILE)
         self.assertIn('wait_for_workflow "CI" "CI"', WAITER_TEXT)
-        self.assertIn('wait_for_workflow "Publish container images" "IMAGES"', WAITER_TEXT)
+        self.assertIn("wait_for_image_release", WAITER_TEXT)
+        self.assertNotIn('wait_for_workflow "Publish container images" "IMAGES"', WAITER_TEXT)
+        self.assertIn('artifact_name="crowdrelay-image-digests-${TARGET}"', WAITER_TEXT)
+        self.assertIn('actions/artifacts?name=${artifact_name}', WAITER_TEXT)
+        self.assertIn("select(.expired == false)", WAITER_TEXT)
+        self.assertIn("IMAGES_ARTIFACT=%s", WAITER_TEXT)
         self.assertIn('scripts/deploy-production-safe.sh', WAITER_TEXT)
         self.assertIn('origin/main mismatch', WAITER_TEXT)
         self.assertIn('still waiting for %s run', WAITER_TEXT)
