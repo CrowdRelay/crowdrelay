@@ -19,9 +19,9 @@ require() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
-for command in git ssh python3; do require "$command"; done
+for command in git ssh python3 bash; do require "$command"; done
 cd "$ROOT_DIR"
-[[ -x "$CANONICAL" ]] || fail "canonical exact deploy is missing or not executable: $CANONICAL"
+[[ -f "$CANONICAL" && ! -L "$CANONICAL" ]] || fail "canonical exact deploy is missing or unsafe: $CANONICAL"
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree must be clean'
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 [[ "$branch" == "main" ]] || fail "production deploy must run from main, got=${branch:-detached}"
@@ -42,9 +42,9 @@ python3 scripts/test_boring_production_deploy_contract.py
 printf 'SOURCE_CONTRACTS=PASS\n'
 
 printf '\n==> 1/3 — Canonical exact-SHA CrowdRelay deploy\n'
-"$CANONICAL" "$TARGET"
+bash "$CANONICAL" "$TARGET"
 
-printf '\n==> 2/3 — Reconcile and verify Oracle management proxy\n'
+printf '\n==> 2/3 — Verify Oracle management proxy\n'
 ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" "$TARGET" <<'ORACLE_GATE'
 set -Eeuo pipefail
 repo="$1"
