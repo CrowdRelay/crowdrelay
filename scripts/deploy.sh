@@ -62,6 +62,45 @@ wait_for_workflow() {
   fail "timed out waiting for $label for $TARGET"
 }
 
+wait_for_image_release() {
+  local deadline artifact_name run_id last_notice
+  deadline=$((SECONDS + WAIT_SECONDS))
+  artifact_name="crowdrelay-image-digests-${TARGET}"
+  run_id=""
+  last_notice=0
+  printf '==> Waiting for IMAGES for %s\n' "$TARGET"
+
+  # A workflow_run execution is itself attached to the default branch HEAD,
+  # not necessarily to github.event.workflow_run.head_sha. A later CI run from
+  # Dependabot can therefore create a skipped Publish run that `gh run list
+  # --commit $TARGET --limit 1` mistakes for the release of TARGET. The digest
+  # artifact is named with the source CI SHA and is uploaded only after API,
+  # worker, and Rekor images were pushed and their immutable digests validated.
+  # Gate deployment on that exact artifact instead of on workflow-run metadata.
+  while (( SECONDS < deadline )); do
+    run_id="$(
+      gh api \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "/repos/${REPO}/actions/artifacts?name=${artifact_name}&per_page=100" \
+        --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty' \
+        2>/dev/null || true
+    )"
+    if [[ -n "$run_id" ]]; then
+      printf 'IMAGES_RUN=%s\n' "$run_id"
+      printf 'IMAGES_ARTIFACT=%s\n' "$artifact_name"
+      printf 'IMAGES=PASS sha=%s\n' "$TARGET"
+      return 0
+    fi
+    if (( SECONDS - last_notice >= 15 )); then
+      printf '... still waiting for immutable image digest artifact %s\n' "$artifact_name"
+      last_notice=$SECONDS
+    fi
+    sleep "$POLL_SECONDS"
+  done
+  fail "timed out waiting for immutable image digest artifact $artifact_name"
+}
+
 control_plane_tunnel_fingerprint() {
   ssh -T "$CONTROL_PLANE_HOST" sudo bash -s <<'REMOTE'
 set -Eeuo pipefail
@@ -175,7 +214,7 @@ REMOTE_RECOVERY
 }
 
 wait_for_workflow "CI" "CI"
-wait_for_workflow "Publish container images" "IMAGES"
+wait_for_image_release
 
 [[ "$(git rev-parse HEAD)" == "$TARGET" ]] || fail 'local HEAD moved while waiting for release gates'
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree changed while waiting for release gates'
