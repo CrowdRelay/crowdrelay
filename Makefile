@@ -2,7 +2,7 @@ CARGO ?= cargo
 COMPOSE ?= docker compose
 API_BASE_URL ?= http://127.0.0.1:8080/v1
 
-.PHONY: fmt lint test check validate-contract-assets contract-tests runtime-contracts ci env db-up migrate bootstrap setup build-images build-arm64 up down logs ps health
+.PHONY: fmt lint test check validate-contract-assets contract-tests runtime-contracts ci deploy env db-up migrate bootstrap setup build-images build-arm64 up down logs ps health
 
 fmt:
 	$(CARGO) fmt --all --check
@@ -36,6 +36,9 @@ runtime-contracts:
 	python3 scripts/test-image-provenance-policy.py
 
 ci: check validate-contract-assets contract-tests runtime-contracts
+
+deploy:
+	bash scripts/deploy.sh
 
 env:
 	@test -f .env || cp .env.example .env
