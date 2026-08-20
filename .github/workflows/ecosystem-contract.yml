@@ -1,0 +1,60 @@
+name: Ecosystem contract
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "openapi/**"
+      - "integration/ecosystem/**"
+      - "crates/crowdrelay-api/src/meta.rs"
+      - "crates/crowdrelay-api/src/routing.rs"
+      - "scripts/test-ecosystem-contract-v2.py"
+      - ".github/workflows/ecosystem-contract.yml"
+  pull_request:
+    paths:
+      - "openapi/**"
+      - "integration/ecosystem/**"
+      - "crates/crowdrelay-api/src/meta.rs"
+      - "crates/crowdrelay-api/src/routing.rs"
+      - "scripts/test-ecosystem-contract-v2.py"
+      - ".github/workflows/ecosystem-contract.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ecosystem-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-consumers:
+    name: Signal + Synesthesia compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out CrowdRelay under canonical ecosystem layout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: crowdrelay
+
+      - name: Check out Virya Signal consumer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: wojciechbator/virya-signal
+          ref: main
+          path: virya-signal
+          persist-credentials: false
+
+      - name: Check out Synesthesia consumer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: wojciechbator/synesthesia
+          ref: main
+          path: synesthesia
+          persist-credentials: false
+
+      - name: Verify current consumers against this CrowdRelay revision
+        run: python3 crowdrelay/scripts/test-ecosystem-contract-v2.py
