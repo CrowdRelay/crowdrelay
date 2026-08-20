@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Generate deterministic lock SBOM
         run: python3 scripts/generate_lock_sbom.py Cargo.lock artifacts/crowdrelay-sbom.cdx.json
       - name: Upload dependency SBOM
