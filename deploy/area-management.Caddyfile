@@ -5,8 +5,13 @@
 
 :18080 {
     @area path /v1/control-plane/area /v1/control-plane/area/*
+    @operations path /v1/control-plane/ops/summary /v1/control-plane/ecosystem/flags /v1/control-plane/ecosystem/flags/* /v1/control-plane/autopilot/overview /v1/control-plane/autopilot/policies/*
 
     handle @area {
+        reverse_proxy http://api:8080
+    }
+
+    handle @operations {
         reverse_proxy http://api:8080
     }
 

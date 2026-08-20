@@ -53,6 +53,7 @@ const CLICK_BATCH_SIZE_KEY: &str = "CROWDRELAY_CLICK_BATCH_SIZE";
 const CLICK_FLUSH_INTERVAL_MS_KEY: &str = "CROWDRELAY_CLICK_FLUSH_INTERVAL_MS";
 const COMMERCE_API_KEY: &str = "CROWDRELAY_COMMERCE_API_KEY";
 const CONTROL_PLANE_AREA_API_KEY: &str = "CROWDRELAY_CONTROL_PLANE_AREA_API_KEY";
+const CONTROL_PLANE_API_KEY: &str = "CROWDRELAY_CONTROL_PLANE_API_KEY";
 const EVENT_REMINDER_OFFSETS_MINUTES_KEY: &str = "CROWDRELAY_EVENT_REMINDER_OFFSETS_MINUTES";
 const EVENT_REMINDER_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_EVENT_REMINDER_POLL_INTERVAL_MS";
 const AUTOPILOT_ENABLED_KEY: &str = "CROWDRELAY_AUTOPILOT_ENABLED";
@@ -125,6 +126,7 @@ const KNOWN_KEYS: &[&str] = &[
     CLICK_FLUSH_INTERVAL_MS_KEY,
     COMMERCE_API_KEY,
     CONTROL_PLANE_AREA_API_KEY,
+    CONTROL_PLANE_API_KEY,
     EVENT_REMINDER_OFFSETS_MINUTES_KEY,
     EVENT_REMINDER_POLL_INTERVAL_MS_KEY,
     AUTOPILOT_ENABLED_KEY,
@@ -164,6 +166,8 @@ pub struct Config {
     pub commerce_api_key_sha256: Option<[u8; 32]>,
     /// Narrow Control Plane credential accepted only by the AREA management namespace.
     pub control_plane_area_api_key_sha256: Option<[u8; 32]>,
+    /// Separate narrow credential for operational visibility and bounded controls.
+    pub control_plane_api_key_sha256: Option<[u8; 32]>,
     pub event_reminder_offsets_minutes: Vec<u32>,
     pub event_reminder_poll_interval: Duration,
     pub autopilot_enabled: bool,
@@ -249,6 +253,8 @@ impl Config {
             values.get(CONTROL_PLANE_AREA_API_KEY),
             CONTROL_PLANE_AREA_API_KEY,
         )?;
+        let control_plane_api_key_sha256 =
+            parse_optional_secret_hash(values.get(CONTROL_PLANE_API_KEY), CONTROL_PLANE_API_KEY)?;
         let event_reminder_offsets_minutes =
             parse_event_reminder_offsets(values.get(EVENT_REMINDER_OFFSETS_MINUTES_KEY))?;
         let event_reminder_poll_interval = parse_bounded_duration(
@@ -309,6 +315,7 @@ impl Config {
             click_buffer,
             commerce_api_key_sha256,
             control_plane_area_api_key_sha256,
+            control_plane_api_key_sha256,
             event_reminder_offsets_minutes,
             event_reminder_poll_interval,
             autopilot_enabled,

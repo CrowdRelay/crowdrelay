@@ -2,6 +2,7 @@ services:
   api:
     environment:
       CROWDRELAY_CONTROL_PLANE_AREA_API_KEY: ${CROWDRELAY_CONTROL_PLANE_AREA_API_KEY:?AREA API key missing}
+      CROWDRELAY_CONTROL_PLANE_API_KEY: ${CROWDRELAY_CONTROL_PLANE_API_KEY:?Control Plane API key missing}
 
   area-management-proxy:
     image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648

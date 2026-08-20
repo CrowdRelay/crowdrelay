@@ -249,6 +249,7 @@ async fn main() -> Result<()> {
             fan_lifecycle,
             ticketing,
             config.control_plane_area_api_key_sha256,
+            config.control_plane_api_key_sha256,
             ops,
             autopilot,
             config.autopilot_enabled,
