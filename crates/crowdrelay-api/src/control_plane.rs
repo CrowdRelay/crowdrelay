@@ -15,9 +15,42 @@ const MAX_CONTROL_BODY_BYTES: usize = 8 * 1024;
 pub(crate) fn router(state: crate::AppState) -> Router {
     Router::new()
         .route("/v1/control-plane/ops/summary", get(crate::ops::summary))
+        .route("/v1/control-plane/ops/outbox", get(crate::ops::list_outbox))
+        .route(
+            "/v1/control-plane/ops/outbox/{event_id}/retry",
+            post(crate::ops::retry_outbox),
+        )
+        .route(
+            "/v1/control-plane/ops/deliveries",
+            get(crate::ops::list_deliveries),
+        )
         .route(
             "/v1/control-plane/ops/deliveries/dead/clear",
             post(crate::ops::clear_dead_deliveries),
+        )
+        .route(
+            "/v1/control-plane/ops/deliveries/{delivery_id}",
+            get(crate::ops::delivery_details),
+        )
+        .route(
+            "/v1/control-plane/ops/deliveries/{delivery_id}/retry",
+            post(crate::ops::retry_delivery),
+        )
+        .route(
+            "/v1/control-plane/ops/operations/{request_id}",
+            get(crate::ops::operation_timeline),
+        )
+        .route(
+            "/v1/control-plane/ecosystem/overview",
+            get(crate::ecosystem::overview),
+        )
+        .route(
+            "/v1/control-plane/ecosystem/findings",
+            get(crate::ecosystem::list_findings),
+        )
+        .route(
+            "/v1/control-plane/ecosystem/reconcile",
+            post(crate::ecosystem::reconcile),
         )
         .route(
             "/v1/control-plane/ecosystem/flags",
