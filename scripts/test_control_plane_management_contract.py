@@ -16,6 +16,7 @@ caddy = read("deploy/area-management.Caddyfile")
 
 allowed = (
     "/v1/control-plane/ops/summary",
+    "/v1/control-plane/ops/deliveries/dead/clear",
     "/v1/control-plane/ecosystem/flags",
     "/v1/control-plane/ecosystem/flags/{key}",
     "/v1/control-plane/autopilot/overview",
@@ -34,7 +35,8 @@ assert "state.area_management_api_key_sha256" in lib
 assert "CROWDRELAY_CONTROL_PLANE_API_KEY" in config and "CROWDRELAY_CONTROL_PLANE_AREA_API_KEY" in config
 assert "CROWDRELAY_CONTROL_PLANE_API_KEY" in compose
 assert "@operations path" in caddy
+assert "/v1/control-plane/ops/deliveries/dead/clear" in caddy
 assert "/v1/admin" not in caddy
 assert "command.expected_version" in ecosystem
 assert "ecosystem_feature_flags.version = $6" in ecosystem
-print("CROWDRELAY_CONTROL_PLANE=PASS routes=5 auth=separate-key body<=8KiB admin-alias=forbidden")
+print("CROWDRELAY_CONTROL_PLANE=PASS routes=6 auth=separate-key body<=8KiB admin-alias=forbidden dead-clear=bounded")

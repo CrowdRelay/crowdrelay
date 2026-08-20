@@ -16,6 +16,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
     Router::new()
         .route("/v1/control-plane/ops/summary", get(crate::ops::summary))
         .route(
+            "/v1/control-plane/ops/deliveries/dead/clear",
+            post(crate::ops::clear_dead_deliveries),
+        )
+        .route(
             "/v1/control-plane/ecosystem/flags",
             get(crate::ecosystem::list_flags),
         )
