@@ -1,0 +1,1 @@
+Autopilot growth workflow bundle: real outbound, Spotify/Bandsintown growth, verified free routes, KPI digest, claim/receipt hardening.
