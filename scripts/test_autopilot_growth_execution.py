@@ -85,9 +85,13 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
             self.assertIn(name, names)
         serialized = self.read("n8n/examples/autopilot-free-fan-campaign.example.json")
         self.assertIn("show.growth.free_fan_push.v1", serialized)
-        self.assertIn("VIRYA_BANDSINTOWN_FOLLOW_URL", serialized)
-        self.assertIn("VIRYA_SPOTIFY_ARTIST_URL", serialized)
-        self.assertIn("VIRYA_SPOTIFY_PLAYLIST_URL", serialized)
+        # The CTA URLs are not hard-coded here: the campaign content carries
+        # "env:VIRYA_*" placeholders (asserted against the Rust executor in
+        # test_free_fan_push_has_real_owned_growth_ctas) and this workflow
+        # resolves them out of the n8n environment at send time.
+        self.assertIn("startsWith('env:')", serialized)
+        for cta in ("bandsintown_follow_url", "spotify_artist_url", "spotify_playlist_url"):
+            self.assertIn(cta, serialized)
         self.assertIn("Idempotency-Key", serialized)
         self.assertIn("/deliveries/", serialized)
         self.assertIn("/complete", serialized)
