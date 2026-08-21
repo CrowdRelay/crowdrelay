@@ -22,6 +22,7 @@ contract-tests:
 	python3 -m unittest discover -s scripts -p 'test_*.py'
 
 runtime-contracts:
+	bash scripts/audit-public-tree.sh
 	python3 scripts/check-ci-policy.py
 	python3 scripts/source-size-ratchet.py
 	python3 scripts/api-sql-ratchet.py

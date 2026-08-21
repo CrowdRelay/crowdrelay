@@ -88,7 +88,21 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "for p in /proc/[0-9]*/exe; do [ \"$(readlink \"$p\" 2>/dev/null)\" = \"/app/crowdrelay-worker\" ] && exit 0; done; exit 1"]
+      # `init: true` may make PID 1 a root-owned init process while the
+      # healthcheck runs as the unprivileged CrowdRelay user. Verify the
+      # actual worker executable instead of probing PID 1.
+      #
+      # Every `$` is doubled: Compose interpolates the string before the shell
+      # sees it, so a single `$p` is substituted with the empty string and the
+      # probe silently compares `readlink ""` and can never pass.
+      test:
+        - CMD-SHELL
+        - >-
+          for executable in /proc/[0-9]*/exe; do
+            target=$$(readlink "$$executable" 2>/dev/null || true);
+            [ "$$target" = /usr/local/bin/crowdrelay-worker ] && exit 0;
+          done;
+          exit 1
       interval: 15s
       timeout: 3s
       retries: 3
