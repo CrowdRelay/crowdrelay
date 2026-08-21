@@ -152,6 +152,7 @@ impl ShowGrowthLever {
         matches!(
             self,
             Self::FanAmbassadors
+                | Self::FreeFanChannelPush
                 | Self::MerchBuyerOffer
                 | Self::HighIntentLastMile
                 | Self::PostShowMerchFollowUp
@@ -536,6 +537,11 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn free_fan_channel_push_is_first_party_executable() {
+        assert!(ShowGrowthLever::FreeFanChannelPush.is_first_party_campaign());
     }
 
     #[test]

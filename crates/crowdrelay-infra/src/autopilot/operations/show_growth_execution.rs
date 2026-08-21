@@ -211,41 +211,41 @@ pub(in crate::autopilot) async fn execute_show_growth(
             }
         }),
         ShowGrowthLever::FreeFanChannelPush => json!({
-            "objective": "use free provider-native follower channels to put this show in front of already-relevant listeners without paid reach",
+            "objective": "use free provider-native follower surfaces and consented owned email to turn existing local intent into real Spotify listeners and Bandsintown followers",
             "surface_classes": [
+                "consented_virya_email_to_relevant_show_fans",
                 "bandsintown_location_targeted_post",
                 "bandsintown_event_rsvp_targeted_post",
                 "bandsintown_email_builder_local_followers_within_verified_free_quota",
                 "bandsintown_waitlist_or_event_rsvp_reactivation_when_applicable",
-                "bandsintown_featured_video_or_live_clip_when_available",
                 "spotify_artist_pick_for_event",
                 "youtube_artist_post_to_existing_subscribers_when_posts_are_available",
                 "youtube_official_artist_concert_tab_and_ticket_shelf_health",
-                "youtube_fan_shorts_using_official_virya_audio_as_permissioned_social_proof",
                 "bandcamp_community_message_to_existing_followers_when_available"
             ],
             "rules": [
-                "free_quota_or_free_surface_only",
-                "verify_current_provider_quota_before_sending_email",
-                "bandsintown_email_builder_free_allowance_is_currently_10000_emails_per_artist_per_month_but_must_be_reverified_before_each_campaign",
-                "if_show_is_sold_out_use_provider_waitlist_or_rsvp_reactivation_only_when_truthfully_available",
+                "owned_email_must_require_existing_marketing_consent",
+                "provider_free_quota_or_free_surface_only",
+                "verify_current_provider_quota_before_sending_provider_email",
                 "never_use_bandsintown_boost_or_promoted_campaign_without_separate_paid_approval",
                 "do_not_import_signal_contacts_into_bandsintown_for_this_action",
-                "target_only_existing_provider_followers_or_event_rsvps_by_location_or_event",
-                "reuse_a_current_high_quality_live_clip_instead_of_creating_low_signal_content_for_quota",
-                "one_canonical_ticket_url",
-                "use_only_verified_event_facts_and_approved_copy",
+                "target_existing_provider_followers_or_event_rsvps_by_location_or_event_when provider targeting is used",
+                "reuse_current_high_quality_live_or_release assets instead of creating low-signal content for quota",
+                "one_canonical_ticket_url_when a show CTA exists",
                 "spotify_artist_pick_is_a_human_provider_configuration_step_unless_an_official_supported_api_exists",
-                "youtube_posts_and_bandcamp_community_are_existing_audience_surfaces_not_cold_outreach",
-                "verify_youtube_official_artist_channel_concerts_and_ticket_shelf_instead_of_assuming_delivery",
-                "fan_shorts_are_opt_in_creative_actions_and_never_require_or_pressure_private_fans_to_publish",
-                "youtube_or_bandcamp_account_actions_are_manual_steps_unless_an_official_supported_api_exists",
-                "never_import_or_scrape_contacts_to_expand_these_provider_audiences",
+                "youtube_and_bandcamp_account_actions_are_manual_steps_unless_an_official_supported_api_exists",
+                "never_import_or_scrape_contacts_to_expand_provider_audiences",
                 "never_bypass_login_2fa_captcha_or_email_verification",
-                "return_manual_steps_when_provider_ui_action_is_required"
+                "return_manual_steps_when_provider_ui_action_is_required",
+                "return_delivery_metrics_for_owned_email_and_provider_reach_when_available"
             ],
+            "growth_ctas": {
+                "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
+                "spotify_artist_url": "env:VIRYA_SPOTIFY_ARTIST_URL",
+                "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
+            },
             "receipt_contract": {
-                "metadata": ["checked_surfaces", "scheduled_or_sent", "provider_reach", "manual_steps", "skipped_with_reason"],
+                "metadata": ["checked_surfaces", "scheduled_or_sent", "provider_reach", "owned_email_delivered", "manual_steps", "skipped_with_reason"],
                 "manual_steps_must_include": ["destination", "url", "what_to_do", "why_it_matters"]
             }
         }),
@@ -329,6 +329,21 @@ async fn execute_first_party_growth_campaign(
             "min_qualified_referrals": 1,
             "marketing_consent": true
         }),
+        ShowGrowthLever::FreeFanChannelPush => {
+            if let Some(city_slug) = event.2.clone() {
+                json!({
+                    "statuses": ["active"],
+                    "city_slugs": [city_slug],
+                    "marketing_consent": true
+                })
+            } else {
+                json!({
+                    "statuses": ["active"],
+                    "interested_event_slugs": [event.0.clone()],
+                    "marketing_consent": true
+                })
+            }
+        }
         ShowGrowthLever::MerchBuyerOffer => json!({
             "statuses": ["active"],
             "purchased_event_slugs": [event.0.clone()],
@@ -380,6 +395,29 @@ async fn execute_first_party_growth_campaign(
                     "one_canonical_ticket_url",
                     "respect_community_rules_and_moderators",
                     "do_not_create_new_financial_incentives_without_separate_authority"
+                ]
+            }
+        }),
+        ShowGrowthLever::FreeFanChannelPush => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "ticket_url": event.4,
+            "venue": event.3,
+            "managed_by": "viryaos_show_growth",
+            "growth_ctas": {
+                "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
+                "spotify_artist_url": "env:VIRYA_SPOTIFY_ARTIST_URL",
+                "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
+            },
+            "email_contract": {
+                "goal": "convert already-consented local fans into Spotify followers/listeners and Bandsintown followers without paid reach",
+                "rules": [
+                    "use_existing_marketing_consent_only",
+                    "one_email_per_fan_per_show_growth_wave",
+                    "do_not_claim_exclusive_access_unless_true",
+                    "include_unsubscribe_via_existing_mailer_contract",
+                    "prefer_one_primary_cta_and_one_secondary_cta",
+                    "never fabricate follower_or_stream_numbers"
                 ]
             }
         }),
