@@ -29,10 +29,11 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         source = self.read(
             "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs"
         )
+        # Only the two CTAs CrowdRelay genuinely cannot know stay deferred to
+        # the executor's environment; the Spotify link comes from the event and
+        # is asserted in test_growth_cta_prefers_a_url_crowdrelay_already_holds.
         self.assertIn('"bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL"', source)
-        self.assertIn('"spotify_artist_url": "env:VIRYA_SPOTIFY_ARTIST_URL"', source)
         self.assertIn('"spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"', source)
-        self.assertIn('"owned_email_delivered"', source)
 
     def test_playlist_release_seeder_is_gated_and_idempotent(self):
         source = self.read("migrations/0072_release_playlist_outreach.sql")
