@@ -7,7 +7,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class AutopilotDistributionExecutionContract(unittest.TestCase):
     def test_release_start_press_seeds_verified_playlist_targets(self) -> None:
-        sql = (ROOT / "migrations/0064_release_playlist_outreach.sql").read_text()
+        sql = (ROOT / "migrations/0072_release_playlist_outreach.sql").read_text()
         for needle in (
             "milestone <> 'start_press'",
             "target.target_kind = 'playlist'",
