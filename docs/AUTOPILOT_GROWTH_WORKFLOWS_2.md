@@ -1,0 +1,1 @@
+Autopilot growth workflow bundle. n8n is an adapter layer; CrowdRelay remains authoritative. Workflows ship inactive and disable execution-data persistence. Production activation uses the existing attestation and smoke path.
