@@ -44,7 +44,7 @@ pub(super) fn funding_candidate(
         disposition,
         reason: "eligible funding opportunity clears deterministic value and contribution gates",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action,
         decision_key: format!(
             "decision:funding:v{}:{}:{key}:{}",
@@ -81,7 +81,7 @@ pub(super) fn merch_candidate(
         disposition,
         reason: "projected stock coverage is below bounded target",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestMerchReorder {
             variant_id: snapshot.variant_id,
             quantity,
@@ -147,7 +147,7 @@ pub(super) fn merch_price_candidate(
         disposition,
         reason,
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::ChangeMerchPrice {
             product_id: snapshot.product_id,
             from_minor,
@@ -231,7 +231,7 @@ pub(super) fn booking_candidate(
             "expected_attendance": expected_attendance,
         }),
         policy_snapshot: policy_evidence(
-            policy.clone(),
+            policy,
             serde_json::json!({
                 "opportunity": domain_policy,
                 "target_selection": target_policy,
@@ -304,7 +304,7 @@ pub(super) fn booking_followup_candidate(
         reason: "verified booking target has not replied and the bounded follow-up window is due",
         input_snapshot: serde_json::to_value(target)?,
         policy_snapshot: policy_evidence(
-            policy.clone(),
+            policy,
             serde_json::json!({"opportunity":domain_policy,"followup":followup_policy}),
         )?,
         action: AutopilotActionPayload::RequestBookingOutreach {
@@ -356,7 +356,7 @@ pub(super) fn campaign_lifecycle_candidate(
         disposition,
         reason: "event lifecycle phase is due for a consented first-party audience",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestAudienceCampaign {
             event_id: snapshot.event_id,
             phase,

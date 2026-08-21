@@ -14,7 +14,7 @@ pub async fn public_drops(State(state): State<crate::AppState>) -> Response {
                 StatusCode::OK,
                 [(CACHE_CONTROL, PUBLIC_AREA_CACHE)],
                 Json(PublicDropsResponse {
-                    items: rows.iter().map(public_drop).collect(),
+                    items: rows.into_iter().map(public_drop).collect(),
                     community: AreaCommunity {
                         current,
                         total,

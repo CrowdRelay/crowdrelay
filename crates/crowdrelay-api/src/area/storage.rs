@@ -212,7 +212,7 @@ async fn wallet_for_player(
         f64::from(current) * 100.0 / f64::from(total)
     };
     let token_balance = safe_u32(token_balance);
-    let public_drops = drops.iter().map(public_drop).collect::<Vec<_>>();
+    let public_drops = drops.into_iter().map(public_drop).collect::<Vec<_>>();
     let live_drops = public_drops
         .iter()
         .filter(|drop| drop.active && !drop.full)

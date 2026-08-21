@@ -35,7 +35,7 @@ pub(super) fn show_growth_candidate(
         disposition,
         reason: "a bounded attendance-growth lever is due from first-party show evidence",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action,
         decision_key: format!(
             "decision:show-growth:v{}:{}:{}:{}:{}:{}:{}:{}",

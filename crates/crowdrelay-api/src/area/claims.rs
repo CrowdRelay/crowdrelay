@@ -183,7 +183,7 @@ async fn claim_drop(
                 Json(ClaimResponse {
                     ok: true,
                     already_claimed: true,
-                    collectible: Some(collectible_from_existing(&existing)),
+                    collectible: Some(collectible_from_existing(existing)),
                     reward_credits_awarded: 0,
                 }),
             )
@@ -353,7 +353,7 @@ async fn claim_drop(
                     Json(ClaimResponse {
                         ok: true,
                         already_claimed: true,
-                        collectible: Some(collectible_from_existing(&existing)),
+                        collectible: Some(collectible_from_existing(existing)),
                         reward_credits_awarded: 0,
                     }),
                 )
