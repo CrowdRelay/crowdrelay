@@ -486,21 +486,21 @@ fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
-fn public_drop(row: &DropRow) -> PublicDrop {
+fn public_drop(row: DropRow) -> PublicDrop {
     let full = row.claim_count >= i64::from(row.max_claims);
     PublicDrop {
-        id: row.id.clone(),
-        number: row.number.clone(),
-        city: row.city.clone(),
-        region: row.region.clone(),
-        signal_city_slug: row.signal_city_slug.clone(),
+        id: row.id,
+        number: row.number,
+        city: row.city,
+        region: row.region,
+        signal_city_slug: row.signal_city_slug,
         map_x: row.map_x,
         map_y: row.map_y,
         approximate_lat: row.approximate_lat,
         approximate_lng: row.approximate_lng,
         clue: DropClue {
-            en: row.clue_en.clone(),
-            pl: row.clue_pl.clone(),
+            en: row.clue_en,
+            pl: row.clue_pl,
         },
         active: row.active_now,
         full,
@@ -508,15 +508,15 @@ fn public_drop(row: &DropRow) -> PublicDrop {
     }
 }
 
-fn collectible_from_existing(row: &ExistingClaim) -> AreaCollectible {
+fn collectible_from_existing(row: ExistingClaim) -> AreaCollectible {
     AreaCollectible {
-        drop_id: row.drop_id.clone(),
-        number: row.number.clone(),
-        city: row.city.clone(),
-        line: row.collectible_line.clone(),
-        track: row.collectible_track.clone(),
-        edition: row.collectible_edition.clone(),
-        riddle: row.collectible_riddle.clone(),
+        drop_id: row.drop_id,
+        number: row.number,
+        city: row.city,
+        line: row.collectible_line,
+        track: row.collectible_track,
+        edition: row.collectible_edition,
+        riddle: row.collectible_riddle,
     }
 }
 

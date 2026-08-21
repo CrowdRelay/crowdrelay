@@ -29,7 +29,7 @@ pub(super) fn beacon_discovery_candidate(
         disposition,
         reason: "upcoming show needs more verified local Beacons before the outreach window",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestBeaconDiscovery {
             event_id: snapshot.event_id,
             target_count,
@@ -73,7 +73,7 @@ pub(super) fn beacon_candidate(
         disposition,
         reason: "verified local Beacon is relevant and the show-specific contact window is due",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestBeaconOutreach {
             beacon_id: snapshot.beacon_id,
             event_id: snapshot.event_id,

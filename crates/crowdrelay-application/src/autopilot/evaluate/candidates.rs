@@ -1,5 +1,5 @@
 fn policy_evidence<T: Serialize>(
-    policy: AutopilotPolicy,
+    policy: &AutopilotPolicy,
     domain_config: T,
 ) -> Result<serde_json::Value, serde_json::Error> {
     Ok(serde_json::json!({
@@ -38,7 +38,7 @@ fn ticket_candidate(
         disposition,
         reason: "paid demand exceeds bounded yield thresholds",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::ChangeTicketPrice {
             ticket_type_id: snapshot.ticket_type_id,
             from_minor,
@@ -92,7 +92,7 @@ fn ticket_allocation_candidate(
         disposition,
         reason: "paid tier demand is near its operator-bounded allocation ceiling",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::ChangeTicketCapacity {
             ticket_type_id: snapshot.ticket_type_id,
             from_capacity,
@@ -151,7 +151,7 @@ fn lifecycle_candidate(
         disposition,
         reason: "consented fan lifecycle has a deterministic communication step due",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestFanLifecycleMessage {
             fan_id: snapshot.fan_id,
             template_key: template_key.to_owned(),
@@ -212,7 +212,7 @@ fn release_candidate(
         disposition,
         reason: "release timeline has a deterministic milestone due",
         input_snapshot: serde_json::to_value(&snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::ExecuteReleaseMilestone {
             release_id: snapshot.release_id,
             title: snapshot.title.clone(),
@@ -260,7 +260,7 @@ fn live_opportunity_candidate(
         disposition,
         reason: "verified live opportunity clears deterministic fit and economics gates",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::ApplyLiveOpportunity {
             opportunity_id: snapshot.opportunity_id,
             opportunity_kind: snapshot.kind,
@@ -305,7 +305,7 @@ fn merch_bundle_candidate(
         disposition,
         reason: "repeat co-purchase evidence supports a bounded margin-safe bundle",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestMerchBundle {
             product_a,
             product_b,
@@ -361,7 +361,7 @@ fn outreach_candidate(
         disposition,
         reason: "verified relationship target matches a fresh high-relevance opportunity",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestOutreach {
             opportunity_id: snapshot.opportunity_id,
             target_id: snapshot.target_id,
@@ -411,7 +411,7 @@ fn content_candidate(
         disposition,
         reason: "trusted source is missing one required deterministic content artifact",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestContentArtifact {
             source_id: snapshot.source_id,
             source_version: snapshot.source_version,
@@ -484,7 +484,7 @@ fn experiment_candidate(
         disposition,
         reason: "aggregate experiment evidence shows a bounded material winner",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::AdjustExperiment {
             experiment_id: snapshot.experiment_id,
             expected_version: snapshot.version,
@@ -557,7 +557,7 @@ fn show_operations_candidate(
         disposition,
         reason,
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action,
         decision_key: format!(
             "decision:show:v{}:{}:{:?}:{}:{}",
@@ -614,7 +614,7 @@ fn promotion_candidate(
         disposition,
         reason: "bounded promotion ROAS is outside configured performance band",
         input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy.clone(), domain_policy)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestPromotionBudgetChange {
             campaign_id: snapshot.campaign_id,
             from_minor,
@@ -640,4 +640,3 @@ fn promotion_candidate(
         ),
     }))
 }
-
