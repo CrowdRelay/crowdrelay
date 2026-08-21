@@ -103,17 +103,26 @@ wait_for_image_release() {
 
 control_plane_tunnel_fingerprint() {
   ssh -T "$CONTROL_PLANE_HOST" sudo bash -s <<'REMOTE'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 tunnel="crowdrelay-control-plane-virya-area-tunnel-1"
 status="$(docker inspect "$tunnel" --format '{{.State.Status}}' 2>/dev/null || true)"
 [[ "$status" == "running" ]] || { echo "ERROR: Control Plane tunnel is not running: $status" >&2; exit 1; }
 docker inspect "$tunnel" --format '{{.Id}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.State.Status}}'
+} </dev/null
 REMOTE
 }
 
 recover_exact_runtime_convergence() {
   printf 'RUNTIME_CONVERGENCE_RECOVERY=CHECK sha=%s\n' "$TARGET" >&2
   ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" "$TARGET" <<'REMOTE_RECOVERY'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 repo="$1"
 target="$2"
@@ -190,7 +199,7 @@ for service, component in (("api","api"),("worker","worker")):
 # service is replaced. Only api+worker are force-recreated; the Oracle
 # management proxy and the Home Control Plane tunnel are deliberately excluded.
 compose pull api worker setup
-compose run --rm setup
+compose run --rm -T setup </dev/null
 compose up -d --no-deps --force-recreate --wait --wait-timeout "${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}" api worker
 
 for service in api worker; do
@@ -210,6 +219,7 @@ if value.get("gitSha") != expected:
     raise SystemExit(f"runtime meta mismatch: {value.get('gitSha')} != {expected}")
 ' "$target" || fail 'post-recovery-meta-mismatch'
 printf 'RUNTIME_CONVERGENCE_RECOVERY=PASS sha=%s services=api,worker proxy=untouched\n' "$target"
+} </dev/null
 REMOTE_RECOVERY
 }
 

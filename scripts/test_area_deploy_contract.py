@@ -12,7 +12,7 @@ assert "sha256_stdin" in ctl
 assert "verify_management_proxy" in ctl
 assert "MANAGEMENT_PROXY=PASS" in ctl
 assert "deploy_services+=(area-management-proxy)" in ctl
-assert "compose run --rm --no-deps --entrypoint caddy area-management-proxy" in ctl
+assert "compose run --rm -T --no-deps --entrypoint caddy area-management-proxy" in ctl
 assert "compose up --detach --wait" in ctl
 assert "area-management-proxy:" in compose
 assert "${CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256:?management config digest required}" in compose
