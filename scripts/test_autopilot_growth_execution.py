@@ -92,10 +92,29 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         self.assertIn("/deliveries/", serialized)
         self.assertIn("/complete", serialized)
 
+    def test_bandsintown_executor_hands_off_to_real_campaign_delivery(self):
+        workflow = self.workflow("n8n/examples/autopilot-bandsintown-growth.example.json")
+        names = self.node_names(workflow)
+        for name in (
+            "Claim action once",
+            "Read Bandsintown state",
+            "Ensure consented growth segment",
+            "Create consented Bandsintown CTA campaign",
+            "Schedule Bandsintown CTA campaign",
+            "Report Bandsintown growth receipt",
+        ):
+            self.assertIn(name, names)
+        serialized = self.read("n8n/examples/autopilot-bandsintown-growth.example.json")
+        self.assertIn("show.growth.free_fan_push.v1", serialized)
+        self.assertIn("VIRYA_BANDSINTOWN_GROWTH_SEGMENT_SLUG", serialized)
+        self.assertIn("marketing_consent:true", serialized)
+        self.assertIn("CROWDRELAY_ADMIN_TOKEN", serialized)
+
     def test_no_growth_workflow_contains_fake_stream_or_paid_placement_automation(self):
         paths = [
             "n8n/examples/autopilot-free-fan-campaign.example.json",
             "n8n/examples/autopilot-outreach-executor.example.json",
+            "n8n/examples/autopilot-bandsintown-growth.example.json",
         ]
         banned = re.compile(
             r"(?i)(buy\s*streams|stream\s*bot|click\s*farm|fake\s*followers|guaranteed\s*playlist|paid\s*placement)"
