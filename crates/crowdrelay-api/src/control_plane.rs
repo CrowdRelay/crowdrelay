@@ -19,6 +19,10 @@ const MAX_CONTROL_BODY_BYTES: usize = 8 * 1024;
 pub(crate) fn router(state: crate::AppState) -> Router {
     Router::new()
         .route("/v1/control-plane/ops/summary", get(crate::ops::summary))
+        .route(
+            "/v1/control-plane/ops/attention",
+            get(crate::ops::attention),
+        )
         .route("/v1/control-plane/ops/outbox", get(crate::ops::list_outbox))
         .route(
             "/v1/control-plane/ops/outbox/{event_id}/retry",
