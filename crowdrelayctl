@@ -254,7 +254,7 @@ doctor() {
   esac
 
   compose config --quiet
-  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then compose run --rm --no-deps --entrypoint caddy area-management-proxy validate --config /etc/caddy/Caddyfile >/dev/null; fi
+  if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then compose run --rm -T --no-deps --entrypoint caddy area-management-proxy validate --config /etc/caddy/Caddyfile >/dev/null </dev/null; fi
   echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
 }
 
@@ -306,7 +306,7 @@ verify_exact_release_identity() {
   done
 
   meta="$(compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
-    http://127.0.0.1:8080/v1/meta)"
+    http://127.0.0.1:8080/v1/meta </dev/null)"
   printf '%s' "$meta" | python3 -c '
 import json
 import sys
@@ -322,13 +322,13 @@ if actual != expected:
 verify() {
   require_command docker
   compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
-    http://127.0.0.1:8080/v1/health/live >/dev/null
+    http://127.0.0.1:8080/v1/health/live >/dev/null </dev/null
   compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
-    http://127.0.0.1:8080/v1/health/ready >/dev/null
+    http://127.0.0.1:8080/v1/health/ready >/dev/null </dev/null
   compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
-    'http://127.0.0.1:8080/v1/public/cities?limit=100' >/dev/null
+    'http://127.0.0.1:8080/v1/public/cities?limit=100' >/dev/null </dev/null
   compose exec -T api curl --fail --silent --show-error --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 10 \
-    'http://127.0.0.1:8080/v1/public/events?limit=50' >/dev/null
+    'http://127.0.0.1:8080/v1/public/events?limit=50' >/dev/null </dev/null
 
   if [[ -n "$CROWDRELAY_PUBLIC_BASE_URL" ]]; then
     require_command curl
@@ -389,7 +389,7 @@ deploy() {
   }
   run_hook crowdrelay_before_deploy
   compose pull
-  compose run --rm setup
+  compose run --rm -T setup </dev/null
   local -a deploy_services=(api worker)
 
   if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then
@@ -454,6 +454,10 @@ ship() {
   scp "$archive" "${CROWDRELAY_SSH_TARGET}:${CROWDRELAY_REMOTE_ARCHIVE}"
   ssh "$CROWDRELAY_SSH_TARGET" bash -s -- \
     "$CROWDRELAY_REMOTE_INSTALL_DIR" "$CROWDRELAY_REMOTE_ARCHIVE" <<'REMOTE'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -euo pipefail
 install_dir="$1"
 archive="$2"
@@ -501,6 +505,7 @@ chmod 600 .crowdrelay.local.sh deploy/.env.production
 normalize_runtime_json "$install_dir/deploy/bootstrap.production.json"
 normalize_runtime_json "$install_dir/deploy/webhook-secrets.production.json"
 ./crowdrelayctl deploy
+} </dev/null
 REMOTE
 }
 

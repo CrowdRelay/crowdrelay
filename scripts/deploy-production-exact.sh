@@ -37,6 +37,10 @@ printf 'LOCAL_TARGET=PASS sha=%s local_head=%s target_is_ancestor=true\n' "$TARG
 
 printf '\n==> 2/5 — Production image gate\n'
 ssh -T "$REMOTE" bash -s -- "$TARGET" "$IMAGE_ATTEMPTS" "$IMAGE_SLEEP_SECONDS" <<'REMOTE_IMAGE_GATE'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 target="$1"
 attempts="$2"
@@ -109,11 +113,16 @@ for component in api worker; do
 done
 
 printf 'IMAGE_GATE=PASS sha=%s required=api,worker architecture=amd64\n' "$target"
+} </dev/null
 REMOTE_IMAGE_GATE
 
 printf '\n==> 3/5 — Exact source sync (local bundle, no GitHub auth on server)\n'
 REMOTE_STATE="$(
   ssh -T "$REMOTE" bash -s -- "$REMOTE_REPO" <<'REMOTE_PREFLIGHT'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 repo="$1"
 [[ -d "$repo/.git" ]] || { echo "ERROR=repo-missing"; exit 20; }
@@ -128,6 +137,7 @@ dirty="$(git status --porcelain --untracked-files=normal)"
   exit 22
 }
 printf 'HEAD=%s\nBRANCH=%s\n' "$head" "$branch"
+} </dev/null
 REMOTE_PREFLIGHT
 )" || fail 'production repository preflight failed'
 
@@ -154,6 +164,10 @@ scp -q "$BUNDLE" "$REMOTE:$REMOTE_BUNDLE"
 
 ssh -T "$REMOTE" bash -s -- \
   "$REMOTE_REPO" "$REMOTE_HEAD" "$REMOTE_BRANCH" "$TARGET" "$LOCAL_HEAD" "$REMOTE_BUNDLE" <<'REMOTE_SYNC'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 repo="$1"
 expected_old="$2"
@@ -195,10 +209,15 @@ final="$(git rev-parse HEAD)"
 
 printf 'SOURCE_SYNC=PASS old=%s new=%s branch=%s backup=%s github-auth=not-required\n' \
   "$current" "$final" "$branch" "$backup_ref"
+} </dev/null
 REMOTE_SYNC
 
 printf '\n==> 4/5 — Canonical crowdrelayctl deploy\n'
 ssh -T "$REMOTE" bash -s -- "$REMOTE_REPO" "$TARGET" <<'REMOTE_DEPLOY'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 repo="$1"
 target="$2"
@@ -225,10 +244,15 @@ for service in api worker; do
 done
 
 printf 'CANONICAL_DEPLOY=PASS sha=%s engine=crowdrelayctl\n' "$target"
+} </dev/null
 REMOTE_DEPLOY
 
 printf '\n==> 5/5 — Production git/runtime receipt + public health\n'
 ssh -T "$REMOTE" bash -s -- "$REMOTE_REPO" "$TARGET" <<'REMOTE_RECEIPT'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 repo="$1"
 target="$2"
@@ -251,6 +275,7 @@ for service in api worker; do
 done
 
 printf 'PRODUCTION_EXACT_SHA=PASS source=git+oci sha=%s\n' "$target"
+} </dev/null
 REMOTE_RECEIPT
 
 curl --fail --silent --show-error \

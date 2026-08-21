@@ -46,6 +46,10 @@ bash "$CANONICAL" "$TARGET"
 
 printf '\n==> 2/3 — Verify Oracle management proxy\n'
 ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" "$TARGET" <<'ORACLE_GATE'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 repo="$1"
 target="$2"
@@ -132,10 +136,15 @@ for service in api worker; do
 done
 
 printf 'ORACLE_MANAGEMENT_PROXY=PASS sha=%s routing=401 config=current\n' "$target"
+} </dev/null
 ORACLE_GATE
 
 printf '\n==> 3/3 — Control Plane cross-system E2E\n'
 ssh -T "$CONTROL_PLANE_HOST" sudo bash -s -- "$CONTROL_PLANE_DIR" <<'CONTROL_PLANE_GATE'
+# Remote body runs as one brace group with stdin detached. bash reads this
+# script from ssh stdin; any command that attaches stdin (docker compose
+# run/exec) would otherwise swallow the remainder and silently skip it.
+{
 set -Eeuo pipefail
 root="$1"
 cd "$root"
@@ -220,6 +229,7 @@ if not isinstance(http, dict) or not isinstance(http.get("p95_ms"), int):
     raise SystemExit("http.p95_ms missing")
 print("CONTROL_PLANE_CROSS_GATE=PASS schema={} p95_ms={}".format(value["schema_version"], http["p95_ms"]))
 '
+} </dev/null
 CONTROL_PLANE_GATE
 
 printf '\nCROWDRELAY_SAFE_DEPLOY=PASS sha=%s oracle_proxy=current control_plane_e2e=pass\n' "$TARGET"

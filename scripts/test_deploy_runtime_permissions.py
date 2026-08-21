@@ -10,7 +10,7 @@ class DeployRuntimePermissionsContract(unittest.TestCase):
         deploy = CTL[CTL.index("deploy() {"):CTL.index("\npackage_deploy()")]
         normalize = deploy.index("prepare_runtime_file_permissions")
         doctor = deploy.index("doctor")
-        setup = deploy.index("compose run --rm setup")
+        setup = deploy.index("compose run --rm -T setup")
         self.assertLess(normalize, doctor)
         self.assertLess(doctor, setup)
 

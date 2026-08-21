@@ -62,7 +62,7 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn('--env-file "$env_file"', CTL)
         self.assertIn("verify_exact_release_identity", CTL)
         self.assertIn("compose pull", CTL)
-        self.assertIn("compose run --rm setup", CTL)
+        self.assertIn("compose run --rm -T setup </dev/null", CTL)
         self.assertIn("compose up --detach --wait", CTL)
         self.assertIn("verify\n", CTL)
 
