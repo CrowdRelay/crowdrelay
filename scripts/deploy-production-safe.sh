@@ -95,8 +95,14 @@ compose() {
     "$@"
 }
 
-compose config --quiet
+# The area overlay pins the proxy to the exact Caddyfile digest so a config
+# change forces recreation. That digest is derived, not stored in the env
+# file, so it must be exported before any compose call can interpolate the
+# overlay -- otherwise `compose config` fails on a missing required variable.
 source_sha="$(sha256sum deploy/area-management.Caddyfile | cut -d " " -f1)"
+export CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256="$source_sha"
+
+compose config --quiet
 proxy_status="$(docker inspect crowdrelay-area-management-proxy-1 --format "{{.State.Status}}" 2>/dev/null || true)"
 [[ "$proxy_status" == "running" ]] || fail "management proxy is not running after canonical deploy: $proxy_status"
 runtime_sha="$(docker exec crowdrelay-area-management-proxy-1 cat /etc/caddy/Caddyfile | sha256sum | cut -d " " -f1 || true)"
