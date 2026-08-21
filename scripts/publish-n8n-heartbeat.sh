@@ -21,3 +21,29 @@ curl --fail-with-body --silent --show-error --max-time 15 \
   --data-binary "@$payload" \
   "${CROWDRELAY_BASE_URL%/}/v1/internal/autopilot/executors/heartbeat"
 printf '\nN8N_HEARTBEAT_PUBLISH=PASS executor=%s\n' "$N8N_EXECUTOR_ID"
+
+# The heartbeat proves the executor is alive; the release ledger separately
+# expects a production receipt per component. Without this one, n8n stayed in
+# missing_components forever, which also left n8n_attestation_ready false and
+# executor_manifest_drift permanently true. Same evidence, second endpoint.
+jq --arg deploy "$N8N_EXECUTOR_ID" '{
+    component_key:"n8n",
+    environment:"production",
+    source_sha:.manifest_sha,
+    artifact_digest:null,
+    deploy_ref:$deploy,
+    version:.version,
+    manifest_sha:.manifest_sha,
+    metadata:{
+      reporter:"n8n-heartbeat",
+      workflow_attestation_sha:.metadata.workflow_attestation_sha,
+      workflow_attestation_manifest_sha:.metadata.workflow_attestation_manifest_sha,
+      workflow_attested_at:.metadata.workflow_attested_at
+    },
+    observed_at:.observed_at
+  }' "$payload" | curl --fail-with-body --silent --show-error --max-time 15 \
+    -H 'content-type: application/json' \
+    -H "Authorization: Bearer ${CROWDRELAY_COMMERCE_API_KEY}" \
+    --data-binary @- \
+    "${CROWDRELAY_BASE_URL%/}/v1/internal/autopilot/release-components"
+printf '\nN8N_RELEASE_RECEIPT=PASS component=n8n\n'
