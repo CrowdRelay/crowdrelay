@@ -179,8 +179,34 @@ published="$(docker port "$app" 8090/tcp | head -n1)"
 [[ -n "$published" ]] || fail 'Control Plane app has no published endpoint'
 admin="$(docker inspect "$app" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^CONTROL_PLANE_ADMIN_TOKEN=//p')"
 [[ -n "$admin" ]] || fail 'Control Plane admin token missing from runtime'
-summary="$(curl -fsS --connect-timeout 3 --max-time 10 -H "Authorization: Bearer $admin" "http://${published}/api/v1/tenants/virya/operations/summary")"
+summary=""
+for attempt in $(seq 1 30); do
+  body_file="$(mktemp)"
+  code="000"
+  if code="$(curl -sS -o "$body_file" -w '%{http_code}' --connect-timeout 3 --max-time 10 \
+    -H "Authorization: Bearer $admin" \
+    "http://${published}/api/v1/tenants/virya/operations/summary")"; then
+    if [[ "$code" == "200" ]]; then
+      summary="$(cat "$body_file")"
+      rm -f "$body_file"
+      printf 'CONTROL_PLANE_CROSS_GATE_READINESS=PASS attempt=%s status=200\n' "$attempt"
+      break
+    fi
+    if [[ ! "$code" =~ ^(502|503|504)$ ]]; then
+      detail="$(cat "$body_file" 2>/dev/null || true)"
+      rm -f "$body_file"
+      fail "Control Plane cross-system gate failed status=$code detail=$detail"
+    fi
+  fi
+  rm -f "$body_file"
+  if [[ "$attempt" == "30" ]]; then
+    fail "Control Plane cross-system gate did not converge after transient management-proxy failures"
+  fi
+  printf 'CONTROL_PLANE_CROSS_GATE_RETRY attempt=%s status=%s\n' "$attempt" "$code" >&2
+  sleep 1
+done
 unset admin
+[[ -n "$summary" ]] || fail 'Control Plane cross-system gate returned no summary after bounded retry'
 printf '%s' "$summary" | python3 -c '
 import json
 import sys
