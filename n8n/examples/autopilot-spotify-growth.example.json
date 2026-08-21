@@ -1,130 +1,29 @@
 {
   "name": "CrowdRelay — Autopilot Spotify free-growth executor",
   "nodes": [
-    {
-      "parameters": {},
-      "id": "s3000000-0000-4000-8000-000000000001",
-      "name": "Called by verified ingress",
-      "type": "n8n-nodes-base.executeWorkflowTrigger",
-      "typeVersion": 1.1,
-      "position": [0, 0]
-    },
-    {
-      "parameters": {
-        "jsCode": "const e=$json; if(!e||e.type!=='viryaos.show_growth.requested'||e.version!==1)return[]; const d=e.data??{}; if(d.lever!=='free_fan_channel_push')return[]; if(!d.action_id||!d.event_id||!d.ticket_url)throw new Error('Invalid Spotify growth intent'); return [{json:{event_id:String(d.event_id),action_id:String(d.action_id),event_slug:String(d.event_slug||''),event_title:String(d.event_title||''),city_slug:d.city_slug||null,ticket_url:String(d.ticket_url),lever:String(d.lever),template_key:String(d.template_key||'show.growth.free_fan_push.v1')}}];"
-      },
-      "id": "s3000000-0000-4000-8000-000000000002",
-      "name": "Validate Spotify growth intent",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [240, 0]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
-        "sendHeaders": true,
-        "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"}]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,occurred_at:new Date().toISOString()}) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "s3000000-0000-4000-8000-000000000003",
-      "name": "Claim action once",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [500, 0]
-    },
-    {
-      "parameters": {
-        "url": "={{ 'https://api.spotify.com/v1/artists/' + $env.SPOTIFY_ARTIST_ID }}",
-        "sendHeaders": true,
-        "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.SPOTIFY_ACCESS_TOKEN }}"}]},
-        "options": {"timeout": 10000}
-      },
-      "id": "s3000000-0000-4000-8000-000000000004",
-      "name": "Read Spotify artist state",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [760, -160]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns' }}",
-        "sendHeaders": true,
-        "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"}, {"name": "Idempotency-Key", "value": "={{ 'spotify-growth:' + $json.action_id }}"}]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({slug:'autopilot-spotify-'+$json.event_slug,name:'Spotify growth · '+$json.event_title,channel:'email',segment_slug:$env.VIRYA_SPOTIFY_GROWTH_SEGMENT_SLUG||'autopilot-growth',template_key:'autopilot.spotify.follow.v1',subject:'VIRYA — posłuchaj i obserwuj nas na Spotify',content:{event_slug:$json.event_slug,event_title:$json.event_title,ticket_url:$json.ticket_url,spotify_url:($env.VIRYA_SPOTIFY_URL||'https://open.spotify.com/artist/'+$env.SPOTIFY_ARTIST_ID),cta:'Obserwuj VIRYA na Spotify i wróć do nas na kolejny koncert.'}}) }}",
-        "options": {"timeout": 15000}
-      },
-      "id": "s3000000-0000-4000-8000-000000000005",
-      "name": "Create consented Spotify CTA campaign",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1020, -160],
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns/' + $json.id + '/schedule' }}",
-        "sendHeaders": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"}, {"name": "Idempotency-Key", "value": "={{ 'spotify-growth-schedule:' + $('Validate Spotify growth intent').first().json.action_id }}"}]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({scheduled_at:new Date().toISOString()}) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "s3000000-0000-4000-8000-000000000006",
-      "name": "Schedule Spotify CTA campaign",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1280, -160],
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "jsCode": "const intent=$('Validate Spotify growth intent').first().json; const claim=$('Claim action once').first().json; const artist=$('Read Spotify artist state').first().json; const campaign=$('Create consented Spotify CTA campaign').first().json; const scheduled=$json; const failed=[claim,campaign,scheduled].some(x=>x?.error); return [{json:{action_id:intent.action_id,receipt_key:'spotify-growth:'+intent.action_id,executor_id:$env.VIRYA_N8N_EXECUTOR_ID,status:failed?'failed':'succeeded',claim_token:claim.claim_token||null,provider_reference:campaign.id?String(campaign.id):null,error_kind:failed?'spotify_growth_execution_failed':null,metadata:{spotify_artist_id:$env.SPOTIFY_ARTIST_ID,spotify_followers:artist?.followers?.total??null,spotify_url:$env.VIRYA_SPOTIFY_URL||('https://open.spotify.com/artist/'+$env.SPOTIFY_ARTIST_ID),event_slug:intent.event_slug,campaign_id:campaign.id??null,scheduled:Boolean(!failed),provider_native_steps:['Spotify Artist Pick / event CTA remain human-only unless an official supported write API is enabled']},occurred_at:new Date().toISOString()}}];"
-      },
-      "id": "s3000000-0000-4000-8000-000000000007",
-      "name": "Build Spotify growth receipt",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1540, -160]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}",
-        "sendHeaders": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "s3000000-0000-4000-8000-000000000008",
-      "name": "Report Spotify growth receipt",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1800, -160]
-    }
+    {"parameters":{},"id":"s3100000-0000-4000-8000-000000000001","name":"Called by verified ingress","type":"n8n-nodes-base.executeWorkflowTrigger","typeVersion":1.1,"position":[0,0]},
+    {"parameters":{"jsCode":"const e=$json; if(!e||e.type!=='viryaos.show_growth.requested'||e.version!==1)return[]; const d=e.data??{}; if(d.lever!=='free_fan_channel_push')return[]; if(!d.action_id||!d.event_id||!d.ticket_url)throw new Error('Invalid Spotify growth intent'); return [{json:{event_id:String(d.event_id),action_id:String(d.action_id),event_slug:String(d.event_slug||''),event_title:String(d.event_title||''),ticket_url:String(d.ticket_url),template_key:String(d.template_key||'show.growth.free_fan_push.v1')}}];"},"id":"s3100000-0000-4000-8000-000000000002","name":"Validate Spotify growth intent","type":"n8n-nodes-base.code","typeVersion":2,"position":[240,0]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,occurred_at:new Date().toISOString()}) }}","options":{"timeout":10000}},"id":"s3100000-0000-4000-8000-000000000003","name":"Claim action once","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[500,0]},
+    {"parameters":{"jsCode":"const claim=$json; const intent=$('Validate Spotify growth intent').first().json; if(claim.disposition!=='claimed'||!claim.claim_token)return[]; return [{json:{...intent,claim_token:claim.claim_token}}];"},"id":"s3100000-0000-4000-8000-000000000004","name":"Fail-closed claim gate","type":"n8n-nodes-base.code","typeVersion":2,"position":[760,0]},
+    {"parameters":{"url":"={{ 'https://api.spotify.com/v1/artists/' + $env.SPOTIFY_ARTIST_ID }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.SPOTIFY_ACCESS_TOKEN }}"]},"options":{"timeout":10000}},"id":"s3100000-0000-4000-8000-000000000005","name":"Read Spotify artist state","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1020,-180]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"},{"name":"Idempotency-Key","value":"={{ 'spotify-growth:' + $('Fail-closed claim gate').first().json.action_id }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({slug:'autopilot-spotify-'+$('Fail-closed claim gate').first().json.event_slug,name:'Spotify growth · '+$('Fail-closed claim gate').first().json.event_title,channel:'email',segment_slug:$env.VIRYA_SPOTIFY_GROWTH_SEGMENT_SLUG||'autopilot-growth',template_key:'autopilot.spotify.follow.v1',subject:'VIRYA — posłuchaj i obserwuj nas na Spotify',content:{event_slug:$('Fail-closed claim gate').first().json.event_slug,event_title:$('Fail-closed claim gate').first().json.event_title,ticket_url:$('Fail-closed claim gate').first().json.ticket_url,spotify_url:($env.VIRYA_SPOTIFY_URL||'https://open.spotify.com/artist/'+$env.SPOTIFY_ARTIST_ID),cta:'Obserwuj VIRYA na Spotify i wróć do nas na kolejny koncert.'}}) }}","options":{"timeout":15000}},"id":"s3100000-0000-4000-8000-000000000006","name":"Create consented Spotify CTA campaign","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1280,-180],"continueOnFail":true},
+    {"parameters":{"jsCode":"const campaign=$json; const intent=$('Fail-closed claim gate').first().json; if(campaign?.error||!campaign?.id)return[]; return [{json:{...intent,campaign_id:String(campaign.id)}}];"},"id":"s3100000-0000-4000-8000-000000000007","name":"Campaign creation gate","type":"n8n-nodes-base.code","typeVersion":2,"position":[1540,-180]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns/' + $json.campaign_id + '/schedule' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"},{"name":"Idempotency-Key","value":"={{ 'spotify-growth-schedule:' + $json.action_id }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({scheduled_at:new Date().toISOString()}) }}","options":{"timeout":10000}},"id":"s3100000-0000-4000-8000-000000000008","name":"Schedule Spotify CTA campaign","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1800,-180],"continueOnFail":true},
+    {"parameters":{"jsCode":"const scheduled=$json; const intent=$('Campaign creation gate').first().json; const artist=$('Read Spotify artist state').first().json; const failed=Boolean(scheduled?.error); return [{json:{action_id:intent.action_id,receipt_key:'spotify-growth:'+intent.action_id,executor_id:$env.VIRYA_N8N_EXECUTOR_ID,status:failed?'failed':'succeeded',claim_token:intent.claim_token,provider_reference:failed?null:String(intent.campaign_id),error_kind:failed?'spotify_growth_schedule_failed':null,metadata:{spotify_artist_id:$env.SPOTIFY_ARTIST_ID,spotify_followers:artist?.followers?.total??null,spotify_url:$env.VIRYA_SPOTIFY_URL||('https://open.spotify.com/artist/'+$env.SPOTIFY_ARTIST_ID),event_slug:intent.event_slug,campaign_id:intent.campaign_id,provider_native_steps:['Spotify Artist Pick remains human-only unless an official supported write API is enabled']},occurred_at:new Date().toISOString()}}];"},"id":"s3100000-0000-4000-8000-000000000009","name":"Build Spotify growth receipt","type":"n8n-nodes-base.code","typeVersion":2,"position":[2060,-180]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}","options":{"timeout":10000}},"id":"s3100000-0000-4000-8000-000000000010","name":"Report Spotify growth receipt","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[2320,-180]}
   ],
-  "connections": {
-    "Called by verified ingress": {"main": [[{"node":"Validate Spotify growth intent","type":"main","index":0}]]},
-    "Validate Spotify growth intent": {"main": [[{"node":"Claim action once","type":"main","index":0}]]},
-    "Claim action once": {"main": [[{"node":"Read Spotify artist state","type":"main","index":0}]]},
-    "Read Spotify artist state": {"main": [[{"node":"Create consented Spotify CTA campaign","type":"main","index":0}]]},
-    "Create consented Spotify CTA campaign": {"main": [[{"node":"Schedule Spotify CTA campaign","type":"main","index":0}]]},
-    "Schedule Spotify CTA campaign": {"main": [[{"node":"Build Spotify growth receipt","type":"main","index":0}]]},
-    "Build Spotify growth receipt": {"main": [[{"node":"Report Spotify growth receipt","type":"main","index":0}]]}
+  "connections":{
+    "Called by verified ingress":{"main":[[{"node":"Validate Spotify growth intent","type":"main","index":0}]]},
+    "Validate Spotify growth intent":{"main":[[{"node":"Claim action once","type":"main","index":0}]]},
+    "Claim action once":{"main":[[{"node":"Fail-closed claim gate","type":"main","index":0}]]},
+    "Fail-closed claim gate":{"main":[[{"node":"Read Spotify artist state","type":"main","index":0}]]},
+    "Read Spotify artist state":{"main":[[{"node":"Create consented Spotify CTA campaign","type":"main","index":0}]]},
+    "Create consented Spotify CTA campaign":{"main":[[{"node":"Campaign creation gate","type":"main","index":0}]]},
+    "Campaign creation gate":{"main":[[{"node":"Schedule Spotify CTA campaign","type":"main","index":0}]]},
+    "Schedule Spotify CTA campaign":{"main":[[{"node":"Build Spotify growth receipt","type":"main","index":0}]]},
+    "Build Spotify growth receipt":{"main":[[{"node":"Report Spotify growth receipt","type":"main","index":0}]]}
   },
-  "active": false,
-  "settings": {"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
-  "tags": []
+  "active":false,
+  "settings":{"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
+  "tags":[]
 }
