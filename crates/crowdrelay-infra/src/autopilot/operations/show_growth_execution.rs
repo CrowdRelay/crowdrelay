@@ -212,50 +212,11 @@ pub(in crate::autopilot) async fn execute_show_growth(
                 "manual_steps_must_include": ["destination", "what_to_do", "why_it_matters", "consent_or_moderation_requirement"]
             }
         }),
-        ShowGrowthLever::FreeFanChannelPush => json!({
-            "objective": "use free provider-native follower surfaces and consented owned email to turn existing local intent into real Spotify listeners and Bandsintown followers",
-            "surface_classes": [
-                "consented_virya_email_to_relevant_show_fans",
-                "bandsintown_location_targeted_post",
-                "bandsintown_event_rsvp_targeted_post",
-                "bandsintown_email_builder_local_followers_within_verified_free_quota",
-                "bandsintown_waitlist_or_event_rsvp_reactivation_when_applicable",
-                "bandsintown_featured_video_or_live_clip_when_available",
-                "spotify_artist_pick_for_event",
-                "youtube_artist_post_to_existing_subscribers_when_posts_are_available",
-                "youtube_official_artist_concert_tab_and_ticket_shelf_health",
-                "youtube_fan_shorts_using_official_virya_audio_as_permissioned_social_proof",
-                "bandcamp_community_message_to_existing_followers_when_available"
-            ],
-            "rules": [
-                "owned_email_must_require_existing_marketing_consent",
-                "provider_free_quota_or_free_surface_only",
-                "verify_current_provider_quota_before_sending_provider_email",
-                "bandsintown_email_builder_free_allowance_is_currently_10000_emails_per_artist_per_month_but_must_be_reverified_before_each_campaign",
-                "never_use_bandsintown_boost_or_promoted_campaign_without_separate_paid_approval",
-                "do_not_import_signal_contacts_into_bandsintown_for_this_action",
-                "target_existing_provider_followers_or_event_rsvps_by_location_or_event_when_provider_targeting_is_used",
-                "reuse_current_high_quality_live_or_release_assets_instead_of_creating_low_signal_content_for_quota",
-                "one_canonical_ticket_url_when_a_show_cta_exists",
-                "spotify_artist_pick_is_a_human_provider_configuration_step_unless_an_official_supported_api_exists",
-                "youtube_posts_and_bandcamp_community_are_existing_audience_surfaces_not_cold_outreach",
-                "youtube_and_bandcamp_account_actions_are_manual_steps_unless_an_official_supported_api_exists",
-                "fan_shorts_are_opt_in_creative_actions_and_never_require_or_pressure_private_fans_to_publish",
-                "never_import_or_scrape_contacts_to_expand_provider_audiences",
-                "never_bypass_login_2fa_captcha_or_email_verification",
-                "return_manual_steps_when_provider_ui_action_is_required",
-                "return_delivery_metrics_for_owned_email_and_provider_reach_when_available"
-            ],
-            "growth_ctas": {
-                "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
-                "spotify_artist_url": "env:VIRYA_SPOTIFY_ARTIST_URL",
-                "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
-            },
-            "receipt_contract": {
-                "metadata": ["checked_surfaces", "scheduled_or_sent", "provider_reach", "owned_email_delivered", "manual_steps", "skipped_with_reason"],
-                "manual_steps_must_include": ["destination", "url", "what_to_do", "why_it_matters"]
-            }
-        }),
+        // FreeFanChannelPush is a first-party lever: execute_show_growth
+        // returns into execute_first_party_growth_campaign before this
+        // match, so it never reached an arm here. The provider-surface
+        // policy that used to sit here was therefore never emitted to any
+        // executor; the campaign content carries the real contract now.
         ShowGrowthLever::SocialProofRelay => json!({
             "objective": "relay truthful proof and a strong local reason to attend across owned/partner channels",
             "preferred_proof": [

@@ -134,10 +134,6 @@ class TeamAutopilotsContract(unittest.TestCase):
         for surface in (
             "amazon_music_event_visibility_via_bandsintown_distribution",
             "songkick_partner_distribution_health_deezer_bandcamp_soundcloud",
-            "bandsintown_featured_video_or_live_clip_when_available",
-            "spotify_artist_pick_for_event",
-            "youtube_artist_post_to_existing_subscribers_when_posts_are_available",
-            "bandcamp_community_message_to_existing_followers_when_available",
         ):
             self.assertIn(surface, execution)
         self.assertIn("verify_youtube_sell_tickets_setting", execution)
@@ -147,8 +143,6 @@ class TeamAutopilotsContract(unittest.TestCase):
         self.assertIn("fan_generated_live_photo_or_clip_with_explicit_repost_permission", execution)
         self.assertIn("fan_generated_media_requires_explicit_repost_permission_and_credit", execution)
         self.assertIn("never_bypass_group_rules_posting_limits_or_moderation", execution)
-        self.assertIn("never_use_bandsintown_boost_or_promoted_campaign", execution)
-        self.assertIn("youtube_posts_and_bandcamp_community_are_existing_audience_surfaces_not_cold_outreach", execution)
         self.assertIn('"relay_pack"', execution)
         self.assertIn("send_a_personal_invite_to_one_to_three_relevant_friends", execution)
         self.assertIn("no_mass_dm_or_contact_scraping", execution)
@@ -173,10 +167,6 @@ class TeamAutopilotsContract(unittest.TestCase):
             "tattoo_alt_fashion_or_scene_business",
             "one_consent_based_warm_intro",
             "no_scraping_no_mass_dm_no_automated_cold_group_posting",
-            "bandsintown_email_builder_free_allowance_is_currently_10000_emails_per_artist_per_month_but_must_be_reverified_before_each_campaign",
-            "bandsintown_waitlist_or_event_rsvp_reactivation_when_applicable",
-            "youtube_official_artist_concert_tab_and_ticket_shelf_health",
-            "youtube_fan_shorts_using_official_virya_audio_as_permissioned_social_proof",
         ):
             self.assertIn(needle, execution)
         for table in (

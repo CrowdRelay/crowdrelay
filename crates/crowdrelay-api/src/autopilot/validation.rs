@@ -122,6 +122,7 @@ fn parse_context(value: &str) -> Option<AutopilotContext> {
         "live_opportunity" => Some(AutopilotContext::LiveOpportunity),
         "funding" => Some(AutopilotContext::Funding),
         "beacon" => Some(AutopilotContext::Beacon),
+        "show_growth" => Some(AutopilotContext::ShowGrowth),
         _ => None,
     }
 }
