@@ -1,140 +1,29 @@
 {
   "name": "CrowdRelay — Autopilot Bandsintown free-growth executor",
   "nodes": [
-    {
-      "parameters": {},
-      "id": "b3000000-0000-4000-8000-000000000001",
-      "name": "Called by verified ingress",
-      "type": "n8n-nodes-base.executeWorkflowTrigger",
-      "typeVersion": 1.1,
-      "position": [0, 0]
-    },
-    {
-      "parameters": {
-        "jsCode": "const e=$json; if(!e||e.type!=='viryaos.show_growth.requested'||e.version!==1)return[]; const d=e.data??{}; if(!['free_fan_channel_push','audience_capture_setup'].includes(d.lever))return[]; if(!d.action_id||!d.event_id||!d.ticket_url)throw new Error('Invalid Bandsintown growth intent'); return [{json:{event_id:String(d.event_id),action_id:String(d.action_id),event_slug:String(d.event_slug||''),event_title:String(d.event_title||''),city_slug:d.city_slug||null,ticket_url:String(d.ticket_url),lever:String(d.lever),template_key:String(d.template_key||'show.growth.free_fan_push.v1')}}];"
-      },
-      "id": "b3000000-0000-4000-8000-000000000002",
-      "name": "Validate Bandsintown growth intent",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [240, 0]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
-        "sendHeaders": true,
-        "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,occurred_at:new Date().toISOString()}) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "b3000000-0000-4000-8000-000000000003",
-      "name": "Claim action once",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [500, 0]
-    },
-    {
-      "parameters": {
-        "url": "={{ 'https://rest.bandsintown.com/artists/' + encodeURIComponent($env.BANDSINTOWN_ARTIST_NAME) }}",
-        "sendQuery": true,
-        "queryParameters": {"parameters": [{"name": "app_id", "value": "={{ $env.BANDSINTOWN_APP_ID }}"}, {"name": "date", "value": "upcoming"}]},
-        "options": {"timeout": 10000}
-      },
-      "id": "b3000000-0000-4000-8000-000000000004",
-      "name": "Read Bandsintown state",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [760, -160]
-    },
-    {
-      "parameters": {
-        "jsCode": "const state=$json; const intent=$('Validate Bandsintown growth intent').first().json; const events=Array.isArray(state)?state:((state?.events)||[]); const relevant=events.filter(ev=>String(ev?.id||'')===String($env.BANDSINTOWN_EVENT_ID||intent.event_id)||String(ev?.title||'').toLowerCase().includes(intent.event_title.toLowerCase().slice(0,24))); return [{json:{...intent,bandsintown_artist_url:state?.url||$env.BANDSINTOWN_ARTIST_URL||null,bandsintown_followers:state?.followers_count??state?.followers?.total??null,bandsintown_events:events.length,relevant_event_ids:relevant.map(ev=>String(ev.id||'')),smart_link:$env.BANDSINTOWN_SMART_LINK||null,free_surfaces:['Bandsintown follow/signup CTA','Bandsintown event/share link','Bandsintown Smart Link','Bandsintown free Email Builder quota','Bandsintown follower post/direct message'],provider_native_automation_limit:'Bandsintown public API is read/display oriented; posting and Email Builder sending remain provider-dashboard actions unless an approved write integration is available.'}}];"
-      },
-      "id": "b3000000-0000-4000-8000-000000000005",
-      "name": "Normalize Bandsintown growth state",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1020, -160]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns' }}",
-        "sendHeaders": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"}, {"name": "Idempotency-Key", "value": "={{ 'bandsintown-growth:' + $json.action_id }}"}]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({slug:'autopilot-bandsintown-'+$json.event_slug,name:'Bandsintown growth · '+$json.event_title,channel:'email',segment_slug:$env.VIRYA_BANDSINTOWN_GROWTH_SEGMENT_SLUG||'autopilot-growth',template_key:'autopilot.bandsintown.follow.v1',subject:'VIRYA — obserwuj nas na Bandsintown i nie przegap koncertu',content:{event_slug:$json.event_slug,event_title:$json.event_title,ticket_url:$json.ticket_url,bandsintown_url:$json.bandsintown_artist_url||$env.BANDSINTOWN_ARTIST_URL||'',bandsintown_smart_link:$json.smart_link||'',cta:'Obserwuj VIRYA na Bandsintown i ustaw alert na koncert.'}}) }}",
-        "options": {"timeout": 15000}
-      },
-      "id": "b3000000-0000-4000-8000-000000000006",
-      "name": "Create consented Bandsintown CTA campaign",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1280, -160],
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns/' + $json.id + '/schedule' }}",
-        "sendHeaders": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"}, {"name": "Idempotency-Key", "value": "={{ 'bandsintown-growth-schedule:' + $('Validate Bandsintown growth intent').first().json.action_id }}"}]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({scheduled_at:new Date().toISOString()}) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "b3000000-0000-4000-8000-000000000007",
-      "name": "Schedule Bandsintown CTA campaign",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1540, -160],
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "jsCode": "const intent=$('Normalize Bandsintown growth state').first().json; const claim=$('Claim action once').first().json; const campaign=$('Create consented Bandsintown CTA campaign').first().json; const scheduled=$json; const failed=[claim,campaign,scheduled].some(x=>x?.error); return [{json:{action_id:intent.action_id,receipt_key:'bandsintown-growth:'+intent.action_id,executor_id:$env.VIRYA_N8N_EXECUTOR_ID,status:failed?'failed':'succeeded',claim_token:claim.claim_token||null,provider_reference:campaign.id?String(campaign.id):null,error_kind:failed?'bandsintown_growth_execution_failed':null,metadata:{bandsintown_artist_url:intent.bandsintown_artist_url,bandsintown_followers:intent.bandsintown_followers,bandsintown_upcoming_events:intent.bandsintown_events,bandsintown_smart_link:intent.smart_link,free_surfaces_checked:intent.free_surfaces,provider_native_steps:['Publish a Bandsintown follower post / direct message using the verified event Smart Link','Use Bandsintown Email Builder within the free monthly allowance if the operator dashboard is required','Keep Facebook/X connected in Bandsintown for Artists so provider posts can cross-publish when enabled']},occurred_at:new Date().toISOString()}}];"
-      },
-      "id": "b3000000-0000-4000-8000-000000000008",
-      "name": "Build Bandsintown growth receipt",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1800, -160]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}",
-        "sendHeaders": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "b3000000-0000-4000-8000-000000000009",
-      "name": "Report Bandsintown growth receipt",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [2060, -160]
-    }
+    {"parameters":{},"id":"b3000000-0000-4000-8000-000000000001","name":"Called by verified ingress","type":"n8n-nodes-base.executeWorkflowTrigger","typeVersion":1.1,"position":[0,0]},
+    {"parameters":{"jsCode":"const e=$json; if(!e||e.type!=='viryaos.show_growth.requested'||e.version!==1)return[]; const d=e.data??{}; if(!['free_fan_channel_push','audience_capture_setup'].includes(d.lever))return[]; if(!d.action_id||!d.event_id||!d.ticket_url)throw new Error('Invalid Bandsintown growth intent'); return [{json:{event_id:String(d.event_id),action_id:String(d.action_id),event_slug:String(d.event_slug||''),event_title:String(d.event_title||''),city_slug:d.city_slug||null,ticket_url:String(d.ticket_url),lever:String(d.lever),template_key:'show.growth.free_fan_push.v1'}}];"},"id":"b3000000-0000-4000-8000-000000000002","name":"Validate Bandsintown growth intent","type":"n8n-nodes-base.code","typeVersion":2,"position":[240,0]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,occurred_at:new Date().toISOString()}) }}","options":{"timeout":10000}},"id":"b3000000-0000-4000-8000-000000000003","name":"Claim action once","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[500,0]},
+    {"parameters":{"url":"={{ 'https://rest.bandsintown.com/artists/' + encodeURIComponent($env.BANDSINTOWN_ARTIST_NAME) }}","sendQuery":true,"queryParameters":{"parameters":[{"name":"app_id","value":"={{ $env.BANDSINTOWN_APP_ID }}"},{"name":"date","value":"upcoming"}]},"options":{"timeout":10000}},"id":"b3000000-0000-4000-8000-000000000004","name":"Read Bandsintown state","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[760,-160]},
+    {"parameters":{"jsCode":"const state=$json; const intent=$('Validate Bandsintown growth intent').first().json; const events=Array.isArray(state)?state:((state?.events)||[]); const relevant=events.filter(ev=>String(ev?.id||'')===String($env.BANDSINTOWN_EVENT_ID||intent.event_id)||String(ev?.title||'').toLowerCase().includes(intent.event_title.toLowerCase().slice(0,24))); return [{json:{...intent,bandsintown_artist_url:state?.url||$env.BANDSINTOWN_ARTIST_URL||null,bandsintown_followers:state?.followers_count??state?.followers?.total??null,bandsintown_events:events.length,relevant_event_ids:relevant.map(ev=>String(ev.id||'')),smart_link:$env.BANDSINTOWN_SMART_LINK||null,free_surfaces:['Bandsintown follow/signup CTA','Bandsintown event/share link','Bandsintown Smart Link','Bandsintown free Email Builder quota','Bandsintown follower post/direct message'],provider_native_automation_limit:'Bandsintown public API is read/display oriented; posting and Email Builder sending remain provider-dashboard actions unless an approved write integration is available.'}}];"},"id":"b3000000-0000-4000-8000-000000000005","name":"Normalize Bandsintown growth state","type":"n8n-nodes-base.code","typeVersion":2,"position":[1020,-160]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/audience/segments' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({slug:$env.VIRYA_BANDSINTOWN_GROWTH_SEGMENT_SLUG||'autopilot-growth',name:'Autopilot growth · consented fans',description:'Consent-filtered owned growth audience for provider CTAs',filter:{statuses:['active'],marketing_consent:true}}) }}","options":{"timeout":10000}},"id":"b3000000-0000-4000-8000-000000000010","name":"Ensure consented growth segment","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1280,-160],"continueOnFail":true},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"},{"name":"Idempotency-Key","value":"={{ 'bandsintown-growth:' + $('Validate Bandsintown growth intent').first().json.action_id }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({slug:'autopilot-bandsintown-'+$json.event_slug,name:'Bandsintown growth · '+$json.event_title,channel:'email',segment_slug:$env.VIRYA_BANDSINTOWN_GROWTH_SEGMENT_SLUG||'autopilot-growth',template_key:'show.growth.free_fan_push.v1',subject:'VIRYA — obserwuj nas na Bandsintown i nie przegap koncertu',content:{event_slug:$json.event_slug,event_title:$json.event_title,ticket_url:$json.ticket_url,growth_ctas:{bandsintown_follow_url:$json.bandsintown_artist_url||$env.BANDSINTOWN_ARTIST_URL||'',spotify_artist_url:$env.VIRYA_SPOTIFY_ARTIST_URL||'',spotify_playlist_url:$env.VIRYA_SPOTIFY_PLAYLIST_URL||''},bandsintown_smart_link:$json.smart_link||'',cta:'Obserwuj VIRYA na Bandsintown i ustaw alert na koncert.'}}) }}","options":{"timeout":15000}},"id":"b3000000-0000-4000-8000-000000000006","name":"Create consented Bandsintown CTA campaign","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1540,-160],"continueOnFail":true},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/communications/campaigns/' + $json.id + '/schedule' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"},{"name":"Idempotency-Key","value":"={{ 'bandsintown-growth-schedule:' + $('Validate Bandsintown growth intent').first().json.action_id }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({scheduled_at:new Date().toISOString()}) }}","options":{"timeout":10000}},"id":"b3000000-0000-4000-8000-000000000007","name":"Schedule Bandsintown CTA campaign","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1800,-160],"continueOnFail":true},
+    {"parameters":{"jsCode":"const intent=$('Normalize Bandsintown growth state').first().json; const claim=$('Claim action once').first().json; const campaign=$('Create consented Bandsintown CTA campaign').first().json; const scheduled=$json; const failed=[claim,campaign,scheduled].some(x=>x?.error); return [{json:{action_id:intent.action_id,receipt_key:'bandsintown-growth:'+intent.action_id,executor_id:$env.VIRYA_N8N_EXECUTOR_ID,status:failed?'failed':'succeeded',claim_token:claim.claim_token||null,provider_reference:campaign.id?String(campaign.id):null,error_kind:failed?'bandsintown_growth_execution_failed':null,metadata:{bandsintown_artist_url:intent.bandsintown_artist_url,bandsintown_followers:intent.bandsintown_followers,bandsintown_upcoming_events:intent.bandsintown_events,bandsintown_smart_link:intent.smart_link,free_surfaces_checked:intent.free_surfaces,provider_native_steps:['Publish a Bandsintown follower post / direct message using the verified event Smart Link','Use Bandsintown Email Builder within the free monthly allowance if the operator dashboard is required','Keep Facebook/X connected in Bandsintown for Artists so provider posts can cross-publish when enabled']},occurred_at:new Date().toISOString()}}];"},"id":"b3000000-0000-4000-8000-000000000008","name":"Build Bandsintown growth receipt","type":"n8n-nodes-base.code","typeVersion":2,"position":[2060,-160]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}","options":{"timeout":10000}},"id":"b3000000-0000-4000-8000-000000000009","name":"Report Bandsintown growth receipt","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[2320,-160]}
   ],
   "connections": {
-    "Called by verified ingress": {"main": [[{"node":"Validate Bandsintown growth intent","type":"main","index":0}]]},
-    "Validate Bandsintown growth intent": {"main": [[{"node":"Claim action once","type":"main","index":0}]]},
-    "Claim action once": {"main": [[{"node":"Read Bandsintown state","type":"main","index":0}]]},
-    "Read Bandsintown state": {"main": [[{"node":"Normalize Bandsintown growth state","type":"main","index":0}]]},
-    "Normalize Bandsintown growth state": {"main": [[{"node":"Create consented Bandsintown CTA campaign","type":"main","index":0}]]},
-    "Create consented Bandsintown CTA campaign": {"main": [[{"node":"Schedule Bandsintown CTA campaign","type":"main","index":0}]]},
-    "Schedule Bandsintown CTA campaign": {"main": [[{"node":"Build Bandsintown growth receipt","type":"main","index":0}]]},
-    "Build Bandsintown growth receipt": {"main": [[{"node":"Report Bandsintown growth receipt","type":"main","index":0}]]}
+    "Called by verified ingress":{"main":[[{"node":"Validate Bandsintown growth intent","type":"main","index":0}]]},
+    "Validate Bandsintown growth intent":{"main":[[{"node":"Claim action once","type":"main","index":0}]]},
+    "Claim action once":{"main":[[{"node":"Read Bandsintown state","type":"main","index":0}]]},
+    "Read Bandsintown state":{"main":[[{"node":"Normalize Bandsintown growth state","type":"main","index":0}]]},
+    "Normalize Bandsintown growth state":{"main":[[{"node":"Ensure consented growth segment","type":"main","index":0}]]},
+    "Ensure consented growth segment":{"main":[[{"node":"Create consented Bandsintown CTA campaign","type":"main","index":0}]]},
+    "Create consented Bandsintown CTA campaign":{"main":[[{"node":"Schedule Bandsintown CTA campaign","type":"main","index":0}]]},
+    "Schedule Bandsintown CTA campaign":{"main":[[{"node":"Build Bandsintown growth receipt","type":"main","index":0}]]},
+    "Build Bandsintown growth receipt":{"main":[[{"node":"Report Bandsintown growth receipt","type":"main","index":0}]]}
   },
   "active": false,
-  "settings": {"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
-  "tags": []
+  "settings":{"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
+  "tags":[]
 }
