@@ -110,6 +110,13 @@ async fn load_dead_deliveries(state: &OpsState) -> Result<Vec<DeliveryItem>, Ops
 async fn load_attention_ecosystem(
     state: &crate::AppState,
 ) -> Result<AttentionEcosystemOverview, OpsError> {
+    // Seed the lazy defaults exactly as `/ecosystem/overview` does. Without
+    // this a workspace whose flags have never been written reports an empty
+    // flag list here while the dedicated endpoint reports the full default
+    // set, so the two views of the same tenant disagree.
+    crate::ecosystem::ensure_default_flags(state)
+        .await
+        .map_err(|_| OpsError::Unexpected)?;
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let flags = sqlx::query_as::<_, crate::ecosystem::FeatureFlag>(
         r#"
@@ -167,7 +174,7 @@ async fn load_attention_ecosystem(
             .map_err(OpsError::sqlx)?;
 
     Ok(AttentionEcosystemOverview {
-        schema_version: 1,
+        schema_version: crate::ecosystem::SHOW_SNAPSHOT_SCHEMA,
         flags,
         last_reconciliation,
         open_findings,

@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::{IDEMPOTENCY_KEY, Problem, request_id, ticket_qr::encode_ticket_qr};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
-const SHOW_SNAPSHOT_SCHEMA: u32 = 1;
+pub(crate) const SHOW_SNAPSHOT_SCHEMA: u32 = 1;
 const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
@@ -476,7 +476,7 @@ pub(crate) async fn feature_enabled(
     Ok(enabled)
 }
 
-async fn ensure_default_flags(state: &crate::AppState) -> Result<(), EcosystemError> {
+pub(crate) async fn ensure_default_flags(state: &crate::AppState) -> Result<(), EcosystemError> {
     sqlx::query(
         r#"
         INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
