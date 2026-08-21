@@ -1,0 +1,1 @@
+Autopilot growth workflow bundle hardening: fail-closed claims, verified free routes, provider API correctness, synchronized KPI digest, inactive-by-default exports, and no execution-data persistence.
