@@ -294,3 +294,4 @@ pub struct AutopilotControlMutation {
 
 include!("control/state_ports.rs");
 include!("control/runtime_ports.rs");
+include!("control/growth_ports.rs");

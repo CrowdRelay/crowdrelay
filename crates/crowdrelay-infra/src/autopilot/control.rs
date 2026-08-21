@@ -277,6 +277,14 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn load_growth_overview(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<AutopilotGrowthOverview, RepositoryError> {
+        self.bounded(self.growth_overview(workspace_id, now)).await
+    }
+
     async fn load_chief_of_staff(
         &self,
         workspace_id: WorkspaceId,

@@ -73,6 +73,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::autopilot::overview),
         )
         .route(
+            "/v1/control-plane/autopilot/growth",
+            get(crate::autopilot::growth),
+        )
+        .route(
             "/v1/control-plane/autopilot/policies/{context}",
             post(crate::autopilot::set_authority),
         )

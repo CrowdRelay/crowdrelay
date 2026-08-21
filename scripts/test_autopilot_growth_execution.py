@@ -118,6 +118,29 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         self.assertIn("VIRYA_BANDSINTOWN_GROWTH_SEGMENT_SLUG", serialized)
         self.assertIn("CROWDRELAY_ADMIN_TOKEN", serialized)
 
+    def test_growth_delivery_progress_is_observable_from_the_control_plane(self):
+        router = self.read("crates/crowdrelay-api/src/control_plane.rs")
+        self.assertIn('"/v1/control-plane/autopilot/growth"', router)
+        self.assertIn("get(crate::autopilot::growth)", router)
+        # The private tunnel is fail-closed: an un-allowlisted route is
+        # unreachable in production even though the router accepts it.
+        caddy = self.read("deploy/area-management.Caddyfile")
+        self.assertIn("/v1/control-plane/autopilot/growth", caddy)
+
+    def test_growth_read_model_counts_the_ledger_and_leaks_no_contact_data(self):
+        adapter = self.read("crates/crowdrelay-infra/src/autopilot/growth.rs")
+        # Progress must come from the delivery ledger. The campaign summary
+        # columns are only written at completion, so a stalled campaign would
+        # otherwise be indistinguishable from a finished one.
+        self.assertIn("communication_campaign_deliveries", adapter)
+        self.assertIn("communication_campaign_recipients", adapter)
+        for status in ("'delivered'", "'failed'", "'claimed'"):
+            self.assertIn(status, adapter)
+        # Outreach targets carry contact_email. The Control Plane is a platform
+        # surface, so this read model must stay aggregate-only.
+        for forbidden in ("contact_email", "display_name", "fan_id", "email"):
+            self.assertNotIn(forbidden, adapter, forbidden)
+
     def test_no_growth_workflow_contains_fake_stream_or_paid_placement_automation(self):
         paths = [
             "n8n/examples/autopilot-free-fan-campaign.example.json",
