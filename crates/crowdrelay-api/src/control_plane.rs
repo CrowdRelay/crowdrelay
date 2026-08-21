@@ -6,7 +6,11 @@
 
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    body::Body,
+    extract::{DefaultBodyLimit, State},
+    http::Request,
+    middleware::{Next, from_fn_with_state},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 
@@ -68,6 +72,27 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/policies/{context}",
             post(crate::autopilot::set_authority),
         )
+        // Route-local authentication is intentional. The global middleware
+        // still separates AREA and management credentials, but this guard
+        // makes adding a route here fail closed even if the global path matcher
+        // or the private tunnel allowlist has not been updated yet.
+        .route_layer(from_fn_with_state(state.clone(), require_control_plane))
         .layer(DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES))
         .with_state(state)
+}
+
+async fn require_control_plane(
+    State(state): State<crate::AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !crate::security::bearer_sha256_matches(
+        request.headers(),
+        state.control_plane_api_key_sha256,
+    ) {
+        return crate::Problem::unauthorized(crate::request_id(request.headers()))
+            .private()
+            .into_response();
+    }
+    next.run(request).await
 }
