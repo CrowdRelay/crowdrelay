@@ -77,6 +77,7 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
             "Claim delivery once",
             "Send through canonical mailer",
             "Record delivery receipt",
+            "Restore campaign context",
             "Check campaign progress",
             "Complete campaign",
         ]
