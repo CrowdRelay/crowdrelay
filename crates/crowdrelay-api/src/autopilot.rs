@@ -79,6 +79,21 @@ pub async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Resp
     }
 }
 
+/// Delivery-side growth progress for the Control Plane.
+///
+/// `overview` reports the action queue; this reports whether the external n8n
+/// delivery workers are actually draining the campaigns those actions created.
+pub async fn growth(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_growth_overview(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(growth) => private_json(StatusCode::OK, growth),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn chief_of_staff(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match state
         .autopilot

@@ -3,6 +3,7 @@
 mod actions;
 mod control;
 mod decisions;
+mod growth;
 mod measurement;
 mod operations;
 mod runtime;
@@ -18,18 +19,21 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotActionPayload, AutopilotActionRepository, AutopilotBookingStateRepository,
         AutopilotContext, AutopilotControlMutation, AutopilotControlOverview,
-        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotManualStep,
-        AutopilotMarketStateRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
-        AutopilotMerchStateRepository, AutopilotPolicy, AutopilotPolicyConfig,
-        AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotTicketStateRepository,
-        BookingTargetMutation, CandidatePersistence, CityMarketSignalMutation, ClaimExecution,
-        ClaimedAutopilotAction, ClaimedAutopilotMeasurement, DecisionCandidate,
-        ExecutionClaimMutation, ExecutionReportMutation, ExecutorHeartbeatMutation,
-        ExecutorReportStatus, ManagerBookingPolicySummary, ManagerConfigMutation,
-        MerchProductEconomicsMutation, PendingAutopilotAction, PromotionBudgetGuardrailMutation,
-        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
-        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect,
-        RecordExecutionReport, RecordExecutorHeartbeat, RecordRumSample, ReleaseComponentMutation,
+        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotGrowthOverview,
+        AutopilotManualStep, AutopilotMarketStateRepository, AutopilotMeasurementKind,
+        AutopilotMeasurementRepository, AutopilotMerchStateRepository, AutopilotPolicy,
+        AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
+        AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
+        CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
+        ClaimedAutopilotMeasurement, DecisionCandidate, ExecutionClaimMutation,
+        ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
+        GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress,
+        GrowthDeliveryTotals, GrowthOutreachSummary, ManagerBookingPolicySummary,
+        ManagerConfigMutation, MerchProductEconomicsMutation, PLAYLIST_TEMPLATE_KEY,
+        PendingAutopilotAction, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
+        RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
+        RecordExecutorHeartbeat, RecordRumSample, ReleaseComponentMutation,
         ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority,
         SetManagerBookingPolicy, TeamAssigneeSummary, TicketAllocationGuardrailMutation,
         UpsertBookingTarget, UpsertCityMarketSignal, UpsertMerchProductEconomics,

@@ -48,6 +48,15 @@ pub trait AutopilotControlRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<AutopilotControlOverview, RepositoryError>;
 
+    /// Delivery-side progress for the growth loop. Separate from the control
+    /// overview because it reads the campaign delivery ledger rather than the
+    /// action queue, and operators need it even when no action is pending.
+    async fn load_growth_overview(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<AutopilotGrowthOverview, RepositoryError>;
+
     async fn load_chief_of_staff(
         &self,
         workspace_id: WorkspaceId,
