@@ -13,6 +13,7 @@ assert "verify_management_proxy" in ctl
 assert "MANAGEMENT_PROXY=PASS" in ctl
 assert "deploy_services+=(area-management-proxy)" in ctl
 assert "compose run --rm --no-deps --entrypoint caddy area-management-proxy" in ctl
+assert "compose up --detach --wait" in ctl
 assert "area-management-proxy:" in compose
 assert "${CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256:?management config digest required}" in compose
 assert "org.crowdrelay.area-management-config-sha256" in compose
@@ -20,10 +21,15 @@ assert "CROWDRELAY_CONTROL_PLANE_AREA_API_KEY" in compose
 assert "CROWDRELAY_CONTROL_PLANE_API_KEY" in compose
 assert "CROWDRELAY_AREA_MANAGEMENT_BIND_IP" in compose
 assert "caddy@sha256:" in compose
+assert "healthcheck:" in compose
+assert "http://127.0.0.1:18080/healthz/ready" in compose
+assert "/healthz/ready" in caddy
+assert "rewrite * /v1/health/ready" in caddy
 assert "/v1/control-plane/area" in caddy
 assert "/v1/control-plane/ops/summary" in caddy
+assert "/v1/control-plane/ops/attention" in caddy
 assert "/v1/control-plane/ecosystem/flags" in caddy
 assert "/v1/control-plane/autopilot/overview" in caddy
 assert "respond 404" in caddy
 
-print("AREA_DEPLOY_CONTRACT=PASS config-recreate=runtime-digest canonical-engine=verified")
+print("AREA_DEPLOY_CONTRACT=PASS config-recreate=runtime-digest readiness=e2e attention=snapshot canonical-engine=verified")

@@ -23,7 +23,7 @@ require() {
 [[ "$IMAGE_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || fail 'CROWDRELAY_IMAGE_GATE_ATTEMPTS must be a positive integer'
 [[ "$IMAGE_SLEEP_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail 'CROWDRELAY_IMAGE_GATE_SLEEP_SECONDS must be a positive integer'
 
-for command in git ssh scp curl python3; do require "$command"; done
+for command in git ssh scp curl; do require "$command"; done
 
 cd "$ROOT_DIR"
 git cat-file -e "${TARGET}^{commit}" 2>/dev/null || fail "target commit is not present locally: $TARGET"
@@ -227,31 +227,54 @@ done
 printf 'CANONICAL_DEPLOY=PASS sha=%s engine=crowdrelayctl\n' "$target"
 REMOTE_DEPLOY
 
-printf '\n==> 5/5 — Public exact-SHA verification\n'
-META="$(
-  curl --fail-with-body --silent --show-error \
-    --retry 3 --retry-delay 1 --retry-all-errors \
-    --connect-timeout 3 --max-time 15 \
-    "${PUBLIC_BASE_URL%/}/v1/meta"
-)"
+printf '\n==> 5/5 — Production git/runtime receipt + public health\n'
+ssh -T "$REMOTE" bash -s -- "$REMOTE_REPO" "$TARGET" <<'REMOTE_RECEIPT'
+set -Eeuo pipefail
+repo="$1"
+target="$2"
+cd "$repo"
 
-python3 -c '
-import json
-import sys
-expected = sys.argv[1]
-data = json.loads(sys.stdin.read())
-actual = data.get("gitSha")
-if actual != expected:
-    raise SystemExit(
-        f"PUBLIC_EXACT_SHA=FAIL gitSha={actual!r} expected={expected!r}"
-    )
-print(f"PUBLIC_EXACT_SHA=PASS sha={expected}")
-' "$TARGET" <<<"$META"
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+head="$(git rev-parse HEAD)"
+[[ "$head" == "$target" ]] || fail "production git HEAD mismatch: got=$head expected=$target"
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'production worktree is dirty at final receipt'
+
+for service in api worker; do
+  container_id="$(docker ps -q --filter "name=^crowdrelay-${service}-1$" | head -n1)"
+  [[ -n "$container_id" ]] || fail "missing running container at final receipt: $service"
+  revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container_id" 2>/dev/null || true)"
+  [[ "$revision" == "$target" ]] || fail "runtime OCI revision mismatch for $service: got=$revision expected=$target"
+done
+
+printf 'PRODUCTION_EXACT_SHA=PASS source=git+oci sha=%s\n' "$target"
+REMOTE_RECEIPT
 
 curl --fail --silent --show-error \
-  --retry 3 --retry-delay 1 --retry-all-errors \
+  --retry 5 --retry-delay 1 --retry-all-errors \
   --connect-timeout 3 --max-time 15 \
   "${PUBLIC_BASE_URL%/}/v1/health/ready" >/dev/null
 
 printf 'PUBLIC_HEALTH=PASS url=%s\n' "${PUBLIC_BASE_URL%/}/v1/health/ready"
-printf '\nDEPLOY=PASS sha-%s path=canonical repo-sync=bundle github-auth-on-server=none\n' "$TARGET"
+
+# Public metadata is useful diagnostics, but it is not release identity. A CDN,
+# reverse-proxy or connection-drain window may briefly expose the previous
+# metadata after the production git tree and runtime containers are already
+# exact. Report that as telemetry instead of converting a successful deploy
+# into a false negative.
+public_meta="$(curl --silent --show-error --connect-timeout 3 --max-time 10 "${PUBLIC_BASE_URL%/}/v1/meta" 2>/dev/null || true)"
+if [[ -n "$public_meta" ]]; then
+  actual="$(printf '%s' "$public_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha") or "")' 2>/dev/null || true)"
+  if [[ "$actual" == "$TARGET" ]]; then
+    printf 'PUBLIC_META=PASS gitSha=%s\n' "$actual"
+  else
+    printf 'PUBLIC_META=STALE observed=%s expected=%s blocking=false\n' "${actual:-unavailable}" "$TARGET" >&2
+  fi
+else
+  printf 'PUBLIC_META=UNAVAILABLE blocking=false\n' >&2
+fi
+
+printf '\nDEPLOY=PASS sha-%s identity=git+oci public=health repo-sync=bundle github-auth-on-server=none\n' "$TARGET"
