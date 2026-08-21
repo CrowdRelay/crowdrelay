@@ -25,6 +25,16 @@ services:
     volumes:
       - ./deploy/area-management.Caddyfile:/etc/caddy/Caddyfile:ro
 
+    healthcheck:
+      # This is intentionally end-to-end: Caddy must accept the request and
+      # the upstream CrowdRelay API must report ready before Compose marks the
+      # management proxy healthy.
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://127.0.0.1:18080/healthz/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 2s
+
     read_only: true
 
     tmpfs:
