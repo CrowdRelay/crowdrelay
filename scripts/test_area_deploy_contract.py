@@ -3,6 +3,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 ctl = (root / "crowdrelayctl").read_text()
 compose = (root / "compose.area-management.yaml").read_text()
+safe_deploy = (root / "scripts/deploy-production-safe.sh").read_text()
 caddy = (root / "deploy/area-management.Caddyfile").read_text()
 
 assert "CROWDRELAY_AREA_MANAGEMENT_ENABLED" in ctl
@@ -31,5 +32,13 @@ assert "/v1/control-plane/ops/attention" in caddy
 assert "/v1/control-plane/ecosystem/flags" in caddy
 assert "/v1/control-plane/autopilot/overview" in caddy
 assert "respond 404" in caddy
+
+# The area overlay declares the config digest as a required variable. It is
+# derived from the Caddyfile rather than stored in the env file, so every
+# path that runs compose with the overlay has to export it first. The Oracle
+# gate went unexercised for a long time because a stdin-consuming child
+# truncated it, and the missing export only surfaced once that was fixed.
+assert 'export CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256=' in safe_deploy
+assert safe_deploy.index('export CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256=') < safe_deploy.index('compose config --quiet')
 
 print("AREA_DEPLOY_CONTRACT=PASS config-recreate=runtime-digest readiness=e2e attention=snapshot canonical-engine=verified")
