@@ -1,5 +1,10 @@
--- Close the release -> playlist-pitching loop without colliding with the
--- existing 0064 beacon migration.
+-- Close the release -> playlist-pitching loop.
+--
+-- `start_press` is the durable fact that a release entered its outbound
+-- pitching window. This additive trigger keeps playlist targets in the same
+-- atomic release transaction without inventing recipients or bypassing target
+-- verification. The ON CONFLICT path makes repeated milestone delivery safe.
+
 CREATE OR REPLACE FUNCTION viryaos_seed_release_playlist_outreach()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -10,9 +15,17 @@ BEGIN
     END IF;
 
     INSERT INTO viryaos_outreach_opportunities (
-        workspace_id, target_id, source, subject_kind, subject_key,
-        template_key, relevance_basis_points, confidence_basis_points,
-        active, observed_at, expires_at
+        workspace_id,
+        target_id,
+        source,
+        subject_kind,
+        subject_key,
+        template_key,
+        relevance_basis_points,
+        confidence_basis_points,
+        active,
+        observed_at,
+        expires_at
     )
     SELECT
         target.workspace_id,
@@ -55,11 +68,20 @@ AFTER INSERT ON viryaos_release_milestones
 FOR EACH ROW
 EXECUTE FUNCTION viryaos_seed_release_playlist_outreach();
 
--- Backfill releases that crossed start_press before this migration.
+-- Backfill releases that had already crossed start_press before this migration.
+-- This is deliberately subject to the same verified/active/suppression gates.
 INSERT INTO viryaos_outreach_opportunities (
-    workspace_id, target_id, source, subject_kind, subject_key,
-    template_key, relevance_basis_points, confidence_basis_points,
-    active, observed_at, expires_at
+    workspace_id,
+    target_id,
+    source,
+    subject_kind,
+    subject_key,
+    template_key,
+    relevance_basis_points,
+    confidence_basis_points,
+    active,
+    observed_at,
+    expires_at
 )
 SELECT
     milestone.workspace_id,
