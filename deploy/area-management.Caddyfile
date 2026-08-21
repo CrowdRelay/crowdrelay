@@ -1,19 +1,24 @@
 {
-    auto_https off
-    admin off
+	auto_https off
+	admin off
 }
 
 :18080 {
-    @area path /v1/control-plane/area /v1/control-plane/area/*
-    @operations path /v1/control-plane/ops/summary /v1/control-plane/ops/outbox /v1/control-plane/ops/outbox/* /v1/control-plane/ops/deliveries /v1/control-plane/ops/deliveries/* /v1/control-plane/ops/operations/* /v1/control-plane/ecosystem/overview /v1/control-plane/ecosystem/findings /v1/control-plane/ecosystem/reconcile /v1/control-plane/ecosystem/flags /v1/control-plane/ecosystem/flags/* /v1/control-plane/autopilot/overview /v1/control-plane/autopilot/policies/*
+	@area path /v1/control-plane/area /v1/control-plane/area/*
+	@operations path /v1/control-plane/ops/summary /v1/control-plane/ops/attention /v1/control-plane/ops/outbox /v1/control-plane/ops/outbox/* /v1/control-plane/ops/deliveries /v1/control-plane/ops/deliveries/* /v1/control-plane/ops/operations/* /v1/control-plane/ecosystem/overview /v1/control-plane/ecosystem/findings /v1/control-plane/ecosystem/reconcile /v1/control-plane/ecosystem/flags /v1/control-plane/ecosystem/flags/* /v1/control-plane/autopilot/overview /v1/control-plane/autopilot/policies/*
 
-    handle @area {
-        reverse_proxy http://api:8080
-    }
+	handle /healthz/ready {
+		rewrite * /v1/health/ready
+		reverse_proxy http://api:8080
+	}
 
-    handle @operations {
-        reverse_proxy http://api:8080
-    }
+	handle @area {
+		reverse_proxy http://api:8080
+	}
 
-    respond 404
+	handle @operations {
+		reverse_proxy http://api:8080
+	}
+
+	respond 404
 }

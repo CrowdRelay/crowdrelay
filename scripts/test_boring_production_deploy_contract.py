@@ -22,7 +22,7 @@ class BoringProductionDeployContract(unittest.TestCase):
             "Production image gate",
             "Exact source sync",
             "Canonical crowdrelayctl deploy",
-            "Public exact-SHA verification",
+            "Production git/runtime receipt + public health",
             "./crowdrelayctl pin",
             "./crowdrelayctl deploy",
             "git bundle create",
@@ -96,10 +96,15 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("platforms: linux/amd64", PUBLISH)
         self.assertNotIn("linux/arm64", PUBLISH)
 
-    def test_public_receipt_checks_the_requested_sha(self) -> None:
-        self.assertIn('json.loads(sys.stdin.read())', DEPLOY)
-        self.assertIn('actual = data.get("gitSha")', DEPLOY)
-        self.assertIn('"$TARGET" <<<"$META"', DEPLOY)
+    def test_final_release_identity_is_git_and_runtime_not_public_metadata(self) -> None:
+        receipt = DEPLOY.split("Production git/runtime receipt + public health", 1)[1]
+        self.assertIn('head="$(git rev-parse HEAD)"', receipt)
+        self.assertIn("PRODUCTION_EXACT_SHA=PASS source=git+oci", receipt)
+        self.assertIn("runtime OCI revision mismatch", receipt)
+        self.assertIn("PUBLIC_HEALTH=PASS", receipt)
+        self.assertIn("PUBLIC_META=STALE", receipt)
+        self.assertIn("blocking=false", receipt)
+        self.assertNotIn("PUBLIC_EXACT_SHA=FAIL", receipt)
 
     def test_fish_wrapper_is_only_a_thin_launcher(self) -> None:
         self.assertIn("deploy-production-safe.sh", INSTALLER)

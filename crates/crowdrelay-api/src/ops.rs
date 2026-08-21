@@ -37,5 +37,6 @@ include!("ops/models.rs");
 
 include!("ops_timeline.rs");
 include!("ops/handlers.rs");
+include!("ops/attention.rs");
 
 include!("ops/query_support.rs");
