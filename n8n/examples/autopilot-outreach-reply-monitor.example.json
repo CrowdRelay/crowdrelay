@@ -1,93 +1,14 @@
 {
   "name": "CrowdRelay — Autopilot inbound reply monitor",
   "nodes": [
-    {
-      "parameters": {
-        "pollTimes": {"item": [{"mode": "everyMinute"}]},
-        "simple": false,
-        "filters": {"labelIds": ["INBOX"]}
-      },
-      "id": "a2000000-0000-4000-8000-000000000001",
-      "name": "Watch Gmail inbox",
-      "type": "n8n-nodes-base.gmailTrigger",
-      "typeVersion": 1.2,
-      "position": [0, 0]
-    },
-    {
-      "parameters": {
-        "jsCode": "const m=$json; const threadId=m.threadId||m.thread_id; const messageId=m.id||m.messageId||m.message_id; if(!threadId||!messageId) return []; return [{json:{thread_id:String(threadId),message_id:String(messageId),occurred_at:new Date().toISOString()}}];"
-      },
-      "id": "a2000000-0000-4000-8000-000000000002",
-      "name": "Extract provider correlation",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [260, 0]
-    },
-    {
-      "parameters": {
-        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/provider-actions/' + encodeURIComponent($json.thread_id) }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"},
-            {"name": "x-virya-executor-id", "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"}
-          ]
-        },
-        "options": {"timeout": 10000}
-      },
-      "id": "a2000000-0000-4000-8000-000000000003",
-      "name": "Resolve CrowdRelay action",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [520, 0],
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "jsCode": "const corr=$json; if(corr.error||!corr.action_id||!corr.subject_id) return []; const source=$('Extract provider correlation').first().json; let path=null; let body=null; if(corr.context==='outreach'){ path=`/v1/admin/autopilot/outreach-targets/${corr.subject_id}/reply`; body={opportunity_id:null,disposition:'received',occurred_at:source.occurred_at}; } else if(corr.context==='booking_opportunity'){ path=`/v1/admin/autopilot/booking-targets/${corr.subject_id}/reply`; body={disposition:'received',occurred_at:source.occurred_at}; } else { return []; } return [{json:{path,body,idempotency_key:`gmail-inbound:${source.message_id}`,provider_reference:source.thread_id}}];"
-      },
-      "id": "a2000000-0000-4000-8000-000000000004",
-      "name": "Build deterministic reply fact",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [780, 0]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + $json.path }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"},
-            {"name": "Idempotency-Key", "value": "={{ $json.idempotency_key }}"}
-          ]
-        },
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ JSON.stringify($json.body) }}",
-        "options": {"timeout": 10000}
-      },
-      "id": "a2000000-0000-4000-8000-000000000005",
-      "name": "Record reply and stop follow-ups",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1040, 0]
-    }
+    {"parameters":{"pollTimes":{"item":[{"mode":"everyMinute"}]},"simple":false,"filters":{"labelIds":["INBOX"]}},"id":"a2000000-0000-4000-8000-000000000001","name":"Watch Gmail inbox","type":"n8n-nodes-base.gmailTrigger","typeVersion":1.2,"position":[0,0]},
+    {"parameters":{"jsCode":"const m=$json; const threadId=m.threadId||m.thread_id; const messageId=m.id||m.messageId||m.message_id; if(!threadId||!messageId) return []; return [{json:{thread_id:String(threadId),message_id:String(messageId),occurred_at:new Date().toISOString()}}];"},"id":"a2000000-0000-4000-8000-000000000002","name":"Extract provider correlation","type":"n8n-nodes-base.code","typeVersion":2,"position":[260,0]},
+    {"parameters":{"url":"={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/provider-actions/' + encodeURIComponent($json.thread_id) }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"},{"name":"x-virya-executor-id","value":"={{ $env.VIRYA_N8N_EXECUTOR_ID }}"}]},"options":{"timeout":10000}},"id":"a2000000-0000-4000-8000-000000000003","name":"Resolve CrowdRelay action","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[520,0],"continueOnFail":true},
+    {"parameters":{"jsCode":"const corr=$json; if(corr.error||!corr.action_id||!corr.subject_id) return []; const source=$('Extract provider correlation').first().json; let path=null; let body=null; if(corr.context==='outreach'){ path=`/v1/admin/autopilot/outreach-targets/${corr.subject_id}/reply`; body={opportunity_id:null,disposition:'received',occurred_at:source.occurred_at}; } else if(corr.context==='booking_opportunity'){ path=`/v1/admin/autopilot/booking-targets/${corr.subject_id}/reply`; body={disposition:'received',occurred_at:source.occurred_at}; } else { return []; } return [{json:{path,body,idempotency_key:`gmail-inbound:${source.message_id}`,provider_reference:source.thread_id}}];"},"id":"a2000000-0000-4000-8000-000000000004","name":"Build deterministic reply fact","type":"n8n-nodes-base.code","typeVersion":2,"position":[780,0]},
+    {"parameters":{"method":"POST","url":"={{ $env.CROWDRELAY_ADMIN_BASE_URL + $json.path }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"Authorization","value":"={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"},{"name":"Idempotency-Key","value":"={{ $json.idempotency_key }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ JSON.stringify($json.body) }}","options":{"timeout":10000}},"id":"a2000000-0000-4000-8000-000000000005","name":"Record reply and stop follow-ups","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[1040,0]}
   ],
-  "connections": {
-    "Watch Gmail inbox": {"main": [[{"node": "Extract provider correlation", "type": "main", "index": 0}]]},
-    "Extract provider correlation": {"main": [[{"node": "Resolve CrowdRelay action", "type": "main", "index": 0}]]},
-    "Resolve CrowdRelay action": {"main": [[{"node": "Build deterministic reply fact", "type": "main", "index": 0}]]},
-    "Build deterministic reply fact": {"main": [[{"node": "Record reply and stop follow-ups", "type": "main", "index": 0}]]}
-  },
+  "connections":{"Watch Gmail inbox":{"main":[[{"node":"Extract provider correlation","type":"main","index":0}]]},"Extract provider correlation":{"main":[[{"node":"Resolve CrowdRelay action","type":"main","index":0}]]},"Resolve CrowdRelay action":{"main":[[{"node":"Build deterministic reply fact","type":"main","index":0}]]},"Build deterministic reply fact":{"main":[[{"node":"Record reply and stop follow-ups","type":"main","index":0}]]}},
   "active": false,
-  "settings": {
-    "executionOrder": "v1",
-    "saveDataErrorExecution": "none",
-    "saveDataSuccessExecution": "none",
-    "saveManualExecutions": false
-  },
-  "tags": []
+  "settings":{"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
+  "tags":[]
 }
