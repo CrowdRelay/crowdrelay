@@ -35,7 +35,7 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         self.assertIn('"owned_email_delivered"', source)
 
     def test_playlist_release_seeder_is_gated_and_idempotent(self):
-        source = self.read("migrations/0064_release_playlist_outreach.sql")
+        source = self.read("migrations/0072_release_playlist_outreach.sql")
         for required in (
             "NEW.milestone <> 'start_press'",
             "target.target_kind = 'playlist'",
