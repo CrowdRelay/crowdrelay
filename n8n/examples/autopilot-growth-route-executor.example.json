@@ -1,0 +1,123 @@
+{
+  "name": "CrowdRelay — Autopilot verified growth-route executor",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "g4000000-0000-4000-8000-000000000001",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e=$json; if(!e||e.type!=='viryaos.show_growth.requested'||e.version!==1) return []; const d=e.data??{}; const allowed=['free_listing_sweep','audience_capture_setup','partner_cross_promo','grassroots_scene_relay','social_proof_relay']; if(!allowed.includes(d.lever)) return []; if(!d.action_id||!d.event_id||!d.event_slug||!d.ticket_url) throw new Error('Invalid growth-route intent'); const routes=JSON.parse($env.VIRYA_GROWTH_ROUTE_MANIFEST_JSON||'{}'); const route=routes[d.lever]??null; if(!route) return [{json:{terminal:true,action_id:String(d.action_id),reason:'no_verified_route',lever:d.lever,manual_steps:(d.constraints?.receipt_contract?.manual_steps_must_include||[]),occurred_at:new Date().toISOString()}}]; if(route.verified!==true||route.free!==true||route.method!=='POST'||route.requires_login===true||route.requires_captcha===true||route.idempotent!==true) throw new Error('Growth route is not eligible for unattended execution'); const u=new URL(String(route.url||'')); if(u.protocol!=='https:') throw new Error('Growth route must be HTTPS'); const fields=route.fields||{}; const values={event_id:String(d.event_id),event_slug:String(d.event_slug),event_title:String(d.event_title||''),city_slug:d.city_slug||null,venue:d.venue||null,ticket_url:String(d.ticket_url),lever:String(d.lever),template_key:String(d.template_key||''),constraints:d.constraints||{}}; const resolve=v=>String(v).replace(/\\{\\{(event_id|event_slug|event_title|city_slug|venue|ticket_url|lever|template_key)\\}\\}/g,(_,k)=>values[k]??''); const body=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,resolve(v)])); return [{json:{terminal:false,action_id:String(d.action_id),event_id:String(d.event_id),event_slug:String(d.event_slug),lever:String(d.lever),route_url:u.toString(),route_content_type:route.content_type==='application/x-www-form-urlencoded'?'application/x-www-form-urlencoded':'application/json',route_body:route.content_type==='application/x-www-form-urlencoded'?new URLSearchParams(body).toString():JSON.stringify(body),occurred_at:new Date().toISOString()}}];"
+      },
+      "id": "g4000000-0000-4000-8000-000000000002",
+      "name": "Resolve verified free route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2},
+          "conditions": [{"id": "g4000000-0000-4000-8000-000000000010", "leftValue": "={{ $json.terminal }}", "rightValue": true, "operator": {"type": "boolean", "operation": "equals"}}],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "g4000000-0000-4000-8000-000000000003",
+      "name": "Manual-only route?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [500, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"}]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,occurred_at:new Date().toISOString()}) }}",
+        "options": {"timeout": 10000}
+      },
+      "id": "g4000000-0000-4000-8000-000000000004",
+      "name": "Claim eligible action",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [760, 140]
+    },
+    {
+      "parameters": {
+        "jsCode": "const claim=$json; const intent=$('Resolve verified free route').first().json; if(claim.disposition!=='claimed') return []; if(!claim.claim_token) throw new Error('Claimed action has no claim token'); return [{json:{...intent,claim_token:claim.claim_token}}];"
+      },
+      "id": "g4000000-0000-4000-8000-000000000005",
+      "name": "Fail-closed claim gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1020, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.route_url }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "={{ $json.route_content_type }}",
+        "body": "={{ $json.route_body }}",
+        "options": {"timeout": 15000}
+      },
+      "id": "g4000000-0000-4000-8000-000000000006",
+      "name": "Execute verified free route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 140],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const result=$json; const intent=$('Fail-closed claim gate').first().json; const failed=Boolean(result.error); return [{json:{action_id:intent.action_id,receipt_key:`growth-route:${intent.action_id}`,executor_id:$env.VIRYA_N8N_EXECUTOR_ID,status:failed?'failed':'succeeded',claim_token:intent.claim_token,provider_reference:failed?null:intent.route_url,error_kind:failed?'growth_route_provider_failed':null,metadata:{lever:intent.lever,route_url:intent.route_url,event_id:intent.event_id,event_slug:intent.event_slug},occurred_at:new Date().toISOString()}}];"
+      },
+      "id": "g4000000-0000-4000-8000-000000000007",
+      "name": "Build route receipt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-report' }}",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key:$json.receipt_key,executor_id:$json.executor_id,status:$json.status,claim_token:$json.claim_token,provider_reference:$json.provider_reference,error_kind:$json.error_kind,metadata:$json.metadata,occurred_at:$json.occurred_at}) }}",
+        "options": {"timeout": 10000}
+      },
+      "id": "g4000000-0000-4000-8000-000000000008",
+      "name": "Report route receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1800, 140]
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {"main": [[{"node":"Resolve verified free route","type":"main","index":0}]]},
+    "Resolve verified free route": {"main": [[{"node":"Manual-only route?","type":"main","index":0}]]},
+    "Manual-only route?": {"main": [[], [{"node":"Claim eligible action","type":"main","index":0}]]},
+    "Claim eligible action": {"main": [[{"node":"Fail-closed claim gate","type":"main","index":0}]]},
+    "Fail-closed claim gate": {"main": [[{"node":"Execute verified free route","type":"main","index":0}]]},
+    "Execute verified free route": {"main": [[{"node":"Build route receipt","type":"main","index":0}]]},
+    "Build route receipt": {"main": [[{"node":"Report route receipt","type":"main","index":0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder":"v1","saveDataErrorExecution":"none","saveDataSuccessExecution":"none","saveManualExecutions":false},
+  "tags": []
+}
