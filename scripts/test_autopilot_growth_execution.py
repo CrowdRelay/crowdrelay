@@ -39,6 +39,7 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         for required in (
             "NEW.milestone <> 'start_press'",
             "target.target_kind = 'playlist'",
+            "target.active",
             "target.verified",
             "target.accepts_outreach",
             "NOT target.do_not_contact",
@@ -68,33 +69,57 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         self.assertIn("gmail-inbound:", serialized)
         self.assertIn("disposition:'received'", serialized)
 
-    def test_free_fan_campaign_executor_is_end_to_end(self):
-        workflow = self.workflow("n8n/examples/autopilot-free-fan-campaign.example.json")
-        names = self.node_names(workflow)
-        required = [
-            "List campaigns",
-            "Load delivery page",
-            "Claim delivery once",
-            "Send through canonical mailer",
-            "Record delivery receipt",
-            "Restore campaign context",
-            "Check campaign progress",
-            "Complete campaign",
-        ]
-        for name in required:
-            self.assertIn(name, names)
-        serialized = self.read("n8n/examples/autopilot-free-fan-campaign.example.json")
-        self.assertIn("show.growth.free_fan_push.v1", serialized)
-        # The CTA URLs are not hard-coded here: the campaign content carries
-        # "env:VIRYA_*" placeholders (asserted against the Rust executor in
-        # test_free_fan_push_has_real_owned_growth_ctas) and this workflow
-        # resolves them out of the n8n environment at send time.
-        self.assertIn("startsWith('env:')", serialized)
-        for cta in ("bandsintown_follow_url", "spotify_artist_url", "spotify_playlist_url"):
-            self.assertIn(cta, serialized)
-        self.assertIn("Idempotency-Key", serialized)
-        self.assertIn("/deliveries/", serialized)
-        self.assertIn("/complete", serialized)
+    def test_free_fan_push_is_delivered_by_the_campaign_due_executor(self):
+        """Growth campaigns ride the existing campaign delivery path.
+
+        `execute_first_party_growth_campaign` schedules the campaign and emits
+        `communication.campaign_due`, so the generic campaign executor already
+        owns claim/send/receipt/complete. A second poller would mean two
+        workers claiming the same deliveries, so none is shipped here and the
+        contract is enforced on the producer instead.
+        """
+        source = self.read(
+            "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs"
+        )
+        self.assertIn("'communication.campaign_due'", source)
+        self.assertIn("ShowGrowthLever::FreeFanChannelPush", source)
+        # The CTAs travel in the campaign content, so any consumer of
+        # campaign_due can render them without provider-specific wiring.
+        self.assertIn('"growth_ctas"', source)
+
+    def test_no_polling_campaign_worker_is_shipped(self):
+        """A poller would need admin credentials and would double-claim.
+
+        Campaign delivery is event-driven. Reintroducing a workflow that lists
+        campaigns from the admin API puts a second claimant on the same
+        deliveries and needs an admin token in n8n.
+        """
+        for retired in (
+            "n8n/examples/autopilot-free-fan-campaign.example.json",
+            "n8n/examples/autopilot-growth-campaign-delivery.example.json",
+            "n8n/examples/autopilot-growth-campaign-reconciler.example.json",
+        ):
+            self.assertFalse(
+                (ROOT / retired).exists(),
+                f"{retired} duplicates the campaign_due delivery path",
+            )
+        # Creating a campaign from a provider executor is fine; what must not
+        # come back is a scheduled trigger that lists campaigns and delivers
+        # them behind the event-driven executor's back.
+        for path in sorted((ROOT / "n8n/examples").glob("*.example.json")):
+            workflow = json.loads(path.read_text(encoding="utf-8"))
+            polls = any(
+                node["type"].endswith("scheduleTrigger") for node in workflow["nodes"]
+            )
+            if not polls:
+                continue
+            for node in workflow["nodes"]:
+                url = node.get("parameters", {}).get("url", "")
+                method = node.get("parameters", {}).get("method", "GET")
+                self.assertFalse(
+                    method == "GET" and "communications/campaigns" in url,
+                    f"{path.name} polls the campaign list on a schedule",
+                )
 
     def test_bandsintown_executor_hands_off_to_real_campaign_delivery(self):
         workflow = self.workflow("n8n/examples/autopilot-bandsintown-growth.example.json")
@@ -143,9 +168,9 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
 
     def test_no_growth_workflow_contains_fake_stream_or_paid_placement_automation(self):
         paths = [
-            "n8n/examples/autopilot-free-fan-campaign.example.json",
             "n8n/examples/autopilot-outreach-executor.example.json",
             "n8n/examples/autopilot-bandsintown-growth.example.json",
+            "n8n/examples/autopilot-spotify-growth.example.json",
         ]
         banned = re.compile(
             r"(?i)(buy\s*streams|stream\s*bot|click\s*farm|fake\s*followers|guaranteed\s*playlist|paid\s*placement)"

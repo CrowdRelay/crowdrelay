@@ -56,48 +56,52 @@ The form route is intentionally fail-closed. A route that is not explicitly veri
 
 Watches the outbound Gmail inbox and maps a reply through the provider reference. A reply is recorded as a durable `received` fact so the existing CrowdRelay follow-up scheduler stops automatically.
 
-## Campaign delivery workflows
+## Campaign delivery
 
-### `autopilot-free-fan-campaign.example.json`
+Growth campaigns are **not** delivered by a dedicated workflow, and no polling
+worker ships here.
 
-Runs every five minutes and executes due `show.growth.free_fan_push.v1` campaigns.
+`execute_first_party_growth_campaign` creates the consent-filtered campaign,
+schedules it, and writes a `communication.campaign_due` outbox event. That event
+reaches the existing campaign executor through the verified webhook ingress, and
+that executor already owns the whole delivery loop: load the delivery plan, claim
+each recipient exactly once, send through the mailer, report the result, and
+complete the campaign when nothing is pending.
 
-It uses the existing consent-filtered campaign delivery plan, claims each recipient exactly once, sends through the canonical mailer, records delivery receipts, and completes the campaign when no pending deliveries remain. A page is capped at 250 recipients; subsequent five-minute passes continue the same campaign safely.
+Adding a second worker that lists campaigns on a schedule would put two
+claimants on the same deliveries and would need an admin credential inside n8n.
+The delivery plan is served by `/v1/internal/...` under the executor credential,
+so no admin access is required anywhere in this path.
 
-The message contains real, configured CTAs for:
+### Growth CTAs
 
-- Bandsintown follow
-- Spotify artist profile
-- optional owned Spotify playlist
-- the canonical event ticket URL when present
+The campaign executor must render the CTAs that arrive in the campaign content
+rather than hard-coding provider URLs. For `show.growth.free_fan_push.v1` the
+content carries:
 
-No third-party contacts are imported. The recipient snapshot is already filtered by CrowdRelay's `marketing_consent` gate.
+```json
+{
+  "growth_ctas": {
+    "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
+    "spotify_artist_url": "env:VIRYA_SPOTIFY_ARTIST_URL",
+    "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
+  }
+}
+```
 
-### `autopilot-growth-campaign-delivery.example.json`
+A value prefixed with `env:` names an n8n environment variable and must be
+resolved at send time; anything else is used verbatim. A campaign whose CTAs
+cannot be resolved should send without them rather than emit a broken link.
 
-The generic delivery worker. It polls every five minutes and executes due campaigns for:
+Recipients are already filtered by CrowdRelay's `marketing_consent` gate, and no
+third-party contacts are imported.
 
-- `show.growth.free_fan_push.v1`
-- `autopilot.spotify.follow.v1`
-- `autopilot.bandsintown.follow.v1`
+### Zero-recipient campaigns
 
-Execution is real:
-
-1. fetch only scheduled growth campaigns;
-2. load the consent-filtered delivery plan;
-3. claim each fan delivery exactly once;
-4. build the message from the provider executor's campaign content;
-5. send through the canonical mailer with idempotency and bounded retries;
-6. write the delivery receipt back to CrowdRelay;
-7. finish the campaign when no pending deliveries remain.
-
-A page is capped at 250 recipients. The five-minute poll naturally continues large campaigns without holding a long-running n8n execution.
-
-### `autopilot-growth-campaign-reconciler.example.json`
-
-A separate five-minute safety net for campaigns the delivery worker can never finish on its own: those with zero eligible recipients, and those whose deliveries already completed but whose campaign row was never closed.
-
-It reads the delivery plan, keeps only campaigns with `pending_count == 0`, and posts the terminal `/complete` transition with the observed recipient/delivered/failed counts. It performs no sends, so it cannot double-deliver.
+A campaign with no eligible recipients still has to reach a terminal state. The
+campaign executor completes it directly with zero counts; there is no separate
+reconciler, because a second worker calling `/complete` can close a campaign the
+first one is still delivering.
 
 ## Provider workflows
 
