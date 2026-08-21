@@ -27,8 +27,9 @@ assert "/healthz/ready" in caddy
 assert "rewrite * /v1/health/ready" in caddy
 assert "/v1/control-plane/area" in caddy
 assert "/v1/control-plane/ops/summary" in caddy
+assert "/v1/control-plane/ops/attention" in caddy
 assert "/v1/control-plane/ecosystem/flags" in caddy
 assert "/v1/control-plane/autopilot/overview" in caddy
 assert "respond 404" in caddy
 
-print("AREA_DEPLOY_CONTRACT=PASS config-recreate=runtime-digest readiness=e2e canonical-engine=verified")
+print("AREA_DEPLOY_CONTRACT=PASS config-recreate=runtime-digest readiness=e2e attention=snapshot canonical-engine=verified")
