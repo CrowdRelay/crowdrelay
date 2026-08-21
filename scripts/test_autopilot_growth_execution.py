@@ -87,6 +87,32 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         # campaign_due can render them without provider-specific wiring.
         self.assertIn('"growth_ctas"', source)
 
+    def test_growth_cta_prefers_a_url_crowdrelay_already_holds(self):
+        """An `env:` CTA is only as good as the executor's environment.
+
+        Every CTA in this lever was an `env:` placeholder, so a deployment that
+        had not defined those variables sent a follow-us email with no links --
+        the one thing the lever exists to deliver, and a failure invisible until
+        the first real send. The event's own listen URL is known here, so it
+        travels as a real URL and only the provider-native follow/playlist links
+        remain deferred.
+        """
+        source = self.read(
+            "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs"
+        )
+        self.assertIn("event.listen_url", source)
+        # There are two growth_ctas blocks. The one in execute_show_growth's
+        # constraints match is unreachable for this lever -- it is first-party,
+        # so execution returns before that match. Only the campaign content
+        # built in execute_first_party_growth_campaign reaches the executor, so
+        # assert against that function specifically rather than the whole file.
+        live = source.split("async fn execute_first_party_growth_campaign", 1)[1]
+        self.assertRegex(
+            live,
+            r'(?s)"spotify_artist_url":\s*event\s*\.5\s*\.clone\(\)\s*'
+            r'\.unwrap_or_else\(\|\|\s*"env:VIRYA_SPOTIFY_ARTIST_URL"',
+        )
+
     def test_no_polling_campaign_worker_is_shipped(self):
         """A poller would need admin credentials and would double-claim.
 

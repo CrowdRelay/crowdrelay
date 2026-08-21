@@ -8,6 +8,17 @@
 use super::*;
 use crowdrelay_domain::show_growth::ShowGrowthLever;
 
+/// Canonical event facts a growth campaign renders from: slug, title, city
+/// slug, venue, ticket URL and the event's own listen URL.
+type GrowthEventFacts = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 pub(in crate::autopilot) async fn execute_show_growth(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
@@ -17,18 +28,9 @@ pub(in crate::autopilot) async fn execute_show_growth(
     template_key: &str,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
-    let event = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(
+    let event = sqlx::query_as::<_, GrowthEventFacts>(
         r#"
-        SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url
+        SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url, event.listen_url
         FROM events AS event
         LEFT JOIN cities AS city
           ON city.workspace_id = event.workspace_id
@@ -305,13 +307,7 @@ async fn execute_first_party_growth_campaign(
     workspace_id: WorkspaceId,
     event_id: EventId,
     action_id: crowdrelay_domain::AutopilotActionId,
-    event: &(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ),
+    event: &GrowthEventFacts,
     lever: ShowGrowthLever,
     template_key: &str,
     now: OffsetDateTime,
@@ -409,9 +405,18 @@ async fn execute_first_party_growth_campaign(
             "ticket_url": event.4,
             "venue": event.3,
             "managed_by": "viryaos_show_growth",
+            // The event already carries its canonical listen URL, so send the
+            // real value rather than an `env:` placeholder the executor may not
+            // be able to resolve. An unresolvable CTA silently drops out of the
+            // message, and delivering exactly these links is what this lever is
+            // for. The other two stay deferred: CrowdRelay holds no
+            // provider-native follow or playlist URL of its own.
             "growth_ctas": {
                 "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
-                "spotify_artist_url": "env:VIRYA_SPOTIFY_ARTIST_URL",
+                "spotify_artist_url": event
+                    .5
+                    .clone()
+                    .unwrap_or_else(|| "env:VIRYA_SPOTIFY_ARTIST_URL".to_owned()),
                 "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
             },
             "email_contract": {
