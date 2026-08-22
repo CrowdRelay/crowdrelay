@@ -1,0 +1,18 @@
+[Unit]
+Description=Report CrowdRelay runtime status to the Control Plane
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Must match the actual install directory: crowdrelayctl resolves its compose
+# file, env file and .crowdrelay.local.sh relative to its own location.
+WorkingDirectory=/opt/crowdrelay
+ExecStart=/opt/crowdrelay/crowdrelayctl heartbeat
+# The install directory and .crowdrelay.local.sh are owner-only, and the
+# heartbeat shells out to docker, so this runs as the deploy user rather than
+# an isolated service account.
+User=ubuntu
+Group=ubuntu
+NoNewPrivileges=true
+PrivateTmp=true
