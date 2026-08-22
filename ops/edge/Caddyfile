@@ -10,6 +10,12 @@
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# The applications behind this edge send no security headers of their
+		# own, so clickjacking protection has to originate here. The policy is
+		# deliberately limited to frame-ancestors: a fuller CSP would have to be
+		# written against each app's own script and style sources.
+		X-Frame-Options "DENY"
+		Content-Security-Policy "frame-ancestors 'none'"
 		-Server
 	}
 }
