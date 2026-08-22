@@ -40,3 +40,4 @@ n8n/*
 CLAUDE.md
 .claude/
 scripts/migrate-to-virya-crowdrelay.sh
+scripts/provision-oracle-instance.sh

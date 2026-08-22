@@ -33,6 +33,13 @@ note() {
   printf '==> %s\n' "$*" >&2
 }
 
+debug() {
+  # Per-attempt resolution chatter. Off by default so a long capacity wait reads
+  # as one line per availability domain.
+  [[ "${CROWDRELAY_PROVISION_VERBOSE:-0}" == "1" ]] || return 0
+  printf '==> %s\n' "$*" >&2
+}
+
 require() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
@@ -50,25 +57,34 @@ TENANCY="${CROWDRELAY_TENANCY_OCID:-$(
 )}"
 [[ "$TENANCY" == ocid1.tenancy.* ]] || fail "cannot resolve tenancy OCID (got: ${TENANCY:-empty}); run: oci setup config"
 COMPARTMENT="${CROWDRELAY_INSTANCE_COMPARTMENT:-$TENANCY}"
+REGION="${OCI_CLI_REGION:-$(
+  awk -F= '/^region[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "$OCI_CONFIG"
+)}"
+[[ -n "$REGION" ]] || fail "cannot resolve region from $OCI_CONFIG"
+
+# launch_instance runs inside a command substitution, so it cannot hand a
+# failure reason back through a variable. It leaves the reason here instead.
+LAUNCH_ERROR_FILE="$(mktemp)"
+trap 'rm -f "$LAUNCH_ERROR_FILE"' EXIT
 
 existing="$(oci compute instance list --compartment-id "$COMPARTMENT" --display-name "$DISPLAY_NAME" \
   --query 'data[?"lifecycle-state"!=`TERMINATED` && "lifecycle-state"!=`TERMINATING`].id | [0]' --raw-output)"
 
 launch_instance() {
   local ad_suffix="$1"
-  note "resolving availability domain ending in $ad_suffix"
+  debug "resolving availability domain ending in $ad_suffix"
   local availability_domain
   availability_domain="$(oci iam availability-domain list --compartment-id "$COMPARTMENT" \
     --query "data[?ends_with(name, \`$ad_suffix\`)].name | [0]" --raw-output)"
   [[ -n "$availability_domain" && "$availability_domain" != null ]] || fail "no availability domain matching $ad_suffix"
 
-  note "resolving subnet $SUBNET_NAME"
+  debug "resolving subnet $SUBNET_NAME"
   local subnet_id
   subnet_id="$(oci network subnet list --compartment-id "$COMPARTMENT" --display-name "$SUBNET_NAME" \
     --query 'data[?"lifecycle-state"==`AVAILABLE`].id | [0]' --raw-output)"
   [[ -n "$subnet_id" && "$subnet_id" != null ]] || fail "subnet not found: $SUBNET_NAME"
 
-  note "resolving $OS_NAME $OS_VERSION image for $SHAPE"
+  debug "resolving $OS_NAME $OS_VERSION image for $SHAPE"
   local image_query='data[0].id' image_id
   if [[ -n "$IMAGE_NAME" ]]; then
     image_query="data[?\"display-name\"==\`$IMAGE_NAME\`].id | [0]"
@@ -102,8 +118,10 @@ launch_instance() {
   availability_config="$(jq -nc '{recoveryAction: "RESTORE_INSTANCE"}')"
   metadata="$(jq -nc --rawfile key "$SSH_KEY.pub" '{ssh_authorized_keys: $key}')"
 
-  note "launching $DISPLAY_NAME ($SHAPE, ${OCPUS} OCPU, ${MEMORY_GB} GB) in $availability_domain"
-  oci compute instance launch \
+  debug "launching $DISPLAY_NAME ($SHAPE, ${OCPUS} OCPU, ${MEMORY_GB} GB) in $availability_domain"
+  local launch_stderr instance_id reason
+  launch_stderr="$(mktemp)"
+  if instance_id="$(oci compute instance launch \
     --compartment-id "$COMPARTMENT" \
     --availability-domain "$availability_domain" \
     --display-name "$DISPLAY_NAME" \
@@ -120,7 +138,20 @@ launch_instance() {
     --availability-config "$availability_config" \
     --is-pv-encryption-in-transit-enabled true \
     --wait-for-state RUNNING \
-    --query 'data.id' --raw-output
+    --query 'data.id' --raw-output 2>"$launch_stderr")"; then
+    rm -f "$launch_stderr"
+    printf '%s' "$instance_id"
+    return 0
+  fi
+
+  # An OCI ServiceError is a one-line banner followed by a JSON body. Keep just
+  # the message so a capacity miss is one readable line instead of 15.
+  reason="$(sed -n '/^{/,$p' "$launch_stderr" | jq -r '.message // empty' 2>/dev/null || true)"
+  [[ -n "$reason" ]] || reason="$(tr -d '\n' <"$launch_stderr" | tail -c 200)"
+  [[ -n "$reason" ]] || reason='launch failed without an error message'
+  printf '%s' "$reason" >"$LAUNCH_ERROR_FILE"
+  rm -f "$launch_stderr"
+  return 1
 }
 
 if [[ -n "$existing" && "$existing" != null ]]; then
@@ -140,10 +171,11 @@ else
       fi
       INSTANCE_ID=''
       # "Out of host capacity" is the normal failure for always-free Ampere shapes.
-      note "launch failed in $ad"
+      printf '[%s / %s] %s\n' "$REGION" "$ad" "$(<"$LAUNCH_ERROR_FILE")" >&2
     done
     (( attempt++ < RETRIES )) || fail "launch failed after $attempt round(s) over ${AD_SUFFIXES}"
-    note "retrying all availability domains in ${RETRY_SLEEP}s (round $attempt/$RETRIES)"
+    printf 'All %s ADs exhausted; retrying in %ss... (round %s/%s)\n' \
+      "$REGION" "$RETRY_SLEEP" "$attempt" "$RETRIES" >&2
     sleep "$RETRY_SLEEP"
   done
   [[ -n "$INSTANCE_ID" ]] || fail 'launch reported success without an instance OCID'
