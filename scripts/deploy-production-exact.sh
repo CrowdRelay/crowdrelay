@@ -4,7 +4,7 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TARGET="${1:-}"
-REMOTE="${CROWDRELAY_DEPLOY_HOST:-virya-oracle}"
+REMOTE="${CROWDRELAY_DEPLOY_HOST:-virya-crowdrelay}"
 REMOTE_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
 PUBLIC_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-https://signal-api.virya.music}"
 IMAGE_ATTEMPTS="${CROWDRELAY_IMAGE_GATE_ATTEMPTS:-36}"

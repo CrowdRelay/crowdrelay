@@ -4,9 +4,9 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TARGET="${1:-}"
-ORACLE="${CROWDRELAY_DEPLOY_HOST:-virya-oracle}"
+ORACLE="${CROWDRELAY_DEPLOY_HOST:-virya-crowdrelay}"
 ORACLE_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
-CONTROL_PLANE_HOST="${CROWDRELAY_CONTROL_PLANE_HOST:-virya-home}"
+CONTROL_PLANE_HOST="${CROWDRELAY_CONTROL_PLANE_HOST:-virya-crowdrelay}"
 CONTROL_PLANE_DIR="${CROWDRELAY_CONTROL_PLANE_DIR:-/srv/crowdrelay-control-plane}"
 CANONICAL="$ROOT_DIR/scripts/deploy-production-exact.sh"
 
