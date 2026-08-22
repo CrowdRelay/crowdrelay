@@ -119,6 +119,10 @@ pub struct BookingReplyRequest {
 pub struct BeaconRequest {
     beacon_id: Option<Uuid>,
     city_id: Option<Uuid>,
+    /// Operator surfaces know a city by the slug the public city list returns.
+    /// Accepted as an alternative to `city_id`, never together with it.
+    #[serde(default)]
+    city_slug: Option<String>,
     beacon_kind: BeaconKind,
     display_name: String,
     contact_email: Option<String>,

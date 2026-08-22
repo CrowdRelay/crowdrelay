@@ -144,6 +144,24 @@ impl AcquisitionState {
         )
     }
 
+    /// Resolves a public city slug to its id.
+    ///
+    /// Operator surfaces render the public city list, which carries slugs and no
+    /// ids, so writes that key on a city id need this translation. It reads the
+    /// same cached snapshot the public endpoint serves rather than adding an
+    /// admin city read.
+    pub(crate) async fn city_id_for_slug(
+        &self,
+        slug: &crowdrelay_domain::CitySlug,
+    ) -> Result<Option<crowdrelay_domain::CityId>, ListCitiesError> {
+        Ok(self
+            .resilient_cities(MAX_CITY_SNAPSHOT_LIMIT)
+            .await?
+            .into_iter()
+            .find(|city| city.slug() == slug)
+            .map(|city| city.city_id()))
+    }
+
     async fn resilient_cities(
         &self,
         limit: u32,

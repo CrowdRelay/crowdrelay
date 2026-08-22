@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::{
-    IdempotencyKey, RepositoryError, RequestId,
+    IdempotencyKey, ListCitiesError, RepositoryError, RequestId,
     autopilot::{
         AutopilotBeaconStateRepository, AutopilotBookingStateRepository,
         AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
@@ -29,9 +29,9 @@ use crowdrelay_application::{
     },
 };
 use crowdrelay_domain::{
-    AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
-    ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId, ReleasePlanId,
-    TeamOpportunityId, TicketTypeId,
+    AutopilotActionId, BeaconId, BookingTargetId, CityId, CitySlug, ContentSourceId, EventId,
+    ExperimentId, ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId,
+    ReleasePlanId, TeamOpportunityId, TicketTypeId,
     autonomy::{AutonomyLevel, Confidence},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
