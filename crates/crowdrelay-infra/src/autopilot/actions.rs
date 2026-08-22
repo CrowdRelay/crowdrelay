@@ -626,6 +626,16 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                 }
+                AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
+                    // Deliberately no side effect. The finding is the work: the
+                    // durable action row carries the evidence, the recommended
+                    // class of response and the authority it was raised under,
+                    // and the operator queue reads it from there. Emitting a
+                    // provider call would mean assuming a capability the
+                    // platform was never declared to have, and inventing a
+                    // first-party mutation would fabricate state the evidence
+                    // does not support.
+                }
                 AutopilotActionPayload::RequestShowGrowth {
                     event_id,
                     lever,

@@ -3,14 +3,15 @@
 use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, BeaconId, BookingTargetId, CityId, ContentSourceId,
-    EventId, ExperimentId, ExperimentVariantId, MarketSignalId, MerchProductId,
-    OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
-    WorkspaceId,
+    EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId, MarketSignalId,
+    MerchProductId, OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId,
+    TeamOpportunityId, WorkspaceId,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::{ExperimentAllocationSlot, ExperimentMetric, assign_variant},
+    growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
@@ -295,3 +296,4 @@ pub struct AutopilotControlMutation {
 include!("control/state_ports.rs");
 include!("control/runtime_ports.rs");
 include!("control/growth_ports.rs");
+include!("control/growth_metric_ports.rs");

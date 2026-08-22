@@ -2187,6 +2187,95 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/growth-metrics/series:
+    post:
+      operationId: upsertAutopilotGrowthMetricSeries
+      summary: Declare or update a tracked external metric
+      description: >
+        Declares the identity of one number tracked on an external platform. Identity is
+        (platform, metric_key, subject), so re-declaring a series updates it rather than opening a
+        second timeline for the same number. Declaring a series does not fetch anything: observations
+        arrive through the points endpoint.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrowthMetricSeriesRequest'
+      responses:
+        '200':
+          description: Series declared or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthMetricSeriesMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/growth-metrics/points:
+    post:
+      operationId: recordAutopilotGrowthMetricPoint
+      summary: Record one absolute observation of a tracked metric
+      description: >
+        Appends one observation at the provider's own capture time. Values are absolute levels, never
+        deltas. An observation already recorded at that capture time is left untouched and the
+        response reports accepted=false, so a retry cannot rewrite a value a decision was already
+        derived from.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrowthMetricPointRequest'
+      responses:
+        '200':
+          description: Observation recorded, rejected as a duplicate capture time, or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthMetricPointMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/growth-metrics/trends:
+    get:
+      operationId: getAutopilotGrowthMetricTrends
+      summary: Read derived trends for every tracked metric
+      description: >
+        Returns 24h/7d/28d deltas, recent velocity, the 21-day baseline preceding the last 7 days,
+        and window coverage for each active series. Windows with no observation old enough to compare
+        against are reported as null rather than zero: "no evidence" and "no movement" are different
+        facts. Deltas are derived on read and never stored.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Derived trends for all active series.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthMetricTrendsResponse'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/chief-of-staff:
     get:
       operationId: getAutopilotChiefOfStaff
@@ -7411,7 +7500,7 @@ components:
       enum: [observe, recommend, require_approval, bounded_auto]
     AutopilotContext:
       type: string
-      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth]
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth, growth_metrics]
     AutopilotDisposition:
       type: string
       enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
@@ -7444,7 +7533,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email, raise_growth_opportunity]
       additionalProperties: true
     TeamAssigneeSummary:
       type: object
@@ -7540,7 +7629,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 17
+          maxItems: 18
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array
@@ -8372,6 +8461,112 @@ components:
         operation_id: { type: string, format: uuid }
         signal_id: { type: string, format: uuid }
         replayed: { type: boolean }
+
+    GrowthMetricPlatform:
+      type: string
+      enum: [spotify, youtube, bandsintown, social, website, ticketing, signal, merch]
+    GrowthMetricDirection:
+      type: string
+      enum: [higher_is_better, lower_is_better]
+    GrowthMetricValueTier:
+      type: string
+      description: >
+        How close the metric sits to banked value. A vanity series is not surfaced as an opportunity
+        while a stronger tier is tracked for the same platform.
+      enum: [vanity, intermediate, downstream]
+    GrowthMetricSeriesRequest:
+      type: object
+      additionalProperties: false
+      required: [platform, metric_key, display_name, direction, value_tier, expected_interval_hours, active]
+      properties:
+        platform: { $ref: '#/components/schemas/GrowthMetricPlatform' }
+        metric_key: { type: string, minLength: 1, maxLength: 64 }
+        subject_kind:
+          type: string
+          nullable: true
+          enum: [event, city, release_plan, content_source, beacon]
+        subject_id: { type: string, format: uuid, nullable: true }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        direction: { $ref: '#/components/schemas/GrowthMetricDirection' }
+        value_tier: { $ref: '#/components/schemas/GrowthMetricValueTier' }
+        expected_interval_hours: { type: integer, minimum: 1, maximum: 720 }
+        active: { type: boolean }
+    GrowthMetricSeriesMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, series_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        series_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+    GrowthMetricPointRequest:
+      type: object
+      additionalProperties: false
+      required: [series_id, captured_at, value, source]
+      properties:
+        series_id: { type: string, format: uuid }
+        captured_at:
+          type: string
+          format: date-time
+          description: The provider's own observation time, not ingestion time.
+        value:
+          type: integer
+          minimum: 0
+          description: Absolute level of the metric at captured_at, never a delta.
+        source: { type: string, minLength: 1, maxLength: 64 }
+    GrowthMetricPointMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, series_id, replayed, accepted]
+      properties:
+        operation_id: { type: string, format: uuid }
+        series_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+        accepted:
+          type: boolean
+          description: False when an observation already existed at that capture time; the stored value is unchanged.
+    GrowthMetricTrend:
+      type: object
+      additionalProperties: false
+      required: [series_id, platform, metric_key, display_name, direction, value_tier, expected_interval_hours, latest_value, latest_at, points_in_window, age_seconds, stale]
+      properties:
+        series_id: { type: string, format: uuid }
+        platform: { $ref: '#/components/schemas/GrowthMetricPlatform' }
+        metric_key: { type: string }
+        display_name: { type: string }
+        subject_kind: { type: string, nullable: true }
+        subject_id: { type: string, format: uuid, nullable: true }
+        direction: { $ref: '#/components/schemas/GrowthMetricDirection' }
+        value_tier: { $ref: '#/components/schemas/GrowthMetricValueTier' }
+        expected_interval_hours: { type: integer }
+        latest_value: { type: integer }
+        latest_at: { type: string, format: date-time }
+        delta_24h: { type: integer, nullable: true }
+        delta_7d: { type: integer, nullable: true }
+        delta_28d: { type: integer, nullable: true }
+        velocity_milli_per_day:
+          type: integer
+          nullable: true
+          description: Movement over the last 7 days in milli-units per day.
+        baseline_milli_per_day:
+          type: integer
+          nullable: true
+          description: Movement over the 21 days preceding the last 7, in milli-units per day.
+        velocity_ratio_basis_points:
+          type: integer
+          nullable: true
+          description: Recent velocity against the series' own baseline; 10000 is exactly on baseline. Absent when the baseline is too flat to divide by.
+        points_in_window: { type: integer }
+        age_seconds: { type: integer }
+        stale: { type: boolean }
+    GrowthMetricTrendsResponse:
+      type: object
+      additionalProperties: false
+      required: [series]
+      properties:
+        series:
+          type: array
+          items: { $ref: '#/components/schemas/GrowthMetricTrend' }
 
     PromotionBudgetGuardrailRequest:
       type: object

@@ -195,6 +195,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_growth_metric_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthMetricSnapshot>, RepositoryError> {
+        self.load_growth_metric_snapshots_impl(workspace_id, now)
+            .await
+    }
+
     async fn persist_candidate(
         &self,
         workspace_id: WorkspaceId,

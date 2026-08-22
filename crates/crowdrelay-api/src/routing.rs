@@ -770,6 +770,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::upsert_city_market_signal),
         )
         .route(
+            "/v1/admin/autopilot/growth-metrics/series",
+            post(autopilot::upsert_growth_metric_series),
+        )
+        .route(
+            "/v1/admin/autopilot/growth-metrics/points",
+            post(autopilot::record_growth_metric_point),
+        )
+        .route(
+            "/v1/admin/autopilot/growth-metrics/trends",
+            get(autopilot::growth_metric_trends),
+        )
+        .route(
             "/v1/admin/autopilot/actions/{action_id}/assign",
             post(autopilot::assign_action),
         )

@@ -2,8 +2,9 @@
 
 use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
-    ExperimentVariantId, FanId, MerchProductId, MerchVariantId, OutreachOpportunityId,
-    OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
+    ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
+    OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
+    TicketTypeId,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
@@ -12,6 +13,7 @@ use crowdrelay_domain::{
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
     funding::FundingPolicy,
+    growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricPlatform},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
@@ -45,6 +47,7 @@ pub enum AutopilotContext {
     Funding,
     Beacon,
     ShowGrowth,
+    GrowthMetrics,
 }
 
 impl AutopilotContext {
@@ -68,6 +71,7 @@ impl AutopilotContext {
             Self::Funding => "funding",
             Self::Beacon => "beacon",
             Self::ShowGrowth => "show_growth",
+            Self::GrowthMetrics => "growth_metrics",
         }
     }
 }
@@ -92,6 +96,7 @@ pub enum AutopilotPolicyConfig {
     Funding(FundingPolicy),
     Beacon(BeaconCampaignPolicy),
     ShowGrowth(ShowGrowthPolicy),
+    GrowthMetrics(GrowthMetricPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -125,6 +130,7 @@ pub enum ActionSubject {
     ReleasePlan(ReleasePlanId),
     TeamOpportunity(TeamOpportunityId),
     Beacon(BeaconId),
+    GrowthMetricSeries(GrowthMetricSeriesId),
 }
 
 impl ActionSubject {
@@ -144,6 +150,7 @@ impl ActionSubject {
             Self::ReleasePlan(_) => "release_plan",
             Self::TeamOpportunity(_) => "team_opportunity",
             Self::Beacon(_) => "beacon",
+            Self::GrowthMetricSeries(_) => "growth_metric_series",
         }
     }
 
@@ -163,6 +170,7 @@ impl ActionSubject {
             Self::ReleasePlan(id) => id.into_uuid(),
             Self::TeamOpportunity(id) => id.into_uuid(),
             Self::Beacon(id) => id.into_uuid(),
+            Self::GrowthMetricSeries(id) => id.into_uuid(),
         }
     }
 }
@@ -290,6 +298,22 @@ pub enum AutopilotActionPayload {
     SubmitFundingApplication {
         opportunity_id: TeamOpportunityId,
     },
+    /// Surfaces a detected movement in an external metric as durable work. The
+    /// payload carries the evidence and the class of response, never a
+    /// provider call: what a platform can actually do is not the domain's to
+    /// assume, so execution stays with the operator or an executor that owns
+    /// that capability.
+    RaiseGrowthOpportunity {
+        series_id: GrowthMetricSeriesId,
+        platform: MetricPlatform,
+        metric_key: String,
+        signal: GrowthSignal,
+        recommended_action: String,
+        /// Measured deviation from the series' own baseline, in basis points.
+        deviation_basis_points: u32,
+        priority: u16,
+        template_key: String,
+    },
     SendTeamAssignmentEmail {
         assignment_id: uuid::Uuid,
         recipient_email: String,
@@ -330,6 +354,7 @@ impl AutopilotActionPayload {
             Self::ApplyLiveOpportunity { .. } => "opportunity.live.apply",
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
+            Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
         }
     }

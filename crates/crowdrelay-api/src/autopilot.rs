@@ -15,28 +15,30 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotBeaconStateRepository, AutopilotBookingStateRepository,
         AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
-        AutopilotExperimentStateRepository, AutopilotMarketStateRepository,
-        AutopilotMerchStateRepository, AutopilotOutreachStateRepository,
-        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
-        CreateExperimentVariant, ExperimentObservation, ManagerConfigSource, RecordBeaconReply,
-        RecordBookingReply, RecordOutreachReply, RecordTeamOpportunityProgress,
-        SetAutopilotAuthority, SetManagerBookingPolicy, TeamOpportunityKind,
-        TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertContentSource, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
-        UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertReleasePlan, UpsertTeamOpportunity, UpsertTicketAllocationGuardrail,
-        assign_experiment_variant,
+        AutopilotExperimentStateRepository, AutopilotGrowthMetricRepository,
+        AutopilotMarketStateRepository, AutopilotMerchStateRepository,
+        AutopilotOutreachStateRepository, AutopilotTeamStateRepository,
+        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
+        ExperimentObservation, GrowthMetricSubject, GrowthMetricTrendView, ManagerConfigSource,
+        RecordBeaconReply, RecordBookingReply, RecordGrowthMetricPoint, RecordOutreachReply,
+        RecordTeamOpportunityProgress, SetAutopilotAuthority, SetManagerBookingPolicy,
+        TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget,
+        UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
+        UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
+        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
+        UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
-    ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId, ReleasePlanId,
-    TeamOpportunityId, TicketTypeId,
+    ExperimentVariantId, GrowthMetricSeriesId, MerchProductId, OutreachOpportunityId,
+    OutreachTargetId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
     autonomy::{AutonomyLevel, Confidence},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::ExperimentMetric,
+    growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
@@ -120,4 +122,5 @@ include!("autopilot/authority_booking.rs");
 include!("autopilot/promotion_market.rs");
 include!("autopilot/outreach_release.rs");
 include!("autopilot/experiments_actions.rs");
+include!("autopilot/growth_metrics.rs");
 include!("autopilot/validation.rs");
