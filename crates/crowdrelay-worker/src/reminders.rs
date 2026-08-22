@@ -80,107 +80,105 @@ impl EventReminderScheduler {
             .await
             .map_err(ReminderSchedulerError::Database)?;
         cancel_ineligible_jobs(&mut transaction).await?;
-        let rows = sqlx::query_as::<_, DueReminderRow>(
+
+        let reminder_count = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT
-                jobs.id,
-                jobs.workspace_id,
-                jobs.event_id,
-                jobs.fan_id,
-                jobs.reminder_kind,
-                jobs.due_at,
-                events.slug AS event_slug,
-                events.title AS event_title,
-                events.starts_at,
-                events.doors_at,
-                events.venue,
-                events.venue_address,
-                events.ticket_url,
-                fans.normalized_email,
-                fans.display_name,
-                fans.locale
-            FROM event_reminder_jobs AS jobs
-            INNER JOIN events
-                ON events.workspace_id = jobs.workspace_id
-                AND events.id = jobs.event_id
-            INNER JOIN fans
-                ON fans.workspace_id = jobs.workspace_id
-                AND fans.id = jobs.fan_id
-            WHERE jobs.status = 'pending'
-                AND jobs.due_at <= now()
-                AND events.status = 'published'
-                AND events.starts_at > now()
-                AND fans.status = 'active'
-            ORDER BY jobs.due_at, jobs.id
-            FOR UPDATE OF jobs SKIP LOCKED
-            LIMIT $1
+            WITH due AS MATERIALIZED (
+                SELECT
+                    jobs.id,
+                    jobs.workspace_id,
+                    jobs.event_id,
+                    jobs.fan_id,
+                    jobs.reminder_kind,
+                    jobs.due_at,
+                    events.slug AS event_slug,
+                    events.title AS event_title,
+                    events.starts_at,
+                    events.doors_at,
+                    events.venue,
+                    events.venue_address,
+                    events.ticket_url,
+                    fans.normalized_email,
+                    fans.display_name,
+                    fans.locale
+                FROM event_reminder_jobs AS jobs
+                INNER JOIN events
+                    ON events.workspace_id = jobs.workspace_id
+                    AND events.id = jobs.event_id
+                INNER JOIN fans
+                    ON fans.workspace_id = jobs.workspace_id
+                    AND fans.id = jobs.fan_id
+                WHERE jobs.status = 'pending'
+                    AND jobs.due_at <= now()
+                    AND events.status = 'published'
+                    AND events.starts_at > now()
+                    AND fans.status = 'active'
+                ORDER BY jobs.due_at, jobs.id
+                FOR UPDATE OF jobs SKIP LOCKED
+                LIMIT $1
+            ),
+            inserted AS (
+                INSERT INTO outbox_events (
+                    workspace_id, event_type, event_version, payload, request_id
+                )
+                SELECT
+                    due.workspace_id,
+                    'event.reminder_due',
+                    1,
+                    jsonb_build_object(
+                        'workspace_id', due.workspace_id,
+                        'event_id', due.event_id,
+                        'fan_id', due.fan_id,
+                        'reminder_kind', due.reminder_kind,
+                        'due_at', due.due_at,
+                        'event', jsonb_build_object(
+                            'slug', due.event_slug,
+                            'title', due.event_title,
+                            'starts_at', due.starts_at,
+                            'doors_at', due.doors_at,
+                            'venue', due.venue,
+                            'venue_address', due.venue_address,
+                            'ticket_url', due.ticket_url
+                        ),
+                        'fan', jsonb_build_object(
+                            'email', due.normalized_email,
+                            'display_name', due.display_name,
+                            'locale', due.locale
+                        )
+                    ),
+                    'event-reminder:' || due.id::text
+                FROM due
+                RETURNING id
+            ),
+            updated AS (
+                UPDATE event_reminder_jobs AS jobs
+                SET
+                    status = 'enqueued',
+                    enqueued_at = now()
+                FROM due
+                WHERE jobs.id = due.id
+                  AND jobs.status = 'pending'
+                RETURNING jobs.id
+            )
+            SELECT count(*)::bigint
+            FROM updated
             "#,
         )
         .bind(self.batch_size)
-        .fetch_all(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(ReminderSchedulerError::Database)?;
-
-        for row in &rows {
-            let payload = json!({
-                "workspace_id": row.workspace_id,
-                "event_id": row.event_id,
-                "fan_id": row.fan_id,
-                "reminder_kind": row.reminder_kind.as_str(),
-                "due_at": row.due_at,
-                "event": {
-                    "slug": row.event_slug.as_str(),
-                    "title": row.event_title.as_str(),
-                    "starts_at": row.starts_at,
-                    "doors_at": row.doors_at,
-                    "venue": row.venue.as_deref(),
-                    "venue_address": row.venue_address.as_deref(),
-                    "ticket_url": row.ticket_url.as_deref(),
-                },
-                "fan": {
-                    "email": row.normalized_email.as_str(),
-                    "display_name": row.display_name.as_deref(),
-                    "locale": row.locale.as_deref(),
-                }
-            });
-            sqlx::query(
-                r#"
-                INSERT INTO outbox_events (
-                    workspace_id, event_type, event_version, payload, request_id
-                ) VALUES ($1, 'event.reminder_due', 1, $2, $3)
-                "#,
-            )
-            .bind(row.workspace_id)
-            .bind(payload)
-            .bind(format!("event-reminder:{}", row.id))
-            .execute(&mut *transaction)
-            .await
-            .map_err(ReminderSchedulerError::Database)?;
-        }
 
         let checklist_emissions = enqueue_due_show_checklists(&mut transaction).await?;
         let activation_emissions =
             enqueue_due_beacon_release_activations(&mut transaction, self.batch_size).await?;
 
-        let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-        if !ids.is_empty() {
-            sqlx::query(
-                r#"
-                UPDATE event_reminder_jobs
-                SET status = 'enqueued', enqueued_at = now()
-                WHERE id = ANY($1::uuid[]) AND status = 'pending'
-                "#,
-            )
-            .bind(&ids)
-            .execute(&mut *transaction)
-            .await
-            .map_err(ReminderSchedulerError::Database)?;
-        }
         transaction
             .commit()
             .await
             .map_err(ReminderSchedulerError::Database)?;
-        Ok(u64::try_from(rows.len())
+
+        Ok(u64::try_from(reminder_count)
             .unwrap_or(u64::MAX)
             .saturating_add(checklist_emissions)
             .saturating_add(activation_emissions))
@@ -455,26 +453,6 @@ async fn cancel_ineligible_jobs(
     .await
     .map_err(ReminderSchedulerError::Database)?;
     Ok(())
-}
-
-#[derive(FromRow)]
-struct DueReminderRow {
-    id: Uuid,
-    workspace_id: Uuid,
-    event_id: Uuid,
-    fan_id: Uuid,
-    reminder_kind: String,
-    due_at: OffsetDateTime,
-    event_slug: String,
-    event_title: String,
-    starts_at: OffsetDateTime,
-    doors_at: Option<OffsetDateTime>,
-    venue: Option<String>,
-    venue_address: Option<String>,
-    ticket_url: Option<String>,
-    normalized_email: String,
-    display_name: Option<String>,
-    locale: Option<String>,
 }
 
 /// Error returned when the reminder scheduler is constructed with invalid durations.
