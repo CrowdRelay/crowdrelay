@@ -10,6 +10,7 @@ use crowdrelay_domain::{
     content_supply::ContentSupplySnapshot,
     experimentation::ExperimentSnapshot,
     funding::FundingOpportunitySnapshot,
+    growth_debt::GrowthDebtObservation,
     growth_metrics::GrowthMetricSnapshot,
     live_opportunities::LiveOpportunitySnapshot,
     merch_bundle::MerchBundleSnapshot,
@@ -160,6 +161,19 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthMetricSnapshot>, RepositoryError>;
+
+    /// Returns one observation per subject that has outstanding committed work,
+    /// across every debt kind, already carrying `hours_since_last_signal`.
+    ///
+    /// The adapter reports facts only — how long the work has been outstanding,
+    /// how much of it is outstanding, and what date applies. Every horizon and
+    /// threshold lives in `GrowthDebtPolicy`, so what counts as neglect can
+    /// change without touching a query.
+    async fn load_growth_debt_observations(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthDebtObservation>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.

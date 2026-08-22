@@ -490,5 +490,18 @@ macro_rules! decision_opportunity_reads {
         ))
         .await
     }
+
+    async fn load_growth_debt_observations_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthDebtObservation>, RepositoryError> {
+        self.bounded(operations::load_growth_debt_observations(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
     };
 }

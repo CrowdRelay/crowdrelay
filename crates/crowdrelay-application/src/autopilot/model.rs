@@ -13,7 +13,7 @@ use crowdrelay_domain::{
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
     funding::FundingPolicy,
-    growth_debt::GrowthDebtPolicy,
+    growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricPlatform},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
@@ -135,6 +135,20 @@ pub enum ActionSubject {
     TeamOpportunity(TeamOpportunityId),
     Beacon(BeaconId),
     GrowthMetricSeries(GrowthMetricSeriesId),
+    BookingTarget(BookingTargetId),
+    OutreachTarget(OutreachTargetId),
+}
+
+impl From<GrowthDebtSubject> for ActionSubject {
+    fn from(subject: GrowthDebtSubject) -> Self {
+        match subject {
+            GrowthDebtSubject::BookingTarget(id) => Self::BookingTarget(id),
+            GrowthDebtSubject::OutreachTarget(id) => Self::OutreachTarget(id),
+            GrowthDebtSubject::Beacon(id) => Self::Beacon(id),
+            GrowthDebtSubject::Event(id) => Self::Event(id),
+            GrowthDebtSubject::ReleasePlan(id) => Self::ReleasePlan(id),
+        }
+    }
 }
 
 impl ActionSubject {
@@ -155,6 +169,8 @@ impl ActionSubject {
             Self::TeamOpportunity(_) => "team_opportunity",
             Self::Beacon(_) => "beacon",
             Self::GrowthMetricSeries(_) => "growth_metric_series",
+            Self::BookingTarget(_) => "booking_target",
+            Self::OutreachTarget(_) => "outreach_target",
         }
     }
 
@@ -175,6 +191,8 @@ impl ActionSubject {
             Self::TeamOpportunity(id) => id.into_uuid(),
             Self::Beacon(id) => id.into_uuid(),
             Self::GrowthMetricSeries(id) => id.into_uuid(),
+            Self::BookingTarget(id) => id.into_uuid(),
+            Self::OutreachTarget(id) => id.into_uuid(),
         }
     }
 }
@@ -318,6 +336,25 @@ pub enum AutopilotActionPayload {
         priority: u16,
         template_key: String,
     },
+    /// Work that was committed to and then left undone. One action kind covers
+    /// every debt kind on purpose: the ranked queue compares them against each
+    /// other, and four look-alike action kinds would only make that harder.
+    RaiseGrowthDebt {
+        subject_kind: String,
+        subject_id: uuid::Uuid,
+        debt_kind: GrowthDebtKind,
+        recommended_action: String,
+        /// How far past its horizon the work is, in basis points. `10_000` is
+        /// exactly at the horizon. Measured, never forecast.
+        overdue_basis_points: u32,
+        /// Tracked items still outstanding, and how many were tracked at all.
+        /// Both travel with the action so the operator sees the denominator
+        /// rather than a bare count.
+        outstanding_items: u32,
+        tracked_items: u32,
+        priority: u16,
+        template_key: String,
+    },
     SendTeamAssignmentEmail {
         assignment_id: uuid::Uuid,
         recipient_email: String,
@@ -359,6 +396,7 @@ impl AutopilotActionPayload {
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
+            Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
         }
     }

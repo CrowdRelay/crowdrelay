@@ -44,6 +44,7 @@ use time::OffsetDateTime;
 use super::{model::*, ports::AutopilotDecisionRepository};
 mod beacons;
 mod commercial;
+mod growth_debt;
 mod growth_metrics;
 mod show_growth;
 
@@ -52,6 +53,7 @@ use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
     merch_candidate, merch_price_candidate,
 };
+use growth_debt::growth_debt_candidate;
 use growth_metrics::growth_metric_candidate;
 use show_growth::show_growth_candidate;
 
@@ -312,11 +314,15 @@ where
                     }
                 }
                 AutopilotContext::GrowthDebt => {
-                    // The context, its authority row and its domain rule exist;
-                    // the observation loaders that feed it do not yet. Holding
-                    // here is the correct behaviour rather than a placeholder:
-                    // the rule refuses to speak without evidence, and this arm
-                    // is the same refusal one layer up.
+                    let observations = self
+                        .repository
+                        .load_growth_debt_observations(self.workspace_id, now)
+                        .await?;
+                    for observation in &observations {
+                        if let Some(candidate) = growth_debt_candidate(observation, &policy, now)? {
+                            self.persist(&candidate, &mut report).await?;
+                        }
+                    }
                 }
             }
         }
@@ -364,3 +370,4 @@ pub enum AutopilotError {
 include!("evaluate/candidates.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/growth_metrics_tests.rs");
+include!("evaluate/growth_debt_tests.rs");

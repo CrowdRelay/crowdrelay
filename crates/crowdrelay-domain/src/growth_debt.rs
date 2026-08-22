@@ -107,6 +107,22 @@ impl GrowthDebtKind {
         }
     }
 
+    /// The decision kind recorded against this finding.
+    ///
+    /// Per-kind rather than one shared value, because the cooldown is read back
+    /// out of `viryaos_autopilot_decisions` by grouping on it: one event can owe
+    /// both skipped levers and a stalled release plan, and raising one must not
+    /// silence the other for a fortnight.
+    #[must_use]
+    pub const fn decision_kind(self) -> &'static str {
+        match self {
+            Self::RelationshipQuiet => "raise_growth_debt_relationship_quiet",
+            Self::EventLeversSkipped => "raise_growth_debt_event_levers_skipped",
+            Self::ReleaseMilestonesMissed => "raise_growth_debt_release_milestones_missed",
+            Self::StaleContactData => "raise_growth_debt_stale_contact_data",
+        }
+    }
+
     #[must_use]
     pub const fn template_key(self) -> &'static str {
         match self {

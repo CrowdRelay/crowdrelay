@@ -314,10 +314,7 @@ like a `growth_metrics` trend.
   `parse_context` in `mapping.rs` / `validation.rs`, `SCHEMA_VERSION` 73 → 74,
   the OpenAPI `AutopilotContext` enum, `AutopilotOverview.policies.maxItems`
   18 → 19, and the context count in `scripts/test_viryaos_autopilot_v1.py`.
-- The `AutopilotContext::GrowthDebt` arm in `evaluate.rs` holds and evaluates
-  nothing until 3b. That is the honest state, not a placeholder: the loaders do
-  not exist, and the rule refuses to speak without evidence.
-- `scripts/test_growth_debt_v1.py` (11 tests).
+- `scripts/test_growth_debt_v1.py` (18 tests after 3b/3c).
 
 Found and fixed while doing this, both worth not rediscovering:
 
@@ -336,45 +333,82 @@ Found and fixed while doing this, both worth not rediscovering:
   a later one, so it now asserts subset; the newest context migration owns the
   equality claim.
 
-### 3b — application (NEXT)
+### 3b — application (DONE)
 
-- `AutopilotGrowthDebtRepository` port (or an added method on the existing
-  decision repository — decide by whether the loaders need their own trait to
-  keep `decisions.rs` under the size ratchet): one
-  `load_growth_debt_observations(workspace_id, now)`.
+- `load_growth_debt_observations(workspace_id, now)` added to the existing
+  `AutopilotDecisionRepository` rather than a new trait. One loader does not
+  justify a port of its own, and `decisions.rs` is 214 lines — nowhere near the
+  size ratchet, which was the only reason to consider splitting.
 - `evaluate/growth_debt.rs` with `growth_debt_candidate()`, mirroring
-  `growth_metric_candidate`. `decision_key` must change with the evidence
-  (policy version, subject, kind, overdue bucket, outstanding count);
-  `action_idempotency_key` must be stable per (subject, kind, cooldown window).
-- `AutopilotActionPayload::RaiseGrowthDebt { subject, kind, reason,
-  recommended_action, overdue_basis_points, outstanding_items, priority,
-  template_key }` → `action_kind` `"growth.debt.raise"`. Remember the OpenAPI
-  action-kind enum.
-- `ActionSubject::BookingTarget` / `OutreachTarget` — check whether they already
-  exist before adding; `Beacon`, `Event` and `ReleasePlan` do.
+  `growth_metric_candidate`. `decision_key` carries policy version, subject
+  kind and id, debt kind, overdue bucket and outstanding count;
+  `action_idempotency_key` is stable per (subject, debt kind, cooldown window)
+  and deliberately omits the overdue ratio so ordinary ageing cannot stack
+  duplicates on the operator queue.
+- `AutopilotActionPayload::RaiseGrowthDebt` → `action_kind`
+  `"growth.debt.raise"`. One action kind for every debt kind, so the Phase 4
+  queue sees one comparable stream.
+- `ActionSubject::BookingTarget` and `OutreachTarget` did not exist and were
+  added; `Beacon`, `Event` and `ReleasePlan` already did. `From<GrowthDebtSubject>`
+  keeps the mapping in one place.
+- 9 evaluator tests in `evaluate/growth_debt_tests.rs`.
 
-### 3c — infrastructure
+Two things worth not rediscovering:
 
-One set-oriented query per debt kind, each returning a `GrowthDebtObservation`
-with `hours_since_last_signal` from `viryaos_autopilot_decisions`. No per-subject
-N+1. `operations/growth_debt.rs`, following `operations/growth_metrics.rs`.
+- **`subject_kind` on the payload cannot be `&'static str`.**
+  `AutopilotActionPayload` is deserialized back out of the durable action row,
+  and a borrowed field makes the derived `Deserialize` valid only for
+  `'static`, which fails at the `serde_json::from_value` call site in
+  `infra/autopilot/actions.rs`. It is a `String`.
+- **Correction to the Phase 1d contract-surface list: there is no action-kind
+  enum in `openapi/openapi.yaml`.** `action_kind` is a free-form
+  `type: string, maxLength: 96` in three schemas. Nothing to update for a new
+  action kind beyond staying inside 96 characters.
 
-- Relationship quiet: `viryaos_booking_targets` / `viryaos_outreach_targets` /
-  `viryaos_beacons` against the newest row in the matching interaction table,
-  in *either* direction. `tracked_items` is 1.
-- Event levers: `viryaos_show_growth_surfaces` for events still ahead, counting
-  statuses in (`unknown`,`ready`,`manual`,`blocked`) as outstanding against all
-  declared surfaces for the event. `idle_hours` from the oldest `last_checked_at`
-  (or the row's `updated_at` when never checked).
-- Release milestones: `viryaos_release_plans` where `active`, against
-  `viryaos_release_milestones`. The milestone CHECK list (8 values) is the
-  denominator; `idle_hours` from the newest `completed_at`, or from
-  `created_at` when no milestone has ever been recorded.
+### 3c — infrastructure (DONE)
 
-### 3d — API and contract
+`operations/growth_debt.rs`: three debt kinds in one `UNION ALL`, one round
+trip, capped by `MAX_SNAPSHOTS_PER_CONTEXT`, plus one grouped query for the
+cooldown. No per-subject N+1. The SQL reports facts only — a ratio or priority
+computed there would be a second copy of the rule that drifts silently.
+
+- Relationship quiet: `viryaos_booking_targets` and `viryaos_outreach_targets`.
+  `viryaos_beacons` is **not** included: it has no interaction log of its own
+  and no relationship score, so the rule would have neither of the two facts it
+  needs. `tracked_items` is 1.
+- Event levers: `viryaos_show_growth_surfaces` for published events still
+  ahead, counting statuses in (`unknown`,`ready`,`manual`,`blocked`) as
+  outstanding against every declared surface. `skipped` and `retired` are
+  excluded — those are decisions somebody made, and counting them would report
+  deliberate choices as neglect.
+- Release milestones: `viryaos_release_plans` where `active` and still ahead,
+  against `viryaos_release_milestones`. The milestone CHECK list (8 values) is
+  the denominator, not the recorded rows: counting recorded rows would make a
+  plan that stopped after one milestone report as 0% outstanding.
+- **Idle clock uses `GREATEST(...)` over every timestamp that exists**, with
+  the row's `created_at` as the floor. Postgres `GREATEST` ignores NULLs, so it
+  never collapses. Reading only the interaction log dated a target that has
+  `last_outreach_at` but no logged interaction from its creation, which
+  overstates the neglect; the first draft had that bug.
+- **Cooldown is read back per (subject, decision kind), not per subject.** One
+  event can owe both skipped levers and a stalled release plan, so
+  `GrowthDebtKind::decision_kind()` returns a per-kind string and the last
+  signal query groups on it. Raising one debt must not silence the other for a
+  fortnight.
+
+**Not runtime-verified.** The Docker daemon was not running on the machine that
+wrote this, so `make db-up && make migrate` could not execute the query against
+a real Postgres. It compiles and the contract tests hold, but the first run
+against a live database is still ahead — check it before trusting a row count.
+
+### 3d — API and contract (NEXT)
 
 `GET /v1/admin/autopilot/growth-debt` read model, ranked, hard-capped. Same
-contract-surface list as 1d, plus the action-kind enum.
+contract-surface list as 1d (minus the action-kind enum, which does not exist).
+Consider whether this endpoint should exist at all before Phase 4: the ranked
+Next Best Action queue may subsume it, in which case 3d is one extra read model
+to maintain for nothing. Decide by whether an operator wants debt on its own,
+separate from the mixed queue.
 
 ### 3e — proof
 
