@@ -129,6 +129,14 @@ pub(super) async fn schedule_effect_measurement(
             // ticket or merch movement to an analysis step, which is exactly
             // the kind of invented causality this system must not produce.
         }
+        AutopilotActionPayload::RaiseGrowthDebt { .. } => {
+            // Same reasoning as the raised growth opportunity above, one step
+            // further: debt is measured by the work getting done, and the
+            // signal that it did lives in the owning table (an interaction
+            // recorded, a surface published, a milestone completed), not in a
+            // ticket or merch movement. Phase 5 adds the measurement kind that
+            // can read those honestly.
+        }
         AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => {
             use crowdrelay_domain::show_growth::ShowGrowthLever;
 
@@ -313,6 +321,14 @@ pub(super) async fn record_execution_outcome(
         } => (
             "growth_opportunity_raised",
             f64::from(*deviation_basis_points),
+            None,
+        ),
+        AutopilotActionPayload::RaiseGrowthDebt {
+            overdue_basis_points,
+            ..
+        } => (
+            "growth_debt_raised",
+            f64::from(*overdue_basis_points),
             None,
         ),
         AutopilotActionPayload::RequestShowGrowth { .. } => ("show_growth_lever_requested", 1.0, None),

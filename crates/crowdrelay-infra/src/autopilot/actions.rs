@@ -636,6 +636,13 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     // first-party mutation would fabricate state the evidence
                     // does not support.
                 }
+                AutopilotActionPayload::RaiseGrowthDebt { .. } => {
+                    // Deliberately no side effect, for the same reason as the
+                    // raised growth opportunity: the finding is the work. What
+                    // to do about neglected work is an operator's call, and
+                    // auto-sending an outreach message here would move paid,
+                    // outward-facing work behind an observation quota.
+                }
                 AutopilotActionPayload::RequestShowGrowth {
                     event_id,
                     lever,

@@ -18,6 +18,11 @@ DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_debt.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 VALIDATION = ROOT / "crates/crowdrelay-api/src/autopilot/validation.rs"
 MAPPING = ROOT / "crates/crowdrelay-infra/src/autopilot/mapping.rs"
+LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/growth_debt.rs"
+CANDIDATE = (
+    ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/growth_debt.rs"
+)
+ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs"
 OPENAPI = ROOT / "openapi/openapi.yaml"
 
 
@@ -146,6 +151,56 @@ class GrowthDebtContract(unittest.TestCase):
         reasons = self.domain.split("pub const fn reason", 1)[1].split("}", 1)[0]
         for forbidden in ("because", "caused", "due to"):
             self.assertNotIn(forbidden, reasons.lower())
+
+    def test_the_cooldown_is_read_back_per_subject_and_debt_kind(self) -> None:
+        # One event can owe both skipped levers and a stalled release plan.
+        # Grouping the last signal by subject alone would let raising one
+        # silence the other for a fortnight, which is why the decision kind
+        # carries the debt kind rather than being one shared string.
+        self.assertIn("pub const fn decision_kind", self.domain)
+        loader = read(LOADER)
+        self.assertIn("GROUP BY subject_id, decision_kind", loader)
+        self.assertIn("decision_kind: item.kind.decision_kind()", read(CANDIDATE))
+
+    def test_the_loader_reports_facts_and_leaves_the_arithmetic_to_the_domain(
+        self,
+    ) -> None:
+        # A ratio or a priority computed in SQL is a second copy of the rule
+        # that drifts from the first one silently.
+        loader = read(LOADER)
+        for forbidden in ("basis_points", "priority", "confidence"):
+            self.assertNotIn(forbidden, loader.split('r#"', 1)[1])
+
+    def test_the_loader_only_reads(self) -> None:
+        loader = read(LOADER)
+        for forbidden in ("INSERT ", "UPDATE ", "DELETE "):
+            self.assertNotIn(forbidden, loader)
+
+    def test_deliberate_choices_are_not_counted_as_neglect(self) -> None:
+        # A surface somebody skipped or retired is a decision, not debt.
+        loader = read(LOADER)
+        self.assertIn("surface.status <> 'skipped'", loader)
+        self.assertIn("surface.status <> 'retired'", loader)
+
+    def test_the_observation_query_is_bounded(self) -> None:
+        loader = read(LOADER)
+        self.assertIn("LIMIT $4", loader)
+        self.assertIn("MAX_SNAPSHOTS_PER_CONTEXT", loader)
+
+    def test_raising_debt_has_no_outward_side_effect(self) -> None:
+        # Debt is an observation. Auto-sending outreach off the back of it would
+        # move paid, contractual work behind an observation quota.
+        actions = read(ACTIONS)
+        arm = actions.split("AutopilotActionPayload::RaiseGrowthDebt { .. } => {", 1)[1]
+        self.assertEqual(arm.split("}", 1)[0].strip().count("await"), 0)
+
+    def test_the_action_kind_fits_the_published_contract(self) -> None:
+        # `action_kind` is a free-form bounded string in the contract, not an
+        # enum, so the only thing to hold is the length bound.
+        self.assertIn('Self::RaiseGrowthDebt { .. } => "growth.debt.raise"', read(MODEL))
+        openapi = read(OPENAPI)
+        self.assertIn("action_kind: { type: string, maxLength: 96 }", openapi)
+        self.assertLessEqual(len("growth.debt.raise"), 96)
 
 
 if __name__ == "__main__":

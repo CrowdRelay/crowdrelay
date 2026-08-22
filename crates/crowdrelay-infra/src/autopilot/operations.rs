@@ -31,6 +31,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 
 mod chief;
 mod execution;
+mod growth_debt;
 mod ingress;
 mod show_growth;
 mod show_growth_execution;
@@ -38,6 +39,7 @@ mod snapshots;
 
 pub(super) use chief::*;
 pub(super) use execution::*;
+pub(super) use growth_debt::*;
 pub(super) use show_growth::*;
 pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;
