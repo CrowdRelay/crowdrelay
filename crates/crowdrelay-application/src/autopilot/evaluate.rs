@@ -311,6 +311,13 @@ where
                         }
                     }
                 }
+                AutopilotContext::GrowthDebt => {
+                    // The context, its authority row and its domain rule exist;
+                    // the observation loaders that feed it do not yet. Holding
+                    // here is the correct behaviour rather than a placeholder:
+                    // the rule refuses to speak without evidence, and this arm
+                    // is the same refusal one layer up.
+                }
             }
         }
 

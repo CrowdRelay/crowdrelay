@@ -13,6 +13,7 @@ use crowdrelay_domain::{
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
     funding::FundingPolicy,
+    growth_debt::GrowthDebtPolicy,
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricPlatform},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
@@ -48,6 +49,7 @@ pub enum AutopilotContext {
     Beacon,
     ShowGrowth,
     GrowthMetrics,
+    GrowthDebt,
 }
 
 impl AutopilotContext {
@@ -72,6 +74,7 @@ impl AutopilotContext {
             Self::Beacon => "beacon",
             Self::ShowGrowth => "show_growth",
             Self::GrowthMetrics => "growth_metrics",
+            Self::GrowthDebt => "growth_debt",
         }
     }
 }
@@ -97,6 +100,7 @@ pub enum AutopilotPolicyConfig {
     Beacon(BeaconCampaignPolicy),
     ShowGrowth(ShowGrowthPolicy),
     GrowthMetrics(GrowthMetricPolicy),
+    GrowthDebt(GrowthDebtPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.

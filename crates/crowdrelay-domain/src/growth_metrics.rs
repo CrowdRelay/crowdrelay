@@ -138,7 +138,7 @@ impl MetricValueTier {
         }
     }
 
-    const fn weight(self) -> u16 {
+    pub(crate) const fn weight(self) -> u16 {
         match self {
             Self::Vanity => 20,
             Self::Intermediate => 55,

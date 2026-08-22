@@ -242,7 +242,7 @@ Spotify, YouTube and social continue to arrive through the Phase 1d ingest
 endpoint driven by the existing n8n adapters. CrowdRelay does not grow OAuth
 flows for them until there is a reason it must own the credential.
 
-## Phase 3 — growth debt detectors (NEXT)
+## Phase 3 — growth debt detectors (IN PROGRESS)
 
 Neglected work is the other half of the opportunity engine, and most of the
 inputs already exist as first-party rows.
@@ -255,16 +255,148 @@ inputs already exist as first-party rows.
   `viryaos_show_growth_surfaces` history has unrequested levers past their lead
   time. Most of this rule already exists in `show_growth`; the debt view is the
   *aggregate* of what was skipped, not a second copy of the rule.
-- Incomplete distribution: a release plan with unfulfilled
-  `viryaos_release_components`.
+- Incomplete distribution: a release plan whose milestones stopped being
+  recorded. **Correction to the original bullet:** this is
+  `viryaos_release_plans` + `viryaos_release_milestones` (migration 0039).
+  `viryaos_release_components` (migration 0040) is the deploy/CI component
+  ledger for *software releases* and has nothing to do with a music release
+  plan. Do not join it here.
 - Inactive channel: a `growth_metrics` series that has gone flat for longer
-  than its cadence — already emitted as `StaleFeed` in Phase 1.
+  than its cadence — already emitted as `StaleFeed` in Phase 1. Not repeated in
+  this context.
 - Stale information: `viryaos_*_targets` rows whose verified contact data is
-  older than the policy horizon.
+  older than the policy horizon. **Blocked** — see the open question below.
 
-Decide during Phase 3 whether this is one `growth_debt` context or predicates
-added to existing contexts. Default to extending existing contexts — a new
-context is only justified when it needs its own authority and quota.
+### Decision — one `growth_debt` context, against the stated default
+
+The plan's default was to extend existing contexts. Rejected, for three
+reasons recorded here so it is not re-litigated:
+
+1. Authority. `outreach`, `booking_opportunity` and `release` execute
+   contractual, outward-facing work and are gated for that. Raising debt is an
+   observation about our own records and is safe far wider. Folding it in would
+   either widen those contexts' authority to cover a cheap observation or
+   throttle the observation behind a quota sized for paid outreach.
+2. Quota. How often an operator wants to hear about neglect is a different
+   number from how many emails may go out. `max_actions_24h` cannot express
+   both at once.
+3. Phase 4. One action kind (`growth.debt.raise`) across every debt kind gives
+   the ranked queue one comparable stream instead of four look-alike predicates
+   spread over three contexts.
+
+The context stores nothing of its own. Migration 0074 creates no table: debt is
+derived at evaluation time from the tables that already own the facts, exactly
+like a `growth_metrics` trend.
+
+### 3a — schema, domain rule and context registration (DONE)
+
+- `migrations/0074_viryaos_growth_debt.sql` — no tables. Extends the three
+  context CHECK constraints, the provisioning trigger and the backfill insert.
+  Quota 10/day, provisioned disabled and at `observe`. `subject_kind` on the
+  decision/action tables is free-form bounded text (0033), so the new
+  `booking_target` / `outreach_target` subjects need no constraint change.
+- `crates/crowdrelay-domain/src/growth_debt.rs` — `GrowthDebtKind`,
+  `GrowthDebtSubject`, `GrowthDebtObservation`, `GrowthDebtPolicy`,
+  `GrowthDebtItem`, `evaluate_growth_debt()`. The adapter supplies facts
+  (`idle_hours`, `outstanding_items`, `tracked_items`, dates); every horizon
+  and threshold lives in the policy, so changing what counts as neglect never
+  means changing a query. 15 unit tests.
+- Two refusals are load-bearing and pinned by tests: debt whose deadline has
+  passed is dropped (a show that already played cannot be promoted), and debt
+  is never claimed from an empty denominator (`tracked_items == 0` is a
+  statement about our records, not the business).
+- `value_tier()` reuses `growth_metrics::MetricValueTier` on purpose — one
+  ordering decides what outranks what across both detectors, which is how the
+  "vanity never outranks downstream" invariant stays true between them.
+  `MetricValueTier::weight()` is now `pub(crate)`.
+- Context registered across the Phase 1d surfaces: `AutopilotContext::GrowthDebt`
+  and `AutopilotPolicyConfig::GrowthDebt` in `model.rs`, `parse_policy` +
+  `parse_context` in `mapping.rs` / `validation.rs`, `SCHEMA_VERSION` 73 → 74,
+  the OpenAPI `AutopilotContext` enum, `AutopilotOverview.policies.maxItems`
+  18 → 19, and the context count in `scripts/test_viryaos_autopilot_v1.py`.
+- The `AutopilotContext::GrowthDebt` arm in `evaluate.rs` holds and evaluates
+  nothing until 3b. That is the honest state, not a placeholder: the loaders do
+  not exist, and the rule refuses to speak without evidence.
+- `scripts/test_growth_debt_v1.py` (11 tests).
+
+Found and fixed while doing this, both worth not rediscovering:
+
+- **Overflow in the outstanding-share ratio.** `outstanding * 10_000` in `u32`
+  saturates past ~429k items, and a saturating multiply then divides a clamped
+  numerator by a real denominator — a fully neglected subject would report as
+  ~0% outstanding and be held. Now computed in `u64`. Pinned by a test.
+- **`AutopilotContextPath` in `openapi/openapi.yaml` had drifted.** It inlined
+  its own copy of the context enum and never got `show_growth` or
+  `growth_metrics`, so the published contract rejected path values the API has
+  accepted since Phase 1. It now `$ref`s `AutopilotContext`, which makes the
+  drift structurally impossible; a test asserts it holds no inline `enum`.
+  **Add this parameter to the Phase 1d contract-surface list.**
+- `scripts/test_growth_metrics_v1.py` asserted its own migration's constraints
+  *equal* the Rust enum. A migration is history and may legitimately be behind
+  a later one, so it now asserts subset; the newest context migration owns the
+  equality claim.
+
+### 3b — application (NEXT)
+
+- `AutopilotGrowthDebtRepository` port (or an added method on the existing
+  decision repository — decide by whether the loaders need their own trait to
+  keep `decisions.rs` under the size ratchet): one
+  `load_growth_debt_observations(workspace_id, now)`.
+- `evaluate/growth_debt.rs` with `growth_debt_candidate()`, mirroring
+  `growth_metric_candidate`. `decision_key` must change with the evidence
+  (policy version, subject, kind, overdue bucket, outstanding count);
+  `action_idempotency_key` must be stable per (subject, kind, cooldown window).
+- `AutopilotActionPayload::RaiseGrowthDebt { subject, kind, reason,
+  recommended_action, overdue_basis_points, outstanding_items, priority,
+  template_key }` → `action_kind` `"growth.debt.raise"`. Remember the OpenAPI
+  action-kind enum.
+- `ActionSubject::BookingTarget` / `OutreachTarget` — check whether they already
+  exist before adding; `Beacon`, `Event` and `ReleasePlan` do.
+
+### 3c — infrastructure
+
+One set-oriented query per debt kind, each returning a `GrowthDebtObservation`
+with `hours_since_last_signal` from `viryaos_autopilot_decisions`. No per-subject
+N+1. `operations/growth_debt.rs`, following `operations/growth_metrics.rs`.
+
+- Relationship quiet: `viryaos_booking_targets` / `viryaos_outreach_targets` /
+  `viryaos_beacons` against the newest row in the matching interaction table,
+  in *either* direction. `tracked_items` is 1.
+- Event levers: `viryaos_show_growth_surfaces` for events still ahead, counting
+  statuses in (`unknown`,`ready`,`manual`,`blocked`) as outstanding against all
+  declared surfaces for the event. `idle_hours` from the oldest `last_checked_at`
+  (or the row's `updated_at` when never checked).
+- Release milestones: `viryaos_release_plans` where `active`, against
+  `viryaos_release_milestones`. The milestone CHECK list (8 values) is the
+  denominator; `idle_hours` from the newest `completed_at`, or from
+  `created_at` when no milestone has ever been recorded.
+
+### 3d — API and contract
+
+`GET /v1/admin/autopilot/growth-debt` read model, ranked, hard-capped. Same
+contract-surface list as 1d, plus the action-kind enum.
+
+### 3e — proof
+
+`make check` + `make ci` green, contract tests extended.
+
+### Open question for the operator — blocking `StaleContactData`
+
+The rule is written and tested but **no adapter can supply it**, because the
+schema has no verification timestamp: `viryaos_outreach_targets.verified` and
+`viryaos_beacons.verified` are booleans, and `updated_at` moves whenever any
+column does, so reading it as "last confirmed" would fabricate evidence.
+
+Two ways forward, and it is an authority decision, not a technical one:
+
+1. Add `contact_verified_at timestamptz` to the target/beacon tables, NULL for
+   every existing row (NULL = never verified = the rule holds, which is already
+   its behaviour). Then decide **what writes it**: a staff endpoint, an operator
+   action, or a side effect of a recorded inbound reply.
+2. Drop the kind until a real verification workflow exists.
+
+Until this is answered, 3c wires the three kinds that have a defensible clock
+and leaves `StaleContactData` unreachable.
 
 ---
 
