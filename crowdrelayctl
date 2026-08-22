@@ -15,6 +15,9 @@ CROWDRELAY_DOCKER_NETWORK="${CROWDRELAY_DOCKER_NETWORK:-crowdrelay}"
 CROWDRELAY_CREATE_NETWORK="${CROWDRELAY_CREATE_NETWORK:-false}"
 CROWDRELAY_PUBLIC_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-}"
 CROWDRELAY_LEDGER_COMMERCE_API_KEY="${CROWDRELAY_LEDGER_COMMERCE_API_KEY:-}"
+CROWDRELAY_CONTROL_PLANE_BASE_URL="${CROWDRELAY_CONTROL_PLANE_BASE_URL:-}"
+CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN="${CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN:-}"
+CROWDRELAY_CONTROL_PLANE_TENANT_SLUG="${CROWDRELAY_CONTROL_PLANE_TENANT_SLUG:-}"
 CROWDRELAY_BACKUP_BEFORE_DEPLOY="${CROWDRELAY_BACKUP_BEFORE_DEPLOY:-false}"
 CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS="${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}"
 CROWDRELAY_AREA_MANAGEMENT_ENABLED="${CROWDRELAY_AREA_MANAGEMENT_ENABLED:-false}"
@@ -43,6 +46,7 @@ Usage: ./crowdrelayctl <command> [args]
   status               Show Compose service status
   deploy               Pull, run setup, start API/worker, verify
   verify               Check local and optional public health endpoints
+  heartbeat            Report runtime status to the Control Plane once
   logs [service]       Follow logs for all services or one service
   resources            Read-only memory/swap report for the production host
   backup               Run crowdrelay_backup hook from local config
@@ -133,6 +137,55 @@ report_release_ledger() {
       echo "Release ledger reporter failed for $component; production deploy remains valid." >&2
     fi
   done
+}
+
+report_control_plane_runtime() {
+  [[ -n "$CROWDRELAY_CONTROL_PLANE_BASE_URL" ]] || return 0
+  [[ -n "$CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN" ]] || return 0
+  [[ -n "$CROWDRELAY_CONTROL_PLANE_TENANT_SLUG" ]] || return 0
+  local reporter="${ROOT_DIR}/scripts/report-control-plane-runtime.sh"
+  if [[ ! -x "$reporter" ]]; then
+    echo "Control Plane runtime reporter skipped: $reporter is missing or not executable." >&2
+    return 0
+  fi
+
+  # Health is observed, never assumed. A failing probe reports false so the
+  # Control Plane can show degraded; only an unobservable value stays empty,
+  # which the reporter sends as null.
+  local api_healthy worker_healthy outbox_pending worker_id
+  api_healthy=false
+  if compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    http://127.0.0.1:8080/v1/health/ready >/dev/null 2>&1 </dev/null; then
+    api_healthy=true
+  fi
+
+  worker_healthy=""
+  worker_id="$(compose ps -q worker 2>/dev/null || true)"
+  if [[ -n "$worker_id" ]]; then
+    case "$(docker inspect "$worker_id" --format '{{.State.Health.Status}}' 2>/dev/null || true)" in
+      healthy) worker_healthy=true ;;
+      "") worker_healthy="" ;;
+      *) worker_healthy=false ;;
+    esac
+  fi
+
+  # /metrics is only bound inside the compose network, so scrape it the same way
+  # verify() reaches the readiness probe rather than over the public origin.
+  outbox_pending="$(compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    http://127.0.0.1:8080/metrics 2>/dev/null </dev/null \
+    | awk '$1 == "crowdrelay_outbox_pending" { print $2; exit }' || true)"
+  [[ "$outbox_pending" =~ ^[0-9]+$ ]] || outbox_pending=""
+
+  if ! CONTROL_PLANE_BASE_URL="$CROWDRELAY_CONTROL_PLANE_BASE_URL" \
+    CONTROL_PLANE_TELEMETRY_TOKEN="$CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN" \
+    CONTROL_PLANE_TENANT_SLUG="$CROWDRELAY_CONTROL_PLANE_TENANT_SLUG" \
+    API_HEALTHY="$api_healthy" \
+    WORKER_HEALTHY="$worker_healthy" \
+    DEPLOYED_SHA="$CROWDRELAY_IMAGE_SHA" \
+    OUTBOX_PENDING="$outbox_pending" \
+    "$reporter"; then
+    echo "Control Plane runtime report failed; production deploy remains valid." >&2
+  fi
 }
 
 compose() {
@@ -403,6 +456,7 @@ deploy() {
   run_hook crowdrelay_before_verify
   verify
   report_release_ledger
+  report_control_plane_runtime
   run_hook crowdrelay_after_deploy
   run_hook crowdrelay_notify "CrowdRelay deployed: sha-${CROWDRELAY_IMAGE_SHA}"
 }
@@ -617,6 +671,9 @@ case "$command" in
     else
       compose logs --follow --tail=200
     fi
+    ;;
+  heartbeat)
+    report_control_plane_runtime
     ;;
   resources)
     resources
