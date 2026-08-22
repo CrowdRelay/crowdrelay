@@ -165,15 +165,19 @@ authority ladder.
   and `scripts/test_release_hardening_20260819.py` need PyYAML. Without it they
   report an import error that has nothing to do with the code under test.
 
-### 1e — proof (IN PROGRESS)
+### 1e — proof (DONE)
 
-- `make check` and `make ci` green, including the 365 contract tests.
-- Still to add: a contract test asserting `growth_metrics` is provisioned
-  disabled and at `observe`, and that the three context CHECK constraints in the
-  migration agree with `AutopilotContext`.
-- Still to add: application-level tests for `growth_metric_candidate` covering
-  the decision key changing with the evidence and the action key being stable
-  within a cooldown window but not across windows.
+- `make check` and `make ci` green.
+- `scripts/test_growth_metrics_v1.py` (8 tests): the tables exist, observations
+  are unique per capture time, no derived movement is stored beside the
+  observations, every provisioning statement supplies only the quota so the
+  context arrives disabled and observing, and the three database context CHECK
+  constraints match `AutopilotContext` exactly.
+- `crates/crowdrelay-application/src/autopilot/evaluate/growth_metrics_tests.rs`
+  (7 tests): a `recommend` policy never produces `auto_execute`, the decision
+  key changes with the evidence and with the policy version, the action key is
+  stable inside a cooldown window and different across windows, a mismatched
+  policy config yields no candidate, and confidence below the floor is denied.
 
 ---
 
