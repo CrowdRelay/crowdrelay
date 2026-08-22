@@ -454,24 +454,79 @@ and leaves `StaleContactData` unreachable.
 
 ---
 
-## Phase 4 — one prioritized Next Best Action queue
+## Phase 4 — one prioritized Next Best Action queue (DONE)
 
-- `GET /v1/admin/autopilot/next-best-actions` — a single ranked queue across
-  every context, not a per-context list.
-- Ranking inputs, in order: authority state (awaiting approval outranks
-  observed), deadline proximity, `value_tier` of the affected metric, measured
-  effect of the same action kind in the past (Phase 5), confidence, deviation
-  magnitude.
-- Hard cap the response. The point is the top handful, not thirty suggestions.
-- ~~Extend the `load_chief_of_staff` opportunity query's context allow-list to
-  include `growth_metrics`~~ — done in Phase 3d, for both `growth_metrics` and
-  `growth_debt`. Any context added after this must be added there too, or its
-  decisions never reach the operator brief.
-- Each entry carries: reason, priority, expected impact (as measured deviation,
-  never an invented currency amount), recommended action, authority, and what
-  would happen if it is ignored.
+`GET /v1/admin/autopilot/next-best-actions`, admin-only, no filters and no page
+size — the domain caps it at 10, so there is nothing for a caller to get wrong.
 
----
+### The ranking is lexicographic, not a weighted score
+
+This is the decision worth not re-litigating. A weighted sum is easy to write
+and impossible to explain: an operator cannot tell why a suggestion landed
+where it did, a small weight change silently reorders everything, and a good
+past record can buy its way past a live deadline. Ordered tiers let every entry
+name the single factor that decided its position against its neighbour, which
+is also what makes the Phase 7 adjustment auditable rather than magic.
+
+Order, highest first, exactly as this plan fixed it: authority state, deadline
+proximity, value tier, measured effect, confidence, deviation magnitude. Ties
+break on `(subject_id, decision_kind)` so the same evidence always produces the
+same queue — one that reshuffles between two reads is one an operator stops
+trusting.
+
+### Files
+
+- `crates/crowdrelay-domain/src/next_best_action.rs` — `AuthorityState`,
+  `MeasuredEffect`, `QueueCandidate`, `RankFactor`, `RankedAction`,
+  `rank_next_best_actions`, `MAX_QUEUE_ENTRIES = 10`. 13 unit tests.
+- `crates/crowdrelay-application/src/autopilot/control.rs` — the `NextBestAction`
+  view; `control/runtime_ports.rs` — `load_next_best_actions` on
+  `AutopilotControlRepository`, beside `load_chief_of_staff`.
+- `crates/crowdrelay-infra/src/autopilot/operations/next_best_action.rs` — one
+  query over decisions + their newest action + the subject's own date, capped at
+  200 candidates before ranking.
+- `crates/crowdrelay-api/src/autopilot.rs` + `routing.rs`, `openapi/openapi.yaml`
+  (path + `NextBestAction` schema), `scripts/test_next_best_actions_v1.py`
+  (14 tests).
+
+### Decisions taken while building it
+
+- **Auto-executing work ranks last, not first.** Nobody is blocked on it. The
+  queue is a human's list, and surfacing already-handled work at the top is how
+  a queue becomes noise.
+- **Denied decisions never enter.** The gate refused them; listing them as work
+  to do invites overriding a policy from a list view.
+- **An expired deadline ranks below every live one**, above nothing. It cannot
+  be met, and putting unrecoverable work above recoverable is the worst possible
+  ordering.
+- **An unknown value tier ranks as `Intermediate`, not `Vanity`.** Absent
+  evidence is not evidence of low value.
+- **Only the newest decision per (subject, decision kind) is shown.** Every
+  cycle writes a new decision row when the evidence moves; without this the
+  queue fills with the same finding.
+- **Deadlines are only ever real dates** — `events.starts_at`,
+  `viryaos_release_plans.release_at`, `viryaos_team_opportunities.deadline`, or
+  the action's own `approval_expires_at`. No fallback, no synthesized urgency.
+- **Expected impact is a measured deviation in basis points, never a currency
+  amount.** The system does not know what a stalled channel is worth, and a
+  plausible figure would be the most convincing lie in the whole response.
+- `measured_effect` is wired into the comparator but always `None` until Phase 5
+  records growth outcomes. The slot exists so Phase 7 changes *data*, not the
+  comparator — reordering the tiers later would invalidate every explanation an
+  operator had already read.
+
+### Correction to the Phase 1d contract-surface list
+
+`SCHEMA_VERSION` in `crates/crowdrelay-api/src/meta.rs` tracks **the latest
+migration number**, not the API surface. Six contract tests assert it. Bumping
+it for an endpoint that ships no migration fails the gate; leaving it alone when
+a migration lands fails the same tests. It is 74 today, matching migration 0074.
+
+### Not runtime-verified
+
+Same gap as Phase 3c: no Docker daemon on the machine that wrote this, so the
+query has never run against a real Postgres. `make db-up && make migrate`, then
+read the queue on real VIRYA data, before trusting it.
 
 ## Phase 5 — measurement and honest attribution
 

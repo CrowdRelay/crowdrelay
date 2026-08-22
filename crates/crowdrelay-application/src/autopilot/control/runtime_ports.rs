@@ -63,6 +63,17 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<AutopilotChiefOfStaff, RepositoryError>;
 
+    /// One ranked queue across every context, already capped by the domain.
+    ///
+    /// Separate from `load_chief_of_staff` because the brief answers "what
+    /// happened" and this answers "what should I do next" — they are read at
+    /// different moments and the queue must stay short enough to work through.
+    async fn load_next_best_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<NextBestAction>, RepositoryError>;
+
     async fn load_manager_booking_policy(
         &self,
         workspace_id: WorkspaceId,

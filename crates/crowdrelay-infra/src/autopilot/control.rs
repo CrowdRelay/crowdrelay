@@ -294,6 +294,15 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_next_best_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<NextBestAction>, RepositoryError> {
+        self.bounded(operations::load_next_best_actions(self, workspace_id, now))
+            .await
+    }
+
     async fn load_manager_booking_policy(
         &self,
         workspace_id: WorkspaceId,

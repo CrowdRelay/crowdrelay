@@ -14,6 +14,7 @@ use crowdrelay_domain::{
     growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
+    next_best_action::{AuthorityState, RankFactor},
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
 };
 use serde::{Deserialize, Serialize, Serializer};
@@ -225,6 +226,36 @@ pub struct ChiefOfStaffOpportunity {
     pub confidence: Confidence,
     pub reason: String,
     pub needs_approval: bool,
+}
+
+/// One entry of the cross-context Next Best Action queue.
+///
+/// A view, not a stored row: every field is read from a decision, its action
+/// payload or the subject's own date. Nothing here is denormalized into a table,
+/// so the queue can never disagree with the evidence it came from.
+#[derive(Clone, Debug, Serialize)]
+pub struct NextBestAction {
+    pub position: u8,
+    pub context: AutopilotContext,
+    pub decision_kind: String,
+    pub subject_kind: String,
+    pub subject_id: uuid::Uuid,
+    pub authority: AuthorityState,
+    pub confidence: Confidence,
+    pub reason: String,
+    pub recommended_action: String,
+    /// The factor that decided this entry's position against its neighbour.
+    pub ranked_by: RankFactor,
+    /// What happens if this entry is ignored — a statement about the system's
+    /// own behaviour, never a predicted business outcome.
+    pub consequence: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub due_at: Option<OffsetDateTime>,
+    pub value_tier: Option<MetricValueTier>,
+    /// Measured deviation or overdue ratio in basis points. Deliberately not a
+    /// currency amount: the system does not know what a stalled channel is
+    /// worth, and a plausible figure would be the most convincing lie here.
+    pub deviation_basis_points: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
