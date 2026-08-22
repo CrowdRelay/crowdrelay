@@ -504,3 +504,267 @@ impl AutopilotGrowthMetricRepository for PostgresAutopilotRepository {
         .await
     }
 }
+
+/// First-party series CrowdRelay maintains itself. Declared here rather than in
+/// the database so the shape of a system-owned series stays reviewable in one
+/// place, and so an operator cannot silently retarget one by editing a row.
+///
+/// The cadence is deliberately looser than the write rate: points are recorded
+/// hourly, but a six-hour expectation means an ordinary worker restart or a
+/// short outage does not read as a dead feed.
+const FIRST_PARTY_INTERVAL_HOURS: i32 = 6;
+
+impl PostgresAutopilotRepository {
+    /// Declares the per-event ticketing series for every event currently worth
+    /// tracking, and retires the ones that have aged out.
+    ///
+    /// Retiring matters as much as declaring: a series for a show that finished
+    /// months ago would stop receiving points and then be reported as a dead
+    /// feed forever, which is noise dressed up as a finding.
+    async fn sync_event_ticketing_series(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(u32, u32), RepositoryError> {
+        let workspace = workspace_id.into_uuid();
+        let tracked = sqlx::query_scalar::<_, i64>(
+            r#"
+            WITH tracked AS (
+                INSERT INTO viryaos_growth_metric_series (
+                    workspace_id, platform, metric_key, subject_kind, subject_id,
+                    display_name, direction, value_tier, expected_interval_hours, active
+                )
+                SELECT
+                    event.workspace_id,
+                    'ticketing',
+                    metric.metric_key,
+                    'event',
+                    event.id,
+                    left(metric.label || ' — ' || event.title, 120),
+                    'higher_is_better',
+                    'downstream',
+                    $3,
+                    true
+                FROM events AS event
+                CROSS JOIN (VALUES
+                    ('paid_tickets', 'Paid tickets'),
+                    ('paid_buyers', 'Paid buyers')
+                ) AS metric(metric_key, label)
+                WHERE event.workspace_id = $1
+                  AND event.status IN ('published', 'completed')
+                  AND event.starts_at >= $2 - INTERVAL '30 days'
+                  AND event.starts_at <= $2 + INTERVAL '365 days'
+                ON CONFLICT (workspace_id, platform, metric_key, subject_kind, subject_id)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    active = true
+                RETURNING 1
+            )
+            SELECT count(*)::bigint FROM tracked
+            "#,
+        )
+        .bind(workspace)
+        .bind(now)
+        .bind(FIRST_PARTY_INTERVAL_HOURS)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+
+        let retired = sqlx::query_scalar::<_, i64>(
+            r#"
+            WITH retired AS (
+                UPDATE viryaos_growth_metric_series AS series
+                SET active = false
+                WHERE series.workspace_id = $1
+                  AND series.platform = 'ticketing'
+                  AND series.subject_kind = 'event'
+                  AND series.active
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM events AS event
+                      WHERE event.workspace_id = series.workspace_id
+                        AND event.id = series.subject_id
+                        AND event.status IN ('published', 'completed')
+                        AND event.starts_at >= $2 - INTERVAL '30 days'
+                        AND event.starts_at <= $2 + INTERVAL '365 days'
+                  )
+                RETURNING 1
+            )
+            SELECT count(*)::bigint FROM retired
+            "#,
+        )
+        .bind(workspace)
+        .bind(now)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok((
+            u32::try_from(tracked).unwrap_or(u32::MAX),
+            u32::try_from(retired).unwrap_or(u32::MAX),
+        ))
+    }
+
+    /// Declares the workspace-level series. These have no subject, which is why
+    /// the series uniqueness has to treat NULL subjects as equal.
+    async fn sync_workspace_series(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        workspace_id: WorkspaceId,
+    ) -> Result<u32, RepositoryError> {
+        let tracked = sqlx::query_scalar::<_, i64>(
+            r#"
+            WITH tracked AS (
+                INSERT INTO viryaos_growth_metric_series (
+                    workspace_id, platform, metric_key, subject_kind, subject_id,
+                    display_name, direction, value_tier, expected_interval_hours, active
+                )
+                SELECT $1, metric.platform, metric.metric_key, NULL, NULL,
+                       metric.label, 'higher_is_better', 'downstream', $2, true
+                FROM (VALUES
+                    ('signal', 'active_fans', 'Active fans'),
+                    ('merch', 'paid_orders', 'Paid merch orders')
+                ) AS metric(platform, metric_key, label)
+                ON CONFLICT (workspace_id, platform, metric_key, subject_kind, subject_id)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    active = true
+                RETURNING 1
+            )
+            SELECT count(*)::bigint FROM tracked
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(FIRST_PARTY_INTERVAL_HOURS)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(u32::try_from(tracked).unwrap_or(u32::MAX))
+    }
+}
+
+#[async_trait]
+impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
+    async fn materialize_first_party_growth_metrics(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<FirstPartyGrowthMetricReport, RepositoryError> {
+        self.bounded(async {
+            let workspace = workspace_id.into_uuid();
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+
+            let (event_series, series_retired) = self
+                .sync_event_ticketing_series(&mut transaction, workspace_id, now)
+                .await?;
+            let workspace_series = self
+                .sync_workspace_series(&mut transaction, workspace_id)
+                .await?;
+
+            // Observations are bucketed to the top of the hour and inserted with
+            // DO NOTHING. The worker cycle is far shorter than an hour, so
+            // without a bucket every cycle would append a near-duplicate point
+            // and the window would describe our polling rate rather than the
+            // business.
+            let event_points = sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH recorded AS (
+                    INSERT INTO viryaos_growth_metric_points (
+                        workspace_id, series_id, captured_at, value, source
+                    )
+                    SELECT series.workspace_id, series.id, date_trunc('hour', $2::timestamptz),
+                           CASE series.metric_key
+                               WHEN 'paid_tickets' THEN COALESCE(sold.paid_tickets, 0)
+                               ELSE COALESCE(sold.paid_buyers, 0)
+                           END,
+                           'crowdrelay'
+                    FROM viryaos_growth_metric_series AS series
+                    JOIN events AS event
+                      ON event.workspace_id = series.workspace_id
+                     AND event.id = series.subject_id
+                    LEFT JOIN ticket_sales AS sale
+                      ON sale.workspace_id = event.workspace_id
+                     AND sale.event_id = event.id
+                     AND sale.active
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            COALESCE(SUM(item.quantity) FILTER (
+                                WHERE orders.status IN ('paid', 'partially_refunded')
+                            ), 0)::bigint AS paid_tickets,
+                            COUNT(DISTINCT orders.buyer_email) FILTER (
+                                WHERE orders.status IN ('paid', 'partially_refunded')
+                            )::bigint AS paid_buyers
+                        FROM ticket_orders AS orders
+                        JOIN ticket_order_items AS item
+                          ON item.workspace_id = orders.workspace_id
+                         AND item.ticket_order_id = orders.id
+                        WHERE orders.workspace_id = event.workspace_id
+                          AND orders.ticket_sale_id = sale.id
+                    ) AS sold ON true
+                    WHERE series.workspace_id = $1
+                      AND series.platform = 'ticketing'
+                      AND series.subject_kind = 'event'
+                      AND series.active
+                    ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
+                    RETURNING 1
+                )
+                SELECT count(*)::bigint FROM recorded
+                "#,
+            )
+            .bind(workspace)
+            .bind(now)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            let workspace_points = sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH totals AS (
+                    SELECT
+                        (SELECT count(*)::bigint FROM fans
+                          WHERE workspace_id = $1 AND status = 'active') AS active_fans,
+                        (SELECT count(*)::bigint FROM merch_order_facts
+                          WHERE workspace_id = $1) AS paid_orders
+                ), recorded AS (
+                    INSERT INTO viryaos_growth_metric_points (
+                        workspace_id, series_id, captured_at, value, source
+                    )
+                    SELECT series.workspace_id, series.id, date_trunc('hour', $2::timestamptz),
+                           CASE series.metric_key
+                               WHEN 'active_fans' THEN totals.active_fans
+                               ELSE totals.paid_orders
+                           END,
+                           'crowdrelay'
+                    FROM viryaos_growth_metric_series AS series
+                    CROSS JOIN totals
+                    WHERE series.workspace_id = $1
+                      AND series.subject_kind IS NULL
+                      AND series.active
+                      AND (series.platform, series.metric_key) IN (
+                          ('signal', 'active_fans'),
+                          ('merch', 'paid_orders')
+                      )
+                    ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
+                    RETURNING 1
+                )
+                SELECT count(*)::bigint FROM recorded
+                "#,
+            )
+            .bind(workspace)
+            .bind(now)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(FirstPartyGrowthMetricReport {
+                series_tracked: event_series.saturating_add(workspace_series),
+                series_retired,
+                points_recorded: u32::try_from(event_points.saturating_add(workspace_points))
+                    .unwrap_or(u32::MAX),
+            })
+        })
+        .await
+    }
+}

@@ -139,3 +139,29 @@ pub trait AutopilotGrowthMetricRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthMetricTrendView>, RepositoryError>;
 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct FirstPartyGrowthMetricReport {
+    pub series_tracked: u32,
+    pub series_retired: u32,
+    pub points_recorded: u32,
+}
+
+/// Kept apart from the operator ingress port so the background worker depends
+/// on exactly one method and can never reach the operator write path.
+#[async_trait]
+pub trait AutopilotFirstPartyGrowthMetrics: Send + Sync {
+    /// Records the first-party numbers CrowdRelay already owns as ordinary
+    /// metric observations, so tickets, fans and merch sit on the same timeline
+    /// as anything an external adapter reports.
+    ///
+    /// This exists because the strongest metrics in the system need no provider
+    /// at all: routing them through the ingest endpoint would mean an adapter
+    /// reading our own database back to us, with a delivery failure mode we do
+    /// not have to accept.
+    async fn materialize_first_party_growth_metrics(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<FirstPartyGrowthMetricReport, RepositoryError>;
+}

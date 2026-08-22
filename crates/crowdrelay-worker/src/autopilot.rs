@@ -5,8 +5,8 @@ use std::time::Duration;
 use crowdrelay_application::{
     RepositoryError,
     autopilot::{
-        AutopilotActionRepository, AutopilotMeasurementRepository, EvaluateAutopilot,
-        assess_measurement_effect,
+        AutopilotActionRepository, AutopilotFirstPartyGrowthMetrics,
+        AutopilotMeasurementRepository, EvaluateAutopilot, assess_measurement_effect,
     },
 };
 use crowdrelay_domain::WorkspaceId;
@@ -65,6 +65,30 @@ impl AutopilotWorker {
         // A context-specific query failure must never block already-authorized work
         // or evidence collection from a previous cycle.
         let mut phase_failed = false;
+
+        // Recording first-party observations runs before evaluation so a cycle
+        // reasons about the newest evidence it can. It is a separate phase
+        // because a metric write failing must not stop already-authorized work:
+        // the evaluator simply sees a slightly older window.
+        match self
+            .repository
+            .materialize_first_party_growth_metrics(self.workspace_id, now)
+            .await
+        {
+            Ok(report) if report.points_recorded > 0 || report.series_retired > 0 => {
+                tracing::info!(
+                    series_tracked = report.series_tracked,
+                    series_retired = report.series_retired,
+                    points_recorded = report.points_recorded,
+                    "ViryaOS recorded first-party growth observations"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS first-party growth metric capture failed");
+            }
+        }
 
         let evaluator = EvaluateAutopilot::new(&self.repository, self.workspace_id);
         match evaluator.execute(now).await {
