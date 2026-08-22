@@ -2296,6 +2296,33 @@ paths:
               schema: { $ref: '#/components/schemas/AutopilotChiefOfStaff' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/next-best-actions:
+    get:
+      operationId: getAutopilotNextBestActions
+      summary: Read one prioritized queue across every Autopilot context
+      description: >
+        Returns at most ten entries, ranked lexicographically by authority state, deadline
+        proximity, value tier, measured effect, confidence and deviation magnitude. Each entry
+        states the factor that decided its position and what happens if it is ignored. The
+        response is a derived read model over existing decisions and actions; nothing is stored,
+        and expected impact is always a measured deviation in basis points, never a currency
+        amount.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Ranked next best actions, newest evidence first.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 10
+                items: { $ref: '#/components/schemas/NextBestAction' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/booking-targets/{target_id}/reply:
     post:
       operationId: recordAutopilotBookingReply
@@ -8054,6 +8081,43 @@ components:
         value_minor_delta: { type: integer, format: int64, minimum: 0 }
         observed_at: { type: string, format: date-time }
 
+    NextBestAction:
+      type: object
+      additionalProperties: false
+      required: [position, context, decision_kind, subject_kind, subject_id, authority, confidence, reason, recommended_action, ranked_by, consequence]
+      properties:
+        position: { type: integer, minimum: 1, maximum: 10 }
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        decision_kind: { type: string, maxLength: 96 }
+        subject_kind: { type: string, maxLength: 64 }
+        subject_id: { type: string, format: uuid }
+        authority:
+          type: string
+          enum: [awaiting_approval, recommended, observed, auto_executing]
+        confidence: { type: integer, minimum: 0, maximum: 10000 }
+        reason: { type: string, maxLength: 240 }
+        recommended_action: { type: string, maxLength: 96 }
+        ranked_by:
+          type: string
+          enum: [authority, deadline, value_tier, measured_effect, confidence, magnitude, tie]
+          description: The single factor that decided this entry's position against its neighbour.
+        consequence:
+          type: string
+          maxLength: 240
+          description: >
+            What happens if this entry is ignored. Always a statement about the system's own
+            behaviour, never a predicted business outcome.
+        due_at: { type: string, format: date-time, nullable: true }
+        value_tier:
+          type: string
+          nullable: true
+          enum: [vanity, intermediate, downstream]
+        deviation_basis_points:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: >
+            Measured deviation or overdue ratio. Deliberately not a currency amount.
     ChiefOfStaffOpportunity:
       type: object
       additionalProperties: false

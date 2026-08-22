@@ -51,6 +51,7 @@ pub mod live_opportunities;
 pub mod market_intelligence;
 pub mod merch_bundle;
 pub mod merchandising;
+pub mod next_best_action;
 pub mod outreach;
 pub mod performance;
 pub mod pricing;

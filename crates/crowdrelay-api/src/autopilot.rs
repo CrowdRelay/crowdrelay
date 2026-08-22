@@ -107,6 +107,22 @@ pub async fn chief_of_staff(State(state): State<AppState>, headers: HeaderMap) -
     }
 }
 
+/// One ranked queue across every context.
+///
+/// `chief-of-staff` answers "what happened"; this answers "what should I do
+/// next". The queue is capped by the domain, so this handler has no page size
+/// and no filters to get wrong.
+pub async fn next_best_actions(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_next_best_actions(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(queue) => private_json(StatusCode::OK, queue),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn manager_booking_policy(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match state
         .autopilot

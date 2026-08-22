@@ -596,6 +596,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::chief_of_staff),
         )
         .route(
+            "/v1/admin/autopilot/next-best-actions",
+            get(autopilot::next_best_actions),
+        )
+        .route(
             "/v1/admin/autopilot/manager-config/booking-policy",
             get(autopilot::manager_booking_policy).post(autopilot::set_manager_booking_policy),
         )
