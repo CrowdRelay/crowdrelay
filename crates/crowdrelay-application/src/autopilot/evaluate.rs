@@ -356,3 +356,4 @@ pub enum AutopilotError {
 
 include!("evaluate/candidates.rs");
 include!("evaluate/tests.rs");
+include!("evaluate/growth_metrics_tests.rs");
