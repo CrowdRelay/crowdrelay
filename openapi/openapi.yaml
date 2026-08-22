@@ -6414,8 +6414,7 @@ components:
       name: context
       required: true
       schema:
-        type: string
-        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
+        $ref: '#/components/schemas/AutopilotContext'
     AutopilotActionId:
       in: path
       name: action_id
@@ -7500,7 +7499,7 @@ components:
       enum: [observe, recommend, require_approval, bounded_auto]
     AutopilotContext:
       type: string
-      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth, growth_metrics]
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth, growth_metrics, growth_debt]
     AutopilotDisposition:
       type: string
       enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
@@ -7629,7 +7628,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 18
+          maxItems: 19
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array

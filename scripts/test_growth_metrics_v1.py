@@ -94,7 +94,12 @@ class GrowthMetricsContract(unittest.TestCase):
         )[1]
         self.assertIn("'growth_metrics'", provisioning)
 
-    def test_every_context_check_constraint_matches_the_rust_enum(self) -> None:
+    def test_every_context_check_constraint_is_a_subset_of_the_rust_enum(self) -> None:
+        # This migration is history: a later one may legitimately add contexts
+        # it never knew about, so it cannot be pinned to equality. What it must
+        # never contain is a context the enum does not have — that direction is
+        # drift, and it is the direction that breaks writes at runtime. The
+        # newest context migration owns the equality assertion.
         contexts = self.contexts()
         constraints = re.findall(
             r"ADD CONSTRAINT viryaos_autopilot_\w+_context_check CHECK \(context IN \((.*?)\)\)",
@@ -106,7 +111,8 @@ class GrowthMetricsContract(unittest.TestCase):
         )
         for constraint in constraints:
             allowed = set(re.findall(r"'([a-z0-9_]+)'", constraint))
-            self.assertEqual(
+            self.assertIn("growth_metrics", allowed)
+            self.assertLessEqual(
                 allowed,
                 contexts,
                 "database context constraint drifted from AutopilotContext",

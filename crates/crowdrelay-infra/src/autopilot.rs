@@ -59,6 +59,7 @@ use crowdrelay_domain::{
     content_supply::{ContentSupplyPolicy, ContentSupplySnapshot},
     experimentation::{ExperimentPolicy, ExperimentSnapshot},
     funding::{FundingOpportunitySnapshot, FundingPolicy},
+    growth_debt::GrowthDebtPolicy,
     growth_metrics::{
         GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
         MetricValueTier, compute_trend, velocity_ratio_basis_points,
