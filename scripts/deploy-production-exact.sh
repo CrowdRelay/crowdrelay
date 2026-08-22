@@ -102,17 +102,23 @@ for component in api worker; do
 
   revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
   architecture="$(docker image inspect --format '{{.Architecture}}' "$image" 2>/dev/null || true)"
+  # The release tag is a multi-arch manifest list, so the daemon already
+  # resolved it to this host. The invariant is that the pulled image matches
+  # the host that will run it, not one hardcoded architecture: amd64 on
+  # virya-oracle, arm64 on virya-crowdrelay.
+  host_architecture="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+  [[ -n "$host_architecture" ]] || fail "could not resolve the production host architecture"
 
   [[ "$revision" == "$target" ]] || \
     fail "OCI revision mismatch for $image: got=$revision expected=$target"
-  [[ "$architecture" == "amd64" ]] || \
-    fail "production image architecture mismatch for $image: got=$architecture expected=amd64"
+  [[ "$architecture" == "$host_architecture" ]] || \
+    fail "production image architecture mismatch for $image: got=$architecture expected=$host_architecture"
 
   printf 'EXACT_IMAGE=PASS component=%s revision=%s architecture=%s\n' \
     "$component" "$revision" "$architecture"
 done
 
-printf 'IMAGE_GATE=PASS sha=%s required=api,worker architecture=amd64\n' "$target"
+printf 'IMAGE_GATE=PASS sha=%s required=api,worker architecture=%s\n' "$target" "$host_architecture"
 } </dev/null
 REMOTE_IMAGE_GATE
 

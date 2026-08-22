@@ -39,3 +39,4 @@ n8n/*
 # Local Claude Code context (not part of the product)
 CLAUDE.md
 .claude/
+scripts/migrate-to-virya-crowdrelay.sh
