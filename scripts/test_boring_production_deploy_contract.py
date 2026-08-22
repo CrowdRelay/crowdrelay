@@ -29,7 +29,7 @@ class BoringProductionDeployContract(unittest.TestCase):
             "git fetch --no-tags",
             "git merge --ff-only",
             "OCI revision mismatch",
-            "architecture=amd64",
+            "production image architecture mismatch",
             "github-auth-on-server=none",
         ):
             self.assertIn(token, DEPLOY)
@@ -56,7 +56,10 @@ class BoringProductionDeployContract(unittest.TestCase):
             DEPLOY.index('*"no matching manifest"*'),
             DEPLOY.index('*"manifest unknown"*'),
         )
-        self.assertIn('[[ "$architecture" == "amd64" ]]', DEPLOY)
+        # The gate binds the image to the host that runs it rather than to a
+        # fixed architecture, so one deploy path serves amd64 and arm64 hosts.
+        self.assertIn('[[ "$architecture" == "$host_architecture" ]]', DEPLOY)
+        self.assertIn("{{.Server.Arch}}", DEPLOY)
 
     def test_canonical_ctl_owns_env_interpolation_and_final_runtime_gates(self) -> None:
         self.assertIn('--env-file "$env_file"', CTL)
@@ -92,9 +95,15 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("CROWDRELAY_SAFE_DEPLOY=PASS", SAFE_DEPLOY)
 
     def test_publication_matches_the_real_production_architecture(self) -> None:
-        self.assertIn("*.platform=linux/amd64", PUBLISH)
-        self.assertIn("platforms: linux/amd64", PUBLISH)
-        self.assertNotIn("linux/arm64", PUBLISH)
+        # Production spans both hosts, so a release must carry both platforms
+        # and merge them into one manifest list the deploy tag resolves to.
+        for platform in ("linux/amd64", "linux/arm64"):
+            self.assertIn(f"platform: {platform}", PUBLISH)
+        self.assertIn("*.platform=${{ matrix.platform }}", PUBLISH)
+        self.assertIn("platforms: ${{ matrix.platform }}", PUBLISH)
+        self.assertIn("imagetools create", PUBLISH)
+        # Native runners only: emulating the Rust release build costs hours.
+        self.assertNotIn("setup-qemu-action", PUBLISH)
 
     def test_final_release_identity_is_git_and_runtime_not_public_metadata(self) -> None:
         receipt = DEPLOY.split("Production git/runtime receipt + public health", 1)[1]

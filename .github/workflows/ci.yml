@@ -252,12 +252,22 @@ jobs:
   containers:
     name: Build container targets
     if: github.event_name == 'pull_request'
-    # linux/amd64 is the published production target, so this gate must build
-    # that architecture on a native x86_64 runner. Keeping the PR gate and the
-    # publish workflow on one production platform prevents green CI from
-    # producing an image the production host cannot pull.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # linux/amd64 and linux/arm64 are both published production targets, so this
+    # gate must build each on its own native runner. Keeping the PR gate and the
+    # publish workflow on the same platform set prevents green CI from producing
+    # a release one of the production hosts cannot pull.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -287,9 +297,9 @@ jobs:
       # this job the writing cache-to export as well.
       - name: Build both runtime targets once
         env:
-          BUILD_CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
+          BUILD_CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache:${{ matrix.arch }}
         run: |
           docker buildx bake --file docker-bake.hcl \
-            --set '*.platform=linux/amd64' \
+            --set '*.platform=${{ matrix.platform }}' \
             --set "*.cache-from=type=registry,ref=${BUILD_CACHE_REF}" \
             --set '*.output=type=cacheonly'

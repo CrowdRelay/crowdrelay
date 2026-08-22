@@ -11,7 +11,9 @@ DISPLAY_NAME="${CROWDRELAY_INSTANCE_NAME:-virya-crowdrelay}"
 SHAPE="${CROWDRELAY_INSTANCE_SHAPE:-VM.Standard.A1.Flex}"
 OCPUS="${CROWDRELAY_INSTANCE_OCPUS:-2}"
 MEMORY_GB="${CROWDRELAY_INSTANCE_MEMORY_GB:-12}"
-AD_SUFFIX="${CROWDRELAY_INSTANCE_AD_SUFFIX:-AD-2}"
+# Comma-separated, tried in order. Always-free Ampere capacity is scarce and
+# appears in whichever availability domain happens to have a free host.
+AD_SUFFIXES="${CROWDRELAY_INSTANCE_AD_SUFFIX:-AD-2,AD-1,AD-3}"
 SUBNET_NAME="${CROWDRELAY_INSTANCE_SUBNET:-subnet-20260724-2110}"
 OS_NAME="${CROWDRELAY_INSTANCE_OS:-Canonical Ubuntu}"
 OS_VERSION="${CROWDRELAY_INSTANCE_OS_VERSION:-24.04}"
@@ -53,11 +55,12 @@ existing="$(oci compute instance list --compartment-id "$COMPARTMENT" --display-
   --query 'data[?"lifecycle-state"!=`TERMINATED` && "lifecycle-state"!=`TERMINATING`].id | [0]' --raw-output)"
 
 launch_instance() {
-  note "resolving availability domain ending in $AD_SUFFIX"
+  local ad_suffix="$1"
+  note "resolving availability domain ending in $ad_suffix"
   local availability_domain
   availability_domain="$(oci iam availability-domain list --compartment-id "$COMPARTMENT" \
-    --query "data[?ends_with(name, \`$AD_SUFFIX\`)].name | [0]" --raw-output)"
-  [[ -n "$availability_domain" && "$availability_domain" != null ]] || fail "no availability domain matching $AD_SUFFIX"
+    --query "data[?ends_with(name, \`$ad_suffix\`)].name | [0]" --raw-output)"
+  [[ -n "$availability_domain" && "$availability_domain" != null ]] || fail "no availability domain matching $ad_suffix"
 
   note "resolving subnet $SUBNET_NAME"
   local subnet_id
@@ -124,13 +127,26 @@ if [[ -n "$existing" && "$existing" != null ]]; then
   note "instance already exists, reusing: $existing"
   INSTANCE_ID="$existing"
 else
+  IFS=',' read -r -a ad_list <<<"$AD_SUFFIXES"
+  (( ${#ad_list[@]} > 0 )) || fail 'CROWDRELAY_INSTANCE_AD_SUFFIX must name at least one availability domain'
+  INSTANCE_ID=''
   attempt=0
-  until INSTANCE_ID="$(launch_instance)"; do
-    # "Out of host capacity" is the normal failure for always-free Ampere shapes.
-    (( attempt++ < RETRIES )) || fail "launch failed after $((attempt)) attempt(s)"
-    note "launch failed, retrying in ${RETRY_SLEEP}s ($attempt/$RETRIES)"
+  while :; do
+    for ad in "${ad_list[@]}"; do
+      # Status must come from the script, not from a pipeline: piping this into
+      # a filter would report the filter's exit code and fake a success.
+      if INSTANCE_ID="$(launch_instance "$ad")"; then
+        break 2
+      fi
+      INSTANCE_ID=''
+      # "Out of host capacity" is the normal failure for always-free Ampere shapes.
+      note "launch failed in $ad"
+    done
+    (( attempt++ < RETRIES )) || fail "launch failed after $attempt round(s) over ${AD_SUFFIXES}"
+    note "retrying all availability domains in ${RETRY_SLEEP}s (round $attempt/$RETRIES)"
     sleep "$RETRY_SLEEP"
   done
+  [[ -n "$INSTANCE_ID" ]] || fail 'launch reported success without an instance OCID'
 fi
 
 PUBLIC_IP="$(oci compute instance list-vnics --instance-id "$INSTANCE_ID" \

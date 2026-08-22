@@ -58,25 +58,31 @@ else:
     ):
         if contract not in ci_text:
             failures.append(f".github/workflows/ci.yml: dependency-security contract missing: {contract}")
-    # The container gate must exercise the same linux/amd64 platform that is
-    # published for production, and it must do so on the native x86_64 hosted
-    # runner rather than accidentally drifting back to an arm64-only contract.
+    # The container gate must exercise every platform that is published for
+    # production, each on its own native runner. Dropping a platform here lets
+    # a pull request go green while breaking the host that runs it.
     containers_marker = "  containers:\n"
     if containers_marker not in ci_text:
         failures.append(".github/workflows/ci.yml: containers job is required")
     else:
         containers_text = ci_text.split(containers_marker, 1)[1]
-        if "--set '*.platform=linux/amd64'" not in containers_text:
+        if "--set '*.platform=${{ matrix.platform }}'" not in containers_text:
             failures.append(
-                ".github/workflows/ci.yml: container gate must build linux/amd64"
+                ".github/workflows/ci.yml: container gate must build the matrix platform"
             )
-        if "runs-on: ubuntu-24.04\n" not in containers_text:
+        for platform in ("linux/amd64", "linux/arm64"):
+            if f"platform: {platform}\n" not in containers_text:
+                failures.append(
+                    f".github/workflows/ci.yml: container gate must cover {platform}"
+                )
+        for runner in ("ubuntu-24.04", "ubuntu-24.04-arm"):
+            if f"runner: {runner}\n" not in containers_text:
+                failures.append(
+                    f".github/workflows/ci.yml: container gate must run natively on {runner}"
+                )
+        if "setup-qemu-action" in containers_text:
             failures.append(
-                ".github/workflows/ci.yml: amd64 container gate must run on native ubuntu-24.04"
-            )
-        if "ubuntu-24.04-arm" in containers_text:
-            failures.append(
-                ".github/workflows/ci.yml: arm64 runner forbidden for amd64 production container gate"
+                ".github/workflows/ci.yml: emulated container gate forbidden; use native runners"
             )
 
 security_workflow = workflow_dir / "security.yml"
