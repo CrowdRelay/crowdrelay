@@ -23,6 +23,7 @@ CANDIDATE = (
     ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/growth_debt.rs"
 )
 ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs"
+CHIEF = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/chief.rs"
 OPENAPI = ROOT / "openapi/openapi.yaml"
 
 
@@ -193,6 +194,15 @@ class GrowthDebtContract(unittest.TestCase):
         actions = read(ACTIONS)
         arm = actions.split("AutopilotActionPayload::RaiseGrowthDebt { .. } => {", 1)[1]
         self.assertEqual(arm.split("}", 1)[0].strip().count("await"), 0)
+
+    def test_growth_findings_reach_the_existing_operator_brief(self) -> None:
+        # The chief-of-staff opportunity query filters by context. A detector
+        # missing from that list produces decisions nobody ever sees, which is
+        # indistinguishable from not having built it.
+        chief = read(CHIEF)
+        allow_list = chief.split("AND decision.context IN (", 1)[1].split(")", 1)[0]
+        self.assertIn("'growth_debt'", allow_list)
+        self.assertIn("'growth_metrics'", allow_list)
 
     def test_the_action_kind_fits_the_published_contract(self) -> None:
         # `action_kind` is a free-form bounded string in the contract, not an
