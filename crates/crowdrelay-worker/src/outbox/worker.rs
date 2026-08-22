@@ -18,7 +18,7 @@ use super::{
     SecretProvider, SecretProviderErrorKind,
     backoff::retry_delay,
     model::{AttemptOutcome, AttemptResolution, DeliveryClaim, OutboxEventClaim},
-    repository::{PgOutboxStore, StoreError},
+    repository::{EligibilityTarget, PgOutboxStore, StoreError, eligibility_target},
     transport::{DispatchDisposition, DispatchResult, TransportBuildError, WebhookDispatcher},
 };
 
@@ -164,11 +164,13 @@ impl OutboxWorker {
             .await?;
         stats.deliveries_claimed = delivery_claims.len() as u64;
 
+        let eligibility = self.resolve_eligibility(&delivery_claims).await;
+
         let mut tasks = JoinSet::new();
-        for claim in delivery_claims {
+        for (claim, decision) in delivery_claims.into_iter().zip(eligibility) {
             let worker = self.clone();
             let task_shutdown = shutdown.clone();
-            tasks.spawn(async move { worker.dispatch_one(claim, task_shutdown).await });
+            tasks.spawn(async move { worker.dispatch_one(claim, decision, task_shutdown).await });
         }
 
         while let Some(result) = tasks.join_next().await {

@@ -86,6 +86,14 @@ impl PostgresMobileFanRepository {
         self.bounded(self.request_city_inner(command)).await
     }
 
+    /// Records the fan's nearby-gig preference against the city they signed up
+    /// for.
+    ///
+    /// City slugs are only unique per country (`cities UNIQUE (country_code,
+    /// slug)`), so the slug alone cannot identify a city. The interest row the
+    /// signup transaction wrote was resolved against the configured country,
+    /// so joining it keeps this write on the same city instead of matching a
+    /// same-slug city in another country.
     pub async fn upsert_fan_location_preference(
         &self,
         fan_id: FanId,
@@ -101,6 +109,10 @@ impl PostgresMobileFanRepository {
                 )
                 SELECT $1, $2, cities.id, $4, $5
                 FROM cities
+                INNER JOIN fan_city_interests AS interest
+                    ON interest.city_id = cities.id
+                    AND interest.workspace_id = $1
+                    AND interest.fan_id = $2
                 WHERE cities.slug = $3
                 ON CONFLICT (workspace_id, fan_id) DO UPDATE
                 SET city_id = EXCLUDED.city_id,

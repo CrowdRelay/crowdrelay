@@ -218,11 +218,10 @@ pub async fn redirect_smart_link(
             .private()
             .into_response();
     };
-    let Some(link) = state
-        .acquisition
-        .redirect_cache
-        .resolve(state.acquisition.workspace_id, &slug)
-    else {
+    // The snapshot Arc is held for the whole handler, so the redirect reads one
+    // consistent view without copying the smart-link on every request.
+    let snapshot = state.acquisition.redirect_cache.snapshot();
+    let Some(link) = snapshot.resolve(state.acquisition.workspace_id, &slug) else {
         return Problem::not_found(request_id(&headers))
             .private()
             .into_response();
@@ -231,7 +230,7 @@ pub async fn redirect_smart_link(
     let visitor_id = attribution_visitor(&headers).unwrap_or_default();
     let referrer_host = referrer_host(&headers);
     match ClickEvent::from_link(
-        &link,
+        link,
         Some(visitor_id),
         referrer_host,
         OffsetDateTime::now_utc(),

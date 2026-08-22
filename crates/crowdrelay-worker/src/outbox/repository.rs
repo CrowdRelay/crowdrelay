@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -6,6 +6,48 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::model::{AttemptResolution, DeliveryClaim, OutboxEventClaim};
+
+/// Recipient gate for one delivery, derived from the event type and payload
+/// alone, before any database read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EligibilityTarget {
+    /// The event type carries no recipient gate.
+    NotGated,
+    /// The payload named a fan whose current state decides eligibility.
+    Fan { fan_id: Uuid, require_consent: bool },
+    /// The event type gates on a fan the payload did not name usably.
+    MissingRecipient,
+}
+
+/// Classifies a delivery's recipient gate.
+///
+/// Event types outside the gated set are always eligible; a gated type whose
+/// payload carries no parseable fan ID is never eligible.
+pub(super) fn eligibility_target(event_type: &str, payload: &Value) -> EligibilityTarget {
+    let (raw_fan_id, require_consent) = match event_type {
+        "event.reminder_due" => (payload.get("fan_id").and_then(Value::as_str), false),
+        "event.announcement_due" => (
+            payload
+                .get("fan")
+                .and_then(|fan| fan.get("id"))
+                .and_then(Value::as_str),
+            true,
+        ),
+        "viryaos.fan_lifecycle.message_requested" => {
+            (payload.get("fan_id").and_then(Value::as_str), true)
+        }
+        _ => return EligibilityTarget::NotGated,
+    };
+
+    raw_fan_id
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .map_or(EligibilityTarget::MissingRecipient, |fan_id| {
+            EligibilityTarget::Fan {
+                fan_id,
+                require_consent,
+            }
+        })
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct PgOutboxStore {
@@ -287,79 +329,76 @@ impl PgOutboxStore {
         Ok(claims)
     }
 
+    /// Resolves recipient eligibility for a whole claimed batch in one query.
+    ///
+    /// Returns one entry per active fan among `recipients`, carrying whether
+    /// that fan's latest marketing consent is granted. A missing entry means
+    /// the fan is not active and is therefore never eligible.
+    pub async fn active_fan_marketing_consent(
+        &self,
+        recipients: &[(Uuid, Uuid)],
+    ) -> Result<HashMap<(Uuid, Uuid), bool>, StoreError> {
+        if recipients.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let (workspace_ids, fan_ids): (Vec<Uuid>, Vec<Uuid>) =
+            recipients.iter().copied().unzip();
+
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
+            r#"
+            SELECT
+                fan.workspace_id,
+                fan.id,
+                COALESCE((
+                    SELECT consent.granted
+                    FROM fan_consents AS consent
+                    WHERE consent.workspace_id = fan.workspace_id
+                      AND consent.fan_id = fan.id
+                      AND consent.purpose = 'marketing'
+                    ORDER BY consent.recorded_at DESC, consent.id DESC
+                    LIMIT 1
+                ), false)
+            FROM fans AS fan
+            JOIN unnest($1::uuid[], $2::uuid[])
+                AS requested(workspace_id, fan_id)
+                ON requested.workspace_id = fan.workspace_id
+                AND requested.fan_id = fan.id
+            WHERE fan.status = 'active'
+            "#,
+        )
+        .bind(&workspace_ids)
+        .bind(&fan_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(workspace_id, fan_id, granted)| ((workspace_id, fan_id), granted))
+            .collect())
+    }
+
     pub async fn delivery_is_eligible(
         &self,
         workspace_id: Uuid,
         event_type: &str,
         payload: &Value,
     ) -> Result<bool, StoreError> {
-        let fan_id = match event_type {
-            "event.reminder_due" => payload
-                .get("fan_id")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok()),
-            "event.announcement_due" => payload
-                .get("fan")
-                .and_then(|fan| fan.get("id"))
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok()),
-            "viryaos.fan_lifecycle.message_requested" => payload
-                .get("fan_id")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok()),
-            _ => return Ok(true),
-        };
-        let Some(fan_id) = fan_id else {
-            return Ok(false);
-        };
-
-        if matches!(
-            event_type,
-            "event.announcement_due" | "viryaos.fan_lifecycle.message_requested"
-        ) {
-            return sqlx::query_scalar::<_, bool>(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM fans AS fan
-                    JOIN LATERAL (
-                        SELECT consent.granted
-                        FROM fan_consents AS consent
-                        WHERE consent.workspace_id = fan.workspace_id
-                          AND consent.fan_id = fan.id
-                          AND consent.purpose = 'marketing'
-                        ORDER BY consent.recorded_at DESC, consent.id DESC
-                        LIMIT 1
-                    ) AS latest_consent ON latest_consent.granted
-                    WHERE fan.workspace_id = $1
-                      AND fan.id = $2
-                      AND fan.status = 'active'
-                )
-                "#,
-            )
-            .bind(workspace_id)
-            .bind(fan_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(StoreError::Database);
+        match eligibility_target(event_type, payload) {
+            EligibilityTarget::NotGated => Ok(true),
+            EligibilityTarget::MissingRecipient => Ok(false),
+            EligibilityTarget::Fan {
+                fan_id,
+                require_consent,
+            } => {
+                let consent = self
+                    .active_fan_marketing_consent(&[(workspace_id, fan_id)])
+                    .await?;
+                Ok(consent
+                    .get(&(workspace_id, fan_id))
+                    .is_some_and(|granted| *granted || !require_consent))
+            }
         }
-
-        sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM fans
-                WHERE workspace_id = $1
-                  AND id = $2
-                  AND status = 'active'
-            )
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(fan_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(StoreError::Database)
     }
 
     pub async fn finish_delivery(
