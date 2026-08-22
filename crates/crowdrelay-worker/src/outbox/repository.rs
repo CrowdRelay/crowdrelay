@@ -341,8 +341,7 @@ impl PgOutboxStore {
         if recipients.is_empty() {
             return Ok(HashMap::new());
         }
-        let (workspace_ids, fan_ids): (Vec<Uuid>, Vec<Uuid>) =
-            recipients.iter().copied().unzip();
+        let (workspace_ids, fan_ids): (Vec<Uuid>, Vec<Uuid>) = recipients.iter().copied().unzip();
 
         let rows = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
             r#"
@@ -359,8 +358,11 @@ impl PgOutboxStore {
                     LIMIT 1
                 ), false)
             FROM fans AS fan
-            JOIN unnest($1::uuid[], $2::uuid[])
-                AS requested(workspace_id, fan_id)
+            JOIN (
+                SELECT *
+                FROM unnest($1::uuid[], $2::uuid[])
+                    AS pair(workspace_id, fan_id)
+            ) AS requested
                 ON requested.workspace_id = fan.workspace_id
                 AND requested.fan_id = fan.id
             WHERE fan.status = 'active'
@@ -376,29 +378,6 @@ impl PgOutboxStore {
             .into_iter()
             .map(|(workspace_id, fan_id, granted)| ((workspace_id, fan_id), granted))
             .collect())
-    }
-
-    pub async fn delivery_is_eligible(
-        &self,
-        workspace_id: Uuid,
-        event_type: &str,
-        payload: &Value,
-    ) -> Result<bool, StoreError> {
-        match eligibility_target(event_type, payload) {
-            EligibilityTarget::NotGated => Ok(true),
-            EligibilityTarget::MissingRecipient => Ok(false),
-            EligibilityTarget::Fan {
-                fan_id,
-                require_consent,
-            } => {
-                let consent = self
-                    .active_fan_marketing_consent(&[(workspace_id, fan_id)])
-                    .await?;
-                Ok(consent
-                    .get(&(workspace_id, fan_id))
-                    .is_some_and(|granted| *granted || !require_consent))
-            }
-        }
     }
 
     pub async fn finish_delivery(
@@ -663,6 +642,81 @@ impl StoreError {
 }
 
 #[cfg(test)]
+mod eligibility_tests {
+    use super::*;
+
+    #[test]
+    fn ungated_event_types_need_no_recipient_lookup() {
+        assert_eq!(
+            eligibility_target("fan.created", &serde_json::json!({"fan_id": "not-a-uuid"})),
+            EligibilityTarget::NotGated
+        );
+    }
+
+    #[test]
+    fn reminders_gate_on_the_fan_without_consent() {
+        let fan_id = Uuid::now_v7();
+        assert_eq!(
+            eligibility_target(
+                "event.reminder_due",
+                &serde_json::json!({"fan_id": fan_id.to_string()})
+            ),
+            EligibilityTarget::Fan {
+                fan_id,
+                require_consent: false
+            }
+        );
+    }
+
+    #[test]
+    fn marketing_event_types_gate_on_consent() {
+        let fan_id = Uuid::now_v7();
+        assert_eq!(
+            eligibility_target(
+                "event.announcement_due",
+                &serde_json::json!({"fan": {"id": fan_id.to_string()}})
+            ),
+            EligibilityTarget::Fan {
+                fan_id,
+                require_consent: true
+            }
+        );
+        assert_eq!(
+            eligibility_target(
+                "viryaos.fan_lifecycle.message_requested",
+                &serde_json::json!({"fan_id": fan_id.to_string()})
+            ),
+            EligibilityTarget::Fan {
+                fan_id,
+                require_consent: true
+            }
+        );
+    }
+
+    #[test]
+    fn gated_event_types_reject_malformed_or_missing_recipients() {
+        assert_eq!(
+            eligibility_target(
+                "event.reminder_due",
+                &serde_json::json!({"fan_id": "malformed"})
+            ),
+            EligibilityTarget::MissingRecipient
+        );
+        assert_eq!(
+            eligibility_target("event.reminder_due", &serde_json::json!({})),
+            EligibilityTarget::MissingRecipient
+        );
+        assert_eq!(
+            eligibility_target(
+                "event.announcement_due",
+                &serde_json::json!({"fan": {"id": 42}})
+            ),
+            EligibilityTarget::MissingRecipient
+        );
+    }
+}
+
+#[cfg(test)]
 mod postgres_tests {
     use std::time::Duration;
 
@@ -748,23 +802,14 @@ mod postgres_tests {
         .await?;
 
         let store = PgOutboxStore::new(pool.clone());
-        assert!(
+        // An active fan with no recorded consent is eligible for event types
+        // that do not gate on consent, and never for the ones that do.
+        assert_eq!(
             store
-                .delivery_is_eligible(
-                    workspace_id,
-                    "event.reminder_due",
-                    &serde_json::json!({"fan_id": fan_id}),
-                )
+                .active_fan_marketing_consent(&[(workspace_id, fan_id)])
                 .await?
-        );
-        assert!(
-            store
-                .delivery_is_eligible(
-                    workspace_id,
-                    "fan.created",
-                    &serde_json::json!({"fan_id": "not-a-uuid"}),
-                )
-                .await?
+                .get(&(workspace_id, fan_id)),
+            Some(&false)
         );
         sqlx::query(
             "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source) \
@@ -774,14 +819,12 @@ mod postgres_tests {
         .bind(fan_id)
         .execute(&pool)
         .await?;
-        assert!(
+        assert_eq!(
             store
-                .delivery_is_eligible(
-                    workspace_id,
-                    "event.announcement_due",
-                    &serde_json::json!({"fan": {"id": fan_id}}),
-                )
+                .active_fan_marketing_consent(&[(workspace_id, fan_id)])
                 .await?
+                .get(&(workspace_id, fan_id)),
+            Some(&true)
         );
         sqlx::query(
             "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source) \
@@ -791,36 +834,24 @@ mod postgres_tests {
         .bind(fan_id)
         .execute(&pool)
         .await?;
-        assert!(
-            !store
-                .delivery_is_eligible(
-                    workspace_id,
-                    "event.announcement_due",
-                    &serde_json::json!({"fan": {"id": fan_id}}),
-                )
+        assert_eq!(
+            store
+                .active_fan_marketing_consent(&[(workspace_id, fan_id)])
                 .await?
+                .get(&(workspace_id, fan_id)),
+            Some(&false)
         );
         sqlx::query("UPDATE fans SET status = 'unsubscribed' WHERE id = $1")
             .bind(fan_id)
             .execute(&pool)
             .await?;
+        // A fan that is no longer active drops out of the batch entirely, so
+        // every gated event type treats it as ineligible.
         assert!(
-            !store
-                .delivery_is_eligible(
-                    workspace_id,
-                    "event.reminder_due",
-                    &serde_json::json!({"fan_id": fan_id}),
-                )
+            store
+                .active_fan_marketing_consent(&[(workspace_id, fan_id)])
                 .await?
-        );
-        assert!(
-            !store
-                .delivery_is_eligible(
-                    workspace_id,
-                    "event.reminder_due",
-                    &serde_json::json!({"fan_id": "malformed"}),
-                )
-                .await?
+                .is_empty()
         );
         let first_claim = store
             .claim_outbox_events("worker-a", 1, Duration::from_secs(90))

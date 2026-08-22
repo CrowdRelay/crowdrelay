@@ -181,8 +181,11 @@ report_control_plane_runtime() {
     esac
   fi
 
-  outbox_pending="$(printf '%s\n' "$metrics" \
-    | awk '$1 == "crowdrelay_outbox_pending" { print $2; exit }')"
+  # A here-string, not a pipe: awk exits at the first match, and once the
+  # metrics payload outgrows the pipe buffer that leaves printf writing to a
+  # closed pipe. Under pipefail the SIGPIPE fails the whole heartbeat, which
+  # then reports nothing and the Control Plane shows the runtime as stale.
+  outbox_pending="$(awk '$1 == "crowdrelay_outbox_pending" { print $2; exit }' <<<"$metrics")"
   [[ "$outbox_pending" =~ ^[0-9]+$ ]] || outbox_pending=""
 
   if ! CONTROL_PLANE_BASE_URL="$CROWDRELAY_CONTROL_PLANE_BASE_URL" \
