@@ -44,7 +44,11 @@ CREATE TABLE viryaos_growth_metric_series (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (workspace_id, id),
-    UNIQUE (workspace_id, platform, metric_key, subject_kind, subject_id),
+    -- NULLS NOT DISTINCT is required, not stylistic: most series have no
+    -- subject, and under the default NULL semantics two workspace-level series
+    -- for the same metric would not conflict, so every upsert would insert a
+    -- new timeline for a number that already had one.
+    UNIQUE NULLS NOT DISTINCT (workspace_id, platform, metric_key, subject_kind, subject_id),
     CHECK ((subject_kind IS NULL) = (subject_id IS NULL))
 );
 

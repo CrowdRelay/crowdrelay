@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0073_viryaos_growth_metrics.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_metrics.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
+INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/growth_metrics.rs"
+WORKER = ROOT / "crates/crowdrelay-worker/src/autopilot.rs"
+RETENTION = ROOT / "crates/crowdrelay-worker/src/retention/steps.rs"
 
 
 def read(path: Path) -> str:
@@ -115,6 +118,54 @@ class GrowthMetricsContract(unittest.TestCase):
             self.assertNotIn(
                 forbidden, domain, f"domain module leaked {forbidden!r}"
             )
+
+    def test_series_identity_is_null_safe(self) -> None:
+        # Most series have no subject. Under default NULL semantics two
+        # workspace-level series for the same metric would not conflict, so
+        # every upsert would open a second timeline for the same number.
+        self.assertIn(
+            "UNIQUE NULLS NOT DISTINCT (workspace_id, platform, metric_key, subject_kind, subject_id)",
+            self.migration,
+        )
+
+    def test_first_party_capture_is_bucketed_and_never_overwrites(self) -> None:
+        # The worker cycle is far shorter than an hour. Without a bucket the
+        # window would describe our polling rate rather than the business.
+        infra = read(INFRA)
+        capture = infra.split("impl AutopilotFirstPartyGrowthMetrics", 1)[1]
+        self.assertEqual(
+            capture.count("date_trunc('hour', $2::timestamptz)"),
+            2,
+            "both first-party capture statements must bucket capture time",
+        )
+        self.assertEqual(
+            capture.count(
+                "ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING"
+            ),
+            2,
+            "first-party capture must never overwrite an existing observation",
+        )
+
+    def test_event_series_are_retired_rather_than_left_to_rot(self) -> None:
+        # A series for a show that finished months ago stops receiving points
+        # and would then be reported as a dead feed forever.
+        infra = read(INFRA)
+        self.assertIn("SET active = false", infra)
+        self.assertIn("sync_event_ticketing_series", infra)
+
+    def test_observations_are_recorded_before_the_evaluator_runs(self) -> None:
+        worker = read(WORKER)
+        capture = worker.find("materialize_first_party_growth_metrics")
+        evaluate = worker.find("EvaluateAutopilot::new")
+        self.assertNotEqual(capture, -1, "worker never captures first-party metrics")
+        self.assertLess(
+            capture, evaluate, "a cycle must reason about the newest evidence it can"
+        )
+
+    def test_observations_outside_the_derived_window_are_reclaimed(self) -> None:
+        retention = read(RETENTION)
+        self.assertIn("delete_expired_growth_metric_points", retention)
+        self.assertIn("viryaos_growth_metric_points", retention)
 
     def test_absent_windows_are_optional_rather_than_zero(self) -> None:
         # "We have no observation that old" and "the number did not move" are

@@ -64,7 +64,7 @@ Findings that shape everything below:
 
 ---
 
-## Phase 1 — external metrics + trend/anomaly + `growth_metrics` context
+## Phase 1 — external metrics + trend/anomaly + `growth_metrics` context (DONE)
 
 The foundation. One normalized model, one detector, wired into the existing
 authority ladder.
@@ -181,30 +181,68 @@ authority ladder.
 
 ---
 
-## Phase 2 — two real provider slices
+## Phase 2 — real metric sources (DONE)
 
-Model first, providers second. Pick the two with the best evidence-to-effort
-ratio and **do not** add provider credentials to CrowdRelay for the others.
+Model first, sources second. The two slices that shipped are both first-party,
+because the strongest metrics in the system need no provider at all.
 
-1. **Ticketing (first-party, zero new integration).** Derive series from
-   `ticket_orders`/`ticket_order_items` per event: paid tickets, paid buyers.
-   `value_tier: downstream`. This is the strongest possible metric and needs no
-   external call — a worker step writes points on a schedule.
-2. **Bandsintown.** `crates/crowdrelay-worker/src/event_sync/bandsintown.rs`
-   already talks to the provider. Extend it to write trackers/interest points
-   for the series attached to each synced event. Only fields the provider
-   genuinely returns; if a field is absent, no point is written — never a zero.
+### What landed
 
-Spotify / YouTube / social arrive through the Phase 1d ingest endpoint driven
-by the existing n8n adapters. CrowdRelay does not grow OAuth flows for them
-until there is a reason it must own the credential.
+- `materialize_first_party_growth_metrics` on a dedicated
+  `AutopilotFirstPartyGrowthMetrics` port, implemented in
+  `crates/crowdrelay-infra/src/autopilot/growth_metrics.rs`, called by the
+  Autopilot worker cycle **before** evaluation so a cycle reasons about the
+  newest evidence it can. It is its own phase: a metric write failing must not
+  stop already-authorized work.
+- **Slice 1 — per-event ticketing.** `ticketing/paid_tickets` and
+  `ticketing/paid_buyers`, subject `event`, tier `downstream`. Declared for
+  published or completed events from 30 days past to 365 days ahead, and
+  **retired** (`active = false`) once an event ages out of that window — an
+  abandoned series would otherwise be reported as a dead feed forever.
+- **Slice 2 — workspace totals.** `signal/active_fans` and `merch/paid_orders`,
+  no subject, tier `downstream`. These proved the NULL-subject path, which is
+  what surfaced the uniqueness bug below.
+- Observations are bucketed to the top of the hour and inserted with
+  `ON CONFLICT DO NOTHING`. The worker cycle is far shorter than an hour, so
+  without a bucket the window would describe our polling rate rather than the
+  business. `expected_interval_hours` is 6 while points are written hourly, so
+  a worker restart or short outage does not read as a dead feed.
+- Retention step `expired_growth_metric_points` deletes observations older than
+  90 days. The derived window is 28 days plus a 7-day tolerance, so anything
+  older cannot influence a trend; 90 days leaves room to widen the window later
+  without having already destroyed the evidence.
 
-Reporting rule: a provider that cannot supply a number gets **no series**, not
-a series full of zeroes.
+### Bug found and fixed while doing this
 
----
+`viryaos_growth_metric_series` originally had a plain
+`UNIQUE (workspace_id, platform, metric_key, subject_kind, subject_id)`. Under
+default NULL semantics two subject-less series for the same metric do not
+conflict, so `ON CONFLICT` never fired and the second upsert of a
+workspace-level series hit a primary-key violation instead of updating.
+Migration 0073 now uses `UNIQUE NULLS NOT DISTINCT`. It was amended in place
+rather than patched by an 0074 because it had never run anywhere outside this
+branch. A contract test pins it.
 
-## Phase 3 — growth debt detectors
+### Bandsintown — deliberately not done, and why
+
+`crates/crowdrelay-worker/src/event_sync/bandsintown.rs` calls exactly one
+endpoint, `/artists/{artist}/events`, and its response carries event data only:
+id, url, datetime, title, description, lineup, venue, offers. There is no
+tracker or follower count in anything this repository actually receives.
+
+Follower/tracker counts live on a different endpoint (`/artists/{artist}`) that
+this codebase does not call. Adding it is a deliberate provider change — a new
+request, a new failure mode, and a new field whose semantics need confirming
+against real responses — not something to assume because the number would be
+convenient. Until someone does that work with a real response in hand, there is
+no Bandsintown series. A provider that cannot supply a number gets no series,
+not a series full of zeroes.
+
+Spotify, YouTube and social continue to arrive through the Phase 1d ingest
+endpoint driven by the existing n8n adapters. CrowdRelay does not grow OAuth
+flows for them until there is a reason it must own the credential.
+
+## Phase 3 — growth debt detectors (NEXT)
 
 Neglected work is the other half of the opportunity engine, and most of the
 inputs already exist as first-party rows.

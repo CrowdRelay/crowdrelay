@@ -554,3 +554,33 @@ async fn scrub_beacon_release_delivery_pii(
     .map_err(RetentionRunError::Database)?;
     Ok(result.rows_affected())
 }
+
+/// Growth-metric observations are recorded hourly and the derived window is 28
+/// days plus a 7-day tolerance. Anything older can no longer influence a trend,
+/// a decision or the operator read model, so keeping it only grows the table.
+///
+/// The horizon is deliberately generous: 90 days leaves room to widen the
+/// window later without having already destroyed the evidence needed for it.
+async fn delete_expired_growth_metric_points(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM viryaos_growth_metric_points AS point
+        WHERE point.id IN (
+            SELECT candidate.id
+            FROM viryaos_growth_metric_points AS candidate
+            WHERE candidate.captured_at < now() - interval '90 days'
+            ORDER BY candidate.captured_at, candidate.id
+            FOR UPDATE OF candidate SKIP LOCKED
+            LIMIT $1
+        )
+        "#,
+    )
+    .bind(batch_size)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}
