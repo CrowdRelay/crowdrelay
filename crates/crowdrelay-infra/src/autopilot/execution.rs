@@ -120,6 +120,15 @@ pub(super) async fn schedule_effect_measurement(
                 now + time::Duration::hours(72),
             ));
         }
+        AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
+            // No measurement is scheduled yet. Measuring a raised finding means
+            // comparing the series' own later velocity against the baseline it
+            // was raised from, which needs a growth-metric measurement kind that
+            // does not exist yet (see Phase 5 in docs/GROWTH_OS_PLAN.md).
+            // Scheduling one of the existing kinds here would attribute a
+            // ticket or merch movement to an analysis step, which is exactly
+            // the kind of invented causality this system must not produce.
+        }
         AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => {
             use crowdrelay_domain::show_growth::ShowGrowthLever;
 
@@ -298,6 +307,14 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconOutreach { .. } => ("beacon_outreach_requested", 1.0, None),
+        AutopilotActionPayload::RaiseGrowthOpportunity {
+            deviation_basis_points,
+            ..
+        } => (
+            "growth_opportunity_raised",
+            f64::from(*deviation_basis_points),
+            None,
+        ),
         AutopilotActionPayload::RequestShowGrowth { .. } => ("show_growth_lever_requested", 1.0, None),
         AutopilotActionPayload::RequestContentArtifact { .. } => {
             ("content_artifact_requested", 1.0, None)

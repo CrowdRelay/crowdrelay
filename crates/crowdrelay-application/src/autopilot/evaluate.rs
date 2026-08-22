@@ -44,6 +44,7 @@ use time::OffsetDateTime;
 use super::{model::*, ports::AutopilotDecisionRepository};
 mod beacons;
 mod commercial;
+mod growth_metrics;
 mod show_growth;
 
 use beacons::{beacon_candidate, beacon_discovery_candidate};
@@ -51,6 +52,7 @@ use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
     merch_candidate, merch_price_candidate,
 };
+use growth_metrics::growth_metric_candidate;
 use show_growth::show_growth_candidate;
 
 use crate::RepositoryError;
@@ -294,6 +296,17 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = show_growth_candidate(snapshot, &policy, now)? {
+                            self.persist(&candidate, &mut report).await?;
+                        }
+                    }
+                }
+                AutopilotContext::GrowthMetrics => {
+                    let snapshots = self
+                        .repository
+                        .load_growth_metric_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in &snapshots {
+                        if let Some(candidate) = growth_metric_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut report).await?;
                         }
                     }

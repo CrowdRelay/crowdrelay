@@ -10,6 +10,7 @@ use crowdrelay_domain::{
     content_supply::ContentSupplySnapshot,
     experimentation::ExperimentSnapshot,
     funding::FundingOpportunitySnapshot,
+    growth_metrics::GrowthMetricSnapshot,
     live_opportunities::LiveOpportunitySnapshot,
     merch_bundle::MerchBundleSnapshot,
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
@@ -149,6 +150,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<ShowGrowthSnapshot>, RepositoryError>;
+
+    /// Returns every active metric series with its derived trend and the two
+    /// pieces of context the rule needs but cannot see from one series alone:
+    /// how long ago this series last produced a decision, and whether the same
+    /// platform has a stronger-tier series being tracked.
+    async fn load_growth_metric_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthMetricSnapshot>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.

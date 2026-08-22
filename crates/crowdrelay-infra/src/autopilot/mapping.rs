@@ -17,6 +17,7 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "funding" => AutopilotContext::Funding,
         "beacon" => AutopilotContext::Beacon,
         "show_growth" => AutopilotContext::ShowGrowth,
+        "growth_metrics" => AutopilotContext::GrowthMetrics,
         _ => return Err(RepositoryError::Unexpected),
     };
     let autonomy_level = match row.autonomy_level.as_str() {
@@ -88,6 +89,10 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
             AutopilotContext::Beacon => AutopilotPolicyConfig::Beacon(parse_config(
                 row.config,
                 BeaconCampaignPolicy::default(),
+            )?),
+            AutopilotContext::GrowthMetrics => AutopilotPolicyConfig::GrowthMetrics(parse_config(
+                row.config,
+                GrowthMetricPolicy::default(),
             )?),
             AutopilotContext::ShowGrowth => AutopilotPolicyConfig::ShowGrowth(parse_config(
                 row.config,

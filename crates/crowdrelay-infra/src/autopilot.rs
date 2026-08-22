@@ -4,6 +4,7 @@ mod actions;
 mod control;
 mod decisions;
 mod growth;
+mod growth_metrics;
 mod measurement;
 mod operations;
 mod runtime;
@@ -19,32 +20,33 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotActionPayload, AutopilotActionRepository, AutopilotBookingStateRepository,
         AutopilotContext, AutopilotControlMutation, AutopilotControlOverview,
-        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotGrowthOverview,
-        AutopilotManualStep, AutopilotMarketStateRepository, AutopilotMeasurementKind,
-        AutopilotMeasurementRepository, AutopilotMerchStateRepository, AutopilotPolicy,
-        AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
+        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotGrowthMetricRepository,
+        AutopilotGrowthOverview, AutopilotManualStep, AutopilotMarketStateRepository,
+        AutopilotMeasurementKind, AutopilotMeasurementRepository, AutopilotMerchStateRepository,
+        AutopilotPolicy, AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
         AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
         CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, DecisionCandidate, ExecutionClaimMutation,
         ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
         GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress,
-        GrowthDeliveryTotals, GrowthOutreachSummary, ManagerBookingPolicySummary,
-        ManagerConfigMutation, MerchProductEconomicsMutation, PLAYLIST_TEMPLATE_KEY,
-        PendingAutopilotAction, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
-        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
-        RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
-        RecordExecutorHeartbeat, RecordRumSample, ReleaseComponentMutation,
-        ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority,
-        SetManagerBookingPolicy, TeamAssigneeSummary, TicketAllocationGuardrailMutation,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertMerchProductEconomics,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleaseComponent,
-        UpsertTicketAllocationGuardrail,
+        GrowthDeliveryTotals, GrowthMetricPointMutation, GrowthMetricSeriesMutation,
+        GrowthMetricSubject, GrowthMetricTrendView, GrowthOutreachSummary,
+        ManagerBookingPolicySummary, ManagerConfigMutation, MerchProductEconomicsMutation,
+        PLAYLIST_TEMPLATE_KEY, PendingAutopilotAction, PromotionBudgetGuardrailMutation,
+        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
+        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect,
+        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
+        ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
+        SetAutopilotAuthority, SetManagerBookingPolicy, TeamAssigneeSummary,
+        TicketAllocationGuardrailMutation, UpsertBookingTarget, UpsertCityMarketSignal,
+        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
 };
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
-    EventId, FanId, MarketSignalId, MerchProductId, MerchVariantId, PromotionCampaignId,
-    ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId,
+    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
@@ -56,6 +58,10 @@ use crowdrelay_domain::{
     content_supply::{ContentSupplyPolicy, ContentSupplySnapshot},
     experimentation::{ExperimentPolicy, ExperimentSnapshot},
     funding::{FundingOpportunitySnapshot, FundingPolicy},
+    growth_metrics::{
+        GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
+        MetricValueTier, compute_trend, velocity_ratio_basis_points,
+    },
     live_opportunities::{
         BookingManagerPolicy, LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
         LiveTravelBand,

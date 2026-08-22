@@ -96,7 +96,7 @@ authority ladder.
     ordering between value tiers.
 - `GrowthMetricSeriesId` added to `ids.rs` and re-exported from `lib.rs`.
 
-### 1b — application (NEXT)
+### 1b — application (DONE)
 
 - `crates/crowdrelay-application/src/autopilot/model.rs`
   - `AutopilotContext::GrowthMetrics` → `"growth_metrics"`.
@@ -123,7 +123,7 @@ authority ladder.
     is a no-op replay, not an error.
   - `load_growth_metric_trends(...)` → read model for the API.
 
-### 1c — infrastructure
+### 1c — infrastructure (DONE)
 
 - `crates/crowdrelay-infra/src/autopilot/growth_metrics.rs` (new): the two
   writes (both through `insert_operator_action`, same as
@@ -140,7 +140,7 @@ authority ladder.
 - `decisions.rs` + `decisions/opportunity_reads.rs`: forward the loader.
 - `crates/crowdrelay-infra/src/autopilot.rs`: module + re-exports.
 
-### 1d — API and contract
+### 1d — API and contract (DONE)
 
 - `POST /v1/admin/autopilot/growth-metrics/series` — declare/update a series.
 - `POST /v1/admin/autopilot/growth-metrics/points` — ingest one observation.
@@ -155,13 +155,25 @@ authority ladder.
   `autopilot/requests.rs`, registration in `routing.rs`.
 - `openapi/openapi.yaml`: the three operations plus schemas.
 - Batch ingestion is deliberately out of scope until a provider needs it.
+- Contract surfaces that had to move with the new context, for the next time one
+  is added: `SCHEMA_VERSION` in `crates/crowdrelay-api/src/meta.rs` (and its own
+  assertion), `parse_context` in `autopilot/validation.rs`, the `AutopilotContext`
+  enum and `AutopilotOverview.policies.maxItems` in `openapi/openapi.yaml`, the
+  action-kind enum in the same file, and the context count in
+  `scripts/test_viryaos_autopilot_v1.py`.
+- Note for anyone running the gate locally: `scripts/test_openapi_router_coverage.py`
+  and `scripts/test_release_hardening_20260819.py` need PyYAML. Without it they
+  report an import error that has nothing to do with the code under test.
 
-### 1e — proof
+### 1e — proof (IN PROGRESS)
 
-- `make check`, then `make ci`.
-- `scripts/` contract tests: add coverage asserting `growth_metrics` is
-  provisioned disabled/observe and that the three context CHECK constraints
-  agree with `AutopilotContext`.
+- `make check` and `make ci` green, including the 365 contract tests.
+- Still to add: a contract test asserting `growth_metrics` is provisioned
+  disabled and at `observe`, and that the three context CHECK constraints in the
+  migration agree with `AutopilotContext`.
+- Still to add: application-level tests for `growth_metric_candidate` covering
+  the decision key changing with the evidence and the action key being stable
+  within a cooldown window but not across windows.
 
 ---
 
@@ -274,6 +286,35 @@ context is only justified when it needs its own authority and quota.
   the measured record.
 
 ---
+
+## Phase 8 — audit
+
+Only after Phases 1–7 are done. Five separate passes, each written up in this
+file with findings and their resolution; the work is not finished until all
+five are clean.
+
+1. **Correctness** — does each rule do what it claims on real data, including
+   the boundary cases (absent history, backfills, out-of-order delivery, clock
+   skew, workspace isolation, replay)?
+2. **Usefulness** — would an operator actually act on what the queue surfaces,
+   or is it noise? Measure against real VIRYA data, not fixtures.
+3. **Feature completeness** — every numbered requirement of the original brief
+   accounted for: metrics, trends/anomalies, opportunities, next best action,
+   measurement/attribution, growth debt, operator brief.
+4. **Performance** — snapshot and read-model queries under realistic row
+   counts; index coverage; no per-series N+1; bounded response sizes.
+5. **Code quality** — layering rules held, ratchets respected, no dead
+   abstraction, comments explain the non-obvious rather than restating code.
+
+## Phase 9 — control-plane management and monitoring
+
+Last. In `crowdrelay-control-plane` (the operator/infra plane, never
+tenant-critical), add a thin management and monitoring layer over the Growth
+OS: series health (which feeds are live, stale, or never reported), detector
+throughput (decisions and actions per context per day), authority state per
+context, and the measured outcome record. Read-only over CrowdRelay's API
+contract; the control plane must not become a second source of truth, and no
+business policy moves into it.
 
 ## Resume checklist
 
