@@ -1,0 +1,106 @@
+# Public edge for virya.music: the only stack that binds 80/443 on the
+# production host.
+#
+# Until 2026-08 these two containers ran on virya-oracle from a compose file
+# that had been deleted from the host, so nothing could recreate them and
+# nothing recorded their wiring. They are tracked here instead.
+#
+# Networks:
+#   crowdrelay-shared  external, owned by compose.production.yaml (the API)
+#   virya-edge         external, joins the edge to the control plane, which
+#                      lives in its own compose project on the same host
+#
+# Secrets are host state under ${EDGE_ROOT}/crowdrelay-n8n-bridge and are never
+# tracked here.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: virya-edge-caddy
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${VIRYA_EDGE_PUBLIC_HOST:?VIRYA_EDGE_PUBLIC_HOST required}
+      # Argon2id, produced by `caddy hash-password`. Host state only.
+      CONTROL_PLANE_STAFF_PASSWORD_HASH: ${CONTROL_PLANE_STAFF_PASSWORD_HASH:?CONTROL_PLANE_STAFF_PASSWORD_HASH required}
+      # host:port of the n8n stack on virya-home, reached over WireGuard
+      VIRYA_N8N_UPSTREAM: ${VIRYA_N8N_UPSTREAM:?VIRYA_N8N_UPSTREAM required}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      # Caddy's admin API, not a site: a site probe would depend on whichever
+      # upstream happens to be down and would flap the edge itself.
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    networks:
+      - crowdrelay-shared
+      - virya-edge
+
+  crowdrelay-n8n-bridge:
+    # n8n's own image, reused only for its Node runtime: the bridge is a single
+    # dependency-free script, not an n8n instance.
+    image: docker.n8n.io/n8nio/n8n:2.32.6
+    container_name: virya-crowdrelay-n8n-bridge
+    restart: unless-stopped
+    entrypoint: ["node"]
+    command: ["/opt/bridge/bridge.js"]
+    environment:
+      BRIDGE_CONFIG_PATH: /opt/bridge/config.json
+      BRIDGE_ROUTES_PATH: /opt/bridge/routes.json
+      BRIDGE_DB_PATH: /var/lib/bridge/claims.sqlite
+      BRIDGE_LEASE_SECONDS: "900"
+      BRIDGE_INTERNAL_TOKEN_PATH: /run/secrets/bridge_internal_token
+      BRIDGE_WEBHOOK_SECRET_PATH: /run/secrets/crowdrelay_webhook_secret
+      BRIDGE_COMMERCE_KEY_PATH: /run/secrets/crowdrelay_commerce_api_key
+      BRIDGE_MAILER_TOKEN_PATH: /run/secrets/crowdrelay_mailer_token
+      BRIDGE_TICKET_MAILER_TOKEN_PATH: /run/secrets/virya_ticket_mailer_token
+      NODE_ENV: production
+    volumes:
+      - ./bridge.js:/opt/bridge/bridge.js:ro
+      - ./routes.json:/opt/bridge/routes.json:ro
+      - ${EDGE_ROOT:?EDGE_ROOT required}/crowdrelay-n8n-bridge/config.json:/opt/bridge/config.json:ro
+      - ${EDGE_ROOT}/crowdrelay-n8n-bridge/bridge_internal_token:/run/secrets/bridge_internal_token:ro
+      - ${EDGE_ROOT}/crowdrelay-n8n-bridge/crowdrelay_webhook_secret:/run/secrets/crowdrelay_webhook_secret:ro
+      - ${EDGE_ROOT}/crowdrelay-n8n-bridge/crowdrelay_commerce_api_key:/run/secrets/crowdrelay_commerce_api_key:ro
+      - ${EDGE_ROOT}/crowdrelay-n8n-bridge/crowdrelay_mailer_token:/run/secrets/crowdrelay_mailer_token:ro
+      - ${EDGE_ROOT}/crowdrelay-n8n-bridge/virya_ticket_mailer_token:/run/secrets/virya_ticket_mailer_token:ro
+      - bridge_state:/var/lib/bridge
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 192m
+    networks:
+      # On virya-oracle the bridge sat on the n8n network only, where the API
+      # could not reach it, so it served health checks and nothing else. Here it
+      # shares the API's network, which is the network its callers are on.
+      - crowdrelay-shared
+
+volumes:
+  caddy_data:
+  caddy_config:
+  bridge_state:
+
+networks:
+  crowdrelay-shared:
+    external: true
+    name: ${CROWDRELAY_DOCKER_NETWORK:?Set CROWDRELAY_DOCKER_NETWORK}
+  virya-edge:
+    external: true
+    name: ${VIRYA_EDGE_NETWORK:-virya-edge}
