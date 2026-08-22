@@ -8,7 +8,6 @@ use std::time::Duration;
 use crowdrelay_application::beacon_release_activation_copy;
 use serde_json::json;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
-use time::OffsetDateTime;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
