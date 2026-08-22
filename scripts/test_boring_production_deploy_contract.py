@@ -86,7 +86,7 @@ class BoringProductionDeployContract(unittest.TestCase):
         ):
             self.assertIn(route, SAFE_DEPLOY)
         self.assertIn("expected=401", SAFE_DEPLOY)
-        self.assertIn("CROWDRELAY_CONTROL_PLANE_HOST:-virya-home", SAFE_DEPLOY)
+        self.assertIn("CROWDRELAY_CONTROL_PLANE_HOST:-virya-crowdrelay", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_MANAGEMENT_MASTER_KEY", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_VIRYA_MANAGEMENT_URL", SAFE_DEPLOY)
