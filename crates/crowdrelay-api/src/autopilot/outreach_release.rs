@@ -22,7 +22,14 @@ pub async fn upsert_beacon(
             let trimmed = value.trim();
             trimmed.is_empty() || trimmed.len() > 2048
         })
-        || !request.metadata.is_object();
+        || !request.metadata.is_object()
+        // One home city, one way of naming it. Accepting both keys would let a
+        // caller send two different cities and never learn which one won.
+        || (request.city_id.is_some()
+            && request
+                .city_slug
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()));
     if invalid {
         return Problem::bad_request(request_id(&headers))
             .private()
@@ -41,9 +48,45 @@ pub async fn upsert_beacon(
         Err(response) => return response,
     };
     let request_id_value = parsed_request_id(&headers);
+    // Operator surfaces hold the public city list, which is keyed by slug and
+    // deliberately carries no ids. Resolve here through the same cached snapshot
+    // the public endpoint serves, so a staff panel can assign a home city
+    // without an admin city read of its own.
+    let city_id = match request.city_id {
+        Some(city_id) => Some(CityId::from_uuid(city_id)),
+        None => match request
+            .city_slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            None => None,
+            Some(slug) => {
+                let Ok(slug) = CitySlug::parse(slug) else {
+                    return Problem::bad_request(request_id(&headers))
+                        .private()
+                        .into_response();
+                };
+                match state.acquisition.city_id_for_slug(&slug).await {
+                    Ok(Some(city_id)) => Some(city_id),
+                    // An unknown city is an operator mistake, not an outage:
+                    // fail the write rather than silently creating a beacon
+                    // with no home city and a dead local radar.
+                    Ok(None) | Err(ListCitiesError::InvalidLimit { .. }) => {
+                        return Problem::bad_request(request_id(&headers))
+                            .private()
+                            .into_response();
+                    }
+                    Err(ListCitiesError::Repository(error)) => {
+                        return repository_problem(error, request_id(&headers));
+                    }
+                }
+            }
+        },
+    };
     let command = UpsertBeacon {
         beacon_id: request.beacon_id.map(BeaconId::from_uuid),
-        city_id: request.city_id.map(CityId::from_uuid),
+        city_id,
         kind: request.beacon_kind,
         display_name: request.display_name,
         contact_email: request.contact_email,

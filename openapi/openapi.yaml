@@ -7783,6 +7783,7 @@ components:
       properties:
         beacon_id: { type: [string, 'null'], format: uuid }
         city_id: { type: [string, 'null'], format: uuid }
+        city_slug: { type: [string, 'null'], maxLength: 96, description: 'Home city by public slug, resolved server-side. Alternative to city_id; sending both is rejected.' }
         beacon_kind: { $ref: '#/components/schemas/BeaconKind' }
         display_name: { type: string, minLength: 1, maxLength: 240 }
         contact_email: { type: [string, 'null'], format: email, maxLength: 320 }
