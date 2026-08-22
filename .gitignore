@@ -28,6 +28,10 @@ n8n/*
 !n8n/examples/
 !n8n/examples/**
 
+# AppleDouble sidecars, written whenever a macOS copy reaches a host. They
+# leave the production worktree dirty and the deploy preflight refuses it.
+._*
+
 # Editor/recovery files must never enter source packages.
 *.bak
 *.orig
