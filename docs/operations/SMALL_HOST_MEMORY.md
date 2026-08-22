@@ -73,12 +73,26 @@ lower-priority backstop rather than removing it.
 
 ## Moving off the 1 GiB shape
 
-Oracle's always-free allocation also includes Ampere A1 (up to 4 OCPU and
-24 GiB), at no cost on the same account. The blocker is architecture, not
-budget: `publish-images.yml` builds `linux/amd64` only, deliberately, so the
-production daemon never pulls a manifest it cannot run. `make build-arm64`
-proves the build works, so the change is to publish a two-platform manifest —
-which needs a native arm64 runner rather than QEMU, or Rust release builds under
-emulation become the slowest step in the pipeline.
+Oracle's always-free allocation includes Ampere A1. The ceiling was halved in
+2026: a pure Always Free account now gets 2 OCPU and 12 GiB, where it used to
+get 4 and 24. An account upgraded to Pay As You Go still reaches 4 OCPU and
+24 GiB inside the same free monthly pool — 4 OCPU is 2,920 OCPU-hours against a
+3,000-hour allowance and 24 GiB is 17,520 GB-hours against 18,000, so it runs
+continuously without leaving the pool. PAYG means a payment method on file and
+anything past the pool bills, so it is a deliberate trade rather than a free
+upgrade. Source:
+<https://linuxiac.com/oracle-quietly-cuts-free-tier-ampere-a1-resources-in-half/>
+
+Either shape is a large step up from the current VM.Standard.E2.1.Micro: even
+the reduced always-free A1 is twelve times the memory and twice the cores. The
+tuning above is what makes 1 GiB survivable; it is not what makes 1 GiB the
+right size.
+
+The blocker is architecture, not budget. `publish-images.yml` builds
+`linux/amd64` only, deliberately, so the production daemon never pulls a
+manifest it cannot run. `make build-arm64` proves the build works, so the change
+is to publish a two-platform manifest — which needs a native arm64 runner rather
+than QEMU, or Rust release builds under emulation become the slowest step in the
+pipeline.
 
 Decide that before moving. Everything above is worth doing either way.
