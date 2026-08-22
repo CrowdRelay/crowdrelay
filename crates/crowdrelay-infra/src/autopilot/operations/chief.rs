@@ -233,7 +233,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         WHERE decision.workspace_id=$1
           AND decision.evaluated_at >= $2 - INTERVAL '48 hours'
           AND decision.disposition IN ('recommend_only','require_approval','auto_execute')
-          AND decision.context IN ('booking_opportunity','outreach','promotion_budget','merch_bundle','merch_pricing','ticket_yield','release','live_opportunity','funding','beacon','show_growth')
+          AND decision.context IN ('booking_opportunity','outreach','promotion_budget','merch_bundle','merch_pricing','ticket_yield','release','live_opportunity','funding','beacon','show_growth','growth_metrics','growth_debt')
           AND NOT EXISTS (
               SELECT 1 FROM viryaos_autopilot_actions action
               WHERE action.workspace_id=decision.workspace_id AND action.decision_id=decision.id

@@ -242,7 +242,7 @@ Spotify, YouTube and social continue to arrive through the Phase 1d ingest
 endpoint driven by the existing n8n adapters. CrowdRelay does not grow OAuth
 flows for them until there is a reason it must own the credential.
 
-## Phase 3 — growth debt detectors (IN PROGRESS)
+## Phase 3 — growth debt detectors (DONE, except the blocked `StaleContactData` kind)
 
 Neglected work is the other half of the opportunity engine, and most of the
 inputs already exist as first-party rows.
@@ -401,18 +401,38 @@ wrote this, so `make db-up && make migrate` could not execute the query against
 a real Postgres. It compiles and the contract tests hold, but the first run
 against a live database is still ahead — check it before trusting a row count.
 
-### 3d — API and contract (NEXT)
+### 3d — operator visibility (DONE, and scoped down deliberately)
 
-`GET /v1/admin/autopilot/growth-debt` read model, ranked, hard-capped. Same
-contract-surface list as 1d (minus the action-kind enum, which does not exist).
-Consider whether this endpoint should exist at all before Phase 4: the ranked
-Next Best Action queue may subsume it, in which case 3d is one extra read model
-to maintain for nothing. Decide by whether an operator wants debt on its own,
-separate from the mixed queue.
+The planned `GET /v1/admin/autopilot/growth-debt` read model was **not** built,
+and the reasoning belongs here rather than being re-argued next run:
 
-### 3e — proof
+- Debt decisions and actions already surface through the existing
+  `AutopilotOverview` (`recent_decisions`, `recent_actions`, `queued_actions`),
+  because those are context-agnostic. Nothing had to be added for an operator
+  to see a raised debt item.
+- The one place a new context is genuinely invisible is the chief-of-staff
+  opportunity query, which filters by an explicit context allow-list. Both
+  `growth_metrics` and `growth_debt` were missing from it — so Phase 1's
+  detector has been producing decisions nobody would have seen in the brief.
+  Both are now in the list (this is Phase 4's first bullet, pulled forward
+  because it is one line and the alternative was shipping a blind detector).
+- A dedicated per-context endpoint would be a third read surface over the same
+  rows, and Phase 4's ranked queue is meant to subsume exactly that. Building
+  it now means maintaining and then deprecating it.
 
-`make check` + `make ci` green, contract tests extended.
+If an operator later wants debt on its own, separate from the mixed queue, the
+endpoint is a thin read over rows that already exist. Until someone asks, it is
+not worth the contract surface.
+
+### 3e — proof (DONE)
+
+- `make check` green. `make ci`: 397 contract tests with only the two known
+  PyYAML import errors, every `runtime-contracts` script PASS, both ratchets
+  PASS (`source-size` tracked=20 currently_large=0, `api-sql` writes=129 =
+  baseline, headroom 0 — the loader is a read, so it did not move).
+- 15 domain unit tests, 9 evaluator tests, 19 contract tests.
+- Still outstanding for this phase: one live-database run of the observation
+  query, and the `StaleContactData` decision below.
 
 ### Open question for the operator — blocking `StaleContactData`
 
@@ -443,9 +463,10 @@ and leaves `StaleContactData` unreachable.
   effect of the same action kind in the past (Phase 5), confidence, deviation
   magnitude.
 - Hard cap the response. The point is the top handful, not thirty suggestions.
-- Extend the `load_chief_of_staff` opportunity query's context allow-list to
-  include `growth_metrics` — that alone surfaces metric-driven opportunities in
-  the existing operator view for close to nothing.
+- ~~Extend the `load_chief_of_staff` opportunity query's context allow-list to
+  include `growth_metrics`~~ — done in Phase 3d, for both `growth_metrics` and
+  `growth_debt`. Any context added after this must be added there too, or its
+  decisions never reach the operator brief.
 - Each entry carries: reason, priority, expected impact (as measured deviation,
   never an invented currency amount), recommended action, authority, and what
   would happen if it is ignored.
