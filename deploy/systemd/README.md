@@ -1,8 +1,8 @@
 # Server timers
 
-Two independent units live here. Both assume the package is installed at the
-path named in the unit; production currently runs from `/opt/crowdrelay`, so
-check `WorkingDirectory`/`ExecStart` against the real install before enabling.
+Two independent units live here. Both name `/opt/crowdrelay`, which is where
+production is installed; check `WorkingDirectory`/`ExecStart` against the real
+install before enabling one anywhere else.
 
 ## Control Plane heartbeat timer
 
@@ -26,7 +26,7 @@ Enable with `systemctl enable --now virya-crowdrelay-heartbeat.timer`.
 
 The recurring 15-minute smoke check runs on the server instead of consuming GitHub Actions minutes. GitHub keeps a manual `Production smoke` workflow for operator/post-deploy verification.
 
-Install the service/timer under `/etc/systemd/system`, deploy this repository/package at `/srv/crowdrelay`, and define `CROWDRELAY_BASE_URL`, `VIRYA_BASE_URL`, optional `SYNESTHESIA_BASE_URL`, and optional `N8N_INGRESS_URL` in `/etc/virya/production-smoke.env`. Enable with `systemctl enable --now virya-production-smoke.timer`.
+Install the service/timer under `/etc/systemd/system`, deploy this repository/package at `/opt/crowdrelay`, and define `CROWDRELAY_BASE_URL`, `VIRYA_BASE_URL`, optional `SYNESTHESIA_BASE_URL`, and optional `N8N_INGRESS_URL` in `/etc/virya/production-smoke.env`. Enable with `systemctl enable --now virya-production-smoke.timer`.
 
 ## Optional alerts
 
