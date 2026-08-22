@@ -152,12 +152,18 @@ report_control_plane_runtime() {
   # Health is observed, never assumed. A failing probe reports false so the
   # Control Plane can show degraded; only an unobservable value stays empty,
   # which the reporter sends as null.
-  local api_healthy worker_healthy outbox_pending worker_id
+  #
+  # One `compose exec` covers both readings. /metrics is only bound inside the
+  # compose network, so it is reached the same way verify() reaches readiness —
+  # and it answers 503 unless the database-backed ops snapshot succeeded, so a
+  # 200 already proves what /v1/health/ready would have. This runs every 60s
+  # under the heartbeat timer, where a second `docker compose exec` costs more
+  # CPU than the reading is worth.
+  local api_healthy worker_healthy outbox_pending worker_id metrics
   api_healthy=false
-  if compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
-    http://127.0.0.1:8080/v1/health/ready >/dev/null 2>&1 </dev/null; then
-    api_healthy=true
-  fi
+  metrics="$(compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
+    http://127.0.0.1:8080/metrics 2>/dev/null </dev/null || true)"
+  [[ -n "$metrics" ]] && api_healthy=true
 
   worker_healthy=""
   worker_id="$(compose ps -q worker 2>/dev/null || true)"
@@ -169,11 +175,8 @@ report_control_plane_runtime() {
     esac
   fi
 
-  # /metrics is only bound inside the compose network, so scrape it the same way
-  # verify() reaches the readiness probe rather than over the public origin.
-  outbox_pending="$(compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
-    http://127.0.0.1:8080/metrics 2>/dev/null </dev/null \
-    | awk '$1 == "crowdrelay_outbox_pending" { print $2; exit }' || true)"
+  outbox_pending="$(printf '%s\n' "$metrics" \
+    | awk '$1 == "crowdrelay_outbox_pending" { print $2; exit }')"
   [[ "$outbox_pending" =~ ^[0-9]+$ ]] || outbox_pending=""
 
   if ! CONTROL_PLANE_BASE_URL="$CROWDRELAY_CONTROL_PLANE_BASE_URL" \
