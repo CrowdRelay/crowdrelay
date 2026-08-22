@@ -142,6 +142,21 @@ dirty="$(git status --porcelain --untracked-files=normal)"
   printf '%s\n' "$dirty" >&2
   exit 22
 }
+# A directory copied in from another account leaves the deploy user unable to
+# write inside it. Checkout would then fail halfway and leave the worktree
+# dirty, which is far more work to recover than refusing here. An empty one
+# holds nothing, so it is removed; anything else is reported untouched.
+find . -path ./.git -prune -o -type d ! -writable -print 2>/dev/null |
+  sort -r |
+  while IFS= read -r directory; do
+    rmdir "$directory" 2>/dev/null || true
+  done
+unwritable="$(find . -path ./.git -prune -o -type d ! -writable -print 2>/dev/null)"
+[[ -z "$unwritable" ]] || {
+  echo "ERROR=worktree-unwritable"
+  printf '%s\n' "$unwritable" >&2
+  exit 23
+}
 printf 'HEAD=%s\nBRANCH=%s\n' "$head" "$branch"
 } </dev/null
 REMOTE_PREFLIGHT
