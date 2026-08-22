@@ -24,6 +24,15 @@ use super::{
 
 const MAX_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Per-delivery recipient eligibility resolved once per cycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EligibilityDecision {
+    Eligible,
+    Ineligible,
+    /// The eligibility read failed; the delivery must retry with this kind.
+    Unavailable(&'static str),
+}
+
 /// Transactional outbox worker that materializes and delivers webhook events.
 #[derive(Clone)]
 pub struct OutboxWorker {
@@ -232,14 +241,83 @@ impl OutboxWorker {
         }
     }
 
+    /// Resolves recipient eligibility for the whole claimed batch with a single
+    /// database read, keeping the per-delivery decisions the dispatch path used
+    /// to make one query at a time.
+    ///
+    /// A failed lookup only marks the deliveries that actually gate on a fan as
+    /// retryable; ungated deliveries still dispatch, exactly as when each
+    /// delivery resolved its own eligibility.
+    async fn resolve_eligibility(&self, claims: &[DeliveryClaim]) -> Vec<EligibilityDecision> {
+        let targets: Vec<EligibilityTarget> = claims
+            .iter()
+            .map(|claim| eligibility_target(&claim.event_type, &claim.payload))
+            .collect();
+        let recipients: Vec<(Uuid, Uuid)> = claims
+            .iter()
+            .zip(&targets)
+            .filter_map(|(claim, target)| match *target {
+                EligibilityTarget::Fan { fan_id, .. } => Some((claim.workspace_id, fan_id)),
+                EligibilityTarget::NotGated | EligibilityTarget::MissingRecipient => None,
+            })
+            .collect();
+
+        let consent = if recipients.is_empty() {
+            Ok(std::collections::HashMap::new())
+        } else {
+            self.database_call(
+                "check_delivery_eligibility",
+                self.store.active_fan_marketing_consent(&recipients),
+            )
+            .await
+        };
+
+        let unavailable_kind = consent.as_ref().err().map(|error| {
+            if error.kind == "timeout" {
+                "eligibility_timeout"
+            } else {
+                "eligibility_database"
+            }
+        });
+
+        claims
+            .iter()
+            .zip(&targets)
+            .map(|(claim, target)| match *target {
+                EligibilityTarget::NotGated => EligibilityDecision::Eligible,
+                EligibilityTarget::MissingRecipient => EligibilityDecision::Ineligible,
+                EligibilityTarget::Fan {
+                    fan_id,
+                    require_consent,
+                } => match (&consent, unavailable_kind) {
+                    (Ok(consent), _) => {
+                        if consent
+                            .get(&(claim.workspace_id, fan_id))
+                            .is_some_and(|granted| *granted || !require_consent)
+                        {
+                            EligibilityDecision::Eligible
+                        } else {
+                            EligibilityDecision::Ineligible
+                        }
+                    }
+                    (Err(_), Some(kind)) => EligibilityDecision::Unavailable(kind),
+                    (Err(_), None) => EligibilityDecision::Unavailable("eligibility_database"),
+                },
+            })
+            .collect()
+    }
+
     async fn dispatch_one(
         &self,
         claim: DeliveryClaim,
+        eligibility: EligibilityDecision,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<AttemptOutcome, WorkerRunError> {
         let started_at = OffsetDateTime::now_utc();
         let started = Instant::now();
-        let result = self.resolve_and_dispatch(&claim, &mut shutdown).await;
+        let result = self
+            .resolve_and_dispatch(&claim, eligibility, &mut shutdown)
+            .await;
         let outcome = final_outcome(result.disposition, claim.attempt_number, claim.max_attempts);
         let retry_delay = if outcome == AttemptOutcome::Retry {
             retry_delay(
@@ -287,31 +365,19 @@ impl OutboxWorker {
     async fn resolve_and_dispatch(
         &self,
         claim: &DeliveryClaim,
+        eligibility: EligibilityDecision,
         shutdown: &mut watch::Receiver<bool>,
     ) -> DispatchResult {
         if shutdown_requested(shutdown) {
             return DispatchResult::retryable(None, "worker_shutdown");
         }
 
-        match self
-            .database_call(
-                "check_delivery_eligibility",
-                self.store.delivery_is_eligible(
-                    claim.workspace_id,
-                    &claim.event_type,
-                    &claim.payload,
-                ),
-            )
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => return DispatchResult::permanent("recipient_ineligible"),
-            Err(error) => {
-                let error_kind = if error.kind == "timeout" {
-                    "eligibility_timeout"
-                } else {
-                    "eligibility_database"
-                };
+        match eligibility {
+            EligibilityDecision::Eligible => {}
+            EligibilityDecision::Ineligible => {
+                return DispatchResult::permanent("recipient_ineligible");
+            }
+            EligibilityDecision::Unavailable(error_kind) => {
                 return DispatchResult::retryable(None, error_kind);
             }
         }

@@ -1,6 +1,7 @@
 //! HTTP transport for public acquisition endpoints.
 
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use axum::{
     Json,
-    body::Body,
+    body::{Body, Bytes},
     extract::{
         Path, Query, State,
         rejection::{JsonRejection, QueryRejection},
@@ -73,6 +74,8 @@ pub struct ClickMetricsSnapshot {
 struct CitySnapshot {
     items: Arc<Vec<crowdrelay_domain::CitySignal>>,
     refreshed_at: Option<Instant>,
+    /// Serialized responses for this exact `items` snapshot, keyed by limit.
+    rendered: HashMap<u32, Arc<RenderedCities>>,
 }
 
 /// Construction parameters for acquisition HTTP state.
@@ -124,24 +127,16 @@ impl AcquisitionState {
         (self.click_metrics_reader)()
     }
 
-    async fn cached_cities(
+    async fn cached_snapshot(
         &self,
-        limit: u32,
         max_age: Option<Duration>,
-    ) -> Option<Vec<crowdrelay_domain::CitySignal>> {
+    ) -> Option<Arc<Vec<crowdrelay_domain::CitySignal>>> {
         let snapshot = self.city_snapshot.read().await;
         let refreshed_at = snapshot.refreshed_at?;
         if max_age.is_some_and(|age| refreshed_at.elapsed() > age) {
             return None;
         }
-        Some(
-            snapshot
-                .items
-                .iter()
-                .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .cloned()
-                .collect(),
-        )
+        Some(Arc::clone(&snapshot.items))
     }
 
     /// Resolves a public city slug to its id.
@@ -155,46 +150,41 @@ impl AcquisitionState {
         slug: &crowdrelay_domain::CitySlug,
     ) -> Result<Option<crowdrelay_domain::CityId>, ListCitiesError> {
         Ok(self
-            .resilient_cities(MAX_CITY_SNAPSHOT_LIMIT)
+            .resilient_snapshot()
             .await?
-            .into_iter()
+            .iter()
             .find(|city| city.slug() == slug)
-            .map(|city| city.city_id()))
+            .map(crowdrelay_domain::CitySignal::city_id))
     }
 
-    async fn resilient_cities(
+    /// Returns the shared city snapshot, refreshing it at most once per
+    /// `CITY_SNAPSHOT_MAX_AGE` and falling back to the previous snapshot when a
+    /// refresh fails.
+    async fn resilient_snapshot(
         &self,
-        limit: u32,
-    ) -> Result<Vec<crowdrelay_domain::CitySignal>, ListCitiesError> {
-        if !(1..=MAX_CITY_SNAPSHOT_LIMIT).contains(&limit) {
-            return Err(ListCitiesError::InvalidLimit {
-                max: MAX_CITY_SNAPSHOT_LIMIT,
-            });
-        }
-        if let Some(cities) = self.cached_cities(limit, Some(CITY_SNAPSHOT_MAX_AGE)).await {
+    ) -> Result<Arc<Vec<crowdrelay_domain::CitySignal>>, ListCitiesError> {
+        if let Some(cities) = self.cached_snapshot(Some(CITY_SNAPSHOT_MAX_AGE)).await {
             return Ok(cities);
         }
 
         let _refresh = self.city_refresh.lock().await;
-        if let Some(cities) = self.cached_cities(limit, Some(CITY_SNAPSHOT_MAX_AGE)).await {
+        if let Some(cities) = self.cached_snapshot(Some(CITY_SNAPSHOT_MAX_AGE)).await {
             return Ok(cities);
         }
-        let stale = self.cached_cities(limit, None).await;
+        let stale = self.cached_snapshot(None).await;
         match self
             .list_cities
             .execute(self.workspace_id, MAX_CITY_SNAPSHOT_LIMIT)
             .await
         {
             Ok(cities) => {
-                let result = cities
-                    .iter()
-                    .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                    .cloned()
-                    .collect();
+                let items = Arc::new(cities);
                 let mut snapshot = self.city_snapshot.write().await;
-                snapshot.items = Arc::new(cities);
+                snapshot.items = Arc::clone(&items);
                 snapshot.refreshed_at = Some(Instant::now());
-                Ok(result)
+                // Rendered responses describe the replaced snapshot only.
+                snapshot.rendered.clear();
+                Ok(items)
             }
             Err(error) => match stale {
                 Some(cities) => {
@@ -205,6 +195,68 @@ impl AcquisitionState {
             },
         }
     }
+
+    /// Returns the serialized public city list for `limit`, rendering and
+    /// caching it once per snapshot instead of per request.
+    async fn rendered_cities(&self, limit: u32) -> Result<Arc<RenderedCities>, RenderCitiesError> {
+        if !(1..=MAX_CITY_SNAPSHOT_LIMIT).contains(&limit) {
+            return Err(RenderCitiesError::List(ListCitiesError::InvalidLimit {
+                max: MAX_CITY_SNAPSHOT_LIMIT,
+            }));
+        }
+        let items = self
+            .resilient_snapshot()
+            .await
+            .map_err(RenderCitiesError::List)?;
+        {
+            let snapshot = self.city_snapshot.read().await;
+            if Arc::ptr_eq(&snapshot.items, &items)
+                && let Some(rendered) = snapshot.rendered.get(&limit)
+            {
+                return Ok(Arc::clone(rendered));
+            }
+        }
+
+        let body = serde_json::to_vec(&CityListResponse {
+            items: items
+                .iter()
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .cloned()
+                .map(CitySignalResponse::from)
+                .collect(),
+        })
+        .map_err(|_| RenderCitiesError::Serialization)?;
+        let etag = format!("\"cities-{}\"", hex::encode(Sha256::digest(&body)));
+        let etag_header =
+            HeaderValue::from_str(&etag).map_err(|_| RenderCitiesError::Serialization)?;
+        let rendered = Arc::new(RenderedCities {
+            body: Bytes::from(body),
+            etag,
+            etag_header,
+        });
+
+        let mut snapshot = self.city_snapshot.write().await;
+        // A refresh may have replaced the snapshot while this response was
+        // rendered; that render then describes a superseded snapshot and must
+        // not be cached against the current one.
+        if Arc::ptr_eq(&snapshot.items, &items) {
+            snapshot.rendered.insert(limit, Arc::clone(&rendered));
+        }
+        Ok(rendered)
+    }
+}
+
+/// A serialized public city list and its validator, cached per snapshot.
+#[derive(Debug)]
+struct RenderedCities {
+    body: Bytes,
+    etag: String,
+    etag_header: HeaderValue,
+}
+
+enum RenderCitiesError {
+    List(ListCitiesError),
+    Serialization,
 }
 
 /// Resolves a smart link, records non-critical attribution, and redirects immediately.
@@ -572,39 +624,29 @@ pub async fn list_cities(
         Err(_) => return Problem::bad_request(request_id_value).into_response(),
     };
 
-    let cities = match state
+    let rendered = match state
         .acquisition
-        .resilient_cities(query.limit.unwrap_or(DEFAULT_CITY_LIMIT))
+        .rendered_cities(query.limit.unwrap_or(DEFAULT_CITY_LIMIT))
         .await
     {
-        Ok(cities) => cities,
-        Err(ListCitiesError::InvalidLimit { .. }) => {
+        Ok(rendered) => rendered,
+        Err(RenderCitiesError::List(ListCitiesError::InvalidLimit { .. })) => {
             return Problem::bad_request(request_id_value).into_response();
         }
-        Err(ListCitiesError::Repository(error)) => {
+        Err(RenderCitiesError::List(ListCitiesError::Repository(error))) => {
             return repository_problem(error, request_id_value).into_response();
         }
-    };
-    let body = match serde_json::to_vec(&CityListResponse {
-        items: cities.into_iter().map(CitySignalResponse::from).collect(),
-    }) {
-        Ok(body) => body,
-        Err(error) => {
-            tracing::error!(%error, "failed to serialize public city response");
+        Err(RenderCitiesError::Serialization) => {
+            tracing::error!("failed to render the public city response");
             return Problem::internal(request_id_value).into_response();
         }
     };
-    let etag = format!("\"cities-{}\"", hex::encode(Sha256::digest(&body)));
-    let Ok(etag_header) = HeaderValue::from_str(&etag) else {
-        tracing::error!("city ETag could not be encoded as a response header");
-        return Problem::internal(request_id_value).into_response();
-    };
 
-    if etag_matches(headers.get(IF_NONE_MATCH), &etag) {
+    if etag_matches(headers.get(IF_NONE_MATCH), &rendered.etag) {
         return (
             StatusCode::NOT_MODIFIED,
             [
-                (ETAG, etag_header),
+                (ETAG, rendered.etag_header.clone()),
                 (CACHE_CONTROL, HeaderValue::from_static(PUBLIC_CITY_CACHE)),
             ],
         )
@@ -615,10 +657,10 @@ pub async fn list_cities(
         StatusCode::OK,
         [
             (CONTENT_TYPE, HeaderValue::from_static("application/json")),
-            (ETAG, etag_header),
+            (ETAG, rendered.etag_header.clone()),
             (CACHE_CONTROL, HeaderValue::from_static(PUBLIC_CITY_CACHE)),
         ],
-        Body::from(body),
+        Body::from(rendered.body.clone()),
     )
         .into_response()
 }

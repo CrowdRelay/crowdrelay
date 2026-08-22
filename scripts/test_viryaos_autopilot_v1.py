@@ -88,7 +88,10 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("campaign.status IN ('scheduled', 'completed')", infra)
         self.assertNotIn("synesthesia.completed_at <= $2 - INTERVAL '48 hours'", infra)
         self.assertIn('"viryaos.fan_lifecycle.message_requested"', outbox)
-        self.assertIn("delivery_is_eligible", outbox)
+        self.assertIn("eligibility_target", outbox)
+        self.assertIn("require_consent", outbox)
+        self.assertIn("consent.purpose = 'marketing'", outbox)
+        self.assertIn("fan.status = 'active'", outbox)
 
     def test_postgres_18_aio_and_volume_layout_are_pinned(self):
         compose = COMPOSE.read_text()
