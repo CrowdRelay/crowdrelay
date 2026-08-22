@@ -451,6 +451,11 @@ RESOURCE_REPORT=$(cat <<'REMOTE'
 set -uo pipefail
 line() { printf '\n== %s ==\n' "$1"; }
 
+line "shape"
+printf 'arch=%s cores=%s\n' "$(uname -m)" "$(nproc 2>/dev/null || echo unknown)"
+[ -r /sys/devices/virtual/dmi/id/product_name ] && cat /sys/devices/virtual/dmi/id/product_name
+grep -m1 'model name' /proc/cpuinfo 2>/dev/null || true
+
 line "memory and swap (MiB)"
 free -m 2>/dev/null || cat /proc/meminfo | head -5
 
