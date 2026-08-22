@@ -56,4 +56,14 @@ services:
     cpus: 0.10
 
     networks:
-      - runtime
+      runtime: {}
+      # The control plane runs in its own compose project on the same host and
+      # reaches management through this network. Before the move to
+      # virya-crowdrelay it crossed a WireGuard link from virya-home instead.
+      area-management:
+        aliases: [area-management-proxy]
+
+networks:
+  area-management:
+    external: true
+    name: ${VIRYA_EDGE_NETWORK:-virya-edge}

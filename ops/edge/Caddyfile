@@ -1,0 +1,95 @@
+{
+	servers :443 {
+		protocols h1 h2 h3
+	}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+}
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+	import security_headers
+
+
+
+	handle {
+		# n8n runs on virya-home, which has no public address, so this is the
+		# host's WireGuard peer. Supplied by the environment, not tracked.
+		reverse_proxy {$VIRYA_N8N_UPSTREAM} {
+			header_up X-Real-IP {remote_host}
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 120s
+				keepalive 120s
+			}
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# BEGIN CROWDRELAY SIGNAL API
+signal-api.virya.music {
+	encode zstd gzip
+	import security_headers
+
+	request_body {
+		max_size 32KB
+	}
+
+	reverse_proxy crowdrelay-api:8080 {
+		health_uri /v1/health/ready
+		health_interval 30s
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 10s
+		}
+	}
+}
+# END CROWDRELAY SIGNAL API
+
+# BEGIN CROWDRELAY CONTROL PLANE
+# Managed CrowdRelay Control Plane edge block.
+# The Basic Auth password is stored only as an Argon2id hash below.
+# The Control Plane bearer token is read at request time from Caddy's persistent /config volume.
+control.virya.music {
+    encode zstd gzip
+    import security_headers
+
+    basic_auth argon2id {
+        # Argon2id hash of the staff password, supplied by the host
+        # environment. This repository is public: the hash is never tracked.
+        staff {$CONTROL_PLANE_STAFF_PASSWORD_HASH}
+    }
+
+    reverse_proxy control-plane:8090 {
+        health_uri /healthz/ready
+        health_interval 15s
+        health_timeout 3s
+        lb_try_duration 3s
+        header_up Authorization "Bearer {file./config/control-plane-admin-token}"
+        header_up X-Control-Plane-Edge "oracle-caddy"
+        transport http {
+            dial_timeout 2s
+            response_header_timeout 10s
+            keepalive 60s
+        }
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}
+# END CROWDRELAY CONTROL PLANE
