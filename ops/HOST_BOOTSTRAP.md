@@ -70,13 +70,13 @@ paths itself they are root-owned directories and the anchor dies with
 
 `/opt/crowdrelay/.crowdrelay.local.sh` holds `CROWDRELAY_CONTROL_PLANE_BASE_URL`, which the
 heartbeat posts to. It is not in `deploy/.env.production`. Colocated it must be
-`http://127.0.0.1:8090`; while it still pointed at the old
-`http://10.77.0.2:8090` the heartbeat failed silently and the Control Plane showed the
+`http://127.0.0.1:8090`; while it still pointed at the old cross-host WireGuard
+address on port 8090 the heartbeat failed silently and the Control Plane showed the
 runtime as stale with `apiHealthy: false`.
 
 ## 7. n8n on virya-home
 
-n8n binds `10.77.0.2:5678`, its WireGuard address, so the edge can reach it and
+n8n binds its own `wg0` WireGuard address on port 5678, so the edge can reach it and
 the LAN and internet cannot. It must not depend on the retired `oracle-bridge`.
 
 ## Editing bind-mounted files
