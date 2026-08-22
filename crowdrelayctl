@@ -166,7 +166,13 @@ report_control_plane_runtime() {
   [[ -n "$metrics" ]] && api_healthy=true
 
   worker_healthy=""
-  worker_id="$(compose ps -q worker 2>/dev/null || true)"
+  # Resolve the worker by Compose's own labels rather than `compose ps`, which
+  # would re-parse the compose and env files for a single container id. Labels
+  # are what Compose itself matches on, so this stays correct if the container
+  # naming changes.
+  worker_id="$(docker ps --quiet --no-trunc \
+    --filter "label=com.docker.compose.project=$(basename "$ROOT_DIR")" \
+    --filter "label=com.docker.compose.service=worker" 2>/dev/null | head -n 1 || true)"
   if [[ -n "$worker_id" ]]; then
     case "$(docker inspect "$worker_id" --format '{{.State.Health.Status}}' 2>/dev/null || true)" in
       healthy) worker_healthy=true ;;
