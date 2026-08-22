@@ -1,0 +1,17 @@
+[Unit]
+Description=Report CrowdRelay runtime status every minute
+
+[Timer]
+OnBootSec=2min
+# The Control Plane marks a tenant stale after
+# CONTROL_PLANE_RUNTIME_STALE_AFTER_SECONDS, 180s by default. A 60s cadence
+# keeps three reports inside every stale window, so one missed run never shows
+# a healthy tenant as stale.
+OnUnitActiveSec=60s
+RandomizedDelaySec=5s
+# A missed heartbeat is worthless once its window has passed; catching up on
+# boot would only publish a stale observation as if it were current.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
