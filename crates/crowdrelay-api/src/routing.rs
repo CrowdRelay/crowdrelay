@@ -738,6 +738,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::upsert_outreach_opportunity),
         )
         .route(
+            "/v1/admin/autopilot/outreach/candidates",
+            post(autopilot::ingest_outreach_candidates).get(autopilot::list_outreach_candidates),
+        )
+        .route(
+            "/v1/admin/autopilot/outreach/candidates/{candidate_id}/confirm",
+            post(autopilot::confirm_outreach_candidate),
+        )
+        .route(
+            "/v1/admin/autopilot/outreach/submission-channels",
+            post(autopilot::upsert_submission_channel),
+        )
+        .route(
             "/v1/admin/autopilot/releases",
             post(autopilot::upsert_release_plan),
         )
@@ -788,6 +800,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/growth-metrics/points",
             post(autopilot::record_growth_metric_point),
+        )
+        .route(
+            "/v1/admin/autopilot/growth-metrics/coverage",
+            get(autopilot::growth_metric_coverage),
         )
         .route(
             "/v1/admin/autopilot/growth-metrics/trends",

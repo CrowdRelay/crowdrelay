@@ -1042,6 +1042,36 @@ for this — discovery needs only an app token, and the adapter already holds on
 Deduplicate on contact identity, and carry a per-kind fit score so a metal
 reaction channel is never pitched a folk single.
 
+### As built — 2026-08-23
+
+Migration `0082_viryaos_target_discovery.sql`, `crowdrelay_domain::target_discovery`,
+and four admin routes under `/v1/admin/autopilot/outreach/`.
+
+- **Screening happens on write, not in a sweep.** A candidate arrives, is judged
+  and is stored with its verdict, so a refusal is durable and the same bad
+  candidate is never rediscovered, re-screened and re-refused next week. That is
+  what makes running discovery often cheap.
+- **Refusal reasons are a closed set**: `route_inferred`, `evidence_missing`,
+  `paid_placement`, `sells_placement`, `implausible_engagement`,
+  `indiscriminate_churn`, `poor_fit`, `too_small`. The first two and
+  `paid_placement` are permanent regardless of policy; the rest move with the
+  thresholds in `TargetDiscoveryPolicy`.
+- **Dedupe is on contact identity**, `(workspace, route_kind, route_value)`, so
+  finding the same curator through a second source is a duplicate rather than a
+  second candidate.
+- **Only an email route promotes.** A form or a handle is a real published route
+  with no pitcher yet, so it stays an admitted candidate rather than becoming a
+  target row with nowhere to put the address. Phase 10 and 12 change that.
+- **Promotion never resets a relationship**: an address the band already holds
+  keeps its score, history and do-not-contact flag, and only gains the
+  provenance link back to the candidate.
+- Screening thresholds are `TargetDiscoveryPolicy::default()` today. Making them
+  operator-editable is a `viryaos_autopilot_policies` row and a context, not a
+  new subsystem.
+
+Proven end to end against Postgres 18 in
+`crates/crowdrelay-infra/tests/autopilot_target_discovery_postgres.rs`.
+
 ## Phase 10 — free-reach pitcher
 
 Reviews, radio interviews, reaction-channel creators, collabs, media patronage.
@@ -1076,6 +1106,20 @@ The agent cannot grow what it cannot see, and it currently sees neither.
   an unobservable metric is indistinguishable from doing nothing.
 
 ---
+
+### As built — 2026-08-23 (the seeing half only)
+
+`GET /v1/admin/autopilot/growth-metrics/coverage` answers "what can the agent
+see?" for `spotify`, `youtube`, `bandsintown` and `social`, reporting `missing`,
+`stale` or `live` per platform. A platform nobody connected reads as `missing`
+rather than as an empty list, because silence from an unconnected platform is
+not evidence that nothing is happening there.
+
+The schema already accepted these platforms, and ingestion is the ordinary
+series/points path, so what is left of Phase 11 is entirely adapter work in n8n:
+declare each series once with an honest `expected_interval_hours`, then post
+absolute values. The contract is written up in `n8n/viryaos-executor-contract.md`.
+Until an adapter runs, coverage will honestly report four missing feeds.
 
 ## Phase 12 — playlist pitcher
 
@@ -1300,9 +1344,9 @@ what depends on what. Phases 1 to 7 are code; 8 onward is plan.
 | 6 | Objectives | plan |
 | 7 | Tour economics | DONE |
 | 8 | Booking selectivity and negotiation | plan |
-| 9 | Target discovery | plan |
+| 9 | Target discovery | DONE (ingestion, screening, promotion) |
 | 10 | Free-reach pitcher | plan |
-| 11 | Spotify and Bandsintown feeds | plan |
+| 11 | Spotify and Bandsintown feeds | partial: coverage is visible, adapters unwritten |
 | 12 | Playlist pitcher | plan |
 | 13 | Plays | plan |
 | 14 | Measurement and honest attribution | plan |

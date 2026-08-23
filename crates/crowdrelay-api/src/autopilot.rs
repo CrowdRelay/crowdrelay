@@ -6,7 +6,7 @@
 use crate::{AppState, IDEMPOTENCY_KEY, Problem, request_id};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
@@ -17,15 +17,16 @@ use crowdrelay_application::{
         AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
         AutopilotExperimentStateRepository, AutopilotGrowthMetricRepository,
         AutopilotMarketStateRepository, AutopilotMerchStateRepository,
-        AutopilotOutreachStateRepository, AutopilotTeamStateRepository,
-        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
-        ExperimentObservation, GrowthMetricSubject, GrowthMetricTrendView, ManagerConfigSource,
-        RecordBeaconReply, RecordBookingReply, RecordGrowthMetricPoint, RecordOutreachReply,
-        RecordTeamOpportunityProgress, SetAutopilotAuthority, SetManagerBookingPolicy,
-        SetTourEconomics, TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
-        UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
+        AutopilotOutreachStateRepository, AutopilotTargetDiscoveryRepository,
+        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
+        CreateExperimentVariant, ExperimentObservation, GrowthMetricSubject, GrowthMetricTrendView,
+        IngestOutreachCandidate, ManagerConfigSource, RecordBeaconReply, RecordBookingReply,
+        RecordGrowthMetricPoint, RecordOutreachReply, RecordTeamOpportunityProgress,
+        SetAutopilotAuthority, SetManagerBookingPolicy, SetTourEconomics, TeamOpportunityKind,
+        TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal,
+        UpsertContentSource, UpsertGrowthMetricSeries, UpsertMerchProductEconomics,
+        UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleasePlan, UpsertSubmissionChannel,
         UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
@@ -38,10 +39,13 @@ use crowdrelay_domain::{
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::ExperimentMetric,
-    growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
+    growth_metrics::{
+        FeedCoverage, MetricDirection, MetricPlatform, MetricValueTier, off_platform_coverage,
+    },
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,
 };
 use serde::{Deserialize, Serialize};
@@ -140,4 +144,5 @@ include!("autopilot/promotion_market.rs");
 include!("autopilot/outreach_release.rs");
 include!("autopilot/experiments_actions.rs");
 include!("autopilot/growth_metrics.rs");
+include!("autopilot/target_discovery.rs");
 include!("autopilot/validation.rs");
