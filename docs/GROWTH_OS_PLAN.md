@@ -1596,6 +1596,48 @@ needs two the workspace does not have: `SPOTIFY_CLIENT_ID` and
 `SPOTIFY_CLIENT_SECRET`. Its extraction regex in particular wants a dry run
 against real descriptions before the mapping is enabled.
 
+### The engine went live — 2026-08-23
+
+Deployed `3e6b955`, schema 82 to 84, `MAKE_DEPLOY=PASS`. All twenty contexts
+enabled, and the growth envelope flipped: `agent_enabled=true, dry_run=false`.
+
+Three things are worth recording because they are evidence rather than
+intention.
+
+**The brief chose the right headline on its first unprompted run.** Before the
+envelope was flipped it fired with `disabled_with_work_waiting` — eleven
+decisions and five parked actions waiting on a switched-off agent. That is the
+one silence the rule exists to break, and it found the real production state
+without being told what to look for.
+
+**The agent's first autonomous act was to ask for supply.** `outreach_supply`
+emitted `outreach.discovery.request` within a minute of the envelope opening,
+because it has zero pitchable targets. It then parked itself at
+`awaiting_executor`, because no executor advertises `outreach.discovery`. Both
+halves are correct: it noticed it was starving and it refused to pretend work
+was happening.
+
+**Nothing reached a fan.** Zero owned-audience touches, zero failures since the
+flip, zero dead outbox rows. Six actions parked across three capabilities
+nobody advertises, eleven still awaiting a human. The envelope opened onto a
+system whose every outward path is still gated by a heartbeat, which is exactly
+the state the audit predicted and the reason the capability list matters more
+than the envelope did.
+
+### Still open after going live
+
+- **The kill switch has no interface.** `viryaos_growth_envelope` has no API, no
+  repository port and no mutation path anywhere in the code. It is set by
+  migration 0076 and changeable only by hand in psql. The control an operator
+  would most want to reach in a hurry is the one with no button, and that should
+  be fixed before the agent is doing much.
+- **Three capabilities gate everything with subjects waiting.**
+  `content.artifact` (4 parked), `beacon.outreach` (1) and `outreach.discovery`
+  (1). None needs Rust; all need a heartbeat that advertises them, and per this
+  repo's own contract, a hash-bound smoke before that.
+- **`operator_actions.actor_type` still only allows `'admin_api_key'`**, so an
+  executor's ingestion is recorded under the wrong actor.
+
 ### What is still missing, in the order that unblocks the most
 
 1. **The executor must advertise `outreach.discovery`** and run a sweep. Until
