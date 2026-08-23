@@ -285,6 +285,7 @@ struct LifecycleSnapshotRow {
     paid_ticket_count: i64,
     qualified_referrals: i64,
     last_qualified_referral_at: Option<OffsetDateTime>,
+    has_referral_code: bool,
 }
 
 #[derive(Debug, FromRow)]

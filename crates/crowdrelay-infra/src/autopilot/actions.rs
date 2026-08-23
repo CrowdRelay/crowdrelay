@@ -636,6 +636,29 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     // first-party mutation would fabricate state the evidence
                     // does not support.
                 }
+                AutopilotActionPayload::IssueReferralCode { fan_id } => {
+                    // Same shape as the existing self-service path in
+                    // `fan_lifecycle`: one code per fan, and a second one would
+                    // split their referrals across two identities and make the
+                    // ledger wrong. The insert is guarded rather than blind so a
+                    // replay is a no-op instead of a duplicate.
+                    sqlx::query(
+                        r#"
+                        INSERT INTO referral_codes (workspace_id, fan_id, code)
+                        SELECT $1, $2, encode(gen_random_bytes(18), 'hex')
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM referral_codes
+                            WHERE workspace_id = $1 AND fan_id = $2 AND active
+                        )
+                        ON CONFLICT DO NOTHING
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(fan_id.into_uuid())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
                 AutopilotActionPayload::RaiseGrowthDebt { .. } => {
                     // Deliberately no side effect, for the same reason as the
                     // raised growth opportunity: the finding is the work. What

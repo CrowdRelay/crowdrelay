@@ -28,6 +28,12 @@ pub struct FanLifecycleSnapshot {
     /// When the most recent one converted. Without it the rule cannot say
     /// "recently", and it says nothing rather than guessing.
     pub last_qualified_referral_at: Option<OffsetDateTime>,
+    /// Whether this fan already has an active referral code.
+    ///
+    /// Every message below can carry an invite, and an invite with no code
+    /// behind it is a dead end. So the code is issued first, for the same
+    /// reason a show gets its tracked link before anything is shared.
+    pub has_referral_code: bool,
     pub last_event_interest_at: Option<OffsetDateTime>,
 }
 
@@ -93,6 +99,15 @@ impl LifecycleTemplate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FanLifecycleDecision {
     Hold(FanLifecycleHoldReason),
+    /// Give this fan a referral code before anything invites them to share.
+    ///
+    /// Costs nothing, reaches nobody outside the workspace, and is the only
+    /// growth mechanism that scales with the audience rather than with the
+    /// band's effort — which is exactly why it must exist before the campaign
+    /// rather than after it.
+    IssueReferralCode {
+        confidence: Confidence,
+    },
     RequestMessage {
         template: LifecycleTemplate,
         confidence: Confidence,
@@ -177,6 +192,15 @@ pub fn evaluate_fan_lifecycle(
     if !snapshot.marketing_consent {
         return FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoConsent);
     }
+    // A consented fan with no code is a door that does not open. This runs
+    // before every message, because each of them can carry an invite and an
+    // invite with no code behind it goes nowhere.
+    if !snapshot.has_referral_code {
+        return FanLifecycleDecision::IssueReferralCode {
+            confidence: Confidence::saturating_from_basis_points(9_900),
+        };
+    }
+
     // Milestones are checked before the cooldown, and they are the only thing
     // allowed past it. A thank-you for a ticket bought this morning is worth
     // sending this morning; held for five days it becomes strange. Everything
@@ -249,6 +273,7 @@ mod tests {
             synesthesia_completed_at: None,
             last_marketing_touch_at: None,
             has_paid_ticket: false,
+            has_referral_code: true,
             paid_ticket_count: 0,
             qualified_referrals: 0,
             last_qualified_referral_at: None,
@@ -434,6 +459,57 @@ mod tests {
                 template: LifecycleTemplate::FirstTicketThankYou,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn a_fan_without_a_code_gets_one_before_any_message() {
+        // Every message can carry an invite, and an invite with no code behind
+        // it is a dead end.
+        let mut data = eligible();
+        data.has_referral_code = false;
+        assert_eq!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::IssueReferralCode {
+                confidence: Confidence::saturating_from_basis_points(9_900),
+            }
+        );
+    }
+
+    #[test]
+    fn issuing_a_code_outranks_even_a_milestone() {
+        // The thank-you should carry a working invite the first time it is
+        // sent, not the second.
+        let mut data = eligible();
+        data.has_referral_code = false;
+        data.has_paid_ticket = true;
+        data.paid_ticket_count = 1;
+        data.last_paid_ticket_at = Some(now() - Duration::hours(1));
+        assert!(matches!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::IssueReferralCode { .. }
+        ));
+    }
+
+    #[test]
+    fn a_fan_without_consent_gets_no_code_either() {
+        // A code is harmless, but issuing one for somebody who never agreed to
+        // hear from us implies a relationship that does not exist.
+        let mut data = eligible();
+        data.has_referral_code = false;
+        data.marketing_consent = false;
+        assert_eq!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoConsent)
+        );
+    }
+
+    #[test]
+    fn a_fan_who_already_has_a_code_is_left_alone() {
+        let decision = evaluate_fan_lifecycle(eligible(), FanLifecyclePolicy::default(), now());
+        assert!(!matches!(
+            decision,
+            FanLifecycleDecision::IssueReferralCode { .. }
         ));
     }
 }
