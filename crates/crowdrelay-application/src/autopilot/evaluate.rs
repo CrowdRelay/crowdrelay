@@ -31,6 +31,9 @@ use crowdrelay_domain::{
         MerchReorderDecision, evaluate_merch_price, evaluate_reorder,
     },
     outreach::{OutreachDecision, OutreachSnapshot, evaluate_outreach},
+    plays::{
+        PlayDecision, PlayKind, PlaySnapshot, evaluate_play, play_is_worth_starting, step_schedule,
+    },
     pricing::{
         TicketAllocationDecision, TicketYieldDecision, TicketYieldSnapshot,
         evaluate_ticket_allocation, evaluate_ticket_yield,
@@ -50,6 +53,7 @@ mod commercial;
 mod growth_debt;
 mod growth_metrics;
 mod outreach_supply;
+mod plays;
 mod show_growth;
 
 use beacons::{beacon_candidate, beacon_discovery_candidate};
@@ -60,6 +64,7 @@ use commercial::{
 use growth_debt::growth_debt_candidate;
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
+use plays::{play_decision, play_start, play_step_candidate};
 use show_growth::show_growth_candidate;
 
 use crate::RepositoryError;
@@ -522,6 +527,45 @@ where
                         .await?;
                     }
                 }
+                AutopilotContext::Plays => {
+                    // Starting comes first so a play created this cycle can run
+                    // a step that is already due. An announce step for a show
+                    // announced fourteen days late is due the moment its play
+                    // exists, and making it wait a cycle for no reason is a
+                    // cycle of its window spent.
+                    for kind in PlayKind::all() {
+                        let anchors = self
+                            .repository
+                            .load_play_anchors(self.workspace_id, kind, now)
+                            .await?;
+                        for anchor in anchors {
+                            let Some(start) = play_start(kind, anchor, &policy) else {
+                                continue;
+                            };
+                            if self
+                                .repository
+                                .start_play(self.workspace_id, &start)
+                                .await?
+                            {
+                                report.plays_started = report.plays_started.saturating_add(1);
+                            }
+                        }
+                    }
+                    let snapshots = self
+                        .repository
+                        .load_play_snapshots(self.workspace_id, now)
+                        .await?;
+                    for mut snapshot in snapshots {
+                        let mut limits = CycleLimits {
+                            ceilings: &ceilings,
+                            envelope: &envelope,
+                            usage: &mut usage,
+                            touch_ages: &touch_ages,
+                        };
+                        self.advance_play(&mut snapshot, &policy, &mut limits, &mut report, now)
+                            .await?;
+                    }
+                }
                 AutopilotContext::GrowthDebt => {
                     let observations = self
                         .repository
@@ -545,6 +589,83 @@ where
         }
 
         Ok(report)
+    }
+
+    /// Walks one running play as far as it will go this cycle.
+    ///
+    /// A settle can make the step behind it immediately actionable: a withdrawn
+    /// anchor settles every remaining step in turn, and an expired step settles
+    /// one that is already due. So this loops rather than deciding once — but
+    /// only ever forward, and never more times than there are steps, because a
+    /// state machine that stopped shrinking would otherwise spin against the
+    /// database for the rest of the cycle.
+    async fn advance_play(
+        &self,
+        snapshot: &mut PlayRunSnapshot,
+        policy: &AutopilotPolicy,
+        limits: &mut CycleLimits<'_>,
+        report: &mut AutopilotCycleReport,
+        now: OffsetDateTime,
+    ) -> Result<(), AutopilotError> {
+        let bound = snapshot.steps.len().saturating_add(1);
+        for _ in 0..bound {
+            let Some(decision) = play_decision(snapshot, policy, now) else {
+                return Ok(());
+            };
+            match decision {
+                PlayDecision::Hold(_) => return Ok(()),
+                PlayDecision::RunStep { .. } => {
+                    if let Some(candidate) = play_step_candidate(snapshot, decision, policy)? {
+                        self.persist(
+                            &candidate,
+                            limits.ceilings,
+                            limits.envelope,
+                            limits.usage,
+                            limits.touch_ages,
+                            report,
+                        )
+                        .await?;
+                    }
+                    // One send per play per cycle. The recipient came from a
+                    // read taken before this action existed, and deciding again
+                    // against it would either offer the same fan twice or skip
+                    // the next one; the following cycle reads a fresh audience.
+                    return Ok(());
+                }
+                PlayDecision::SkipStep { index, reason, .. } => {
+                    self.repository
+                        .settle_play_step(
+                            self.workspace_id,
+                            &PlayStepSettlement {
+                                play_id: snapshot.play_id,
+                                step_index: index,
+                                reason,
+                            },
+                            now,
+                        )
+                        .await?;
+                    report.play_steps_skipped = report.play_steps_skipped.saturating_add(1);
+                    // The same settle applied to the copy in hand. Without it
+                    // the next pass reads the step as still open and settles it
+                    // again, which double-counts an omission that happened once.
+                    if let Some(step) = snapshot
+                        .steps
+                        .iter_mut()
+                        .find(|step| step.index == index && !step.settled)
+                    {
+                        step.settled = true;
+                    }
+                }
+                PlayDecision::Complete => {
+                    self.repository
+                        .complete_play(self.workspace_id, snapshot.play_id, now)
+                        .await?;
+                    report.plays_completed = report.plays_completed.saturating_add(1);
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The one place every candidate passes through, and therefore the only
@@ -642,11 +763,33 @@ where
     }
 }
 
+/// The cycle-wide limits every candidate is measured against.
+///
+/// Carried as one value because they are read together and, in the envelope's
+/// case, spent together: passing them separately through a call chain is how a
+/// budget ends up topped up on one path and not on another.
+struct CycleLimits<'a> {
+    ceilings: &'a [(ActionClass, AutonomyLevel)],
+    envelope: &'a GrowthEnvelope,
+    usage: &'a mut EnvelopeUsage,
+    touch_ages: &'a [(uuid::Uuid, u32)],
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AutopilotCycleReport {
     pub decisions: u32,
     pub actions_enqueued: u32,
     pub actions_throttled: u32,
+    /// Campaigns the agent committed to this cycle. Counted apart from
+    /// decisions because starting a play emits nothing: it is the agent taking
+    /// on work, and an operator should be able to see that happen before the
+    /// first message goes anywhere.
+    pub plays_started: u32,
+    /// Steps settled without being sent. The number that matters most on this
+    /// report: it is the agent saying what it did not do, which is the fact
+    /// every other counter here would otherwise hide.
+    pub play_steps_skipped: u32,
+    pub plays_completed: u32,
     /// Decisions the volume envelope held back — the agent was switched off,
     /// rehearsing, out of budget, or inside a subject's cooldown.
     pub actions_held: u32,
@@ -669,3 +812,4 @@ include!("evaluate/candidates.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/growth_metrics_tests.rs");
 include!("evaluate/growth_debt_tests.rs");
+include!("evaluate/plays_tests.rs");

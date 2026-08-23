@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use crowdrelay_domain::{
-    AutopilotActionId, AutopilotMeasurementId, WorkspaceId,
+    AutopilotActionId, AutopilotMeasurementId, PlayId, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::AutonomyLevel,
@@ -20,6 +20,7 @@ use crowdrelay_domain::{
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
     outreach::OutreachSnapshot,
     performance::{EffectDirection, EffectResult, assess_effect},
+    plays::PlayKind,
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
     release_autopilot::ReleasePlanSnapshot,
@@ -31,7 +32,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::model::{
-    AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, DecisionCandidate,
+    AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, DecisionCandidate, PlayAnchor,
+    PlayRunSnapshot, PlayStart, PlayStepSettlement,
 };
 use crate::RepositoryError;
 
@@ -187,6 +189,57 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<OutreachSupplySnapshot, RepositoryError>;
+
+    /// Anchors that could carry a play of this kind and do not have one yet.
+    ///
+    /// Scoped by kind because "already has a play" is per kind: a show may run
+    /// a track-us play and a listing sweep, and one query that ignored the kind
+    /// would start the second only until the first existed.
+    async fn load_play_anchors(
+        &self,
+        workspace_id: WorkspaceId,
+        kind: PlayKind,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PlayAnchor>, RepositoryError>;
+
+    /// Creates the play and its whole step schedule in one transaction.
+    ///
+    /// Returns false when a play already covered this anchor. Not an error: two
+    /// cycles racing, or a restart mid-cycle, must leave one play rather than a
+    /// failure somebody has to interpret.
+    async fn start_play(
+        &self,
+        workspace_id: WorkspaceId,
+        start: &PlayStart,
+    ) -> Result<bool, RepositoryError>;
+
+    /// Every running play with the state its next decision needs, including who
+    /// its open step has not yet reached.
+    async fn load_play_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PlayRunSnapshot>, RepositoryError>;
+
+    /// Settles a step that will never be delivered, with its reason.
+    ///
+    /// The write that makes an omission a fact. Without it a step nobody
+    /// approved simply stops being mentioned, which is the failure mode the
+    /// whole design exists to avoid.
+    async fn settle_play_step(
+        &self,
+        workspace_id: WorkspaceId,
+        settlement: &PlayStepSettlement,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    /// Marks a play whose every step is settled as complete.
+    async fn complete_play(
+        &self,
+        workspace_id: WorkspaceId,
+        play_id: PlayId,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
 
     /// The operator's autonomy ceiling per action class.
     ///

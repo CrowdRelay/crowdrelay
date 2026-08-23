@@ -958,6 +958,25 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                 AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
                     operations::submit_funding_application(&mut transaction, workspace_id, action.id, *opportunity_id, now).await?;
                 }
+                AutopilotActionPayload::RunPlayStep {
+                    play_id, play_kind, step_index, step_kind, event_id, fan_id, template_key,
+                } => {
+                    plays::execute_play_step(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        &plays::PlayStepDispatch {
+                            play_id: *play_id,
+                            play_kind: *play_kind,
+                            step_index: *step_index,
+                            step_kind: *step_kind,
+                            event_id: *event_id,
+                            fan_id: *fan_id,
+                            template_key,
+                        },
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::SendTeamAssignmentEmail {
                     assignment_id, recipient_email, recipient_name, task_title, task_detail,
                     due_at, action_url_path, reminder_number,

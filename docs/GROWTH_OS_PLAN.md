@@ -1348,6 +1348,54 @@ outbox. No new scheduler, no new broker.
    upcoming event carries a complete Bandsintown listing with a tracked link.
 7. **Dormant revival** — owned audience, autonomous.
 
+### As built — 2026-08-23
+
+`crates/crowdrelay-domain/src/plays.rs` (the state machine and 11 unit tests),
+migration `0088_viryaos_plays.sql` (three tables and the `plays` context),
+`AutopilotContext::Plays` with `PlayPolicy`,
+`AutopilotActionPayload::RunPlayStep`, `evaluate/plays.rs`,
+`crates/crowdrelay-infra/src/autopilot/plays.rs`, and the `play.step` executor
+capability carrying `viryaos.play.step_requested`.
+`scripts/test_plays_v1.py`, 16 contract tests, plus two Postgres integration
+tests covering the audience query and the dispatch path end to end.
+`SCHEMA_VERSION` 87 → 88.
+
+Only **track-us ask** is implemented. The other six plays in the library above
+are still plan, and the `play_kind` CHECK names one value on purpose: a play is
+a piece of judgement about how this band grows, and one assembled at runtime
+from operator-supplied parts is a rule nobody reviewed.
+
+Decisions worth not re-deriving:
+
+- **A step's class comes from the step kind, never from the row.** A play author
+  who could pick the class could route a curator email through a step the
+  operator only ever approved for their own fans. The existing class ceiling
+  then does all the gating, so plays need no second permission system.
+- **One action per recipient.** It makes the send idempotent on a key nobody has
+  to invent (`play + step + fan`), keeps the daily quota and the weekly
+  owned-audience envelope meaningful in the units they are written in, and
+  bounds a play that goes wrong to one message rather than a segment. The
+  subject is the *fan*, so the envelope's per-contact cooldown actually applies.
+- **Eligibility and the step ceiling read the action ledger, not the delivered
+  table.** Reading only delivered rows re-offers the fan whose send is still
+  pending on every cycle: the play never progresses, and stalls completely the
+  moment a step needs approval. `viryaos_play_step_recipients` keeps its own
+  meaning — who was actually reached — because that is what Phase 14 measures.
+- **Interest is not attendance.** The announce ask accepts a registered interest
+  or a paid ticket; the post-show ask accepts only a paid ticket. Thanking
+  somebody for coming who did not come is a worse message than sending nothing.
+- **A play starts under an observe-only policy too.** Starting emits nothing,
+  and every step it then records as a decision the operator can read is the
+  agent showing what it would have done. What the policy gates is the send.
+- **Skips are written down, and the cycle log carries them.** A cycle that only
+  settled a step it will never send used to log nothing at all, which is exactly
+  the silence a recorded omission exists to break.
+
+Not delivered: the play's *effect*. A tracker count moving after a campaign is
+correlational, and attributing it to whichever message happened to be last would
+be a number that reads as attribution and is not. That is Phase 14, and no
+measurement is scheduled for a play step until it exists.
+
 ---
 
 ## Phase 14 — measurement and honest attribution
@@ -1462,7 +1510,7 @@ what depends on what. Phases 1 to 7 are code; 8 onward is plan.
 | 10 | Free-reach pitcher | plan |
 | 11 | Spotify and Bandsintown feeds | partial: coverage is visible, adapters unwritten |
 | 12 | Playlist pitcher | plan |
-| 13 | Plays | plan |
+| 13 | Plays | DONE (state machine, track-us play, per-recipient send through the outbox) |
 | 14 | Measurement and honest attribution | plan |
 | 15 | Learning | plan |
 | 16 | Operator brief | DONE (rule, ledger, daily delivery on `ops.alert`) |

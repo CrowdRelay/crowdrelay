@@ -3,8 +3,8 @@
 use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
     ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
-    OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
-    TicketTypeId, WorkspaceId,
+    OutreachOpportunityId, OutreachTargetId, PlayId, PromotionCampaignId, ReleasePlanId,
+    TeamOpportunityId, TicketTypeId, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
@@ -20,6 +20,7 @@ use crowdrelay_domain::{
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
     outreach::{OutreachPhase, OutreachPolicy},
+    plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepSkipReason},
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
@@ -53,6 +54,10 @@ pub enum AutopilotContext {
     GrowthMetrics,
     GrowthDebt,
     OutreachSupply,
+    /// The only context that remembers. Every other one answers a question per
+    /// cycle and forgets; a play carries a campaign across cycles, restarts and
+    /// deploys, which is what lets the agent do step two of anything.
+    Plays,
 }
 
 impl AutopilotContext {
@@ -61,7 +66,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -82,6 +87,7 @@ impl AutopilotContext {
         Self::GrowthMetrics,
         Self::GrowthDebt,
         Self::OutreachSupply,
+        Self::Plays,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -115,6 +121,7 @@ impl AutopilotContext {
             Self::GrowthMetrics => "growth_metrics",
             Self::GrowthDebt => "growth_debt",
             Self::OutreachSupply => "outreach_supply",
+            Self::Plays => "plays",
         }
     }
 }
@@ -142,6 +149,7 @@ pub enum AutopilotPolicyConfig {
     GrowthMetrics(GrowthMetricPolicy),
     GrowthDebt(GrowthDebtPolicy),
     OutreachSupply(OutreachSupplyPolicy),
+    Plays(PlayPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -434,6 +442,24 @@ pub enum AutopilotActionPayload {
         priority: u16,
         template_key: String,
     },
+    /// Deliver one step of a running play to one consented fan.
+    ///
+    /// One recipient per action on purpose. It makes the send idempotent on a
+    /// key nobody has to invent (`play + step + fan`), it lets the daily quota
+    /// and the weekly envelope bound the campaign in the units they are
+    /// written in, and it means a play that goes wrong costs one message before
+    /// somebody can stop it rather than a whole segment.
+    RunPlayStep {
+        play_id: PlayId,
+        play_kind: PlayKind,
+        step_index: u16,
+        step_kind: PlayStepKind,
+        /// The show the step is anchored to. Carried so the executor renders
+        /// the ask about a specific date rather than about the band in general.
+        event_id: EventId,
+        fan_id: FanId,
+        template_key: String,
+    },
     SendTeamAssignmentEmail {
         assignment_id: uuid::Uuid,
         recipient_email: String,
@@ -495,6 +521,12 @@ impl AutopilotActionPayload {
             | Self::RaiseGrowthDebt { .. }
             | Self::IssueReferralCode { .. }
             | Self::SendTeamAssignmentEmail { .. } => ActionClass::FirstPartyReversible,
+
+            // The step kind decides, not the play and not this table: the same
+            // play may legitimately hold an owned-audience ask and a curator
+            // approach, and collapsing them to one class would either gate the
+            // fan message or let the curator one out unattended.
+            Self::RunPlayStep { step_kind, .. } => step_kind.action_class(),
 
             // These two carry their own reach inside the payload, so one class
             // for the whole variant would be wrong in both directions: it would
@@ -559,6 +591,7 @@ impl AutopilotActionPayload {
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
             Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
             Self::IssueReferralCode { .. } => "referral.code.issue",
+            Self::RunPlayStep { .. } => "play.step.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
         }
     }
@@ -589,6 +622,100 @@ pub struct CandidatePersistence {
     pub decision_created: bool,
     pub action_created: bool,
     pub quota_throttled: bool,
+}
+
+/// A fact the agent could hang a campaign on, before any play exists for it.
+///
+/// Read separately from running plays because there is no state machine yet:
+/// this is an anchor being considered, not a play being advanced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlayAnchor {
+    pub event_id: EventId,
+    pub anchor_at: OffsetDateTime,
+    /// False for a show that is cancelled or no longer published. Carried
+    /// rather than filtered away in SQL so the refusal to start is a domain
+    /// rule somebody can read, not a `WHERE` clause somebody can loosen.
+    pub active: bool,
+    pub hours_until: i64,
+}
+
+/// One step of a play as it will be written when the play starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlayStepPlan {
+    pub index: u16,
+    pub kind: PlayStepKind,
+    pub class: ActionClass,
+    pub due_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+}
+
+/// A play about to be created, with its whole schedule already resolved.
+///
+/// Every step's window is derived from the anchor here, once, and then stored.
+/// A play whose schedule were recomputed each cycle would silently reschedule
+/// itself whenever the offsets in the code changed, and a campaign that moves
+/// under a running send is not auditable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayStart {
+    pub kind: PlayKind,
+    pub event_id: EventId,
+    pub anchor_at: OffsetDateTime,
+    pub hypothesis: &'static str,
+    pub success_metric_platform: &'static str,
+    pub success_metric_key: &'static str,
+    pub steps: Vec<PlayStepPlan>,
+}
+
+/// Who is left for the open step of a play.
+///
+/// One type rather than a count plus an optional id, because those two can
+/// disagree: a positive count with no recipient would make the play claim work
+/// it cannot do, and the disagreement would only surface as a play that holds
+/// for ever.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlayAudience {
+    /// Nobody eligible is left. The step has done all it can.
+    Exhausted,
+    /// The next fan to reach, and how many remain including them.
+    Next { fan_id: FanId, remaining: u32 },
+}
+
+impl PlayAudience {
+    #[must_use]
+    pub const fn remaining(self) -> u32 {
+        match self {
+            Self::Exhausted => 0,
+            Self::Next { remaining, .. } => remaining,
+        }
+    }
+
+    #[must_use]
+    pub const fn fan_id(self) -> Option<FanId> {
+        match self {
+            Self::Exhausted => None,
+            Self::Next { fan_id, .. } => Some(fan_id),
+        }
+    }
+}
+
+/// One running play, as the cycle reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayRunSnapshot {
+    pub play_id: PlayId,
+    pub kind: PlayKind,
+    pub event_id: EventId,
+    pub anchor_at: OffsetDateTime,
+    pub anchor_active: bool,
+    pub steps: Vec<PlayStepState>,
+    pub audience: PlayAudience,
+}
+
+/// Settling a step without delivering it, and why.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlayStepSettlement {
+    pub play_id: PlayId,
+    pub step_index: u16,
+    pub reason: StepSkipReason,
 }
 
 /// Action claimed for execution by the worker.

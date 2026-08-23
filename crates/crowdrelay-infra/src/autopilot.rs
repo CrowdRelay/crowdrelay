@@ -7,6 +7,7 @@ mod growth;
 mod growth_metrics;
 mod measurement;
 mod operations;
+mod plays;
 mod runtime;
 mod state;
 mod team;
@@ -34,7 +35,8 @@ use crowdrelay_application::{
         GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
         GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
         MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
-        PendingAutopilotAction, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PendingAutopilotAction, PlayAnchor, PlayAudience, PlayRunSnapshot, PlayStart,
+        PlayStepSettlement, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
         RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
         RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
@@ -48,7 +50,7 @@ use crowdrelay_application::{
 };
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
-    EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId,
+    EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId, PlayId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
@@ -79,6 +81,7 @@ use crowdrelay_domain::{
     },
     outreach::{OutreachPolicy, OutreachSnapshot},
     performance::{EffectAssessment, EffectResult},
+    plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState},
     pricing::{TicketYieldPolicy, TicketYieldSnapshot},
     promotion::{PromotionBudgetPolicy, PromotionPerformanceSnapshot},
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
