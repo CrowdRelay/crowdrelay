@@ -19,14 +19,95 @@ use crowdrelay_application::autopilot::{
 use sqlx::{Postgres, Transaction};
 
 use crowdrelay_domain::target_discovery::{
-    CandidateSnapshot, RouteKind, ScreeningVerdict, TargetDiscoveryPolicy, promotes_to_target,
-    screen_candidate,
+    CandidateSnapshot, OutreachSupplySnapshot, RouteKind, ScreeningVerdict, TargetDiscoveryPolicy,
+    promotes_to_target, screen_candidate,
 };
 
 /// One batch is bounded so an adapter cannot turn a discovery sweep into an
 /// unbounded transaction.
 const MAX_CANDIDATES_PER_BATCH: usize = 100;
 const MAX_CANDIDATE_PAGE: u32 = 200;
+
+/// What the pitcher has, and what the last sweeps produced.
+///
+/// `consecutive_barren_sweeps` is counted from emitted sweep requests rather
+/// than from candidate rows, because the two failure modes it has to tell
+/// apart look identical from the candidate table alone: a source that returns
+/// refusals, and an adapter that never came back at all. Only the first should
+/// stop the agent asking.
+pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    _now: OffsetDateTime,
+) -> Result<OutreachSupplySnapshot, RepositoryError> {
+    let row = sqlx::query_as::<_, (i64, i64, Option<OffsetDateTime>, i64, i64)>(
+        r#"
+        WITH sweeps AS (
+            SELECT action.created_at,
+                   -- Each sweep owns the candidates that arrived before the
+                   -- next one did; without the window every older sweep would
+                   -- also be credited with every later candidate.
+                   lead(action.created_at) OVER (ORDER BY action.created_at)
+                       AS window_ends_at,
+                   row_number() OVER (ORDER BY action.created_at DESC) AS recency
+            FROM viryaos_autopilot_actions action
+            WHERE action.workspace_id=$1
+              AND action.action_kind='outreach.discovery.request'
+              AND action.status IN ('queued','processing','succeeded')
+        ),
+        -- A sweep is barren when candidates arrived and none survived
+        -- screening. A sweep that produced no candidates at all is an adapter
+        -- that never reported: an operator problem, not a dry source, and it
+        -- must not make the agent stop asking.
+        judged AS (
+            SELECT sweep.recency,
+                   count(candidate.id) AS arrived,
+                   count(candidate.id) FILTER (
+                       WHERE candidate.status IN ('admitted','promoted')
+                   ) AS survived
+            FROM sweeps sweep
+            LEFT JOIN viryaos_outreach_candidates candidate
+              ON candidate.workspace_id=$1
+             AND candidate.created_at >= sweep.created_at
+             AND (sweep.window_ends_at IS NULL
+                  OR candidate.created_at < sweep.window_ends_at)
+            GROUP BY sweep.recency
+        )
+        SELECT
+            (SELECT count(*) FROM viryaos_outreach_targets target
+             WHERE target.workspace_id=$1 AND target.active
+               AND target.accepts_outreach AND NOT target.do_not_contact)::bigint,
+            (SELECT count(*) FROM viryaos_outreach_candidates candidate
+             WHERE candidate.workspace_id=$1 AND candidate.status='admitted')::bigint,
+            (SELECT max(created_at) FROM sweeps),
+            (SELECT count(*) FROM viryaos_outreach_candidates candidate
+             WHERE candidate.workspace_id=$1
+               AND candidate.created_at
+                   >= coalesce((SELECT max(created_at) FROM sweeps),
+                               '-infinity'::timestamptz))::bigint,
+            -- The unbroken run of barren sweeps ending at the most recent one:
+            -- everything more recent than the first sweep that was not barren.
+            (SELECT count(*) FROM judged
+             WHERE recency <= coalesce(
+                 (SELECT min(recency) - 1 FROM judged
+                  WHERE arrived = 0 OR survived > 0),
+                 (SELECT max(recency) FROM judged)
+             ))::bigint
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    Ok(OutreachSupplySnapshot {
+        pitchable_targets: u32::try_from(row.0).unwrap_or(u32::MAX),
+        admitted_candidates: u32::try_from(row.1).unwrap_or(u32::MAX),
+        last_sweep_requested_at: row.2,
+        candidates_since_last_sweep: u32::try_from(row.3).unwrap_or(u32::MAX),
+        consecutive_barren_sweeps: u16::try_from(row.4).unwrap_or(u16::MAX),
+    })
+}
 
 #[derive(Debug, FromRow)]
 struct CandidateRow {

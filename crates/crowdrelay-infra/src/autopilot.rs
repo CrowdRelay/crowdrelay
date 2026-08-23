@@ -84,6 +84,7 @@ use crowdrelay_domain::{
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
     show_growth::{ShowGrowthPolicy, ShowGrowthSnapshot},
     show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
+    target_discovery::{OutreachSupplyPolicy, OutreachSupplySnapshot},
     tour_economics::{ShowLogistics, TourEconomicsPolicy, VehicleProfile, estimate_show_cost},
 };
 use serde_json::{Value, json};

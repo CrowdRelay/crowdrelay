@@ -722,5 +722,18 @@ macro_rules! decision_opportunity_reads {
         ))
         .await
     }
+
+    async fn load_outreach_supply_snapshot_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<OutreachSupplySnapshot, RepositoryError> {
+        self.bounded(operations::load_outreach_supply_snapshot(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
     };
 }

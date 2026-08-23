@@ -4,7 +4,7 @@ use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
     ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
     OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
-    TicketTypeId,
+    TicketTypeId, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
@@ -25,6 +25,7 @@ use crowdrelay_domain::{
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
     show_growth::{ShowGrowthLever, ShowGrowthPolicy},
     show_operations::{ShowOperationsPolicy, ShowTaskKind},
+    target_discovery::OutreachSupplyPolicy,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -51,6 +52,7 @@ pub enum AutopilotContext {
     ShowGrowth,
     GrowthMetrics,
     GrowthDebt,
+    OutreachSupply,
 }
 
 impl AutopilotContext {
@@ -59,7 +61,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -79,6 +81,7 @@ impl AutopilotContext {
         Self::ShowGrowth,
         Self::GrowthMetrics,
         Self::GrowthDebt,
+        Self::OutreachSupply,
     ];
 
     /// Parse the stored representation written by [`Self::as_str`].
@@ -111,6 +114,7 @@ impl AutopilotContext {
             Self::ShowGrowth => "show_growth",
             Self::GrowthMetrics => "growth_metrics",
             Self::GrowthDebt => "growth_debt",
+            Self::OutreachSupply => "outreach_supply",
         }
     }
 }
@@ -137,6 +141,7 @@ pub enum AutopilotPolicyConfig {
     ShowGrowth(ShowGrowthPolicy),
     GrowthMetrics(GrowthMetricPolicy),
     GrowthDebt(GrowthDebtPolicy),
+    OutreachSupply(OutreachSupplyPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -173,6 +178,9 @@ pub enum ActionSubject {
     GrowthMetricSeries(GrowthMetricSeriesId),
     BookingTarget(BookingTargetId),
     OutreachTarget(OutreachTargetId),
+    /// Supply is a property of the whole workspace rather than of any one row,
+    /// so the sweep that replenishes it has the workspace as its subject.
+    Workspace(WorkspaceId),
 }
 
 impl From<GrowthDebtSubject> for ActionSubject {
@@ -207,6 +215,7 @@ impl ActionSubject {
             Self::GrowthMetricSeries(_) => "growth_metric_series",
             Self::BookingTarget(_) => "booking_target",
             Self::OutreachTarget(_) => "outreach_target",
+            Self::Workspace(_) => "workspace",
         }
     }
 
@@ -249,6 +258,7 @@ impl ActionSubject {
             Self::GrowthMetricSeries(id) => id.into_uuid(),
             Self::BookingTarget(id) => id.into_uuid(),
             Self::OutreachTarget(id) => id.into_uuid(),
+            Self::Workspace(id) => id.into_uuid(),
         }
     }
 }
@@ -319,6 +329,12 @@ pub enum AutopilotActionPayload {
     RequestBeaconDiscovery {
         event_id: EventId,
         target_count: u16,
+    },
+    /// Ask an adapter to sweep published sources for submission routes and post
+    /// the candidates back. Reads public data, contacts nobody, and buys
+    /// nothing; the screening that decides what is admissible stays here.
+    RequestOutreachDiscovery {
+        requested_candidates: u16,
     },
     RequestBeaconOutreach {
         beacon_id: BeaconId,
@@ -469,6 +485,7 @@ impl AutopilotActionPayload {
             // not an audience or a stranger, and treating internal task routing
             // as outward contact would spend the audience budget on ourselves.
             Self::RequestBeaconDiscovery { .. }
+            | Self::RequestOutreachDiscovery { .. }
             | Self::RequestContentArtifact { .. }
             | Self::AdjustExperiment { .. }
             | Self::CompleteShowTask { .. }
@@ -524,6 +541,7 @@ impl AutopilotActionPayload {
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
+            Self::RequestOutreachDiscovery { .. } => "outreach.discovery.request",
             Self::RequestBeaconOutreach { .. } => "beacon.outreach.request",
             Self::RequestShowGrowth { .. } => "show.growth.request",
             Self::RequestContentArtifact { .. } => "content.artifact.request",

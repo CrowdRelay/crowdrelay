@@ -71,9 +71,12 @@ class GrowthDebtContract(unittest.TestCase):
     def test_growth_debt_is_provisioned_for_existing_and_future_workspaces(self) -> None:
         self.assertIn("SELECT id, 'growth_debt'", self.migration)
 
-    def test_every_context_check_constraint_matches_the_rust_enum(self) -> None:
-        # This is the newest context migration, so it owns the equality claim.
-        contexts = self.contexts()
+    def test_this_migration_widened_all_three_constraints_for_its_own_context(self) -> None:
+        # Equality with the Rust enum is owned by whichever context migration is
+        # newest; see test_outreach_supply_v1. What this migration still owns is
+        # that it widened all three tables rather than one, because a context
+        # the policy table accepts but the actions table refuses fails at the
+        # only moment that matters.
         constraints = re.findall(
             r"ADD CONSTRAINT viryaos_autopilot_\w+_context_check CHECK \(context IN \((.*?)\)\)",
             self.migration,
@@ -84,11 +87,7 @@ class GrowthDebtContract(unittest.TestCase):
         )
         for constraint in constraints:
             allowed = set(re.findall(r"'([a-z0-9_]+)'", constraint))
-            self.assertEqual(
-                allowed,
-                contexts,
-                "database context constraint drifted from AutopilotContext",
-            )
+            self.assertIn("growth_debt", allowed)
 
     def test_the_context_is_reachable_from_every_parse_surface(self) -> None:
         self.assertIn('"growth_debt" => AutopilotContext::GrowthDebt', read(MAPPING))

@@ -229,6 +229,7 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::RequestMerchBundle { .. }
         | AutopilotActionPayload::RequestContentArtifact { .. }
         | AutopilotActionPayload::RequestBeaconDiscovery { .. }
+        | AutopilotActionPayload::RequestOutreachDiscovery { .. }
         | AutopilotActionPayload::RequestBeaconOutreach { .. }
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
@@ -319,6 +320,7 @@ pub(super) async fn record_execution_outcome(
         } => ("merch_bundle_price_minor", *bundle_price_minor as f64, None),
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
+        AutopilotActionPayload::RequestOutreachDiscovery { .. } => ("outreach_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconOutreach { .. } => ("beacon_outreach_requested", 1.0, None),
         AutopilotActionPayload::RaiseGrowthOpportunity {
             deviation_basis_points,
@@ -575,6 +577,7 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::RequestMerchBundle { .. }
                 | AutopilotActionPayload::RequestOutreach { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
+                | AutopilotActionPayload::RequestOutreachDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconOutreach { .. }
                 | AutopilotActionPayload::RequestContentArtifact { .. }
                 | AutopilotActionPayload::EscalateShowTask { .. }
@@ -607,6 +610,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
         AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
+        AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
         AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
         AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",
@@ -630,6 +634,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.merch.bundle_requested" => "merch.bundle",
         "viryaos.outreach.requested" => "outreach.send",
         "viryaos.beacon.discovery_requested" => "beacon.discovery",
+        "viryaos.outreach.discovery_requested" => "outreach.discovery",
         "viryaos.beacon.outreach_requested" => "beacon.outreach",
         "viryaos.beacon.release_delivery_confirmation_requested" => "beacon.release.mail",
         "viryaos.beacon.network_discovery_requested" => "beacon.network.discovery",

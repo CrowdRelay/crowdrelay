@@ -20,6 +20,7 @@
 //! adapter brought back is admissible.
 
 use serde::{Deserialize, Serialize};
+use time::{Duration, OffsetDateTime};
 
 use crate::{action_class::ActionClass, autonomy::Confidence};
 
@@ -256,6 +257,133 @@ pub const fn promotes_to_target(route: RouteKind) -> bool {
     matches!(route, RouteKind::Email)
 }
 
+/// What the pitcher has to work with, and what it is waiting on.
+///
+/// Screening is cheap and durable, so the expensive thing is not judging a
+/// candidate — it is deciding to go looking for one at all. This snapshot
+/// exists so that decision is made from evidence rather than on a timer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct OutreachSupplySnapshot {
+    /// Targets that could be pitched today: active, still accepting outreach,
+    /// and not marked do-not-contact.
+    pub pitchable_targets: u32,
+    /// Candidates that passed screening and are waiting for a human to confirm
+    /// the route. Supply that exists but cannot be used yet.
+    pub admitted_candidates: u32,
+    pub last_sweep_requested_at: Option<OffsetDateTime>,
+    /// Candidates ingested since the last sweep was asked for. Zero means the
+    /// adapter never came back, which is a different problem from a dry source.
+    pub candidates_since_last_sweep: u32,
+    /// How many sweeps in a row returned candidates but nothing admissible.
+    /// A source that keeps producing refusals is exhausted, not unlucky.
+    pub consecutive_barren_sweeps: u16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct OutreachSupplyPolicy {
+    /// Below this many pitchable targets the pitcher is starving and a sweep is
+    /// worth asking for.
+    pub minimum_pitchable_targets: u32,
+    /// A sweep reads public data and contacts nobody, but it still calls
+    /// somebody else's API. Once a day is plenty for a supply that moves this
+    /// slowly.
+    pub sweep_cooldown_hours: u16,
+    /// How many candidates one sweep is asked for. Bounded so an adapter cannot
+    /// turn a request into an unbounded crawl.
+    pub requested_candidates: u16,
+    /// After this many barren sweeps in a row the agent stops asking. Widening
+    /// the source is an operator decision, and hammering a dry one is the
+    /// autonomous equivalent of refreshing an empty inbox.
+    pub barren_sweep_limit: u16,
+}
+
+impl Default for OutreachSupplyPolicy {
+    fn default() -> Self {
+        Self {
+            minimum_pitchable_targets: 25,
+            sweep_cooldown_hours: 24,
+            requested_candidates: 40,
+            barren_sweep_limit: 3,
+        }
+    }
+}
+
+/// Why no sweep was asked for. Each variant is a different owner: two of these
+/// are the agent waiting on itself, and two are the agent waiting on a human.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupplyHold {
+    /// Enough pitchable targets already.
+    SupplyIsAdequate,
+    /// A sweep was asked for recently.
+    CooldownActive,
+    /// Screened candidates are piling up unconfirmed. Fetching more would grow
+    /// a queue nobody is working, and the route confirmation is the operator's.
+    AwaitingRouteConfirmation,
+    /// Repeated sweeps found nothing admissible. The source needs widening,
+    /// which is not something the agent can decide.
+    SourceExhausted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum OutreachSupplyDecision {
+    Request {
+        requested_candidates: u16,
+        confidence: Confidence,
+    },
+    Hold(SupplyHold),
+}
+
+/// Decides whether to ask an adapter for more candidates.
+///
+/// Order matters. The two holds that belong to a human come before the ones
+/// that belong to the clock, so a starving pitcher never looks like a healthy
+/// one just because a sweep happens to be on cooldown.
+#[must_use]
+pub fn evaluate_outreach_supply(
+    snapshot: &OutreachSupplySnapshot,
+    policy: OutreachSupplyPolicy,
+    now: OffsetDateTime,
+) -> OutreachSupplyDecision {
+    if snapshot.consecutive_barren_sweeps >= policy.barren_sweep_limit {
+        return OutreachSupplyDecision::Hold(SupplyHold::SourceExhausted);
+    }
+    if snapshot.pitchable_targets >= policy.minimum_pitchable_targets {
+        return OutreachSupplyDecision::Hold(SupplyHold::SupplyIsAdequate);
+    }
+    // Admitted candidates are supply the agent already found. Asking for more
+    // while that queue is full would hide an operator bottleneck behind
+    // apparent activity.
+    if snapshot.admitted_candidates >= policy.minimum_pitchable_targets {
+        return OutreachSupplyDecision::Hold(SupplyHold::AwaitingRouteConfirmation);
+    }
+    if let Some(last) = snapshot.last_sweep_requested_at {
+        let cooldown = Duration::hours(i64::from(policy.sweep_cooldown_hours));
+        if now - last < cooldown {
+            return OutreachSupplyDecision::Hold(SupplyHold::CooldownActive);
+        }
+    }
+    OutreachSupplyDecision::Request {
+        requested_candidates: policy.requested_candidates,
+        confidence: deficit_confidence(
+            snapshot.pitchable_targets + snapshot.admitted_candidates,
+            policy.minimum_pitchable_targets,
+        ),
+    }
+}
+
+/// How short the supply is, as confidence. An empty pipeline is a certainty,
+/// not a guess, so zero supply reads as full confidence.
+fn deficit_confidence(available: u32, minimum: u32) -> Confidence {
+    if minimum == 0 {
+        return Confidence::MIN;
+    }
+    let deficit = minimum.saturating_sub(available);
+    let ratio = u64::from(deficit) * 10_000 / u64::from(minimum);
+    Confidence::saturating_from_basis_points(u16::try_from(ratio).unwrap_or(10_000))
+}
+
 fn engagement_basis_points(followers: u32, engagement: u32) -> u16 {
     if followers == 0 {
         return 0;
@@ -433,5 +561,146 @@ mod tests {
         assert!(promotes_to_target(RouteKind::Email));
         assert!(!promotes_to_target(RouteKind::SubmissionForm));
         assert!(!promotes_to_target(RouteKind::Handle));
+    }
+
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_780_000_000).expect("valid timestamp")
+    }
+
+    fn starving() -> OutreachSupplySnapshot {
+        OutreachSupplySnapshot {
+            pitchable_targets: 0,
+            admitted_candidates: 0,
+            last_sweep_requested_at: None,
+            candidates_since_last_sweep: 0,
+            consecutive_barren_sweeps: 0,
+        }
+    }
+
+    fn hold(decision: OutreachSupplyDecision) -> SupplyHold {
+        match decision {
+            OutreachSupplyDecision::Hold(reason) => reason,
+            OutreachSupplyDecision::Request { .. } => panic!("expected a hold"),
+        }
+    }
+
+    #[test]
+    fn an_empty_pipeline_asks_for_a_sweep_with_full_confidence() {
+        let decision =
+            evaluate_outreach_supply(&starving(), OutreachSupplyPolicy::default(), now());
+        assert_eq!(
+            decision,
+            OutreachSupplyDecision::Request {
+                requested_candidates: 40,
+                confidence: Confidence::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn a_stocked_pipeline_asks_for_nothing() {
+        let snapshot = OutreachSupplySnapshot {
+            pitchable_targets: 25,
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::SupplyIsAdequate
+        );
+    }
+
+    #[test]
+    fn candidates_waiting_on_a_human_are_not_answered_with_more_candidates() {
+        // The pitcher is still starving, but the bottleneck is route
+        // confirmation. Sweeping again would grow a queue nobody is working.
+        let snapshot = OutreachSupplySnapshot {
+            pitchable_targets: 0,
+            admitted_candidates: 30,
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::AwaitingRouteConfirmation
+        );
+    }
+
+    #[test]
+    fn a_sweep_is_not_repeated_inside_its_cooldown() {
+        let policy = OutreachSupplyPolicy::default();
+        let snapshot = OutreachSupplySnapshot {
+            last_sweep_requested_at: Some(now() - Duration::hours(3)),
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(&snapshot, policy, now())),
+            SupplyHold::CooldownActive
+        );
+        let expired = OutreachSupplySnapshot {
+            last_sweep_requested_at: Some(now() - Duration::hours(25)),
+            ..starving()
+        };
+        assert!(matches!(
+            evaluate_outreach_supply(&expired, policy, now()),
+            OutreachSupplyDecision::Request { .. }
+        ));
+    }
+
+    #[test]
+    fn a_source_that_keeps_returning_nothing_admissible_stops_being_asked() {
+        let snapshot = OutreachSupplySnapshot {
+            consecutive_barren_sweeps: 3,
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::SourceExhausted
+        );
+    }
+
+    #[test]
+    fn exhaustion_outranks_every_other_reason_to_keep_sweeping() {
+        // Starving, off cooldown and nothing awaiting a human: every signal
+        // says sweep. The dry source still wins, because the next sweep would
+        // cost an API call to learn what the last three already proved.
+        let snapshot = OutreachSupplySnapshot {
+            consecutive_barren_sweeps: 5,
+            last_sweep_requested_at: Some(now() - Duration::days(30)),
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::SourceExhausted
+        );
+    }
+
+    #[test]
+    fn partial_supply_lowers_confidence_rather_than_silencing_the_request() {
+        let snapshot = OutreachSupplySnapshot {
+            pitchable_targets: 20,
+            ..starving()
+        };
+        let OutreachSupplyDecision::Request { confidence, .. } =
+            evaluate_outreach_supply(&snapshot, OutreachSupplyPolicy::default(), now())
+        else {
+            panic!("expected a request");
+        };
+        // 5 short of 25 is a fifth of the target missing.
+        assert_eq!(confidence.basis_points(), 2_000);
     }
 }

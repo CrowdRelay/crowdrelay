@@ -25,6 +25,7 @@ use crowdrelay_domain::{
     release_autopilot::ReleasePlanSnapshot,
     show_growth::ShowGrowthSnapshot,
     show_operations::ShowTaskSnapshot,
+    target_discovery::OutreachSupplySnapshot,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -177,6 +178,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthDebtObservation>, RepositoryError>;
+
+    /// What the pitcher currently has to work with. One row per workspace
+    /// rather than a list: supply is not a property of any single target, and
+    /// counting it per target is how a starved pipeline stays invisible.
+    async fn load_outreach_supply_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<OutreachSupplySnapshot, RepositoryError>;
 
     /// The operator's autonomy ceiling per action class.
     ///

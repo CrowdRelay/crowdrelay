@@ -43,6 +43,7 @@ mod snapshots;
 
 pub(super) use acquisition_channels::*;
 pub(super) use chief::*;
+pub(super) use discovery::*;
 pub(super) use execution::*;
 pub(super) use growth_debt::*;
 pub(super) use next_best_action::*;
