@@ -1412,15 +1412,23 @@ what is *running*, which turned out to be a different question.
 
 ### The three post-deploy checks
 
-All three pass on the deployed build, over roughly three autopilot cycles
-(poll interval 300 s):
+Two pass cleanly; the third needs a qualification. Measured over roughly three
+autopilot cycles (poll interval 300 s) and one event sync:
 
 - **`awaiting_executor` = 0**, and parked capabilities warn once per capability
   per cycle rather than once per action — two "autopilot actions are parked"
   lines over three cycles, four team-handoff lines over sixteen.
-- **Content-source versions stopped moving.** Frozen since the deploy itself;
-  the runaway that took one source from version 1 to 283 in thirteen days is
-  gone.
+- **Content-source versions converged, which is not quite the same as "stopped
+  moving".** They bumped once more after the deploy, at 13:48:55, on the first
+  event sync that followed the migration — the old creeping `expires_at` being
+  lifted to its new pinned value. Since then all five sources sit at a fixed
+  point: stored metadata, title and `expires_at` all equal what a fresh
+  projection would produce, so the next firing provably changes nothing. The
+  decisive evidence that the guard works is `ef8b0ff0`: its event row *was*
+  updated in that same 13:48:55 sync and its content source did not move,
+  while three others did. The runaway that took one source from version 1 to
+  283 in thirteen days is gone; the claim to keep watching is that a sync
+  which changes nothing produces no bump at all.
 - **No new `state_changed`.** The last one is timestamped before the deploy.
   The twenty-four failed `content.artifact.request` actions all predate it.
 
