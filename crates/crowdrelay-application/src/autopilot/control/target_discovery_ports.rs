@@ -32,6 +32,25 @@ pub struct IngestOutreachCandidate {
     pub churns_indiscriminately: bool,
 }
 
+/// What the sweep read, as opposed to what it reported.
+///
+/// Optional throughout, because an adapter that cannot count what it read is
+/// still allowed to report candidates; the supply rule then falls back to
+/// treating a barren sweep as a dry source, which is what it did before this
+/// existed. Present, it separates a source with nothing to give from a read
+/// path that returned nothing at all.
+///
+/// These are adapter claims. They may only ever change which hold the supply
+/// rule reports — never widen authority, raise a cap, or let a candidate skip
+/// screening.
+#[derive(Clone, Copy, Debug)]
+pub struct OutreachSweepReport {
+    /// Sources queried, e.g. one per configured search.
+    pub sources_read: u32,
+    /// Items those sources returned, before any screening.
+    pub items_seen: u32,
+}
+
 /// What one batch did. Counts rather than rows: the adapter posts hundreds and
 /// needs to know whether to keep going, not to read them back.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -105,6 +124,7 @@ pub trait AutopilotTargetDiscoveryRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         candidates: Vec<IngestOutreachCandidate>,
+        sweep_report: Option<OutreachSweepReport>,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<OutreachCandidateIngestion, RepositoryError>;

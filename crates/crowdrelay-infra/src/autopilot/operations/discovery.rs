@@ -13,8 +13,8 @@ use super::*;
 use async_trait::async_trait;
 use crowdrelay_application::autopilot::{
     AutopilotTargetDiscoveryRepository, IngestOutreachCandidate, OutreachCandidateIngestion,
-    OutreachCandidatePromotion, OutreachCandidateView, SubmissionChannelMutation,
-    UpsertSubmissionChannel,
+    OutreachCandidatePromotion, OutreachCandidateView, OutreachSweepReport,
+    SubmissionChannelMutation, UpsertSubmissionChannel,
 };
 use sqlx::{Postgres, Transaction};
 
@@ -27,6 +27,15 @@ use crowdrelay_domain::target_discovery::{
 /// unbounded transaction.
 const MAX_CANDIDATES_PER_BATCH: usize = 100;
 const MAX_CANDIDATE_PAGE: u32 = 200;
+/// Mirrors the CHECK constraints in migration 0086. Kept here so an adapter
+/// reporting an absurd count degrades to a clamped number rather than failing
+/// an ingestion that otherwise carried usable candidates.
+const MAX_SWEEP_SOURCES_READ: u32 = 1_000;
+const MAX_SWEEP_ITEMS_SEEN: u32 = 100_000;
+
+fn clamp_report_count(value: u32, maximum: u32) -> i32 {
+    i32::try_from(value.min(maximum)).unwrap_or(0)
+}
 
 /// What the pitcher has, and what the last sweeps produced.
 ///
@@ -35,12 +44,17 @@ const MAX_CANDIDATE_PAGE: u32 = 200;
 /// apart look identical from the candidate table alone: a source that returns
 /// refusals, and an adapter that never came back at all. Only the first should
 /// stop the agent asking.
+///
+/// `items_seen_in_last_sweep` splits the first of those again. An adapter that
+/// read two hundred playlists and found no published route reports the same
+/// empty batch as one whose credential expired, and only the first is a source
+/// worth calling dry.
 pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     _now: OffsetDateTime,
 ) -> Result<OutreachSupplySnapshot, RepositoryError> {
-    let row = sqlx::query_as::<_, (i64, i64, Option<OffsetDateTime>, i64, i64)>(
+    let row = sqlx::query_as::<_, (i64, i64, Option<OffsetDateTime>, i64, i64, Option<i32>)>(
         r#"
         WITH sweeps AS (
             SELECT action.created_at,
@@ -109,7 +123,19 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
                  (SELECT min(recency) - 1 FROM judged
                   WHERE arrived = 0 OR survived > 0),
                  (SELECT max(recency) FROM judged)
-             ))::bigint
+             ))::bigint,
+            -- Scoped to the most recent sweep, matching `candidates_since_last
+            -- _sweep` above. A sweep still waiting on its adapter reports NULL
+            -- rather than the previous sweep's count, so a stale number can
+            -- never be read as this sweep's evidence.
+            (SELECT report.items_seen
+             FROM viryaos_outreach_discovery_sweep_reports report
+             WHERE report.workspace_id=$1
+               AND report.created_at
+                   >= coalesce((SELECT max(created_at) FROM sweeps),
+                               '-infinity'::timestamptz)
+             ORDER BY report.created_at DESC, report.id DESC
+             LIMIT 1)
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -123,6 +149,7 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
         last_sweep_requested_at: row.2,
         candidates_since_last_sweep: u32::try_from(row.3).unwrap_or(u32::MAX),
         consecutive_barren_sweeps: u16::try_from(row.4).unwrap_or(u16::MAX),
+        items_seen_in_last_sweep: row.5.map(|seen| u32::try_from(seen).unwrap_or(0)),
     })
 }
 
@@ -147,6 +174,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         candidates: Vec<IngestOutreachCandidate>,
+        sweep_report: Option<OutreachSweepReport>,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<OutreachCandidateIngestion, RepositoryError> {
@@ -271,6 +299,39 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                     report.refused += 1;
                 }
             }
+
+            // Written in the same transaction as the candidates it describes.
+            // A report that could commit without them, or them without it,
+            // would let the supply rule read one sweep's read count against
+            // another sweep's candidates.
+            if let Some(sweep) = sweep_report {
+                sqlx::query(
+                    r#"
+                    INSERT INTO viryaos_outreach_discovery_sweep_reports (
+                        workspace_id, operation_id, sources_read, items_seen,
+                        candidates_reported
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (workspace_id, operation_id) DO NOTHING
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(operation_id)
+                // Clamped to the column's own bounds rather than saturated to
+                // i32: an over-large claim is an adapter bug, and failing the
+                // whole ingestion on a constraint would throw away the
+                // candidates the sweep did find.
+                .bind(clamp_report_count(
+                    sweep.sources_read,
+                    MAX_SWEEP_SOURCES_READ,
+                ))
+                .bind(clamp_report_count(sweep.items_seen, MAX_SWEEP_ITEMS_SEEN))
+                .bind(clamp_report_count(received, MAX_SWEEP_ITEMS_SEEN))
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
+
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(report)
         })

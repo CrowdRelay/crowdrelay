@@ -1081,6 +1081,47 @@ advertised and idle. `outreach_supply` (migration `0083`) is the context that
 notices the floor and asks for a sweep; see the production audit below for what
 it does and what it deliberately refuses to do.
 
+### The third failure mode — added 2026-08-23
+
+`outreach_supply` shipped able to tell two things apart: an adapter that never
+answered (an integration failure, which must not stop the agent asking) and one
+that answered with nothing admissible (barren, which after `barren_sweep_limit`
+does stop it). Production then found the case neither covers.
+
+The sweep ran, succeeded at 17:20, and reported zero candidates. Two more like it
+and the rule would have concluded `SourceExhausted` and told an operator to widen
+a source — except "we read two hundred playlists and none published a submission
+route" and "we read nothing at all, because the credential is dead" post
+byte-identical empty batches. The first is a dry source. The second is a broken
+integration, and sending an operator to widen a query when their credential
+expired sends them to fix the wrong end of the system.
+
+So the adapter reports what it read. Migration `0086` adds
+`viryaos_outreach_discovery_sweep_reports` (`sources_read`, `items_seen`,
+`candidates_reported`), written in the same transaction as the candidates it
+describes so one sweep's read count can never be read against another sweep's
+candidates. `OutreachSupplySnapshot::items_seen_in_last_sweep` is scoped to the
+most recent sweep, so a sweep still awaiting its adapter reports `None` rather
+than carrying a stale zero forward.
+
+Three properties that keep this safe:
+
+- **The back-off does not change.** `Some(0)` at the barren limit reports
+  `AdapterReadNothing` instead of `SourceExhausted`; the agent stops asking
+  either way, because neither cause is fixed by asking again. Only the reported
+  cause differs, and it has to, because it decides what the operator fixes.
+- **`None` invents nothing.** Every sweep predating the report looks like this,
+  and silence about what was read is not evidence that nothing was.
+- **The counts are adapter claims and are bounded like claims.** They may only
+  rename a hold — never widen authority, raise a cap, or let a candidate skip
+  screening. Incoherent pairs are refused at the boundary (`items_seen` below the
+  candidates posted, or items with no source behind them), and the admin route
+  rejects the field outright: a human posting candidates by hand did not sweep.
+
+A hold that nothing surfaces is a hold nobody acts on, and `evaluate/outreach_supply.rs`
+emits a decision only on `Request`. So the operator brief carries it instead —
+see Phase 16.
+
 ## Phase 10 — free-reach pitcher
 
 Reviews, radio interviews, reaction-channel creators, collabs, media patronage.
@@ -1129,6 +1170,47 @@ series/points path, so what is left of Phase 11 is entirely adapter work in n8n:
 declare each series once with an honest `expected_interval_hours`, then post
 absolute values. The contract is written up in `n8n/viryaos-executor-contract.md`.
 Until an adapter runs, coverage will honestly report four missing feeds.
+
+### As built — 2026-08-23 (second pass: Bandsintown trackers, the first real eye)
+
+Every series in production measured something CrowdRelay already owned —
+`ticketing/paid_tickets`, `ticketing/paid_buyers`, `signal/active_fans`,
+`signal/activated_fans_30d`, `merch/paid_orders`. Those are tills. They report
+whether people bought and never whether anybody new is listening, so the agent
+could not tell a play that worked from one that did nothing.
+
+`crates/crowdrelay-worker/src/event_sync/trackers.rs` closes the smallest half
+of that. The event sync already holds a Bandsintown credential and an artist
+identity, so reading `GET /artists/{artist}` on the same poll costs one request
+and no new configuration. Verified against the live API before it was written:
+the response carries `tracker_count`, and for `virya` it read 29.
+
+Four decisions worth keeping:
+
+- **Non-fatal.** A tracker read that fails logs and returns; it never records a
+  source failure. The calendar is what the public site serves, and no metric is
+  worth degrading it for.
+- **Hour-truncated `captured_at`.** Bandsintown reports no observation time, so
+  polling four times an hour would otherwise write four points claiming four
+  observations of one number. The unique constraint then makes a re-poll a no-op
+  rather than a fabricated data point.
+- **An absent count is not zero.** Bandsintown answers an unknown artist with
+  200 and no count. Recording zero would read as every tracker leaving, so
+  `normalize_tracker_count` refuses anything that is not a whole non-negative
+  number and the series simply receives no point that hour.
+- **Series scoped to the event source**, not the workspace. A workspace may sync
+  more than one artist, and one workspace-level `bandsintown/trackers` series
+  would interleave two artists into a timeline no trend calculation could
+  untangle. Migration `0085` adds `event_source` to the `subject_kind` set.
+
+`value_tier` is `intermediate`, not `vanity`: a tracker asked to be told when
+this artist plays, which is nearer intent than a follower count.
+
+No detector work was needed. `growth_metrics` evaluates every active series, and
+`growth.opportunity.raise` has no executor dependency — the finding is the durable
+action row — so a trackers stall becomes a raised opportunity on its own. Spotify
+and YouTube stay adapter work; `blind_platforms` drops from three to two once the
+first point lands.
 
 ## Phase 12 — playlist pitcher
 
@@ -1303,6 +1385,29 @@ without a human, however good the record looks.
 Extend `load_chief_of_staff`: what the agent did alone, what it is about to do,
 what is parked for approval, what it stopped and why, what moved. Delivery
 through the existing outbox → n8n path.
+
+### `discovery_read_nothing` — added 2026-08-23
+
+Migration `0087` adds a headline, because the existing set could not name the
+state production was in. A sweep that runs, succeeds and reads nothing leaves
+every outreach table at zero while the action ledger reads green, and under the
+old set that is `worked` — the most misleading answer available.
+
+`blind` is the nearest existing headline and it is the wrong one: blind means the
+agent cannot measure a platform, this means it cannot find anybody new to reach.
+So it outranks `blind` and sits below `failing`, because a failed action is
+already visible in the ledger and this is not. It also breaks the silence rule on
+its own — without that, a day with nothing executed and nothing waiting holds as
+`NothingWorthSaying` and the broken read path stays invisible for exactly as long
+as nobody looks.
+
+Read from the most recent sweep report rather than from a barren run: a read path
+that returned nothing on the last attempt is broken now, and waiting for three
+failures before saying so is three days of a growth loop that cannot find anybody.
+
+`scripts/test_operator_brief_v1.py` now reads the headline CHECK from the newest
+migration that defines it, not from `0084`. Pinned to the creating migration, the
+test would have kept passing against a set the database had stopped enforcing.
 
 ---
 

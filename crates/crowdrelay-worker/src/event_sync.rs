@@ -150,6 +150,38 @@ impl EventSyncWorker {
                         complete = batch.is_complete(),
                         "event source synchronized"
                     );
+
+                    // Read the artist's tracker count on the same poll, and
+                    // never let it affect the source's health. The calendar is
+                    // what the public site serves; a growth metric that could
+                    // mark the source as failing would trade a served page for
+                    // a number, which is the wrong trade at any confidence.
+                    if source.provider == "bandsintown" {
+                        match timeout(
+                            self.config.operation_timeout,
+                            self.sync_bandsintown_trackers(&source),
+                        )
+                        .await
+                        {
+                            Ok(Ok(trackers)) => tracing::info!(
+                                source_id = %source.id,
+                                artist = %source.artist_name,
+                                trackers,
+                                "bandsintown tracker count recorded"
+                            ),
+                            Ok(Err(error)) => tracing::warn!(
+                                source_id = %source.id,
+                                artist = %source.artist_name,
+                                error = %error,
+                                "bandsintown tracker count unavailable"
+                            ),
+                            Err(_) => tracing::warn!(
+                                source_id = %source.id,
+                                artist = %source.artist_name,
+                                "bandsintown tracker count timed out"
+                            ),
+                        }
+                    }
                 }
                 Err(error) => {
                     record_source_failure(&self.pool, &source, &error, &self.config).await?;
@@ -337,6 +369,7 @@ async fn claim_source(pool: &PgPool) -> Result<Option<EventSourceRow>, EventSync
 }
 
 include!("event_sync/bandsintown.rs");
+include!("event_sync/trackers.rs");
 include!("event_sync/persistence.rs");
 include!("event_sync/announcements.rs");
 async fn record_source_failure(

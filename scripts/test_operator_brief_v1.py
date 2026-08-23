@@ -22,7 +22,7 @@ import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "migrations/0084_viryaos_operator_brief.sql"
+MIGRATIONS = ROOT / "migrations"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/operator_brief.rs"
 WORKER = ROOT / "crates/crowdrelay-worker/src/operator_brief.rs"
 MAIN = ROOT / "crates/crowdrelay-worker/src/main.rs"
@@ -46,15 +46,28 @@ class OperatorBriefContract(unittest.TestCase):
         block = self.domain.split("impl BriefHeadline", 1)[1].split("\n    }", 1)[0]
         return set(re.findall(r'Self::\w+ => "([a-z_]+)"', block))
 
+    def stored_headlines(self) -> set[str]:
+        """The headline set as the newest migration to define it leaves it.
+
+        Read across every migration rather than from the one that created the
+        table: the constraint is replaced whenever a headline is added, and a
+        test pinned to the original file would keep passing against a set the
+        database stopped enforcing.
+        """
+        latest: str | None = None
+        for path in sorted(MIGRATIONS.glob("*.sql")):
+            for match in re.finditer(
+                r"CHECK \(\s*headline IN \((.*?)\)\s*\)",
+                read(path),
+                re.DOTALL,
+            ):
+                latest = match.group(1)
+        self.assertIsNotNone(latest, "no migration defines the headline set")
+        return set(re.findall(r"'([a-z_]+)'", latest))
+
     def test_the_stored_headline_set_matches_the_rule(self) -> None:
-        constraint = re.search(
-            r"headline text NOT NULL CHECK \(headline IN \((.*?)\)\)",
-            read(MIGRATION),
-            re.DOTALL,
-        )
-        self.assertIsNotNone(constraint)
         self.assertEqual(
-            set(re.findall(r"'([a-z_]+)'", constraint.group(1))),
+            self.stored_headlines(),
             self.headlines(),
             "a headline the rule can emit but the table refuses fails at send time",
         )

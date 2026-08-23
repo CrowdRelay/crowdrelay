@@ -11,6 +11,7 @@ struct AttentionEcosystemOverview {
 #[derive(Debug, Serialize)]
 struct OperatorAttentionSnapshot {
     summary: OpsSummary,
+    alerts: Vec<OpsAlert>,
     dead_outbox: Vec<OutboxItem>,
     dead_deliveries: Vec<DeliveryItem>,
     ecosystem: AttentionEcosystemOverview,
@@ -20,18 +21,23 @@ struct OperatorAttentionSnapshot {
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let timeout_duration = state.ops.operation_timeout;
     let summary = run_with_timeout(timeout_duration, load_summary(&state.ops));
+    let alerts = run_with_timeout(timeout_duration, load_alerts(&state.ops));
     let dead_outbox = run_with_timeout(timeout_duration, load_dead_outbox(&state.ops));
     let dead_deliveries = run_with_timeout(timeout_duration, load_dead_deliveries(&state.ops));
     let ecosystem = run_with_timeout(timeout_duration, load_attention_ecosystem(&state));
     let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
 
-    let (summary, dead_outbox, dead_deliveries, ecosystem, findings) =
-        tokio::join!(summary, dead_outbox, dead_deliveries, ecosystem, findings);
+    let (summary, alerts, dead_outbox, dead_deliveries, ecosystem, findings) =
+        tokio::join!(summary, alerts, dead_outbox, dead_deliveries, ecosystem, findings);
 
     let request_id_value = request_id(&headers);
     let summary = match summary {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id_value),
+    };
+    let alerts = match alerts {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
     };
     let dead_outbox = match dead_outbox {
         Ok(value) => value,
@@ -54,12 +60,39 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         StatusCode::OK,
         OperatorAttentionSnapshot {
             summary,
+            alerts,
             dead_outbox,
             dead_deliveries,
             ecosystem,
             findings,
         },
     )
+}
+
+/// Open watchdog alerts, plus the ones that recovered in the last 24 hours.
+///
+/// Recovered rows stay visible for a day because the watchdog only re-evaluates
+/// every five minutes: an operator who fixed the cause needs to see that the
+/// alert closed by itself rather than wonder whether the count is stuck.
+async fn load_alerts(state: &OpsState) -> Result<Vec<OpsAlert>, OpsError> {
+    sqlx::query_as::<_, OpsAlert>(
+        r#"
+        SELECT alert_key, severity, summary, active, first_seen_at, last_seen_at,
+               last_alerted_at, recovered_at, details
+        FROM viryaos_ops_alert_state
+        WHERE workspace_id = $1
+          AND (active OR recovered_at >= now() - INTERVAL '24 hours')
+        ORDER BY active DESC,
+                 (severity = 'critical') DESC,
+                 last_seen_at DESC,
+                 alert_key
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
 }
 
 async fn load_dead_outbox(state: &OpsState) -> Result<Vec<OutboxItem>, OpsError> {

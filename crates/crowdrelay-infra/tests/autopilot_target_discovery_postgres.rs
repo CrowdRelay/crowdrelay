@@ -115,6 +115,7 @@ async fn candidates_are_screened_on_write_and_only_promote_when_confirmed()
                     Some("free-directory"),
                 ),
             ],
+            None,
             &key("sweep-1"),
             None,
         )
@@ -150,6 +151,7 @@ async fn candidates_are_screened_on_write_and_only_promote_when_confirmed()
                 true,
                 None,
             )],
+            None,
             &key("sweep-1"),
             None,
         )
@@ -168,6 +170,7 @@ async fn candidates_are_screened_on_write_and_only_promote_when_confirmed()
                 true,
                 None,
             )],
+            None,
             &key("sweep-2"),
             None,
         )
@@ -225,6 +228,7 @@ async fn candidates_are_screened_on_write_and_only_promote_when_confirmed()
                 true,
                 None,
             )],
+            None,
             &key("sweep-3"),
             None,
         )

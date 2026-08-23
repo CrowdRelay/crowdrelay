@@ -40,6 +40,14 @@ pub struct OperatorBriefSnapshot {
     /// Off-platform feeds the agent has no series for. Reported so "we saw no
     /// change" is never confused with "we could not look".
     pub blind_platforms: u16,
+    /// The most recent discovery sweep answered having read nothing at all.
+    ///
+    /// Separate from `blind_platforms` because it is a different loss: that one
+    /// means the agent cannot measure, this one means it cannot find anybody
+    /// new to reach. It is also the quietest failure the system has — the sweep
+    /// succeeds, the batch is empty, and every downstream table stays at zero
+    /// while the ledger reads green.
+    pub last_sweep_read_nothing: bool,
     pub agent_enabled: bool,
     pub dry_run: bool,
     pub last_brief_at: Option<OffsetDateTime>,
@@ -72,6 +80,12 @@ pub enum BriefHeadline {
     Worked,
     /// The agent cannot see platforms it is expected to report on.
     Blind,
+    /// The last discovery sweep read nothing, so the pitcher's only source of
+    /// new targets is producing none. Ranked above `Blind` because a broken
+    /// read path stops the agent reaching anybody new, where a missing metric
+    /// series only stops it measuring. Ranked below `Failing`: a failed action
+    /// is already visible in the ledger, and this is not.
+    DiscoveryReadNothing,
     /// Actions failed.
     Failing,
     /// Decisions are waiting on a human inside the normal window.
@@ -93,6 +107,7 @@ impl BriefHeadline {
         match self {
             Self::Worked => "worked",
             Self::Blind => "blind",
+            Self::DiscoveryReadNothing => "discovery_read_nothing",
             Self::Failing => "failing",
             Self::AwaitingApproval => "awaiting_approval",
             Self::WorkParked => "work_parked",
@@ -172,6 +187,9 @@ fn headline(snapshot: &OperatorBriefSnapshot, policy: OperatorBriefPolicy) -> Br
     if snapshot.actions_failed_24h > 0 {
         return BriefHeadline::Failing;
     }
+    if snapshot.last_sweep_read_nothing {
+        return BriefHeadline::DiscoveryReadNothing;
+    }
     if snapshot.blind_platforms > 0 {
         return BriefHeadline::Blind;
     }
@@ -194,6 +212,7 @@ mod tests {
             oldest_approval_age_hours: None,
             actions_parked: 0,
             blind_platforms: 0,
+            last_sweep_read_nothing: false,
             agent_enabled: true,
             dry_run: false,
             last_brief_at: None,
@@ -340,6 +359,58 @@ mod tests {
     }
 
     #[test]
+    fn a_sweep_that_read_nothing_outranks_a_missing_metric_feed() {
+        // Both are blindness, and they are not equally expensive. A missing
+        // series stops the agent measuring; a sweep that reads nothing stops it
+        // finding anybody new to reach, which is the growth loop itself.
+        let snapshot = OperatorBriefSnapshot {
+            blind_platforms: 3,
+            last_sweep_read_nothing: true,
+            ..quiet()
+        };
+        assert_eq!(
+            sent(evaluate_operator_brief(
+                &snapshot,
+                OperatorBriefPolicy::default(),
+                now()
+            )),
+            BriefHeadline::DiscoveryReadNothing
+        );
+    }
+
+    #[test]
+    fn a_failed_action_still_outranks_a_sweep_that_read_nothing() {
+        let snapshot = OperatorBriefSnapshot {
+            actions_failed_24h: 1,
+            last_sweep_read_nothing: true,
+            ..quiet()
+        };
+        assert_eq!(
+            sent(evaluate_operator_brief(
+                &snapshot,
+                OperatorBriefPolicy::default(),
+                now()
+            )),
+            BriefHeadline::Failing
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_read_nothing_breaks_the_silence_on_its_own() {
+        // Nothing executed, nothing failed, nothing waiting. Without this the
+        // brief would hold as `NothingWorthSaying` and the broken read path
+        // would stay invisible for exactly as long as nobody looked.
+        let snapshot = OperatorBriefSnapshot {
+            last_sweep_read_nothing: true,
+            ..quiet()
+        };
+        assert!(matches!(
+            evaluate_operator_brief(&snapshot, OperatorBriefPolicy::default(), now()),
+            OperatorBriefDecision::Send(BriefHeadline::DiscoveryReadNothing)
+        ));
+    }
+
+    #[test]
     fn nothing_is_sent_twice_inside_the_interval_however_bad_the_news() {
         let snapshot = OperatorBriefSnapshot {
             agent_enabled: false,
@@ -373,6 +444,7 @@ mod tests {
             BriefHeadline::Blind,
             BriefHeadline::DisabledWithWorkWaiting,
             BriefHeadline::Failing,
+            BriefHeadline::DiscoveryReadNothing,
             BriefHeadline::AwaitingApproval,
         ];
         ordered.sort_unstable();
@@ -381,6 +453,7 @@ mod tests {
             [
                 BriefHeadline::Worked,
                 BriefHeadline::Blind,
+                BriefHeadline::DiscoveryReadNothing,
                 BriefHeadline::Failing,
                 BriefHeadline::AwaitingApproval,
                 BriefHeadline::WorkParked,

@@ -156,6 +156,27 @@ impl QueueStatus {
     }
 }
 
+/// One row of the native watchdog's alert state.
+///
+/// The counts in `OpsSummary.watchdog` say how many alerts are open; this says
+/// which ones and why, so an operator does not have to open psql to find out.
+#[derive(Debug, Serialize, FromRow)]
+pub struct OpsAlert {
+    alert_key: String,
+    severity: String,
+    summary: String,
+    active: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    first_seen_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    last_seen_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_alerted_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    recovered_at: Option<OffsetDateTime>,
+    details: serde_json::Value,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct OutboxItem {
     id: Uuid,

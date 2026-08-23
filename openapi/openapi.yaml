@@ -1947,6 +1947,11 @@ paths:
         whether an ingestion happened at all, and both cases leave zero
         candidate rows. An adapter that returns silently keeps the request alive
         for ever instead of backing it off.
+
+
+        Send `sweep` wherever the adapter can count what it read. It is what
+        separates a source with nothing to give from a read path that returned
+        nothing at all, and only the first is worth calling exhausted.
       security:
       - commerceBearer: []
       parameters:
@@ -1955,7 +1960,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/OutreachCandidateBatchRequest' }
+            schema: { $ref: '#/components/schemas/OutreachSweepBatchRequest' }
       responses:
         '200':
           description: Sweep recorded and every candidate screened.
@@ -8064,6 +8069,54 @@ components:
           minItems: 1
           maxItems: 100
           items: { $ref: '#/components/schemas/OutreachCandidateRequest' }
+    OutreachSweepBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [candidates]
+      description: >-
+        The executor's report of one sweep. `candidates` may be empty, because a
+        sweep that found no usable route is a real answer.
+      properties:
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: { $ref: '#/components/schemas/OutreachCandidateRequest' }
+        sweep: { $ref: '#/components/schemas/OutreachSweepReport' }
+    OutreachSweepReport:
+      type: object
+      additionalProperties: false
+      required: [sources_read, items_seen]
+      description: >-
+        What the sweep read, as opposed to what it reported. Optional, because
+        an adapter that cannot count what it read is still a valid client.
+
+
+        Without it an adapter that queried two hundred playlists and found no
+        published submission route is indistinguishable from one whose
+        credential expired: both post an empty `candidates` array. The first is
+        a dry source an operator may choose to widen; the second is a broken
+        integration. These counts are adapter claims and are treated as such —
+        they can only change which cause CrowdRelay reports, never widen
+        authority, raise a cap, or let a candidate skip screening.
+
+
+        Rejected as `400` when incoherent: `items_seen` below the number of
+        candidates posted, or `items_seen` above zero with `sources_read` at
+        zero.
+      properties:
+        sources_read:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: Sources queried, for example one per configured search.
+        items_seen:
+          type: integer
+          minimum: 0
+          maximum: 100000
+          description: >-
+            Items those sources returned, before any screening. Zero on a
+            successful sweep is the signature of a broken read path.
     OutreachCandidateIngestion:
       type: object
       additionalProperties: false

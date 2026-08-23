@@ -38,6 +38,19 @@ pub struct OutreachCandidateRequest {
 #[serde(deny_unknown_fields)]
 pub struct OutreachCandidateBatchRequest {
     candidates: Vec<OutreachCandidateRequest>,
+    /// What the sweep read before screening anything, where the adapter can
+    /// count it. Optional so an adapter that cannot is still a valid client,
+    /// and absent on the admin route: a human posting candidates by hand did
+    /// not run a sweep and must not be recorded as having run one.
+    #[serde(default)]
+    sweep: Option<SweepReportRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SweepReportRequest {
+    sources_read: u32,
+    items_seen: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +139,21 @@ pub async fn ingest_outreach_candidates_internal(
             .private()
             .into_response();
     }
+    // A sweep cannot report fewer items read than candidates reported: every
+    // candidate came out of an item. Refusing the incoherent pair keeps the
+    // supply rule from reading `items_seen = 0` as a broken adapter on a sweep
+    // that plainly found something.
+    let sweep_report = match request.sweep {
+        Some(sweep) => match validate_sweep_report(&sweep, request.candidates.len()) {
+            Ok(report) => Some(report),
+            Err(()) => {
+                return Problem::bad_request(request_id(&headers))
+                    .private()
+                    .into_response();
+            }
+        },
+        None => None,
+    };
     let idempotency_key = match parse_idempotency_key(&headers) {
         Ok(value) => value,
         Err(response) => return response,
@@ -147,6 +175,7 @@ pub async fn ingest_outreach_candidates_internal(
         .ingest_outreach_candidates(
             state.ops.workspace_id(),
             candidates,
+            sweep_report,
             &idempotency_key,
             request_id_value.as_ref(),
         )
@@ -157,12 +186,45 @@ pub async fn ingest_outreach_candidates_internal(
     }
 }
 
+/// Bounds mirror migration 0086's CHECK constraints, so an out-of-range claim
+/// is refused at the boundary rather than silently clamped into the timeline.
+const MAX_SWEEP_SOURCES_READ: u32 = 1_000;
+const MAX_SWEEP_ITEMS_SEEN: u32 = 100_000;
+
+fn validate_sweep_report(
+    request: &SweepReportRequest,
+    candidates: usize,
+) -> Result<OutreachSweepReport, ()> {
+    if request.sources_read > MAX_SWEEP_SOURCES_READ || request.items_seen > MAX_SWEEP_ITEMS_SEEN {
+        return Err(());
+    }
+    // Reporting candidates out of nothing read is not a coherent sweep.
+    let candidates = u32::try_from(candidates).map_err(|_| ())?;
+    if request.items_seen < candidates {
+        return Err(());
+    }
+    // Items with no source behind them is the same incoherence one level up.
+    if request.sources_read == 0 && request.items_seen > 0 {
+        return Err(());
+    }
+    Ok(OutreachSweepReport {
+        sources_read: request.sources_read,
+        items_seen: request.items_seen,
+    })
+}
+
 pub async fn ingest_outreach_candidates(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<OutreachCandidateBatchRequest>,
 ) -> Response {
-    if request.candidates.is_empty() || request.candidates.len() > MAX_CANDIDATE_BATCH {
+    // A sweep report belongs to an adapter that swept. Accepting one here would
+    // let a hand-posted batch answer "what did the last sweep read", which is
+    // the one question this route has no standing to answer.
+    if request.candidates.is_empty()
+        || request.candidates.len() > MAX_CANDIDATE_BATCH
+        || request.sweep.is_some()
+    {
         return Problem::bad_request(request_id(&headers))
             .private()
             .into_response();
@@ -188,6 +250,7 @@ pub async fn ingest_outreach_candidates(
         .ingest_outreach_candidates(
             state.ops.workspace_id(),
             candidates,
+            None,
             &idempotency_key,
             request_id_value.as_ref(),
         )
