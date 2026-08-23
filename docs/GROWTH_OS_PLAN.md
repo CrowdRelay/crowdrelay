@@ -584,7 +584,7 @@ On top of the invariants at the top of this file, which all still hold:
 
 ---
 
-## Phase 5 — autonomy envelope (5a DONE, 5b NEXT)
+## Phase 5 — autonomy envelope (5a, 5b DONE; 5c NEXT)
 
 Nothing acts until the envelope exists. This is the phase that makes "the agent
 sent that on its own" a sentence an operator can hear without alarm.
@@ -648,7 +648,7 @@ Decisions worth not re-deriving:
 - Cycle reports now count `actions_gated` separately from `actions_throttled`:
   throttled work is deferred, gated work is somebody's decision to make.
 
-### 5b — the envelope itself (NEXT)
+### 5b — the envelope itself (DONE)
 
 Per-workspace, operator-editable, with defaults that are deliberately timid:
 
@@ -663,6 +663,56 @@ Per-workspace, operator-editable, with defaults that are deliberately timid:
   Autopilot
 - **dry run**: the agent produces the exact steps, segments and copy it would
   execute, and executes nothing. This is how a new play earns trust.
+
+**As built.** `crates/crowdrelay-domain/src/growth_envelope.rs` (11 unit tests),
+migration `0076_viryaos_growth_envelope.sql`, `load_growth_envelope` and
+`load_outward_touch_ages` on `AutopilotDecisionRepository`, applied in
+`EvaluateAutopilot::persist` immediately after the class clamp.
+`scripts/test_growth_envelope_v1.py`, 16 contract tests. `SCHEMA_VERSION`
+75 → 76.
+
+Decisions worth not re-deriving:
+
+- **No new ledger.** Outward touches are already durable rows in
+  `viryaos_autopilot_actions`, so the envelope counts those. A parallel ledger
+  would be one more thing that can disagree with the actions it describes. The
+  cost of this is one new column, not one new table.
+- **`viryaos_autopilot_actions.action_class` is written at insert and is
+  nullable.** Written rather than derived, because deriving it at read time
+  means reimplementing the Rust classification in SQL and the two drift the
+  first time a lever is reclassified. It also records the class the action was
+  *authorised under*, which is what an audit needs. NULL means the row predates
+  the envelope, and that work is deliberately not charged to the agent — it was
+  not the agent's.
+- **Cancelled actions are not counted as touches.** An approval somebody refused
+  never reached anybody. Failures still count: a send that errored may still
+  have gone out.
+- **The kill switch stops outward contact only.** First-party work is exempt, so
+  switching the agent off is a stop on contact rather than a rollback of
+  housekeeping.
+- **`agent_enabled` and `dry_run` are separate.** Turning the agent on must not
+  also be the moment it first sends something real.
+- **Dry run is the one block that produces nothing approvable** — it downgrades
+  to `recommend`, everything else to `require_approval`. An approve button in a
+  rehearsal view turns the rehearsal into a send.
+- **Budget is per outward class.** A busy newsletter week must not silence
+  curator outreach, and a wave of pitches must not eat the audience budget.
+- **The cooldown is keyed on subject, not on fan.** A superset of the intended
+  rule and cheaper to enforce: no subject hears from the agent twice inside the
+  window, whichever play wants to reach them.
+- Both counting queries are time-bounded (7 days, 365 days) and covered by two
+  partial indexes, and both are read once per cycle rather than per candidate.
+
+**Deferred, with the reason.** The plan said "weekly budget *per channel*".
+There is no channel column on `viryaos_autopilot_actions` — the channel is
+implied by the action kind and the executor. Budgets are per action class for
+now; splitting email from push means adding a channel to the action row, which
+is a bigger change than it looks and is not worth it until a play exists that
+would be throttled wrongly by the coarser bucket.
+
+**Not runtime-verified.** No Docker daemon on this machine, so neither
+migration has run against a real Postgres. Do that before switching
+`agent_enabled` on anywhere.
 
 ### 5c — proof
 

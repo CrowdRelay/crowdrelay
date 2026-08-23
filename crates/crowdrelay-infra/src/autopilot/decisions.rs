@@ -220,6 +220,22 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.load_autonomy_ceilings_impl(workspace_id).await
     }
 
+    async fn load_growth_envelope(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError> {
+        self.load_growth_envelope_impl(workspace_id, now).await
+    }
+
+    async fn load_outward_touch_ages(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(Uuid, u32)>, RepositoryError> {
+        self.load_outward_touch_ages_impl(workspace_id, now).await
+    }
+
     async fn persist_candidate(
         &self,
         workspace_id: WorkspaceId,

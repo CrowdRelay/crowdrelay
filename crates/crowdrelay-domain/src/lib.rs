@@ -46,6 +46,7 @@ pub mod experimentation;
 pub mod fan_lifecycle;
 pub mod funding;
 pub mod growth_debt;
+pub mod growth_envelope;
 pub mod growth_metrics;
 pub mod ids;
 pub mod live_opportunities;

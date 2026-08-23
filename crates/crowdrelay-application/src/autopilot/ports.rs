@@ -13,6 +13,7 @@ use crowdrelay_domain::{
     experimentation::ExperimentSnapshot,
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
+    growth_envelope::{EnvelopeUsage, GrowthEnvelope},
     growth_metrics::GrowthMetricSnapshot,
     live_opportunities::LiveOpportunitySnapshot,
     merch_bundle::MerchBundleSnapshot,
@@ -186,6 +187,26 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError>;
+
+    /// The operator's volume limits, and what the workspace has already spent
+    /// against them in the trailing seven days.
+    ///
+    /// Returned together because they are read together once per cycle: the
+    /// limits without the spend cannot decide anything, and reading the spend
+    /// per candidate would be a query per finding.
+    async fn load_growth_envelope(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError>;
+
+    /// Hours since the agent last reached each subject through an outward
+    /// action, for the cooldown. One query per cycle, not one per candidate.
+    async fn load_outward_touch_ages(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(uuid::Uuid, u32)>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.

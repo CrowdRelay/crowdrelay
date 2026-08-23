@@ -89,8 +89,12 @@ class GrowthAutonomyContract(unittest.TestCase):
         persist = self.evaluate_persist()
         self.assertIn("candidate.action.action_class()", persist)
         self.assertIn("clamp_disposition", persist)
+        # Not "appears once" — the envelope downgrades through the same helper.
+        # What must hold is that no other function touches authority at all.
         evaluate = read(EVALUATE)
-        self.assertEqual(evaluate.count("clamp_disposition("), 1)
+        self.assertEqual(
+            evaluate.count("clamp_disposition("), persist.count("clamp_disposition(")
+        )
         # Every dispatch arm reaches the database through this one function.
         self.assertNotIn("persist_candidate(self.workspace_id", evaluate.split("async fn persist(", 1)[0])
 
