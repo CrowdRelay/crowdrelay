@@ -98,6 +98,65 @@ fn validate_candidate(
     })
 }
 
+/// Executor-facing ingestion.
+///
+/// Discovery is executor work, so it belongs on the internal surface with the
+/// commerce credential every other executor route uses. Requiring the admin key
+/// would hand an adapter authority over ninety-seven admin routes to post a
+/// list of playlist contacts, which is exactly the blurring the surfaces exist
+/// to prevent.
+///
+/// Unlike the admin route this accepts an **empty** batch. A sweep that read
+/// published text and found no usable route is a real answer, and it is the
+/// answer the barren-sweep back-off is built on: without a way to report it,
+/// an adapter can only stay silent, and silence is indistinguishable from an
+/// adapter that crashed.
+pub async fn ingest_outreach_candidates_internal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OutreachCandidateBatchRequest>,
+) -> Response {
+    if !state.ticketing.commerce_authorized(&headers) {
+        return Problem::unauthorized(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    if request.candidates.len() > MAX_CANDIDATE_BATCH {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let mut candidates = Vec::with_capacity(request.candidates.len());
+    for candidate in request.candidates {
+        match validate_candidate(candidate) {
+            Ok(candidate) => candidates.push(candidate),
+            Err(()) => {
+                return Problem::bad_request(request_id(&headers))
+                    .private()
+                    .into_response();
+            }
+        }
+    }
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .ingest_outreach_candidates(
+            state.ops.workspace_id(),
+            candidates,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn ingest_outreach_candidates(
     State(state): State<AppState>,
     headers: HeaderMap,

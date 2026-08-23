@@ -1,5 +1,5 @@
 {
-  "name": "VIRYA Autopilot \u2014 viryaos.ops.operator_brief (daily brief delivery)",
+  "name": "CrowdRelay \u2014 VIRYA OS operator brief",
   "nodes": [
     {
       "parameters": {},
@@ -8,20 +8,89 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        -360,
+        -380,
         0
       ]
     },
     {
       "parameters": {
-        "jsCode": "// A brief is not a condition that opens and recovers, so it carries no\n// alert_key and no state. Branch on the event type before anything else: this\n// workflow shares a destination with viryaos.ops.status_changed, not a shape.\nconst e = $json;\nif (!e || e.type !== 'viryaos.ops.operator_brief' || e.version !== 1) return [];\nconst d = e.data ?? {};\nif (!d.headline || !d.summary) throw new Error('Invalid operator brief');\nconst s = d.snapshot ?? {};\n\n// CrowdRelay decided there was something worth saying and sends at most one a\n// day. Never suppress, batch or re-send: a delivery path that applies its own\n// quiet hours reproduces the silence the brief exists to break.\nconst HEADLINES = {\n  approval_stale: {icon: '\\u23F0', label: 'A decision has been waiting too long'},\n  disabled_with_work_waiting: {icon: '\\u26A0\\uFE0F', label: 'The agent is not running while work waits'},\n  work_parked: {icon: '\\u{1F6A7}', label: 'Work is parked with no executor for it'},\n  awaiting_approval: {icon: '\\u{1F464}', label: 'Decisions need you'},\n  failing: {icon: '\\u274C', label: 'Actions failed'},\n  blind: {icon: '\\u{1F441}\\uFE0F', label: 'The agent cannot see some platforms'},\n  worked: {icon: '\\u2705', label: 'The agent worked'}\n};\nconst h = HEADLINES[d.headline] ?? {icon: '\\u2139\\uFE0F', label: d.headline};\n\n// Facts only. The brief reports; the read models and the operator decide.\nconst lines = [\n  `${h.icon} *VIRYA \\u2014 ${h.label}*`,\n  '',\n  d.summary,\n  '',\n  `Executed (24h): ${s.actions_executed_24h ?? 0}`,\n  `Failed (24h): ${s.actions_failed_24h ?? 0}`,\n  `Awaiting approval: ${s.actions_awaiting_approval ?? 0}`,\n  `Parked (no executor): ${s.actions_parked ?? 0}`,\n  `Platforms not visible: ${s.blind_platforms ?? 0}`,\n  `Agent: ${s.agent_enabled ? 'enabled' : 'disabled'}${s.dry_run ? ', dry run' : ''}`,\n  '',\n  $env.VIRYA_STAFF_TODAY_URL ? `Queue: ${$env.VIRYA_STAFF_TODAY_URL}` : ''\n].filter(Boolean);\n\nreturn [{ json: {\n  event_id: e.id,\n  headline: d.headline,\n  observed_at: d.observed_at,\n  subject: `VIRYA daily brief \\u2014 ${h.label}`,\n  text: lines.join('\\n')\n}}];"
+        "jsCode": "// A brief is not a condition that opens and recovers, so it carries no\n// alert_key and no state. Branch on the event type first: this shares the ops\n// Discord destination with viryaos.ops.status_changed, not its shape.\nconst e = $json;\nif (!e || e.type !== 'viryaos.ops.operator_brief' || e.version !== 1) return [];\nconst d = e.data ?? {};\nif (!d.headline || !d.summary) throw new Error('Invalid operator brief');\nconst s = d.snapshot ?? {};\n\n// CrowdRelay already decided there was something worth saying and sends at\n// most one a day. Never suppress, batch or re-send here: a delivery path with\n// its own quiet hours reproduces the silence the brief exists to break.\nconst LABELS = {\n  approval_stale: 'Decyzja czeka za d\\u0142ugo',\n  disabled_with_work_waiting: 'Agent nie dzia\\u0142a, a praca czeka',\n  work_parked: 'Praca zaparkowana \\u2014 brak wykonawcy',\n  awaiting_approval: 'Decyzje czekaj\\u0105 na Ciebie',\n  failing: 'Akcje si\\u0119 nie powiod\\u0142y',\n  blind: 'Agent nie widzi cz\\u0119\\u015bci platform',\n  worked: 'Agent pracowa\\u0142'\n};\nconst label = LABELS[d.headline] ?? String(d.headline);\n\n// Facts only. The brief reports; the read models and the operator decide.\nconst lines = [\n  `**VIRYA \\u2014 ${label}**`,\n  '',\n  String(d.summary),\n  '',\n  `Wykonane (24h): ${s.actions_executed_24h ?? 0}`,\n  `Nieudane (24h): ${s.actions_failed_24h ?? 0}`,\n  `Czeka na akceptacj\\u0119: ${s.actions_awaiting_approval ?? 0}`,\n  `Zaparkowane (brak wykonawcy): ${s.actions_parked ?? 0}`,\n  `Platformy niewidoczne: ${s.blind_platforms ?? 0}`,\n  `Agent: ${s.agent_enabled ? 'w\\u0142\\u0105czony' : 'wy\\u0142\\u0105czony'}${s.dry_run ? ', dry run' : ''}`\n];\nif ($env.VIRYA_STAFF_TODAY_URL) lines.push('', `Kolejka: ${$env.VIRYA_STAFF_TODAY_URL}`);\n\nreturn [{ json: {\n  event_id: e.id,\n  headline: String(d.headline),\n  observed_at: d.observed_at ?? null,\n  content: lines.join('\\n').slice(0, 1900)\n}}];"
       },
       "id": "format",
-      "name": "Validate and format the brief",
+      "name": "Validate and build the brief",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -120,
+        -140,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.VIRYA_OPS_ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "recent",
+      "name": "Read recent operations messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The outbox is at-least-once, so the same brief can arrive twice. CrowdRelay\n// already guarantees one a day; this only stops a redelivery becoming a second\n// message. The marker is the event id, invisible in the rendered text.\nconst brief = $('Validate and build the brief').first().json;\nconst marker = `\\u200b[brief:${brief.event_id}]`;\nconst recent = Array.isArray($json) ? $json : ($json.body ?? []);\nconst already = recent.some(m => String(m?.content || '').includes(marker));\nreturn [{ json: { ...brief, marker, already } }];"
+      },
+      "id": "dedupe",
+      "name": "Check brief idempotency",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.already }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "gate",
+      "name": "Brief already sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        580,
         0
       ]
     },
@@ -33,26 +102,37 @@
         "headerParameters": {
           "parameters": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
             }
           ]
         },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({text: $json.text}) }}",
+        "body": "={{ JSON.stringify({content: $json.content + '\\n' + $json.marker, allowed_mentions: {parse: []}}) }}",
         "options": {
           "timeout": 10000
         }
       },
-      "id": "deliver",
-      "name": "Deliver to the operator channel",
+      "id": "post",
+      "name": "Post the operator brief",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        120,
-        0
+        820,
+        -100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "done",
+      "name": "Operator brief complete",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        820,
+        120
       ]
     }
   ],
@@ -61,18 +141,58 @@
       "main": [
         [
           {
-            "node": "Validate and format the brief",
+            "node": "Validate and build the brief",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Validate and format the brief": {
+    "Validate and build the brief": {
       "main": [
         [
           {
-            "node": "Deliver to the operator channel",
+            "node": "Read recent operations messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read recent operations messages": {
+      "main": [
+        [
+          {
+            "node": "Check brief idempotency",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check brief idempotency": {
+      "main": [
+        [
+          {
+            "node": "Brief already sent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Brief already sent?": {
+      "main": [
+        [
+          {
+            "node": "Post the operator brief",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Operator brief complete",
             "type": "main",
             "index": 0
           }
@@ -83,9 +203,11 @@
   "active": false,
   "settings": {
     "executionOrder": "v1",
-    "saveDataSuccessExecution": "none",
     "saveDataErrorExecution": "none",
-    "saveExecutionProgress": false
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "errorWorkflow": "98d5e1a4-2dba-5e5a-9be1-2e5d9220859d",
+    "binaryMode": "separate"
   },
   "tags": []
 }

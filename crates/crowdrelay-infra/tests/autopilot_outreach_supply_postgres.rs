@@ -67,27 +67,18 @@ async fn supply_counts_the_run_of_barren_sweeps_not_the_total()
     let middle = seed_sweep(&pool, workspace_id, now - time::Duration::days(6)).await?;
     let recent = seed_sweep(&pool, workspace_id, now - time::Duration::days(3)).await?;
 
-    seed_candidate(
-        &pool,
-        workspace_id,
-        "refused",
-        old + time::Duration::hours(1),
-    )
-    .await?;
-    seed_candidate(
-        &pool,
-        workspace_id,
-        "admitted",
-        middle + time::Duration::hours(1),
-    )
-    .await?;
-    seed_candidate(
-        &pool,
-        workspace_id,
-        "refused",
-        recent + time::Duration::hours(1),
-    )
-    .await?;
+    // Each sweep was answered. The ingestion is what says so — candidate rows
+    // cannot, because a sweep that reported "nothing found" leaves none either.
+    for (at, status) in [
+        (old, Some("refused")),
+        (middle, Some("admitted")),
+        (recent, Some("refused")),
+    ] {
+        seed_ingestion(&pool, workspace_id, at + time::Duration::hours(1)).await?;
+        if let Some(status) = status {
+            seed_candidate(&pool, workspace_id, status, at + time::Duration::hours(1)).await?;
+        }
+    }
 
     let snapshot = repository
         .load_outreach_supply_snapshot(workspace_id, now)
@@ -108,15 +99,33 @@ async fn supply_counts_the_run_of_barren_sweeps_not_the_total()
         "the per-sweep window must not credit an older sweep with a later candidate"
     );
 
-    // A sweep nobody answered is an integration failure, not a dry source. If
-    // it counted as barren, one broken workflow would disable discovery.
+    // An adapter that answered with an empty batch found nothing admissible,
+    // which is a real answer and extends the barren run to two.
+    let answered_empty = seed_sweep(&pool, workspace_id, now - time::Duration::hours(20)).await?;
+    seed_ingestion(
+        &pool,
+        workspace_id,
+        answered_empty + time::Duration::minutes(5),
+    )
+    .await?;
+    let dry = repository
+        .load_outreach_supply_snapshot(workspace_id, now)
+        .await?;
+    assert_eq!(
+        dry.consecutive_barren_sweeps, 2,
+        "an empty batch is a report that the source is dry, not silence"
+    );
+
+    // A sweep nobody answered at all is an integration failure, not a dry
+    // source. If it counted as barren, one broken workflow would permanently
+    // disable discovery — so it breaks the run instead of extending it.
     seed_sweep(&pool, workspace_id, now - time::Duration::hours(6)).await?;
     let unanswered = repository
         .load_outreach_supply_snapshot(workspace_id, now)
         .await?;
     assert_eq!(
         unanswered.consecutive_barren_sweeps, 0,
-        "a sweep with no candidates at all breaks the barren run"
+        "a sweep with no ingestion at all breaks the barren run"
     );
     assert_eq!(unanswered.candidates_since_last_sweep, 0);
 
@@ -146,10 +155,9 @@ async fn supply_counts_the_run_of_barren_sweeps_not_the_total()
         "do-not-contact and inactive targets are not supply"
     );
 
-    sqlx::query("DELETE FROM workspaces WHERE id=$1")
-        .bind(workspace_id.into_uuid())
-        .execute(&pool)
-        .await?;
+    // No teardown: `operator_actions` is append-only, so cascading the
+    // workspace away is refused by design. The database this runs against is
+    // disposable and the workspace id is unique per run.
     Ok(())
 }
 
@@ -186,6 +194,32 @@ async fn seed_sweep(
     .execute(pool)
     .await?;
     Ok(created_at)
+}
+
+/// Records the adapter's answer, exactly as the ingest route does.
+///
+/// `actor_type` is `admin_api_key` because the ledger has no value for an
+/// executor yet; the action name is what identifies this as executor work.
+/// Threading a real actor through all thirty-one call sites is its own change.
+async fn seed_ingestion(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    created_at: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO operator_actions
+         (id, workspace_id, action, target_type, target_id, actor_type,
+          idempotency_key, details, created_at)
+         VALUES ($1, $2, 'ingest_autopilot_outreach_candidates',
+                 'outreach_candidate_batch', $2, 'admin_api_key', $3, '{}'::jsonb, $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("sweep-report-{}", Uuid::now_v7()))
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_candidate(

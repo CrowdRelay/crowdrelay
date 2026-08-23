@@ -1929,6 +1929,42 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/outreach/candidates:
+    post:
+      operationId: reportOutreachSweep
+      summary: Report an executor's discovery sweep
+      description: >-
+        The executor-facing half of candidate ingestion. Discovery is executor
+        work, so it uses the commerce key rather than the admin key: requiring
+        the latter would hand an adapter authority over every admin route in
+        order to post a list of playlist contacts.
+
+
+        Unlike the admin route this accepts an **empty** `candidates` array. A
+        sweep that read published text and found no usable route is a real
+        answer, and it is the one the barren-sweep back-off is built on:
+        CrowdRelay tells a dry source from an adapter that never came back by
+        whether an ingestion happened at all, and both cases leave zero
+        candidate rows. An adapter that returns silently keeps the request alive
+        for ever instead of backing it off.
+      security:
+      - commerceBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OutreachCandidateBatchRequest' }
+      responses:
+        '200':
+          description: Sweep recorded and every candidate screened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutreachCandidateIngestion' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/release-ledger:
     get:
       operationId: getAutopilotReleaseLedger
