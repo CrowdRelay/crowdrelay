@@ -8,6 +8,7 @@ without a deploy -- so each one is pinned against being quietly removed.
 """
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +184,36 @@ class GrowthEnvelopeContract(unittest.TestCase):
         self.assertNotIn("tracing::warn", available)
         # The strict gate stays for the moment an action actually needs it.
         self.assertIn("ensure_executor_capability_strict", execution)
+
+    def test_gated_work_is_parked_before_it_is_claimed(self) -> None:
+        # Claiming an action spends one of its five attempts. Spending them on a
+        # capability an operator has switched off retires the action for good:
+        # once it is `failed` the snapshot no longer counts it as in flight, and
+        # the re-proposed decision dedupes into the idempotency key it already
+        # used. The work would then never run again, gate or no gate.
+        actions = read(ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs")
+        self.assertIn("partition_by_executor_capability", actions)
+        self.assertIn("FOR UPDATE SKIP LOCKED", actions)
+        park = actions.split("async fn park_gated_actions", 1)[1].split("\n}", 1)[0]
+        self.assertIn("status = 'queued'", park)
+        self.assertIn("last_error_kind = 'awaiting_executor'", park)
+        # Parking must not look like an attempt, so nothing here may touch the
+        # attempt counter.
+        self.assertNotIn("attempt_count", park)
+        self.assertIn("no executor advertises this capability", park)
+
+    def test_every_capability_an_action_needs_is_one_an_executor_can_advertise(self) -> None:
+        # The pre-claim check and the emission-time check must name capabilities
+        # identically, or an action is parked under one name and gated under
+        # another.
+        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs")
+        by_payload = execution.split("fn executor_capability_for_payload", 1)[1].split(
+            "\nfn executor_capability_for_event", 1
+        )[0]
+        by_event = execution.split("fn executor_capability_for_event", 1)[1].split("\n}", 1)[0]
+        advertised = set(re.findall(r'=> "([a-z][a-z0-9_.]+)"', by_event))
+        for capability in set(re.findall(r'=> "([a-z][a-z0-9_.]+)"', by_payload)):
+            self.assertIn(capability, advertised)
 
     def test_held_decisions_are_counted_apart_from_gated_and_throttled_ones(self) -> None:
         report = self.evaluate.split("pub struct AutopilotCycleReport {", 1)[1].split(
