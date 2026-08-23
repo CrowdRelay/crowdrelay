@@ -81,6 +81,21 @@ class OutreachSupplyContract(unittest.TestCase):
         # own those facts. A supply table would be a second, stale copy.
         self.assertNotIn("CREATE TABLE", strip_sql_comments(self.migration))
 
+    def test_a_workspace_created_later_also_gets_the_context(self) -> None:
+        # The backfill covers today's workspaces and the trigger covers
+        # tomorrow's. Updating only one works until the next workspace exists.
+        self.assertIn("SELECT workspace.id, 'outreach_supply', 2", self.migration)
+        trigger = self.migration.split(
+            "CREATE OR REPLACE FUNCTION viryaos_provision_autopilot_policies", 1
+        )[1]
+        self.assertIn("'outreach_supply', 2", trigger)
+        provisioned = set(re.findall(r"NEW\.id, '([a-z_]+)'", trigger))
+        self.assertEqual(
+            provisioned,
+            self.contexts(),
+            "the provisioning trigger drifted from AutopilotContext",
+        )
+
     def test_the_context_arrives_disabled_and_tightly_quota_limited(self) -> None:
         provisioning = self.migration.split(
             "INSERT INTO viryaos_autopilot_policies", 1
