@@ -1999,6 +1999,44 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '503':
           $ref: '#/components/responses/PrivateProblem'
+  /admin/autopilot/growth-envelope:
+    post:
+      operationId: setGrowthEnvelope
+      summary: Set the growth envelope, kill switch included
+      description: >-
+        The operator control for stopping the agent. `agent_enabled` is the kill
+        switch and `dry_run` makes it decide everything and execute nothing.
+
+
+        Deliberately a whole-envelope write rather than a patch. A partial
+        update of a limit set is how one ceiling gets widened while another is
+        believed tightened, and an operator stopping the agent should be stating
+        the world they want rather than editing one field of the world they
+        have. `expected_version` makes two operators editing at once a refusal
+        instead of a silent last-writer-wins.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrowthEnvelopeRequest' }
+      responses:
+        '200':
+          description: Envelope updated or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/policies/{context}:
     post:
       operationId: setAutopilotAuthority
@@ -7919,6 +7957,20 @@ components:
           type: array
           maxItems: 16
           items: { $ref: '#/components/schemas/RumMetricSummary' }
+    GrowthEnvelopeRequest:
+      type: object
+      additionalProperties: false
+      required: [agent_enabled, dry_run, weekly_owned_audience_touches, weekly_third_party_touches, subject_cooldown_hours, max_recipients_per_step, expected_version]
+      properties:
+        # The kill switch.
+        agent_enabled: { type: boolean }
+        # Decide everything, execute nothing.
+        dry_run: { type: boolean }
+        weekly_owned_audience_touches: { type: integer, minimum: 0, maximum: 100000 }
+        weekly_third_party_touches: { type: integer, minimum: 0, maximum: 1000 }
+        subject_cooldown_hours: { type: integer, minimum: 0, maximum: 8760 }
+        max_recipients_per_step: { type: integer, minimum: 1, maximum: 100000 }
+        expected_version: { type: integer, format: int64, minimum: 1 }
     AutopilotAuthorityRequest:
       type: object
       additionalProperties: false
