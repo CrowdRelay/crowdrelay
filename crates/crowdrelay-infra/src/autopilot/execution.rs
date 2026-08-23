@@ -662,6 +662,44 @@ pub(in crate::autopilot) async fn ensure_executor_capability(
 /// Strict capability gate for new external features. Unlike the backwards-
 /// compatible gate above, absence of the registry is unavailable: a task must
 /// never be committed unless an active executor explicitly advertises it.
+/// Whether a capability is currently advertised, with no logging and no error.
+///
+/// The strict version is right at the moment an action is about to need a
+/// capability. It is wrong for a scheduled sweep that merely *might* need one:
+/// a capability an operator has deliberately gated off is a steady state, not a
+/// fault, and treating it as an error makes a healthy system report a failing
+/// cycle every sixty seconds forever.
+pub(in crate::autopilot) async fn executor_capability_available(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    capability: &str,
+) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM viryaos_executor_capabilities capability
+            JOIN viryaos_executor_instances executor
+              ON executor.workspace_id=capability.workspace_id
+             AND executor.executor_id=capability.executor_id
+            LEFT JOIN viryaos_executor_circuit_breakers breaker
+              ON breaker.workspace_id=executor.workspace_id
+             AND breaker.executor_id=executor.executor_id
+            WHERE capability.workspace_id=$1
+              AND capability.capability=$2
+              AND capability.expires_at>now()
+              AND executor.expires_at>now()
+              AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
+        )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(capability)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)
+}
+
 pub(in crate::autopilot) async fn ensure_executor_capability_strict(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,

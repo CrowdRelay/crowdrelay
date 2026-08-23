@@ -166,6 +166,24 @@ class GrowthEnvelopeContract(unittest.TestCase):
         self.assertIn("is_contactable_person()", persist)
         self.assertIn("hours_since_subject_touched", persist)
 
+    def test_a_gated_capability_is_a_state_rather_than_a_failing_cycle(self) -> None:
+        # An operator who has switched a capability off has not broken
+        # anything. Reporting it as a failed cycle every sixty seconds trains
+        # everyone to ignore the log, and it also rolled back housekeeping that
+        # needed no executor at all.
+        team = read(ROOT / "crates/crowdrelay-infra/src/autopilot/team.rs")
+        self.assertEqual(team.count("executor_capability_available"), 2)
+        # Silent when nothing is parked; one line when work is actually waiting.
+        self.assertIn("if !approvals.is_empty()", team)
+        self.assertIn("if !rows.is_empty()", team)
+        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs")
+        available = execution.split("async fn executor_capability_available", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertNotIn("tracing::warn", available)
+        # The strict gate stays for the moment an action actually needs it.
+        self.assertIn("ensure_executor_capability_strict", execution)
+
     def test_held_decisions_are_counted_apart_from_gated_and_throttled_ones(self) -> None:
         report = self.evaluate.split("pub struct AutopilotCycleReport {", 1)[1].split(
             "}", 1
