@@ -48,6 +48,10 @@ pub(in crate::autopilot) async fn execute_show_growth(
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
 
+    if lever == ShowGrowthLever::CanonicalLinkSetup {
+        return ensure_canonical_show_link(tx, workspace_id, event_id, &event).await;
+    }
+
     if lever.is_first_party_campaign() {
         return execute_first_party_growth_campaign(
             tx,
@@ -260,6 +264,73 @@ pub(in crate::autopilot) async fn execute_show_growth(
         }),
     )
     .await
+}
+
+/// Gives the show a tracked link, or reactivates the one it already had.
+///
+/// Every other lever hands somebody a URL, and a URL nobody tracks turns all of
+/// that work into an unmeasurable guess — the difference between "we shared it
+/// and followers went up" and "forty people clicked". This is the cheapest
+/// action in the whole system and the one the rest of the measurement rests on.
+///
+/// It writes only to the workspace's own link table, so it is safe to run
+/// unattended: worst case it recreates a link that already pointed where it
+/// should.
+async fn ensure_canonical_show_link(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+    event: &GrowthEventFacts,
+) -> Result<(), RepositoryError> {
+    // No destination, no link. Inventing one would produce a tracked route to
+    // nowhere, which is worse than an untracked route to the right place.
+    let Some(destination) = event.4.clone().filter(|url| url.starts_with("http")) else {
+        return Err(RepositoryError::Conflict);
+    };
+
+    // The slug has to satisfy the smart-link pattern, and the event slug
+    // already does; the prefix keeps agent-created links identifiable so an
+    // operator can tell at a glance which links they made and which it did.
+    let slug = format!("show-{}", event.0);
+    if slug.len() > 128 {
+        return Err(RepositoryError::Conflict);
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO smart_links (workspace_id, slug, destination_url, active)
+        VALUES ($1, $2, $3, true)
+        ON CONFLICT (workspace_id, slug) DO UPDATE SET
+            destination_url = EXCLUDED.destination_url,
+            active = true,
+            version = smart_links.version + 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(&destination)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // The event row is the one place a later lever looks for the canonical
+    // route, so record which link belongs to this show rather than leaving the
+    // association implied by a naming convention.
+    sqlx::query(
+        r#"
+        UPDATE viryaos_show_growth_surfaces
+        SET attribution_url = $3, last_checked_at = now()
+        WHERE workspace_id = $1 AND event_id = $2 AND attribution_url IS NULL
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(format!("/l/{slug}"))
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

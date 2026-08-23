@@ -213,5 +213,67 @@ class GrowthDebtContract(unittest.TestCase):
         self.assertLessEqual(len("growth.debt.raise"), 96)
 
 
+class ShowGrowthDoesTheWorkContract(unittest.TestCase):
+    """The agent completes free work rather than filing it as a suggestion."""
+
+    def setUp(self) -> None:
+        self.domain = read(ROOT / "crates/crowdrelay-domain/src/show_growth.rs")
+        self.execution = read(
+            ROOT / "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs"
+        )
+
+    def test_a_show_is_given_a_tracked_link_before_anything_is_shared(self) -> None:
+        # Every lever hands somebody a URL. A URL nobody tracks turns all of
+        # that work into an unmeasurable guess, and the honest-attribution
+        # promise elsewhere in the system depends on the link existing.
+        self.assertIn("CanonicalLinkSetup", self.domain)
+        rule = self.domain.split("pub fn evaluate_show_growth", 1)[1]
+        self.assertLess(
+            rule.index("ShowGrowthLever::CanonicalLinkSetup"),
+            rule.index("ShowGrowthLever::FreeListingSweep"),
+            "the link must be set up before the first lever that shares it",
+        )
+        self.assertIn("a_show_gets_a_tracked_link_before_anything_is_shared", self.domain)
+
+    def test_the_link_is_created_rather_than_described(self) -> None:
+        # An instruction to an executor is a suggestion. This writes the row.
+        self.assertIn("INSERT INTO smart_links", self.execution)
+        self.assertIn("ensure_canonical_show_link", self.execution)
+
+    def test_a_show_with_no_destination_gets_no_link(self) -> None:
+        # A tracked route to nowhere is worse than an untracked route to the
+        # right place.
+        body = self.execution.split("async fn ensure_canonical_show_link", 1)[1].split(
+            "\n#[allow", 1
+        )[0]
+        self.assertIn('filter(|url| url.starts_with("http"))', body)
+        self.assertIn("RepositoryError::Conflict", body)
+
+    def test_rerunning_the_setup_repairs_rather_than_duplicates(self) -> None:
+        body = self.execution.split("async fn ensure_canonical_show_link", 1)[1].split(
+            "\n#[allow", 1
+        )[0]
+        self.assertIn("ON CONFLICT (workspace_id, slug) DO UPDATE", body)
+        self.assertIn("active = true", body)
+
+    def test_the_room_is_asked_to_follow_after_the_show(self) -> None:
+        # Attendance is the strongest signal in the system and the ask is free.
+        self.assertIn("PostShowFollowAsk", self.domain)
+        self.assertIn("post_show_follow_ask_hours", self.domain)
+        self.assertIn(
+            "the_room_is_asked_to_follow_once_the_merch_window_closes", self.domain
+        )
+        # It must not collide with the merch message about the same night.
+        self.assertIn("the_merch_window_still_wins_while_it_is_open", self.domain)
+        self.assertIn("the_follow_window_may_not_close_before_the_merch_window", self.domain)
+
+    def test_the_follow_ask_carries_the_links_it_is_asking_about(self) -> None:
+        block = self.execution.split("ShowGrowthLever::PostShowFollowAsk => json!", 1)[1]
+        self.assertIn("bandsintown_follow_url", block)
+        self.assertIn("spotify_artist_url", block)
+        self.assertIn("must_read_as_a_thank_you_first_and_an_ask_second", block)
+        self.assertIn("do_not_ask_for_money_in_this_message", block)
+
+
 if __name__ == "__main__":
     unittest.main()
