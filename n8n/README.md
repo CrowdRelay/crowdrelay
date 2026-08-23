@@ -134,6 +134,15 @@ data persistence unless a carefully redacted audit trail is explicitly needed.
 
 ## ViryaOS executor runtime
 
+### Events added for the growth engine
+
+Two event types were added alongside the growth work, both routed at the edge like any other:
+
+- `viryaos.outreach.discovery_requested` — capability `outreach.discovery`. Emitted when the agent has fewer confirmed submission routes than its policy floor. The executor sweeps published sources and reports the batch to `POST /v1/internal/autopilot/outreach/candidates` with the commerce key. **Report the batch even when it is empty:** an empty batch says the source is dry, and silence is read as a request that was never answered, which keeps the agent asking for ever.
+- `viryaos.ops.operator_brief` — delivered on the `ops.alert` channel. A first-party notice to the band's own operator, not an audience message. Branch on the event type: the payload is `headline`, `summary`, `snapshot` and `observed_at`, with no `alert_key` or `state`, because a brief is not a condition that opens and recovers. Deliver it even while the agent is disabled — an operator whose agent is off with work waiting is exactly the reader it exists for.
+
+Anonymised importable workflows for both are in [`examples/`](./examples/).
+
 See [`viryaos-executor-contract.md`](./viryaos-executor-contract.md) and [`viryaos-executor-manifest.tsv`](./viryaos-executor-manifest.tsv) for heartbeat capabilities, pre-send claims, provider execution receipts, campaign delivery safety, blue/green safety and release-ledger behavior. The concrete release mapping is [`viryaos-production-workflow-manifest.tsv`](./viryaos-production-workflow-manifest.tsv); its checked SHA is the release-ledger/heartbeat parity key. The legacy `import-workflows.sh` is deliberately fail-closed and is not a production deployment path.
 
 ### `team.email` activation state

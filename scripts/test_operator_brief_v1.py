@@ -28,7 +28,7 @@ WORKER = ROOT / "crates/crowdrelay-worker/src/operator_brief.rs"
 MAIN = ROOT / "crates/crowdrelay-worker/src/main.rs"
 ROUTES = ROOT / "ops/edge/routes.json"
 BRIDGE = ROOT / "ops/edge/bridge.js"
-CONTRACT = ROOT / "n8n/viryaos-executor-contract.md"
+CONTRACT = ROOT / "n8n/README.md"
 
 EVENT_TYPE = "viryaos.ops.operator_brief"
 
@@ -151,8 +151,13 @@ class OperatorBriefContract(unittest.TestCase):
             "the bridge's asserted route count drifted from the route map",
         )
 
-    def test_the_executor_contract_documents_the_new_event(self) -> None:
-        self.assertIn(EVENT_TYPE, read(CONTRACT))
+    def test_the_public_readme_documents_the_new_event(self) -> None:
+        # Asserted against the tracked README rather than the private executor
+        # contract: that file is gitignored, so a test reading it passes on a
+        # workstation and can never pass in CI.
+        readme = read(CONTRACT)
+        self.assertIn(EVENT_TYPE, readme)
+        self.assertIn("ops.alert", readme)
 
     def test_the_example_workflow_branches_on_the_event_type(self) -> None:
         # It shares a destination with viryaos.ops.status_changed, not a shape:
