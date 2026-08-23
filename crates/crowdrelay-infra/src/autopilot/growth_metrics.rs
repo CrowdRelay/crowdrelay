@@ -623,7 +623,8 @@ impl PostgresAutopilotRepository {
                 SELECT $1, metric.platform, metric.metric_key, NULL, NULL,
                        metric.label, 'higher_is_better', 'downstream', $2, true
                 FROM (VALUES
-                    ('signal', 'active_fans', 'Active fans'),
+                    ('signal', 'active_fans', 'Fans with an open account'),
+                    ('signal', 'activated_fans_30d', 'Fans active in the last 30 days'),
                     ('merch', 'paid_orders', 'Paid merch orders')
                 ) AS metric(platform, metric_key, label)
                 ON CONFLICT (workspace_id, platform, metric_key, subject_kind, subject_id)
@@ -724,6 +725,31 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                     SELECT
                         (SELECT count(*)::bigint FROM fans
                           WHERE workspace_id = $1 AND status = 'active') AS active_fans,
+                        -- The definition lives in crowdrelay_domain::fan_activation
+                        -- and this is its set-oriented form: signed up, consented,
+                        -- and at least one meaningful action inside the window.
+                        -- An account whose status is 'active' is not a person who
+                        -- did anything, which is what the other series counts and
+                        -- why it is not the campaign KPI.
+                        (SELECT count(*)::bigint FROM fans AS fan
+                          WHERE fan.workspace_id = $1
+                            AND fan.status = 'active'
+                            AND EXISTS (
+                                SELECT 1 FROM fan_consents AS consent
+                                WHERE consent.workspace_id = fan.workspace_id
+                                  AND consent.fan_id = fan.id
+                                  AND consent.purpose = 'marketing'
+                                  AND consent.granted
+                                  AND consent.recorded_at = (
+                                      SELECT max(latest.recorded_at) FROM fan_consents AS latest
+                                      WHERE latest.workspace_id = fan.workspace_id
+                                        AND latest.fan_id = fan.id
+                                        AND latest.purpose = 'marketing'
+                                  )
+                            )
+                            AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
+                                BETWEEN $2 - INTERVAL '30 days' AND $2
+                        ) AS activated_fans_30d,
                         (SELECT count(*)::bigint FROM merch_order_facts
                           WHERE workspace_id = $1) AS paid_orders
                 ), recorded AS (
@@ -733,6 +759,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                     SELECT series.workspace_id, series.id, date_trunc('hour', $2::timestamptz),
                            CASE series.metric_key
                                WHEN 'active_fans' THEN totals.active_fans
+                               WHEN 'activated_fans_30d' THEN totals.activated_fans_30d
                                ELSE totals.paid_orders
                            END,
                            'crowdrelay'
@@ -743,6 +770,7 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                       AND series.active
                       AND (series.platform, series.metric_key) IN (
                           ('signal', 'active_fans'),
+                          ('signal', 'activated_fans_30d'),
                           ('merch', 'paid_orders')
                       )
                     ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
