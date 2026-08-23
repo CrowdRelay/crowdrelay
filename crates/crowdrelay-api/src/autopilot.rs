@@ -22,8 +22,8 @@ use crowdrelay_application::{
         ExperimentObservation, GrowthMetricSubject, GrowthMetricTrendView, ManagerConfigSource,
         RecordBeaconReply, RecordBookingReply, RecordGrowthMetricPoint, RecordOutreachReply,
         RecordTeamOpportunityProgress, SetAutopilotAuthority, SetManagerBookingPolicy,
-        TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget,
-        UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
+        SetTourEconomics, TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
         UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
         UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
         UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
@@ -42,6 +42,7 @@ use crowdrelay_domain::{
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    tour_economics::TourEconomicsPolicy,
 };
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};

@@ -267,3 +267,50 @@ pub async fn upsert_promotion_budget_guardrail(
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }
+
+/// Reads the band's vehicles and rates, with the version to edit against.
+pub async fn tour_economics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_tour_economics_config(state.ops.workspace_id())
+        .await
+    {
+        Ok(config) => private_json(StatusCode::OK, config),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Sets them. Every gig the agent costs uses these numbers, so a wrong one here
+/// is a wrong answer on every booking decision until it is fixed.
+pub async fn set_tour_economics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TourEconomicsRequest>,
+) -> Response {
+    if request.expected_version < 0 || !request.policy.is_valid() {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .set_tour_economics(
+            state.ops.workspace_id(),
+            SetTourEconomics {
+                policy: request.policy,
+                expected_version: request.expected_version,
+            },
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}

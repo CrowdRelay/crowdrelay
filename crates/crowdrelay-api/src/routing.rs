@@ -600,6 +600,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::next_best_actions),
         )
         .route(
+            "/v1/admin/autopilot/tour-economics",
+            get(autopilot::tour_economics).put(autopilot::set_tour_economics),
+        )
+        .route(
             "/v1/admin/autopilot/manager-config/booking-policy",
             get(autopilot::manager_booking_policy).post(autopilot::set_manager_booking_policy),
         )
