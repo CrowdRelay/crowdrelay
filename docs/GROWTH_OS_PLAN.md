@@ -1626,11 +1626,16 @@ than the envelope did.
 
 ### Still open after going live
 
-- **The kill switch has no interface.** `viryaos_growth_envelope` has no API, no
-  repository port and no mutation path anywhere in the code. It is set by
-  migration 0076 and changeable only by hand in psql. The control an operator
-  would most want to reach in a hurry is the one with no button, and that should
-  be fixed before the agent is doing much.
+- ~~**The kill switch has no interface.**~~ Fixed and deployed the same day.
+  `POST /v1/admin/autopilot/growth-envelope` sets the whole envelope, kill
+  switch included, under the same optimistic concurrency and operator-action
+  audit as every other authority change. Whole-envelope rather than a patch: a
+  partial update of a limit set is how one ceiling gets widened while another is
+  believed tightened. Nothing in the path belongs to the agent — no outbox row,
+  no queued action, no worker — because a kill switch that needs the thing it is
+  killing is not one. Verified against live production: a stale version is
+  refused 409, an out-of-bounds limit 400, and a correct write returns 200 with
+  the change recorded in `operator_actions`.
 - **Three capabilities gate everything with subjects waiting.**
   `content.artifact` (4 parked), `beacon.outreach` (1) and `outreach.discovery`
   (1). None needs Rust; all need a heartbeat that advertises them, and per this
