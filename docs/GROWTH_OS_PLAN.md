@@ -1310,6 +1310,8 @@ what depends on what. Phases 1 to 7 are code; 8 onward is plan.
 | 16 | Operator brief | plan |
 | 17 | Audit | plan |
 | 18 | Control plane: find, then "do it" | plan |
+| 19 | Hunt for more free autonomous work | plan |
+| 20 | Layering, hardening, performance, completeness | plan |
 
 Hard dependencies, the ones that make a phase pointless if taken out of order:
 
@@ -1330,15 +1332,89 @@ operator who cannot see what it did will switch it off.
 
 - **Tour config is seeded with declared figures** — 200 zł per 100 km round trip
   for two cars, 8 l/100 km at 8 zł as the fallback, six crew, 300 zł overhead,
-  500 zł minimum margin, 180 zł a room, 60 zł per diem. Backline volume, cargo
-  capacity and the 350 km overnight threshold are still guesses and should be
-  confirmed. There is **no admin endpoint for this yet** — Phase 8 should add
-  `PUT /v1/admin/autopilot/tour-economics` rather than expecting SQL.
+  500 zł minimum margin, 180 zł a room, 60 zł per diem. Editable through
+  `GET`/`PUT /v1/admin/autopilot/tour-economics`. **Three values are still
+  guesses and change the answer**: backline volume (1 200 l) and vehicle cargo
+  capacity (900 l) together decide whether a trip needs one car or two, which
+  moves every downstream number; the 350 km overnight threshold decides whether
+  a trip books beds. Confirm all three before trusting a verdict.
 - **`StaleContactData` growth-debt kind stays blocked** — the schema has no
   verification timestamp, and `updated_at` is not one. Phase 3's open question.
 - **Nothing has run against a real Postgres.** Migrations 0074 to 0077 exist
   only on this branch, and no Docker daemon was available. Run them before
   trusting a single number the agent reports.
+
+---
+
+## Phase 19 — hunt for more free autonomous work
+
+The point of the whole system is a brain that does useful things and gives the
+band its time back. Everything above was specified from what the operator asked
+for; this phase asks the opposite question — what else is the agent already able
+to do for free that nobody has thought to ask for?
+
+Run as a survey, not a build: enumerate, score, then implement only what earns
+it. For every candidate, three questions decide it.
+
+1. **Does it save real time, or does it just look busy?** An action that
+   produces a list somebody still has to read has saved nothing.
+2. **Is it free and reversible enough to run unattended**, under the Phase 5
+   class ceiling as it stands?
+3. **Is there a first-party signal that it worked?** If not, it cannot be
+   measured, cannot be learned from, and will quietly rot.
+
+Candidate ground already visible in the repository, to be assessed rather than
+assumed:
+
+- **Post-show follow-through.** Attendance, merch and beacon data all exist the
+  morning after; the thank-you, the setlist post, the next-city ask and the
+  merch window are all owned-audience and all currently manual.
+- **Calendar and routing hygiene.** Two confirmed shows 600 km apart on
+  consecutive days is a fact the system can see and nobody enjoys discovering
+  late. Phase 7's cost model already knows what the drive costs.
+- **Release-asset completeness.** A release with no smart link, no pre-save
+  surface or an incomplete listing is first-party debt the agent can simply fix.
+- **Contact hygiene at the source.** Bounces, dead links and stale routes
+  discovered during a wave, repaired rather than reported.
+- **Ticket-sale watch.** A show selling far below its own history at T-14 is
+  visible now; the response is owned-audience and free.
+- **Fan-milestone moments.** First ticket, tenth show, referral that converted —
+  real reasons to say something true, and the strongest owned-audience material
+  there is.
+- **Reply triage.** Inbound replies classified and routed, so a human reads the
+  three that need a human rather than forty that do not.
+
+Output is a written scoring of every candidate in this file, with the rejected
+ones and why — a rejected idea with a reason is worth as much next time as an
+accepted one.
+
+---
+
+## Phase 20 — final pass: layering, hardening, performance, completeness
+
+Last, deliberately, because doing it earlier means doing it twice.
+
+- **Domain-driven layering.** Ubiquitous language consistent across domain,
+  application and API; no anaemic types carrying logic that belongs in the
+  domain; aggregate boundaries honest about what a single transaction may
+  change. `crowdrelay-application` still holding zero sqlx call sites, and no
+  writes in `crowdrelay-api`.
+- **Hardening.** Every new endpoint replay-safe and bounded; every new snapshot
+  loader workspace-scoped with no cross-tenant path; clock skew, backfills and
+  out-of-order delivery covered on every rule added since Phase 1; the autonomy
+  ceiling and envelope re-verified end to end against a live database rather
+  than against a contract test reading source.
+- **Performance.** Every query added since Phase 1 measured under realistic row
+  counts, index coverage confirmed, no per-subject N+1, response sizes bounded,
+  and the Autopilot cycle measured as a whole — the agent runs on a 12 GB box
+  that also serves production.
+- **Completeness.** Every requirement in this file accounted for, each either
+  built, explicitly deferred with a reason, or explicitly refused with a reason.
+  A requirement that quietly vanished is the failure mode this pass exists to
+  catch.
+- **Sanity.** Read the whole thing as an operator would: switch the agent on in
+  dry run against real VIRYA data and read every action it proposes for a week.
+  Anything that would have embarrassed the band is a bug, whatever the tests say.
 
 ---
 
