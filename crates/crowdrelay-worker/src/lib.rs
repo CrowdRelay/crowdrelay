@@ -24,6 +24,7 @@ pub mod autopilot;
 pub mod bootstrap;
 pub mod draws;
 pub mod event_sync;
+pub mod operator_brief;
 pub mod ops_watchdog;
 pub mod outbox;
 pub mod push_delivery;

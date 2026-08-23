@@ -28,6 +28,7 @@ use crowdrelay_worker::{
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
+    operator_brief::OperatorBriefWorker,
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     push_delivery::PushDeliveryWorker,
@@ -45,6 +46,10 @@ use uuid::Uuid;
 
 const DATABASE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OPS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// The brief itself is once a day; this is only how often the rule is asked
+/// whether a day has passed. Cheap, and it means a restart cannot push the
+/// brief a whole cycle late.
+const OPERATOR_BRIEF_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const WEBHOOK_SECRETS_FILE_KEY: &str = "CROWDRELAY_WEBHOOK_SECRETS_FILE";
 const BOOTSTRAP_JSON_KEY: &str = "CROWDRELAY_BOOTSTRAP_JSON";
 const BOOTSTRAP_FILE_KEY: &str = "CROWDRELAY_BOOTSTRAP_FILE";
@@ -257,6 +262,14 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         OPS_WATCHDOG_INTERVAL,
         config.database.operation_timeout,
     );
+    // Deliberately not gated on `autopilot_enabled`: an operator whose agent is
+    // switched off is exactly the one who most needs to be told so.
+    let operator_brief = OperatorBriefWorker::new(
+        database.clone(),
+        workspace_id,
+        OPERATOR_BRIEF_INTERVAL,
+        config.database.operation_timeout,
+    );
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
@@ -266,6 +279,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let team_email_shutdown = shutdown_receiver.clone();
     let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
+    let operator_brief_shutdown = shutdown_receiver.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -311,6 +325,10 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     runtime_tasks.spawn(async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
         "CrowdRelay ops watchdog"
+    });
+    runtime_tasks.spawn(async move {
+        operator_brief.run(operator_brief_shutdown).await;
+        "CrowdRelay operator brief"
     });
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
