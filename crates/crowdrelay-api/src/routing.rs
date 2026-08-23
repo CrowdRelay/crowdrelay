@@ -587,6 +587,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::release_component),
         )
         .route(
+            "/v1/internal/autopilot/outreach/candidates",
+            post(autopilot::ingest_outreach_candidates_internal),
+        )
+        .route(
             "/v1/admin/autopilot/release-ledger",
             get(autopilot::release_ledger),
         )

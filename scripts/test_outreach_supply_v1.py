@@ -165,6 +165,37 @@ class OutreachSupplyContract(unittest.TestCase):
         self.assertIn("never_submit_through_a_channel_that_sells_placement", emission)
         self.assertIn("/v1/admin/autopilot/outreach/candidates", emission)
 
+    def test_executors_report_on_the_internal_surface(self) -> None:
+        # Handing an adapter the admin key so it can post playlist contacts
+        # blurs the two authority surfaces the route map keeps apart.
+        routing = read(ROOT / "crates/crowdrelay-api/src/routing.rs")
+        self.assertIn("/v1/internal/autopilot/outreach/candidates", routing)
+        api = read(ROOT / "crates/crowdrelay-api/src/autopilot/target_discovery.rs")
+        internal = api.split("pub async fn ingest_outreach_candidates_internal", 1)[1]
+        self.assertIn("commerce_authorized", internal.split("\n}", 1)[0])
+
+    def test_an_empty_batch_is_reportable_on_the_internal_route(self) -> None:
+        # A sweep that found nothing admissible must be able to say so, or the
+        # barren back-off can never fire and the agent asks a dead source for
+        # ever. The admin route keeps refusing empty batches: an operator who
+        # imports nothing has made a mistake.
+        api = read(ROOT / "crates/crowdrelay-api/src/autopilot/target_discovery.rs")
+        internal = api.split("pub async fn ingest_outreach_candidates_internal", 1)[1].split(
+            "\npub async fn ingest_outreach_candidates(", 1
+        )[0]
+        self.assertNotIn("candidates.is_empty()", internal)
+        admin = api.split("\npub async fn ingest_outreach_candidates(", 1)[1]
+        self.assertIn("request.candidates.is_empty()", admin.split("\n}", 1)[0])
+
+    def test_an_unanswered_sweep_is_read_from_the_ingestion_not_the_candidates(
+        self,
+    ) -> None:
+        # Zero candidate rows means both "found nothing" and "never reported".
+        # Only the operator-action ledger separates them.
+        loader = read(LOADER).split("load_outreach_supply_snapshot", 1)[1][:4000]
+        self.assertIn("ingest_autopilot_outreach_candidates", loader)
+        self.assertIn("operator_actions", loader)
+
     def test_a_full_human_queue_is_not_answered_with_more_candidates(self) -> None:
         rule = self.domain.split("pub fn evaluate_outreach_supply", 1)[1]
         self.assertIn("AwaitingRouteConfirmation", rule)
@@ -211,10 +242,11 @@ class OutreachSupplyContract(unittest.TestCase):
         self.assertIn("viryaos.outreach.discovery_requested", sweep)
         self.assertIn("route_is_published", sweep)
         self.assertIn("evidence", sweep)
-        self.assertIn("/v1/admin/autopilot/outreach/candidates", sweep)
+        self.assertIn("/v1/internal/autopilot/outreach/candidates", sweep)
         # An empty sweep must still be reported: silence is read as an
-        # unanswered request and keeps the agent asking for ever.
-        self.assertIn("empty sweep", sweep)
+        # unanswered request and keeps the agent asking for ever, so the
+        # extractor must always emit exactly one batch item.
+        self.assertIn("Always one item, even with nothing found", sweep)
         for secret in ("Bearer sk-", "xoxb-", "hooks.slack.com/services/T"):
             self.assertNotIn(secret, sweep, "a literal secret leaked into the example")
 

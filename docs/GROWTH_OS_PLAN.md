@@ -1418,17 +1418,15 @@ autopilot cycles (poll interval 300 s) and one event sync:
 - **`awaiting_executor` = 0**, and parked capabilities warn once per capability
   per cycle rather than once per action — two "autopilot actions are parked"
   lines over three cycles, four team-handoff lines over sixteen.
-- **Content-source versions converged, which is not quite the same as "stopped
-  moving".** They bumped once more after the deploy, at 13:48:55, on the first
-  event sync that followed the migration — the old creeping `expires_at` being
-  lifted to its new pinned value. Since then all five sources sit at a fixed
-  point: stored metadata, title and `expires_at` all equal what a fresh
-  projection would produce, so the next firing provably changes nothing. The
-  decisive evidence that the guard works is `ef8b0ff0`: its event row *was*
-  updated in that same 13:48:55 sync and its content source did not move,
-  while three others did. The runaway that took one source from version 1 to
-  283 in thirteen days is gone; the claim to keep watching is that a sync
-  which changes nothing produces no bump at all.
+- **Content-source versions converged, then stopped — confirmed by observation.**
+  They bumped once more after the deploy, at 13:48:55, on the first event sync
+  that followed the migration, lifting the old creeping `expires_at` to its
+  pinned value. **Since then four event rows have been updated and not one
+  content source has moved.** The guard was already visible in that same sync —
+  `ef8b0ff0`'s event row was updated and its content source stayed put while
+  three others moved — and the later window is the clean proof: a sync that
+  changes nothing now produces no bump at all. The runaway that took one source
+  from version 1 to 283 in thirteen days is gone.
 - **No new `state_changed`.** The last one is timestamped before the deploy.
   The twenty-four failed `content.artifact.request` actions all predate it.
 
@@ -1545,6 +1543,58 @@ event is routed at the edge to the workflow that already carries
 `viryaos.ops.status_changed`; its payload is `headline`, `summary`, `snapshot`
 and `observed_at`, with no `alert_key` or `state`, because a brief is not a
 condition that opens and recovers.
+
+### Three defects the first deploy did not surface — found and fixed 2026-08-23
+
+All three came from watching an operator use the queue rather than from reading
+the code, and each one made the loop look healthier than it was.
+
+1. **Approving a parked action was a lie.** An operator approved a
+   `beacon.outreach.request`; it moved to `queued` and the worker immediately
+   parked it, because nothing advertises `beacon.outreach`. The button said
+   "pass it on", the row vanished, and nothing was passed on. `needs_you` now
+   carries `required_capability` and `executor_ready`, computed from the same
+   payload-to-capability mapping the claim path uses so the queue and the worker
+   cannot disagree.
+2. **Every failed transition was a 409.** A wrong action id, an already-approved
+   action and an expired approval read identically, which is why a stale list
+   looked like a broken button. A missing action is now 404.
+3. **Discovery ingestion was on the admin surface**, so an executor could only
+   report a sweep by holding the admin key — authority over ninety-seven admin
+   routes in order to post a list of playlist contacts. There is now
+   `POST /v1/internal/autopilot/outreach/candidates` on the commerce key.
+
+The third fix uncovered a fourth, which mattered more than any of them: **an
+empty sweep was unreportable**, because both the route and the repository
+refused an empty batch. The barren-sweep back-off was therefore unreachable —
+an adapter that found nothing could only stay silent, and silence is what the
+rule reads as "never answered". Worse, the original SQL inferred "the adapter
+answered" from candidate rows, and a sweep that reports nothing leaves none of
+those either. The internal route now accepts an empty batch, and the supply
+query reads the answer from the ingestion in the operator-action ledger rather
+than from candidates. Proven against Postgres 18: an empty batch extends the
+barren run, a sweep with no ingestion at all breaks it.
+
+**Still open:** `operator_actions.actor_type` is constrained to
+`'admin_api_key'`, so an executor's ingestion is recorded under the wrong actor.
+The action name identifies it unambiguously today, but the ledger cannot express
+who did it. Threading a real actor through all thirty-one call sites is its own
+change, deliberately not bundled here.
+
+### The two workflows, written but not published
+
+`n8n/examples/autopilot-outreach-discovery.example.json` and
+`autopilot-operator-brief.example.json`, with deployable copies carrying the
+production credential ids under the gitignored
+`n8n/private-production-exports/`. Both are inactive by construction and neither
+has been run: **written against the contract, not smoke-tested.**
+
+The brief needs no new secret — it uses the `Discord Bot HTTP` credential and
+the ops channel the watchdog already posts to, and dedupes on a zero-width event
+marker in the last 25 messages because the outbox is at-least-once. The sweep
+needs two the workspace does not have: `SPOTIFY_CLIENT_ID` and
+`SPOTIFY_CLIENT_SECRET`. Its extraction regex in particular wants a dry run
+against real descriptions before the mapping is enabled.
 
 ### What is still missing, in the order that unblocks the most
 

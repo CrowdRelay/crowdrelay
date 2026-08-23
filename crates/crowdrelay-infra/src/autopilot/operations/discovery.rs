@@ -55,23 +55,40 @@ pub(in crate::autopilot) async fn load_outreach_supply_snapshot(
               AND action.action_kind='outreach.discovery.request'
               AND action.status IN ('queued','processing','succeeded')
         ),
-        -- A sweep is barren when candidates arrived and none survived
-        -- screening. A sweep that produced no candidates at all is an adapter
-        -- that never reported: an operator problem, not a dry source, and it
-        -- must not make the agent stop asking.
-        judged AS (
+        -- Whether the adapter answered at all is evidence in its own right, and
+        -- it cannot be read from candidate rows: a sweep that reported "I found
+        -- nothing" and a sweep that crashed both leave zero of them. The
+        -- ingestion is the answer, so the operator-action ledger is what says
+        -- one happened.
+        answers AS (
             SELECT sweep.recency,
-                   count(candidate.id) AS arrived,
+                   count(ingestion.id) AS ingestions,
                    count(candidate.id) FILTER (
                        WHERE candidate.status IN ('admitted','promoted')
                    ) AS survived
             FROM sweeps sweep
+            LEFT JOIN operator_actions ingestion
+              ON ingestion.workspace_id=$1
+             AND ingestion.action='ingest_autopilot_outreach_candidates'
+             AND ingestion.created_at >= sweep.created_at
+             AND (sweep.window_ends_at IS NULL
+                  OR ingestion.created_at < sweep.window_ends_at)
             LEFT JOIN viryaos_outreach_candidates candidate
               ON candidate.workspace_id=$1
              AND candidate.created_at >= sweep.created_at
              AND (sweep.window_ends_at IS NULL
                   OR candidate.created_at < sweep.window_ends_at)
             GROUP BY sweep.recency
+        ),
+        -- A sweep is barren when the adapter answered and nothing survived
+        -- screening. A sweep nobody answered is an integration failure: an
+        -- operator problem, not a dry source, and it must not make the agent
+        -- stop asking.
+        judged AS (
+            SELECT recency,
+                   ingestions AS arrived,
+                   survived
+            FROM answers
         )
         SELECT
             (SELECT count(*) FROM viryaos_outreach_targets target
@@ -134,7 +151,11 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
         request_id: Option<&RequestId>,
     ) -> Result<OutreachCandidateIngestion, RepositoryError> {
         self.bounded(async {
-            if candidates.is_empty() || candidates.len() > MAX_CANDIDATES_PER_BATCH {
+            // An empty batch is a legitimate report: the adapter swept and found
+            // nothing admissible. Recording it is what lets the supply rule tell
+            // a dry source from an adapter that never came back, so refusing it
+            // would leave the agent asking a dead source for ever.
+            if candidates.len() > MAX_CANDIDATES_PER_BATCH {
                 return Err(RepositoryError::Unexpected);
             }
             let received =
