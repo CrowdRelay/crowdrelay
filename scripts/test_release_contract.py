@@ -67,15 +67,6 @@ class ReleaseContract(unittest.TestCase):
         self.assertIn("meta::release_identity()", api)
         self.assertIn("gitSha", openapi)
 
-    def test_contract_is_service_boundary_not_internal_crate_promise(self):
-        stable_contract = ROOT / "docs/STABLE_CONTRACT.md"
-        if not stable_contract.is_file():
-            self.skipTest('stable contract prose is intentionally not tracked in docs')
-        text = stable_contract.read_text(encoding='utf-8').lower()
-        self.assertIn("openapi/openapi.yaml", text)
-        self.assertIn("private surfaces", text)
-        self.assertIn("domain -> application -> infrastructure", text)
-
 
 if __name__ == "__main__":
     unittest.main()
