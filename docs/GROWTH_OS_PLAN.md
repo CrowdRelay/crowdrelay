@@ -1340,9 +1340,12 @@ operator who cannot see what it did will switch it off.
   a trip books beds. Confirm all three before trusting a verdict.
 - **`StaleContactData` growth-debt kind stays blocked** — the schema has no
   verification timestamp, and `updated_at` is not one. Phase 3's open question.
-- **Nothing has run against a real Postgres.** Migrations 0074 to 0077 exist
-  only on this branch, and no Docker daemon was available. Run them before
-  trusting a single number the agent reports.
+- **The schema now runs against a real Postgres 18** — 2026-08-23, every
+  migration through 0081 applied by the runner against a local disposable
+  database, and the gated-claim behaviour is covered by
+  `crates/crowdrelay-infra/tests/autopilot_gated_claim_postgres.rs`, which is
+  run with `CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL`. The numbers the agent
+  reports are still unverified against production volumes.
 
 ---
 
