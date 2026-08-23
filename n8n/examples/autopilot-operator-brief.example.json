@@ -52,7 +52,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// The outbox is at-least-once, so the same brief can arrive twice. CrowdRelay\n// already guarantees one a day; this only stops a redelivery becoming a second\n// message. The marker is the event id, invisible in the rendered text.\nconst brief = $('Validate and build the brief').first().json;\nconst marker = `\\u200b[brief:${brief.event_id}]`;\nconst recent = Array.isArray($json) ? $json : ($json.body ?? []);\nconst already = recent.some(m => String(m?.content || '').includes(marker));\nreturn [{ json: { ...brief, marker, already } }];"
+        "jsCode": "// The outbox is at-least-once, so the same brief can arrive twice. CrowdRelay\n// already guarantees one a day; this only stops a redelivery becoming a second\n// message. The marker is the event id, invisible in the rendered text.\nconst brief = $('Validate and build the brief').first().json;\nconst marker = `\\u200b[brief:${brief.event_id}]`;\nconst recent = Array.isArray($json) ? $json : ($json.body ?? []);\nconst already = recent.some(m => String(m?.content || '').includes(marker));\n// Pre-serialised: an n8n expression cannot carry a nested object\n// literal, because its parser stops at the first `}}`.\nconst discordBody = JSON.stringify({\n  content: brief.content + '\\n' + marker,\n  allowed_mentions: { parse: [] }\n});\nreturn [{ json: { ...brief, marker, already, discordBody } }];"
       },
       "id": "dedupe",
       "name": "Check brief idempotency",
@@ -110,7 +110,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({content: $json.content + '\\n' + $json.marker, allowed_mentions: {parse: []}}) }}",
+        "body": "={{ $json.discordBody }}",
         "options": {
           "timeout": 10000
         }
