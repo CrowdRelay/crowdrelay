@@ -1360,7 +1360,7 @@ what depends on what. Phases 1 to 7 are code; 8 onward is plan.
 | 13 | Plays | plan |
 | 14 | Measurement and honest attribution | plan |
 | 15 | Learning | plan |
-| 16 | Operator brief | plan |
+| 16 | Operator brief | DONE (rule, ledger, daily delivery on `ops.alert`) |
 | 17 | Audit | plan |
 | 18 | Control plane: find, then "do it" | plan |
 | 19 | Hunt for more free autonomous work | plan |
@@ -1448,7 +1448,7 @@ All three pass on the deployed build, over roughly three autopilot cycles
 | Experiments | REAL code, EMPTY | 0 experiments |
 | Measurement and attribution | PLAN ONLY | — |
 | Learning | PLAN ONLY | — |
-| Operator brief | **PARTIAL** | `chief-of-staff` is a read endpoint; nothing is ever sent |
+| Operator brief | REAL as of this commit | rule, ledger and daily delivery; the n8n branch is pending |
 
 ### The biggest blocker, stated precisely
 
@@ -1494,6 +1494,50 @@ Proven against Postgres 18 in
 per-sweep window, the barren run, the unanswered sweep, and the fact that
 do-not-contact and inactive targets are not supply.
 
+### Phase 16 as built — 2026-08-23
+
+Migration `0084`, `crowdrelay_domain::operator_brief`, and
+`crowdrelay-worker/src/operator_brief.rs`. One brief a day, and deliberately
+not more.
+
+**It is a worker, not an autopilot context, and that is the whole design.**
+Routing the brief through the growth envelope would mean a disabled envelope
+silences the message whose only job is to say the envelope is disabled — which
+is exactly the production state that made this worth building. For the same
+reason it is not gated on `autopilot_enabled`: an operator whose agent is
+switched off is the reader the brief exists for. It reaches the band's own
+operator rather than an audience, so it is first-party and spends no budget,
+and it rides `ops.alert`, a capability the executor already advertises.
+
+The rule is not "summarise the day":
+
+- **Silence is the default.** A daily "nothing to report" is the fastest way to
+  train an operator to filter the brief into a folder they never open.
+- **Except the silences that lie.** An agent switched off with work waiting, or
+  a human sitting on a decision past the horizon, both look calm from outside.
+  Those break the silence rule; a disabled agent with an empty queue does not,
+  because that is a decision rather than a problem.
+- **One headline, ordered by what leaving it unread costs.** Parked work
+  outranks the approval queue, because approving a parked action changes
+  nothing — no executor advertises the capability it needs.
+- **Facts, never instructions.** The summary states what is true; the read
+  models and the operator decide what to do.
+
+The record and the delivery are written in one transaction, so a brief cannot
+be marked sent without an event or delivered twice, and `last_brief_at` comes
+from `viryaos_operator_briefs` rather than the outbox — an idempotency
+guarantee that expires with a retention window is not one.
+
+Verified against Postgres 18: the snapshot query, the headline check
+constraint, and the fact that a workspace with no envelope row reads as *not
+running* rather than as running.
+
+**Still needed from n8n:** one branch on `viryaos.ops.operator_brief`. The
+event is routed at the edge to the workflow that already carries
+`viryaos.ops.status_changed`; its payload is `headline`, `summary`, `snapshot`
+and `observed_at`, with no `alert_key` or `state`, because a brief is not a
+condition that opens and recovers.
+
 ### What is still missing, in the order that unblocks the most
 
 1. **The executor must advertise `outreach.discovery`** and run a sweep. Until
@@ -1509,8 +1553,8 @@ do-not-contact and inactive targets are not supply.
    every path is empty proves nothing and teaches the operator to distrust it.
 5. **Phase 14 (verification) then 15 (learning).** Both are still plan, and
    ranking without verified outcomes trains on somebody else's marketing.
-6. **Phase 16 (operator brief).** `chief-of-staff` already computes it; nothing
-   delivers it. Worth pulling forward the moment step 4 happens.
+6. ~~**Phase 16 (operator brief).**~~ Built the same day — see below. The
+   remaining piece is one n8n branch on `viryaos.ops.operator_brief`.
 
 ### Next measurable growth loop
 
