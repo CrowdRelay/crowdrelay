@@ -172,6 +172,21 @@ class GrowthDebtContract(unittest.TestCase):
         for forbidden in ("basis_points", "priority", "confidence"):
             self.assertNotIn(forbidden, loader.split('r#"', 1)[1])
 
+    def test_the_idle_clock_falls_back_rather_than_capping(self) -> None:
+        # `created_at` inside the GREATEST makes it a ceiling on idleness, not a
+        # floor: a row created today carrying an outreach timestamp from last
+        # year reads as touched today, and no relationship is ever quiet. Found
+        # against a real database — a target 200 days idle reported 0 hours.
+        loader = read(LOADER)
+        quiet = loader.split("WITH quiet_relationships AS", 1)[1].split(
+            "skipped_levers AS", 1
+        )[0]
+        for branch in quiet.split("UNION ALL"):
+            self.assertIn("COALESCE(", branch)
+            greatest = branch.split("COALESCE(", 1)[1].split("target.created_at", 1)[0]
+            self.assertIn("GREATEST(", greatest)
+            self.assertNotIn("created_at", greatest)
+
     def test_the_loader_only_reads(self) -> None:
         loader = read(LOADER)
         for forbidden in ("INSERT ", "UPDATE ", "DELETE "):

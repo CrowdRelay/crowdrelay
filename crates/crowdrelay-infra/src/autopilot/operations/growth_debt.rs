@@ -77,17 +77,18 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 'relationship_quiet' AS debt_kind,
                 'booking_target' AS subject_kind,
                 target.id AS subject_id,
-                -- GREATEST ignores NULLs in Postgres, and `created_at` is NOT
-                -- NULL, so this is the newest evidence that exists and never
-                -- collapses to NULL. Reading only the interaction log would
-                -- date a target that has an outreach timestamp but no logged
-                -- interaction from its creation, which overstates the neglect.
+                -- GREATEST over the contact timestamps only, then COALESCE to
+                -- `created_at`. Putting `created_at` inside the GREATEST makes
+                -- it a ceiling on idleness rather than a floor: a row created
+                -- today with an outreach timestamp from last year reads as
+                -- touched today, and no relationship is ever quiet. GREATEST
+                -- ignores NULLs and returns NULL only when all of them are,
+                -- which is exactly when the fallback should apply.
                 GREATEST(
                     0,
                     FLOOR(EXTRACT(EPOCH FROM (
-                        $2 - GREATEST(
-                            touch.last_interaction_at,
-                            target.last_outreach_at,
+                        $2 - COALESCE(
+                            GREATEST(touch.last_interaction_at, target.last_outreach_at),
                             target.created_at
                         )
                     )) / 3600)
@@ -116,10 +117,12 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 GREATEST(
                     0,
                     FLOOR(EXTRACT(EPOCH FROM (
-                        $2 - GREATEST(
-                            touch.last_interaction_at,
-                            target.last_outreach_at,
-                            target.last_reply_at,
+                        $2 - COALESCE(
+                            GREATEST(
+                                touch.last_interaction_at,
+                                target.last_outreach_at,
+                                target.last_reply_at
+                            ),
                             target.created_at
                         )
                     )) / 3600)
