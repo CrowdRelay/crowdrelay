@@ -175,6 +175,26 @@ impl ActionSubject {
         }
     }
 
+    /// True when the subject *is* the person being contacted.
+    ///
+    /// The envelope's cooldown exists so no one hears from the agent twice in a
+    /// week. That only means anything when the subject is a contact. An event
+    /// or a release is a *topic*: a show legitimately needs a listing sweep, an
+    /// ambassador push and a last-mile nudge over the weeks before it, each
+    /// reaching different people, and a cooldown keyed on the event would allow
+    /// exactly one of them per week and silently starve the rest.
+    ///
+    /// Per-recipient frequency for those campaigns is the audience filter's job,
+    /// not this one — the agent cannot enforce at the action level something it
+    /// only resolves at delivery.
+    #[must_use]
+    pub const fn is_contactable_person(self) -> bool {
+        matches!(
+            self,
+            Self::Fan(_) | Self::BookingTarget(_) | Self::OutreachTarget(_) | Self::Beacon(_)
+        )
+    }
+
     #[must_use]
     pub fn uuid(self) -> uuid::Uuid {
         match self {
@@ -428,7 +448,8 @@ impl AutopilotActionPayload {
                 | ShowGrowthLever::FreeFanChannelPush
                 | ShowGrowthLever::MerchBuyerOffer
                 | ShowGrowthLever::HighIntentLastMile
-                | ShowGrowthLever::PostShowMerchFollowUp => ActionClass::OwnedAudience,
+                | ShowGrowthLever::PostShowMerchFollowUp
+                | ShowGrowthLever::PostShowFollowAsk => ActionClass::OwnedAudience,
                 ShowGrowthLever::FreeListingSweep | ShowGrowthLever::AudienceCaptureSetup => {
                     ActionClass::FirstPartyReversible
                 }

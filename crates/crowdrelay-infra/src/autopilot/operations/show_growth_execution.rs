@@ -328,6 +328,11 @@ async fn execute_first_party_growth_campaign(
             "attended_event_slugs": [event.0.clone()],
             "marketing_consent": true
         }),
+        ShowGrowthLever::PostShowFollowAsk => json!({
+            "statuses": ["active"],
+            "attended_event_slugs": [event.0.clone()],
+            "marketing_consent": true
+        }),
         _ => return Err(RepositoryError::Conflict),
     };
 
@@ -386,6 +391,38 @@ async fn execute_first_party_growth_campaign(
                     "use_existing_marketing_consent_only",
                     "one_email_per_fan_per_show_growth_wave",
                     "do_not_claim_exclusive_access_unless_true",
+                    "include_unsubscribe_via_existing_mailer_contract",
+                    "prefer_one_primary_cta_and_one_secondary_cta",
+                    "never fabricate follower_or_stream_numbers"
+                ]
+            }
+        }),
+        ShowGrowthLever::PostShowFollowAsk => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "ticket_url": event.4,
+            "venue": event.3,
+            "managed_by": "viryaos_show_growth",
+            // Same canonical links as the pre-show push. The difference is who
+            // receives it: people who were in the room, which is the warmest
+            // list the band will ever have and the only one where "come with us
+            // to the next one" is a statement of fact rather than a pitch.
+            "growth_ctas": {
+                "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
+                "spotify_artist_url": event
+                    .5
+                    .clone()
+                    .unwrap_or_else(|| "env:VIRYA_SPOTIFY_ARTIST_URL".to_owned()),
+                "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
+            },
+            "email_contract": {
+                "goal": "thank the people who were actually there and convert that night into a Spotify follow and a Bandsintown track, so the next show in their city finds them without paid reach",
+                "rules": [
+                    "use_existing_marketing_consent_only",
+                    "one_email_per_fan_per_show",
+                    "must_read_as_a_thank_you_first_and_an_ask_second",
+                    "do_not_ask_for_money_in_this_message",
+                    "do_not_claim_attendance_the_records_do_not_support",
                     "include_unsubscribe_via_existing_mailer_contract",
                     "prefer_one_primary_cta_and_one_secondary_cta",
                     "never fabricate follower_or_stream_numbers"
