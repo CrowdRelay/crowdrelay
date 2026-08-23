@@ -336,6 +336,41 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn('"content.live_listing.v1"', domain)
         self.assertIn('"live_listing"', infra)
 
+    def test_event_content_projection_only_moves_when_the_event_moves(self):
+        # Event sync rewrites every event row on every cycle, so a projection
+        # that bumps `version` on every trigger firing invalidates the source
+        # version every queued content action was decided against, and the
+        # action can only fail as `state_changed`.
+        projection = (
+            ROOT / "migrations/0081_content_source_projection_is_idempotent.sql"
+        ).read_text()
+        self.assertIn("CREATE OR REPLACE FUNCTION viryaos_project_event_content_sources", projection)
+        self.assertIn(
+            "WHERE viryaos_content_sources.title IS DISTINCT FROM EXCLUDED.title",
+            projection,
+        )
+        self.assertIn(
+            "viryaos_content_sources.metadata IS DISTINCT FROM EXCLUDED.metadata",
+            projection,
+        )
+        # The refreshed window is derived from the show's own schedule; a clock
+        # reading in the update would move `expires_at`, and therefore the
+        # version, on every sync all over again.
+        event_branch = projection.split("IF NEW.status = 'completed'")[0]
+        self.assertNotIn("now() + INTERVAL '7 days'", event_branch.split("ON CONFLICT")[1])
+        self.assertIn(
+            "expires_at=GREATEST(viryaos_content_sources.expires_at, NEW.starts_at + INTERVAL '14 days')",
+            projection,
+        )
+
+    def test_content_execution_still_pins_the_decided_source_version(self):
+        # The projection is what was too eager, not the pin. Execution must keep
+        # refusing to act on evidence that has since changed underneath it.
+        self.assertIn(
+            "FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND version=$3",
+            INFRA_TEXT,
+        )
+
     def test_autopilot_does_not_expand_the_rust_compile_graph(self):
         domain_manifest = (ROOT / "crates/crowdrelay-domain/Cargo.toml").read_text()
         application_manifest = (ROOT / "crates/crowdrelay-application/Cargo.toml").read_text()
