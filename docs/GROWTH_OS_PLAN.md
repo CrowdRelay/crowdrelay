@@ -11,8 +11,9 @@ touches and the gate that proves it.
 
 **Phases 1–4 are done and are the sensing layer.** The direction changed on
 2026-08-23: the target is an autonomous growth agent, not a recommender. Read
-"Direction change" before Phase 5 — it sets the autonomy posture and the
-objective, and it renumbers the audit and control-plane phases to 13 and 14.
+"Direction change" before Phase 5 for the autonomy posture, then "Scope
+addition" for the commercial half — gig economics, negotiation, target
+discovery and the free-reach pitcher. Audit is Phase 17, control plane 18.
 
 ## Invariants for every phase
 
@@ -733,194 +734,306 @@ green, contract suite green apart from the two known PyYAML import errors.
 
 ---
 
+## Scope addition — 2026-08-23 (second pass)
+
+The operator added the commercial half. The agent is not only to grow numbers;
+it is to find and win **free reach** and **gigs on terms that actually pay**.
+
+What survives from the existing build, unchanged and reused rather than rebuilt:
+
+- `crates/crowdrelay-domain/src/live_opportunities.rs` already holds the show
+  budget the operator described: `annual_target` 15, `annual_stretch` 20, a
+  stretch show requiring a higher score, a `FarShot` travel band requiring a
+  higher score again, `net_margin = expected_fee - estimated_cost -
+  application_fee`, and an auto-submit gate that refuses contracts, exclusivity
+  and negative margin. **Do not rebuild this.**
+- `OutreachTargetKind` already covers `Playlist`, `Radio`, `Press`, `Creator`,
+  `SupportSlot`, `Endorsement`, `MediaPatronage` — reviews, radio interviews,
+  reaction-channel creators and collabs are all existing kinds, not new ones.
+- Migration 0072 already seeds playlist outreach when a release reaches
+  `start_press`.
+
+The five real gaps, in dependency order.
+
+1. **Nothing computes what a show costs.** `estimated_cost_minor` is an input
+   nobody fills, and the travel band is four coarse buckets rather than a
+   distance. Every "can we take this gig" answer is currently only as good as a
+   number a human typed.
+2. **Nothing negotiates.** The flow submits an application and waits. There is
+   no counter-offer, no target terms, no walk-away floor.
+3. **Nothing discovers targets.** `viryaos_outreach_targets` is written only by
+   operator upsert through the API. A pitcher over an empty table is a loop over
+   zero rows, and this is the single biggest reason playlist pitching would not
+   work today.
+4. **Spotify and Bandsintown are unfed.** The Phase 1d ingest endpoint exists
+   and nothing calls it; Bandsintown tracker counts need an endpoint this
+   repository does not call. The agent is blind on both numbers it is being
+   asked to grow.
+5. **No "do it" button.** The approval queue exists in the API; the control
+   plane has no surface for it, and there is no way to say "we did this
+   ourselves, mark it done".
+
+Phases renumbered again here. Audit is now 17, control plane 18.
+
+---
+
 ## Phase 6 — objectives
 
 An agent without a goal can only react. `viryaos_growth_objectives`: an
 operator-declared target on a metric series or first-party outcome, with a
 value, a deadline and a scope (workspace, city, event or release).
 
-First two, matching the stated objective: `spotify/followers` and
-`bandsintown/trackers`. The Phase 4 queue becomes objective-aware — an entry
-that contributes to an active objective outranks one that does not, inserted
-directly below authority state so a deadline still wins.
+First targets, matching the stated objective: `spotify/followers`,
+`spotify/monthly_listeners` and `bandsintown/trackers`. The Phase 4 queue
+becomes objective-aware — an entry contributing to an active objective outranks
+one that does not, inserted directly below authority state so a deadline still
+wins.
 
 An objective is never evidence of progress. It is a target the measured series
 is compared against, and a missed one is reported as missed.
 
 ---
 
-## Phase 7 — plays
+## Phase 7 — tour economics
 
-The agent's unit of work. One `growth_play` is a typed, stateful, multi-step
-campaign, not a single action:
+Nothing about venue autonomy is safe until the agent can answer "does this gig
+pay" from facts rather than from a number somebody typed. This phase is the
+prerequisite for Phase 8, and Phase 8 is the prerequisite for ever widening the
+`third_party` ceiling on booking.
 
-- a **hypothesis** in one sentence, stored, so a failed play is a learned thing
-  rather than a mystery
-- **entry conditions** — what must be true for it to start
-- **ordered steps**, each mapping to an existing action kind and carrying its
-  own `ActionClass`
-- **timing** relative to an anchor (release date, show date, or now)
-- a **stop rule** — what makes it abandon itself
-- a **success metric** — which series or first-party outcome it claims to move
+`crates/crowdrelay-domain/src/tour_economics.rs`, pure and integer-only:
 
-The design point that makes safest-autonomy workable: **a play executes its
+- Operator config, stored once per workspace: home base (Wrocław), vehicle
+  profile (count, seats, litres/100 km), fuel price per litre, toll estimate per
+  km by country, accommodation rate per night per room, per-diem per person,
+  crew size, and the loading/rehearsal overhead that is paid whether or not the
+  show happens.
+- Input per opportunity: distance in km one way, nights away, border crossings,
+  and the offered fee.
+- Output: an itemised `ShowCost` — fuel, tolls, accommodation, per diem,
+  overhead — and `net_margin_minor = fee - cost`, with the itemisation carried
+  so an operator can see *why* a gig was refused rather than a verdict.
+- **Vehicle count is derived, not assumed.** Crew plus backline against seats
+  decides one car or two, and two cars is roughly double the fuel and tolls —
+  which is exactly the case the operator described.
+- **Refuses to guess.** Unknown distance, unknown fuel price or unknown nights
+  returns `CostEvidence::Insufficient` with the missing field named. A gig whose
+  cost cannot be computed is never auto-anything; it is prepared for a human.
+  Filling a missing distance with a band average is how an agent talks a band
+  into a loss-making 500 km drive.
+- Feeds `LiveOpportunitySnapshot.estimated_cost_minor`, so the existing budget,
+  score and margin gates keep working unchanged. The coarse `travel_band` stays
+  as a secondary signal, not as the cost model.
+
+Merch and bar revenue are **not** modelled. They are real but unpredictable, and
+an agent that books a loss-making show because it assumed merch would cover it
+is worse than one that refuses.
+
+---
+
+## Phase 8 — negotiation
+
+Only after Phase 7. The agent may propose and counter; what it may *accept*
+without a human is deliberately narrow.
+
+- **Terms ladder** per opportunity, derived from tour economics: a walk-away
+  floor (`cost + minimum_margin`), a target (the fee that makes the show clearly
+  worth it), and an opening ask above the target.
+- **State machine** on the opportunity: `proposed → countered → accepted |
+  declined | expired`, every transition durable and idempotent, executed through
+  the existing outbox.
+- **What the agent may never do without a human**, at any autonomy level:
+  accept below the floor, accept anything requiring a contract or exclusivity,
+  accept when the date is not free, accept beyond `annual_stretch`, or accept a
+  stretch show below `stretch_minimum_score_basis_points`. These are refusals in
+  the domain, not settings.
+- At the current safest posture, every counter and acceptance is
+  `third_party` and therefore approval-gated: the agent computes the floor,
+  drafts the counter, and parks it. **This is already useful** — the arithmetic
+  and the draft are the slow parts.
+- When the operator later widens the `third_party` ceiling, the agent may
+  counter inside a pre-approved band and accept only at or above target. The
+  ceiling row is the only thing that changes.
+
+---
+
+## Phase 9 — target discovery
+
+The pitcher's supply. Without this, Phases 10 and 12 are loops over an empty
+table.
+
+- Sources, all producing *candidates* rather than targets: operator import
+  (CSV/Sheet), the existing `beacon` discovery path, public directories through
+  n8n adapters, and reply-derived contacts from conversations that already
+  happened.
+- **A candidate is not a target.** Candidates land unverified, with their source
+  recorded, and become targets only when a contact route is confirmed. The
+  existing `verified` flag and `viryaos_beacon_*` discovery precedent are the
+  pattern.
+- Never fabricate a contact address, never guess an email pattern, never scrape
+  something whose terms forbid it. A target the agent invented is a bounce at
+  best and a burned relationship at worst.
+- Deduplicate on contact identity, and carry a fit score per kind so a metal
+  reaction channel is not pitched a folk single.
+
+---
+
+## Phase 10 — free-reach pitcher
+
+Reviews, radio interviews, reaction-channel creators, collabs, media patronage.
+All free, all `third_party`, all approval-gated at the current posture.
+
+- Runs as **waves**, not one-offs: a ranked batch per kind per release or per
+  tour leg, sized to the weekly third-party budget from Phase 5b.
+- Each pitch carries an **evidence packet** assembled from real first-party
+  data — recent series movement, city signals, real ticket and attendance
+  numbers, existing coverage. No adjectives the numbers do not support.
+- Follow-up discipline is already in `OutreachPolicy`: `initial_cooldown_days`,
+  `followup_after_days`, `maximum_followups`, `declined_cooldown_days`. Reuse
+  it; do not invent a second cadence.
+- A wave is presented for one-click approval as a wave. Approving forty pitches
+  individually is how a human stops approving.
+
+---
+
+## Phase 11 — Spotify and Bandsintown feeds
+
+The agent cannot grow what it cannot see, and it currently sees neither.
+
+- **Bandsintown trackers.** `event_sync/bandsintown.rs` calls only
+  `/artists/{artist}/events`, whose response carries no tracker count. Add the
+  `/artists/{artist}` call, confirm field semantics against a real response, and
+  feed `bandsintown/trackers` through the Phase 1d ingest path. Phase 2 refused
+  to invent this series; this retires that refusal properly.
+- **Spotify followers and monthly listeners** through the existing n8n adapters
+  into the same ingest endpoint. CrowdRelay does not grow an OAuth flow for
+  Spotify until there is a reason it must own the credential.
+- Do this **before** enabling any play that pushes on these numbers. Pushing on
+  an unobservable metric is indistinguishable from doing nothing.
+
+---
+
+## Phase 12 — playlist pitcher
+
+Two different things that are usually confused, and the difference decides what
+can be automated.
+
+- **Spotify editorial pitch is one form per release inside Spotify for Artists,
+  with no API.** The agent cannot submit it and must not pretend to. What it
+  *can* do: detect the release, compute the deadline (pitch before the release
+  is delivered), assemble the pitch text and evidence, park it as a human task
+  with a hard due date, and escalate as the deadline approaches. That is most of
+  the work and all of the discipline.
+- **Independent curators are email**, and those the agent runs as Phase 10
+  waves: fit-ranked targets, evidence packets, cadence, follow-ups, decline
+  cooldowns.
+- **Never pay for placement and never route through a service that sells it.**
+  Paid or reciprocal placement is fabricated engagement wearing a suit; it also
+  gets the artist flagged.
+- Measured honestly: pitch sent, reply, placement confirmed, and *then* series
+  movement. A follower rise after a wave is correlational and is reported as
+  correlational.
+
+---
+
+## Phase 13 — plays
+
+The agent's unit of work: a typed, stateful, multi-step campaign with a
+hypothesis, entry conditions, ordered steps each carrying its own `ActionClass`,
+timing relative to an anchor, a stop rule and a success metric.
+
+The design point that makes safest-autonomy workable: a play executes its
 `owned_audience` and `first_party_reversible` steps autonomously and parks its
-`third_party` steps for approval, without blocking**. The agent does the work;
-the human presses send on the parts that touch someone else's relationship. A
-gated step that goes unapproved past its window is skipped and recorded as
-skipped, not silently dropped.
+`third_party` steps for approval **without blocking**. A gated step unapproved
+past its window is skipped and recorded as skipped, never silently dropped.
 
-State lives in one table with a state machine; steps execute through the
-existing outbox. No new scheduler, no new broker.
+State in one table with a state machine; steps execute through the existing
+outbox. No new scheduler, no new broker.
 
----
+### Play library v1
 
-## Phase 8 — play library v1: Spotify and Bandsintown
-
-Concrete plays, grounded in surfaces this repository already has. Each lists
-what the agent does alone and what it hands over.
-
-1. **Follow-ask ladder** — *owned audience, autonomous.* Fans with recent
-   engagement and no follow-ask in the cooldown get one message with exactly
-   one call to action, through a tracked smart link to the Spotify profile.
-   Measured by first-party click-through plus series movement. Never claims a
-   per-fan follow.
-2. **Track-us ask** — *owned audience, autonomous.* City-scoped, timed to
-   announce and to post-show, asking fans to track the artist on Bandsintown so
-   the next show finds them. The most under-used free lever the band has.
-3. **Release runway** — *mixed.* T-21 pre-save link and landing surface
-   (autonomous), T-14 owned-audience announce (autonomous), T-7 curator pitch
-   packet assembled and queued (**approval to send**), T-0 release-day push
-   (autonomous), T+7 sustain ask (autonomous).
-4. **Curator and playlist pitch waves** — *third party, approval to send.* The
-   agent builds the target list from `viryaos_outreach_targets` where the kind
-   is `playlist`, ranks by fit and contact freshness, assembles the evidence
-   (recent series movement, city signals, real ticket and attendance numbers),
-   drafts each pitch from an approved template, and presents the wave for
-   one-click approval. Everything except the send.
-5. **Listing completeness sweep** — *first party, autonomous.* Every published
+1. **Follow-ask ladder** — owned audience, autonomous. Engaged fans with no
+   follow-ask in the cooldown get one message with exactly one call to action
+   through a tracked smart link.
+2. **Track-us ask** — owned audience, autonomous. City-scoped, timed to announce
+   and post-show. The most under-used free lever the band has.
+3. **Release runway** — mixed. Pre-save link and landing surface, owned-audience
+   announce, curator wave queued for approval, release-day push, sustain ask.
+4. **Curator and playlist waves** — Phase 12.
+5. **Free-reach waves** — Phase 10.
+6. **Listing completeness sweep** — first party, autonomous. Every published
    upcoming event carries a complete Bandsintown listing with a tracked link.
-   This is the Phase 3 `event_levers_skipped` debt rule pointed at a specific
-   surface, not a second copy of it.
-6. **Dormant revival** — *owned audience, autonomous.* Fans with positive
-   history and nothing recent, re-entered through the lightest possible ask.
-
-Each play ships with its dry-run output reviewed before it is enabled.
+7. **Dormant revival** — owned audience, autonomous.
 
 ---
 
-## Phase 9 — Bandsintown tracker ingestion
+## Phase 14 — measurement and honest attribution
 
-Phase 2 refused to invent a Bandsintown series, because
-`crates/crowdrelay-worker/src/event_sync/bandsintown.rs` calls only
-`/artists/{artist}/events`, whose response carries no tracker count. That
-refusal stands and this phase retires it properly: add the `/artists/{artist}`
-call, confirm the field semantics against a real response, and feed
-`bandsintown/trackers` through the existing Phase 1d ingest path.
-
-Without this the agent is pushing on a number it cannot see. Do it before
-Phase 8's track-us play is enabled, not after.
-
----
-
-## Phase 10 — measurement and honest attribution
-
-The unit of measurement is the play, which is a far better unit than a single
-action.
+The unit of measurement is the play.
 
 - Extend `viryaos_autopilot_measurements.measurement_kind` with growth-metric
-  outcome kinds, following migration 0049's pattern for the CHECK constraint.
-- A play's effect is the success metric's velocity over the play window against
+  outcome kinds, following migration 0049's pattern.
+- A play's effect is its success metric's velocity over the play window against
   its own pre-play baseline, recorded as `improved`/`neutral`/`worsened` in
   `viryaos_autopilot_outcomes` — the columns already exist.
-- **Two different claims, never conflated.** Click-through on a smart link is
-  first-party attribution and is reported as attribution. A follower or tracker
-  series moving after a send is *correlational* and is reported as
-  correlational. The API says which it is on every number it returns.
-- The chain `action → channel → click → signup → ticket → merch` is assembled
-  only where a real join key exists: `click_events`, `referral_attributions`,
-  `merch_order_facts`, `fan_acquisition_events`,
-  `viryaos_beacon_native_session_attribution`.
-- Where a link is missing, the read model returns an explicit
-  `evidence: insufficient` marker with the reason. Never interpolate a path,
-  never present correlation as attribution, never fill a gap with a plausible
-  number.
+- **Two claims, never conflated.** A smart-link click is first-party attribution
+  and is reported as attribution. A follower or tracker series moving after a
+  send is correlational and is reported as correlational. The API says which on
+  every number it returns.
+- Show economics close the loop the same way: predicted cost against settled
+  cost, so the Phase 7 model is corrected by reality rather than trusted.
+- Where a join key is missing, return `evidence: insufficient` with the reason.
+  Never interpolate a path, never fill a gap with a plausible number.
 
 ---
 
-## Phase 11 — learning
+## Phase 15 — learning
 
-- Play selection weights move with the measured record: a play that repeatedly
-  measures `worsened` for an objective is proposed less and eventually retires
-  itself; one that measures `improved` is proposed more.
-- Bounded, explainable, stored as data rather than as a model. An operator must
-  be able to read why the agent chose this play today.
-- **Authority never widens automatically.** Neither the context ladder nor the
-  class ceiling moves without a human, however good the measured record looks.
+Play and pitch selection weights move with the measured record; a play that
+repeatedly measures `worsened` is proposed less and eventually retires itself.
+Bounded, explainable, stored as data rather than as a model. **Authority never
+widens automatically** — neither the context ladder nor the class ceiling moves
+without a human, however good the record looks.
 
 ---
 
-## Phase 12 — operator brief
+## Phase 16 — operator brief
 
-Extend `load_chief_of_staff` rather than building a dashboard: what the agent
-did on its own, what it is about to do, what is parked waiting for approval,
-what it stopped and why, what moved. Delivery through the existing outbox → n8n
-path. The brief is a readout of already-actionable data, not a reason to store a
-denormalized copy of it.
+Extend `load_chief_of_staff`: what the agent did alone, what it is about to do,
+what is parked for approval, what it stopped and why, what moved. Delivery
+through the existing outbox → n8n path.
 
 ---
 
-## Phase 13 — audit
+## Phase 17 — audit
 
-Only after Phases 1–12. Five separate passes, each written up in this file with
-findings and their resolution; the work is not finished until all five are
-clean.
-
-1. **Correctness** — does each rule do what it claims on real data, including
-   the boundary cases (absent history, backfills, out-of-order delivery, clock
-   skew, workspace isolation, replay)?
-2. **Usefulness** — did the agent actually grow the numbers, measured against
-   real VIRYA data rather than fixtures, and would the operator have wanted
-   each autonomous send?
-3. **Feature completeness** — metrics, trends, opportunities, growth debt,
-   ranked queue, autonomy envelope, objectives, plays, measurement, learning,
-   brief.
-4. **Safety** — every class ceiling held, no cap exceeded, no fan contacted
-   inside a cooldown, no send outside quiet hours, kill switch effective, and
-   no fabricated engagement anywhere in the system.
-5. **Performance and code quality** — bounded queries and responses, index
-   coverage, no per-subject N+1, layering rules held, ratchets respected, no
-   dead abstraction.
+Five passes, written up here with findings and resolution: correctness,
+usefulness against real VIRYA data, feature completeness, **safety** (every
+ceiling held, no cap exceeded, no cooldown breached, kill switch effective, no
+fabricated engagement, no gig accepted below floor), and performance plus code
+quality.
 
 ---
 
-## Phase 14 — control-plane management and monitoring
+## Phase 18 — control plane: find, then "do it"
 
-Last. In `crowdrelay-control-plane` (the operator/infra plane, never
-tenant-critical), add a thin read-only layer over the Growth OS: series health,
-detector and play throughput, authority and class-ceiling state, envelope
-consumption against caps, and the measured outcome record. Read-only over
-CrowdRelay's API contract; the control plane must not become a second source of
-truth, and no business policy moves into it.
+The operator's stated shape for the no-autonomy mode, and the reason it is last
+rather than optional.
 
----
+In `crowdrelay-control-plane` (operator plane, never tenant-critical):
 
-## Expansion path — what changes when the operator wants more
-
-Recorded now so the widening is a decision rather than a rebuild.
-
-- **Third-party outreach without per-message approval:** update the ceiling row
-  for `third_party` to `bounded_auto`, mark the templates pre-approved, and set
-  a weekly wave cap and per-contact cooldown. No code change. Phase 5a exists
-  to make this true.
-- **Autonomous spend:** needs one new thing that deliberately does not exist
-  yet — a spend ledger with a hard stop, because a cap that is not enforced by
-  a ledger is a suggestion. Then the `paid` ceiling can move to `bounded_auto`
-  below a threshold.
-- **More objectives:** merch, tickets, owned fanbase. Phase 6 is generic; new
-  objectives are rows, and new plays are additions to the Phase 8 library.
-- **What must never widen:** fabricated engagement stays prohibited at every
-  level of autonomy, and no ceiling change may be made by the agent itself.
+- **The opportunity board.** Everything the agent found and parked — gigs with
+  their computed economics and the counter it would send, free-reach pitches,
+  playlist waves, editorial pitch deadlines — each with its evidence and the
+  consequence of ignoring it.
+- **"Do it"** approves the parked action through the existing approval endpoint.
+  One button, one action, no new authority path.
+- **"Done ourselves"** records that a human handled it outside the system, so
+  the agent stops proposing it and the measured record stays honest. This is a
+  first-class outcome, not a dismissal — an opportunity a human took is a
+  success, and recording it as ignored would teach the ranker the wrong thing.
+- Read-only over CrowdRelay's API contract otherwise. The control plane must not
+  become a second source of truth, and no business policy moves into it.
 
 ---
 
