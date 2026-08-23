@@ -213,9 +213,23 @@ impl PostgresAutopilotRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx)?;
-        Ok(config
-            .map(|value| serde_json::from_value(value).unwrap_or_default())
-            .unwrap_or_default())
+        let Some(value) = config else {
+            return Ok(GrowthMetricPolicy::default());
+        };
+        match serde_json::from_value(value) {
+            Ok(policy) => Ok(policy),
+            Err(error) => {
+                // The defaults are safe, so the evaluator still runs. What is
+                // not safe is letting an operator believe a policy applies
+                // when it never parsed.
+                tracing::error!(
+                    %error,
+                    workspace_id = %workspace_id.into_uuid(),
+                    "stored growth_metrics policy is unreadable; falling back to defaults"
+                );
+                Ok(GrowthMetricPolicy::default())
+            }
+        }
     }
 
     pub(super) async fn load_growth_metric_snapshots_impl(
