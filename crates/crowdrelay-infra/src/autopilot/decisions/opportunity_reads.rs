@@ -339,6 +339,51 @@ macro_rules! decision_opportunity_reads {
         }).await
     }
 
+    /// The band's own vehicles and rates.
+    ///
+    /// A missing row is the timid default, whose fuel price is zero and which
+    /// therefore reports every trip as uncosted rather than as free to drive.
+    async fn load_tour_economics(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<TourEconomicsPolicy, RepositoryError> {
+        let row = sqlx::query_as::<_, TourEconomicsRow>(
+            r#"
+            SELECT vehicle_seats, vehicle_cargo_litres, vehicle_fuel_centilitres_per_100km,
+                   max_vehicles, crew_size, backline_litres, fuel_price_minor_per_litre,
+                   toll_minor_per_km, accommodation_minor_per_room_night, crew_per_room,
+                   per_diem_minor_per_person_day, fixed_overhead_minor,
+                   overnight_threshold_km, minimum_margin_minor
+            FROM viryaos_tour_economics
+            WHERE workspace_id = $1
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.map_or_else(TourEconomicsPolicy::default, |row| TourEconomicsPolicy {
+            vehicle: VehicleProfile {
+                seats: u8::try_from(row.vehicle_seats).unwrap_or(0),
+                cargo_litres: u32::try_from(row.vehicle_cargo_litres).unwrap_or(0),
+                fuel_centilitres_per_100km: u32::try_from(row.vehicle_fuel_centilitres_per_100km)
+                    .unwrap_or(0),
+            },
+            max_vehicles: u8::try_from(row.max_vehicles).unwrap_or(1),
+            crew_size: u8::try_from(row.crew_size).unwrap_or(0),
+            backline_litres: u32::try_from(row.backline_litres).unwrap_or(0),
+            fuel_price_minor_per_litre: row.fuel_price_minor_per_litre,
+            toll_minor_per_km: row.toll_minor_per_km,
+            accommodation_minor_per_room_night: row.accommodation_minor_per_room_night,
+            crew_per_room: u8::try_from(row.crew_per_room).unwrap_or(1),
+            per_diem_minor_per_person_day: row.per_diem_minor_per_person_day,
+            fixed_overhead_minor: row.fixed_overhead_minor,
+            overnight_threshold_km: u32::try_from(row.overnight_threshold_km).unwrap_or(0),
+            minimum_margin_minor: row.minimum_margin_minor,
+        }))
+    }
+
     async fn load_live_opportunity_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
@@ -354,6 +399,7 @@ macro_rules! decision_opportunity_reads {
                        opportunity.estimated_cost_minor, opportunity.application_fee_minor,
                        opportunity.requires_contract, opportunity.exclusive, opportunity.deadline,
                        opportunity.status, opportunity.event_starts_at, opportunity.travel_band,
+                       opportunity.distance_km, opportunity.nights_away,
                        (
                            SELECT COUNT(*)
                            FROM events event
@@ -385,6 +431,9 @@ macro_rules! decision_opportunity_reads {
                 LIMIT $3
             "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
               .fetch_all(&self.pool).await.map_err(map_sqlx)?;
+            // Read once for the whole batch: the band's vehicles and rates do
+            // not change between two opportunities in the same cycle.
+            let tour_policy = self.load_tour_economics(workspace_id).await?;
             rows.into_iter().map(|row| {
                 let kind=match row.opportunity_kind.as_str(){
                     "festival"=>LiveOpportunityKind::Festival,"showcase"=>LiveOpportunityKind::Showcase,
@@ -399,6 +448,18 @@ macro_rules! decision_opportunity_reads {
                     None=>None,
                     Some(_)=>return Err(RepositoryError::Unexpected),
                 };
+                // A computed cost is authoritative. When the inputs are not
+                // there the stored figure is still shown, but the opportunity is
+                // marked uncosted so it can be prepared and never auto-submitted.
+                let costed = estimate_show_cost(
+                    &ShowLogistics{
+                        distance_km: row.distance_km.and_then(|km| u32::try_from(km).ok()),
+                        nights_away: row.nights_away.and_then(|nights| u8::try_from(nights).ok()),
+                        offered_fee_minor: row.expected_fee_minor,
+                        application_fee_minor: row.application_fee_minor,
+                    },
+                    &tour_policy,
+                );
                 Ok(LiveOpportunitySnapshot{
                     opportunity_id:TeamOpportunityId::from_uuid(row.opportunity_id),kind,active:row.active,
                     verified_destination:row.verified_destination,
@@ -409,10 +470,13 @@ macro_rules! decision_opportunity_reads {
                     fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     reputation_basis_points:u16::try_from(row.reputation_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     evidence_confidence:parse_confidence(row.confidence_basis_points)?,
-                    expected_fee_minor:row.expected_fee_minor, estimated_cost_minor:row.estimated_cost_minor,
+                    expected_fee_minor:row.expected_fee_minor,
+                    estimated_cost_minor:costed.cost().map_or(row.estimated_cost_minor, |cost| cost.total_cost_minor),
                     application_fee_minor:row.application_fee_minor, requires_contract:row.requires_contract,
                     exclusive:row.exclusive, deadline:row.deadline, event_starts_at:row.event_starts_at,
-                    travel_band, committed_shows_year:u16::try_from(row.committed_shows_year).unwrap_or(u16::MAX),
+                    travel_band,
+                    costed_from_logistics: costed.cost().is_some(),
+                    committed_shows_year:u16::try_from(row.committed_shows_year).unwrap_or(u16::MAX),
                     annual_target:u16::try_from(row.annual_target).map_err(|_|RepositoryError::Unexpected)?,
                     annual_stretch:u16::try_from(row.annual_stretch).map_err(|_|RepositoryError::Unexpected)?,
                     stretch_minimum_score_basis_points:u16::try_from(row.stretch_minimum_score_basis_points).map_err(|_|RepositoryError::Unexpected)?,

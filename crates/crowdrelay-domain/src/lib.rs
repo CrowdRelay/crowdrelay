@@ -63,6 +63,7 @@ pub mod release_autopilot;
 pub mod show_growth;
 pub mod show_operations;
 pub mod team_operations;
+pub mod tour_economics;
 pub mod values;
 
 pub use acquisition::{

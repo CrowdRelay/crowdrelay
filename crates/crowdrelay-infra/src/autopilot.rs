@@ -82,6 +82,7 @@ use crowdrelay_domain::{
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
     show_growth::{ShowGrowthPolicy, ShowGrowthSnapshot},
     show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
+    tour_economics::{ShowLogistics, TourEconomicsPolicy, VehicleProfile, estimate_show_cost},
 };
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -128,6 +129,24 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(|_| RepositoryError::Unavailable)?
     }
+}
+
+#[derive(Debug, FromRow)]
+struct TourEconomicsRow {
+    vehicle_seats: i16,
+    vehicle_cargo_litres: i32,
+    vehicle_fuel_centilitres_per_100km: i32,
+    max_vehicles: i16,
+    crew_size: i16,
+    backline_litres: i32,
+    fuel_price_minor_per_litre: i64,
+    toll_minor_per_km: i64,
+    accommodation_minor_per_room_night: i64,
+    crew_per_room: i16,
+    per_diem_minor_per_person_day: i64,
+    fixed_overhead_minor: i64,
+    overnight_threshold_km: i32,
+    minimum_margin_minor: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -304,6 +323,8 @@ struct LiveOpportunityRow {
     status: String,
     event_starts_at: Option<OffsetDateTime>,
     travel_band: Option<String>,
+    distance_km: Option<i32>,
+    nights_away: Option<i16>,
     committed_shows_year: i64,
     annual_target: i32,
     annual_stretch: i32,
