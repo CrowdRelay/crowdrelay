@@ -59,6 +59,7 @@ pub mod next_best_action;
 pub mod operator_brief;
 pub mod outreach;
 pub mod performance;
+pub mod play_measurement;
 pub mod plays;
 pub mod pricing;
 pub mod promotion;

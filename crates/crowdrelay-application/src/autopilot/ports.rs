@@ -20,6 +20,10 @@ use crowdrelay_domain::{
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
     outreach::OutreachSnapshot,
     performance::{EffectDirection, EffectResult, assess_effect},
+    play_measurement::{
+        PlayMeasurementPolicy, PlayOutcomeInput, PlayOutcomeVerdict, assess_play_outcome,
+        window_velocity_milli_per_day,
+    },
     plays::PlayKind,
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
@@ -32,8 +36,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::model::{
-    AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, DecisionCandidate, PlayAnchor,
-    PlayRunSnapshot, PlayStart, PlayStepSettlement,
+    AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, ClaimedPlayOutcome,
+    DecisionCandidate, PlayAnchor, PlayOutcomeObservation, PlayRunSnapshot, PlayStart,
+    PlayStepSettlement,
 };
 use crate::RepositoryError;
 
@@ -306,6 +311,83 @@ pub trait AutopilotActionRepository: Send + Sync {
         retryable: bool,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError>;
+}
+
+/// Settling what a play did, one claim at a time.
+///
+/// Kept apart from [`AutopilotMeasurementRepository`] because the two measure
+/// different things and must not be confused. That one measures an *action*
+/// against a metric it moved directly. This one measures a *play* — a campaign
+/// of many sends — and its answers are claims with a named strength, including
+/// the answer "this cannot be known, and here is why".
+#[async_trait]
+pub trait AutopilotPlayOutcomeRepository: Send + Sync {
+    async fn claim_due_play_outcomes(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedPlayOutcome>, RepositoryError>;
+
+    /// Reads the window. Never writes, and never fills a gap: a missing series,
+    /// an ambiguous one and an absent join key all come back as themselves.
+    async fn observe_play_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedPlayOutcome,
+        now: OffsetDateTime,
+    ) -> Result<PlayOutcomeObservation, RepositoryError>;
+
+    async fn complete_play_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedPlayOutcome,
+        observation: &PlayOutcomeObservation,
+        verdict: PlayOutcomeVerdict,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    async fn fail_play_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_id: uuid::Uuid,
+        error_kind: &'static str,
+        retryable: bool,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+}
+
+/// Turns one observation into the verdict that will be stored.
+///
+/// A free function rather than a method so the rule stays testable without a
+/// database, and so the worker cannot reach a different answer than the one the
+/// domain would give.
+#[must_use]
+pub fn assess_play_claim(
+    outcome: &ClaimedPlayOutcome,
+    observation: &PlayOutcomeObservation,
+    policy: PlayMeasurementPolicy,
+) -> PlayOutcomeVerdict {
+    assess_play_outcome(
+        PlayOutcomeInput {
+            claim: outcome.claim,
+            recipients_reached: observation.recipients_reached,
+            baseline_milli_per_day: outcome.baseline_milli_per_day,
+            window_milli_per_day: observation.observed_value.and_then(|observed| {
+                outcome.baseline_value.and_then(|baseline| {
+                    window_velocity_milli_per_day(
+                        baseline,
+                        observed,
+                        observation.observed_at - outcome.window_start,
+                    )
+                })
+            }),
+            attributed_clicks: observation.attributed_clicks,
+            direction: observation.direction,
+            ambiguous_series: observation.ambiguous_series,
+        },
+        policy,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

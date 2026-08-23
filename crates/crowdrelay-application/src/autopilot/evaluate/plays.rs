@@ -59,6 +59,24 @@ pub(super) fn play_start(
         return None;
     }
     let (platform, metric_key) = kind.success_metric();
+    let steps: Vec<PlayStepPlan> = kind
+        .steps()
+        .iter()
+        .map(|spec| {
+            let (due_at, expires_at) = step_schedule(*spec, anchor.anchor_at);
+            PlayStepPlan {
+                index: spec.index,
+                kind: spec.kind,
+                class: spec.class,
+                due_at,
+                expires_at,
+            }
+        })
+        .collect();
+    // The window closes after the *last* step, whichever that is, plus the
+    // settle period. Taking the first step's expiry would read the series while
+    // the campaign was still running and call the result the campaign's effect.
+    let last_expiry = steps.iter().map(|step| step.expires_at).max()?;
     Some(PlayStart {
         kind,
         event_id: anchor.event_id,
@@ -66,20 +84,8 @@ pub(super) fn play_start(
         hypothesis: kind.hypothesis(),
         success_metric_platform: platform,
         success_metric_key: metric_key,
-        steps: kind
-            .steps()
-            .iter()
-            .map(|spec| {
-                let (due_at, expires_at) = step_schedule(*spec, anchor.anchor_at);
-                PlayStepPlan {
-                    index: spec.index,
-                    kind: spec.kind,
-                    class: spec.class,
-                    due_at,
-                    expires_at,
-                }
-            })
-            .collect(),
+        measurement_window_end: measurement_due_at(last_expiry, domain_policy.measurement),
+        steps,
     })
 }
 

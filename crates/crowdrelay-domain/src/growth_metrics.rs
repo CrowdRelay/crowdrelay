@@ -96,7 +96,8 @@ impl MetricDirection {
     }
 
     /// Rewrites a raw movement so that positive always means "better".
-    const fn orient(self, value: i64) -> i64 {
+    #[must_use]
+    pub const fn orient(self, value: i64) -> i64 {
         match self {
             Self::HigherIsBetter => value,
             Self::LowerIsBetter => value.saturating_neg(),

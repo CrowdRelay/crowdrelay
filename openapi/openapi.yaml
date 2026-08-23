@@ -2370,6 +2370,33 @@ paths:
                 $ref: '#/components/schemas/GrowthMetricTrendsResponse'
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/plays:
+    get:
+      operationId: getAutopilotPlays
+      summary: Read the play ledger and what each number is allowed to prove
+      description: >
+        Returns every play the agent has committed to, what it claimed in advance, how many of its
+        steps were delivered and how many were skipped, and one entry per claim about its effect.
+        Two claims exist and are never merged: `attributed` is joined to the play through
+        first-party rows, `correlational` is the success metric moving over the play's window with
+        nothing joining the two. Every claim carries `claim_means` so the strength travels with the
+        number. A claim that cannot be made returns `evidence: insufficient` with
+        `evidence_reason` and no verdict — a missing join key, an absent baseline and a campaign
+        that reached nobody are reported as themselves and never as zero.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Plays with their claims.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayLedgerResponse'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/chief-of-staff:
     get:
       operationId: getAutopilotChiefOfStaff
@@ -7916,6 +7943,70 @@ components:
         baseline_value: { type: number, format: double, minimum: 0 }
         observed_value: { type: number, format: double, minimum: 0 }
         observed_at: { type: string, format: date-time }
+    PlayClaimStrength:
+      type: string
+      description: >
+        What a number is allowed to say it proves. `attributed` is joined to the play through our
+        own rows. `correlational` shares a period with the play and nothing more.
+      enum: [attributed, correlational]
+    PlayEvidence:
+      type: string
+      enum: [measured, insufficient]
+    PlayEvidenceReason:
+      type: string
+      description: >
+        Why a claim could not be made. Present exactly when evidence is `insufficient`, and never
+        substituted with a zero.
+      enum: [no_baseline, no_observation, window_not_closed, no_attribution_key, nothing_delivered, ambiguous_series]
+    PlayClaimView:
+      type: object
+      additionalProperties: false
+      required: [claim, claim_means, success_metric_platform, success_metric_key, window_start, window_end, status]
+      properties:
+        claim: { $ref: '#/components/schemas/PlayClaimStrength' }
+        claim_means: { type: string, maxLength: 400 }
+        success_metric_platform: { type: string, maxLength: 64 }
+        success_metric_key: { type: string, maxLength: 64 }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        status: { type: string, enum: [pending, processing, succeeded, failed] }
+        evidence: { $ref: '#/components/schemas/PlayEvidence' }
+        evidence_reason: { $ref: '#/components/schemas/PlayEvidenceReason' }
+        effect: { type: [string, 'null'], enum: [improved, neutral, worsened, null] }
+        delta_basis_points: { type: [integer, 'null'] }
+        baseline_milli_per_day: { type: [integer, 'null'], format: int64 }
+        observed_milli_per_day: { type: [integer, 'null'], format: int64 }
+        recipients_reached: { type: [integer, 'null'], minimum: 0 }
+    PlayLedgerEntry:
+      type: object
+      additionalProperties: false
+      required: [play_id, kind, event_id, anchor_at, hypothesis, state, started_at, steps_total, steps_settled, steps_skipped, recipients_reached, claims]
+      properties:
+        play_id: { type: string, format: uuid }
+        kind: { type: string, enum: [track_us_ask] }
+        event_id: { type: string, format: uuid }
+        anchor_at: { type: string, format: date-time }
+        hypothesis: { type: string, maxLength: 400 }
+        state: { type: string, enum: [running, completed] }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        steps_total: { type: integer, minimum: 0 }
+        steps_settled: { type: integer, minimum: 0 }
+        steps_skipped: { type: integer, minimum: 0 }
+        recipients_reached: { type: integer, minimum: 0 }
+        claims:
+          type: array
+          maxItems: 2
+          items: { $ref: '#/components/schemas/PlayClaimView' }
+    PlayLedgerResponse:
+      type: object
+      additionalProperties: false
+      required: [plays]
+      properties:
+        plays:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/PlayLedgerEntry' }
     AutopilotOverview:
       type: object
       additionalProperties: false

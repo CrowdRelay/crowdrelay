@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, BeaconId, BookingTargetId, CityId, ContentSourceId,
     EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId, MarketSignalId,
-    MerchProductId, OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId,
-    TeamOpportunityId, WorkspaceId,
+    MerchProductId, OutreachOpportunityId, OutreachTargetId, PlayId, PromotionCampaignId,
+    ReleasePlanId, TeamOpportunityId, WorkspaceId,
     acquisition_channel::{ChannelAttribution, UnattributedReason},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconKind, BeaconReplyDisposition},
@@ -18,6 +18,9 @@ use crowdrelay_domain::{
     market_intelligence::CityMarketSignalKind,
     next_best_action::{AuthorityState, RankFactor},
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    performance::EffectAssessment,
+    play_measurement::PlayClaim,
+    plays::PlayKind,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,
 };
@@ -430,3 +433,4 @@ include!("control/runtime_ports.rs");
 include!("control/growth_ports.rs");
 include!("control/growth_metric_ports.rs");
 include!("control/target_discovery_ports.rs");
+include!("control/play_ports.rs");

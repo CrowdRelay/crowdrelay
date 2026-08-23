@@ -7,6 +7,7 @@ mod growth;
 mod growth_metrics;
 mod measurement;
 mod operations;
+mod play_outcomes;
 mod plays;
 mod runtime;
 mod state;
@@ -24,19 +25,21 @@ use crowdrelay_application::{
         AutopilotControlOverview, AutopilotControlRepository, AutopilotDecisionRepository,
         AutopilotFirstPartyGrowthMetrics, AutopilotGrowthMetricRepository, AutopilotGrowthOverview,
         AutopilotManualStep, AutopilotMarketStateRepository, AutopilotMeasurementKind,
-        AutopilotMeasurementRepository, AutopilotMerchStateRepository, AutopilotPolicy,
+        AutopilotMeasurementRepository, AutopilotMerchStateRepository,
+        AutopilotPlayLedgerRepository, AutopilotPlayOutcomeRepository, AutopilotPolicy,
         AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
         AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
         CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
-        ClaimedAutopilotMeasurement, DecisionCandidate, ExecutionClaimMutation,
+        ClaimedAutopilotMeasurement, ClaimedPlayOutcome, DecisionCandidate, ExecutionClaimMutation,
         ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
         FirstPartyGrowthMetricReport, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
         GrowthCampaignProgress, GrowthDeliveryTotals, GrowthMetricPointMutation,
         GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
         GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
         MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
-        PendingAutopilotAction, PlayAnchor, PlayAudience, PlayRunSnapshot, PlayStart,
-        PlayStepSettlement, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView, PlayLedgerEntry,
+        PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
+        PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
         RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
         RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
@@ -81,6 +84,7 @@ use crowdrelay_domain::{
     },
     outreach::{OutreachPolicy, OutreachSnapshot},
     performance::{EffectAssessment, EffectResult},
+    play_measurement::{PlayClaim, PlayOutcomeVerdict},
     plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState},
     pricing::{TicketYieldPolicy, TicketYieldSnapshot},
     promotion::{PromotionBudgetPolicy, PromotionPerformanceSnapshot},

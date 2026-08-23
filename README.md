@@ -1,12 +1,12 @@
 # CrowdRelay
 
-**Rust / Tokio / Axum / SQLx / PostgreSQL. Stable release: 1.0.0.**
+**Rust / Tokio / Axum / SQLx / PostgreSQL backend and deterministic growth plane for artists, events and communities. Stable release: 1.0.0.**
 
-CrowdRelay is a self-hosted, PostgreSQL-authoritative backend for artists, events and communities. It turns campaign traffic into a durable flow:
+CrowdRelay owns the durable business state behind a working artist: fans and their consent, tickets, admission, merch, referrals, and every outward action the operation takes. It turns campaign traffic into one auditable flow — `smart link → signup → confirmation → referrals → event interest → reward / draw → check-in / admission` — and, through ViryaOS Autopilot, decides and runs the growth work around that flow under explicit, operator-set authority limits.
 
-`smart link → signup → confirmation → referrals → event interest → reward / draw → check-in / admission`
+Email, n8n, Stripe, Calendar, Bandsintown and LLM-assisted copy adaptation are execution adapters. They deliver; they never hold business truth, choose recipients, invent offers or widen authority.
 
-The OpenAPI 1.x document is the supported cross-repository integration contract. Internal Rust modules and persistence remain implementation details.
+The interesting part is not the endpoint list. It is that **a decision, the evidence it was made on, the action it produced and the claim that action can support are four separate records**, so an autonomous system cannot quietly promote a coincidence into a result.
 
 ## Engineering snapshot
 
@@ -14,45 +14,21 @@ The OpenAPI 1.x document is the supported cross-repository integration contract.
 - **Asynchronous delivery:** public requests never wait for email, n8n or other providers; workers deliver from a transactional outbox with leases, bounded retries and dead-state inspection.
 - **Explicit delivery semantics:** external delivery is at-least-once, so event/operation identity is durable and consumers must deduplicate.
 - **Hard authorization boundaries:** `/public`, `/me`, `/admin`, `/staff`, `/commerce` and `/internal` are separate capabilities rather than one general bearer credential.
+- **Bounded autonomy:** every autonomous action carries an action class, an operator ceiling per class, a weekly volume envelope and a per-contact cooldown. A new action kind does not compile until somebody has decided what it costs.
+- **Evidence over assertion:** a measurement that cannot be made is stored and returned as `insufficient` with a reason. Nothing interpolates a missing point or reports a ratio against a baseline too flat to carry one.
 - **Measured scaling boundary:** the API is stateless apart from bounded process-local read caches; workers coordinate through PostgreSQL leases. A separate broker or partitioning is deferred until production measurements justify the extra system.
 - **Release identity:** production deploys are tied to an exact Git/OCI revision and verified with readiness and end-to-end management checks.
 - **Cross-repo compatibility:** OpenAPI and executable ecosystem contracts guard consumers such as Virya Signal, virya.music and Synesthesia against backend drift.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the consistency model and deliberate trade-offs, and [`docs/STABLE_CONTRACT.md`](docs/STABLE_CONTRACT.md) for the compatibility policy.
 
-## Workspace
+## Status
 
-| Crate | Responsibility |
-| --- | --- |
-| `crowdrelay-domain` | identifiers, events, value objects and deterministic policy |
-| `crowdrelay-application` | use cases and repository/provider ports |
-| `crowdrelay-infra` | PostgreSQL repositories, caches, provider adapters and observability |
-| `crowdrelay-api` | HTTP/auth boundaries, validation and response contracts |
-| `crowdrelay-worker` | outbox delivery, reminders, retention, synchronization and draws |
+1.0.0, in production, 89 sequential migrations. The transactional core — fans, events, ticketing, admission, commerce, referrals, outbox delivery — is complete and carries live traffic.
 
-The intended dependency direction is domain → application → infrastructure/adapters, with transport and provider details kept outside business policy.
+The growth plane is the part still being built: 14 of 20 phases, with the reasoning behind each one, what was deliberately not built and why, tracked in [`docs/GROWTH_OS_PLAN.md`](docs/GROWTH_OS_PLAN.md). Every autopilot context is provisioned disabled and at `observe`; turning one on is a row update an operator makes deliberately.
 
-## Main command path
-
-```text
-HTTP command
-  -> auth + bounded validation
-  -> application use case
-  -> PostgreSQL transaction
-       business rows
-       idempotency result
-       outbox event
-  -> response
-  -> worker lease
-  -> signed provider delivery
-  -> retry / delivered / dead
-```
-
-PostgreSQL is authoritative for fan state, consent, tickets, admission, commerce, accounting-related state and the outbox. External systems never participate in the public transaction commit.
-
-## Product surface
-
-CrowdRelay currently covers:
+## Features
 
 - campaign links, attribution and asynchronous click statistics;
 - double-opt-in fan signup, private fan sessions, consent and unsubscribe;
@@ -68,7 +44,7 @@ CrowdRelay currently covers:
 - optional Sigstore Rekor anchoring for audit/draw receipts;
 - health, readiness, metrics, structured logging, migrations and graceful shutdown.
 
-The exact request/response/auth schemas live in [`openapi/openapi.yaml`](openapi/openapi.yaml).
+The exact request/response/auth schemas live in [`openapi/openapi.yaml`](openapi/openapi.yaml), which is the supported cross-repository integration contract. Internal Rust modules and persistence remain implementation details.
 
 ## ViryaOS Autopilot
 
@@ -88,6 +64,46 @@ Authority is classified as **AUTO**, **BOUNDED AUTO** or **APPROVAL**. Consequen
 
 Attendance growth and Beacon outreach are relationship- and policy-driven rather than generic blast messaging. The operational model is documented in [`docs/ATTENDANCE_GROWTH_PLAYBOOK.md`](docs/ATTENDANCE_GROWTH_PLAYBOOK.md).
 
+### Current direction: from detector to agent
+
+Every bounded context above answers one question per cycle and forgets. That shape suits a detector and not a campaign, so the plane is being extended with three things that let it act rather than only notice.
+
+- **Bounded authority.** Every action carries an action class — first-party reversible, owned audience, third party or paid. An operator sets a ceiling per class, and a weekly volume envelope plus a per-contact cooldown bound blast radius independently of that ceiling.
+- **Plays.** A play is a durable multi-step campaign anchored to a fact such as a show: ordered steps, each with its own action class and its own window derived from the anchor. A gated step waiting on a human never blocks the step behind it, and a step past its window is settled as skipped with its reason rather than delivered late or silently dropped. Steps execute through the existing outbox; there is no second scheduler.
+- **Honest measurement.** The unit of measurement is the play, against a baseline frozen when it started. Two claims are kept separate and never merged: first-party rows that join an outcome to the action are reported as attribution, and a follower or tracker series moving over the play's window is reported as correlational. Where a join key, a baseline or an audience is missing, the API returns `evidence: insufficient` with the reason.
+
+## Tech stack
+
+Rust 1.97 (edition 2024), Tokio, Axum 0.8, SQLx 0.8 against PostgreSQL 18, `time`, `uuid` v7, `tracing` with a JSON subscriber, rustls only. No compile-time SQL macros, so the workspace builds and lints without a database.
+
+| Crate | Responsibility |
+| --- | --- |
+| `crowdrelay-domain` | identifiers, events, value objects and deterministic policy |
+| `crowdrelay-application` | use cases and repository/provider ports |
+| `crowdrelay-infra` | PostgreSQL repositories, caches, provider adapters and observability |
+| `crowdrelay-api` | HTTP/auth boundaries, validation and response contracts |
+| `crowdrelay-worker` | outbox delivery, reminders, retention, synchronization and draws |
+
+The intended dependency direction is domain → application → infrastructure/adapters, with transport and provider details kept outside business policy.
+
+### Main command path
+
+```text
+HTTP command
+  -> auth + bounded validation
+  -> application use case
+  -> PostgreSQL transaction
+       business rows
+       idempotency result
+       outbox event
+  -> response
+  -> worker lease
+  -> signed provider delivery
+  -> retry / delivered / dead
+```
+
+PostgreSQL is authoritative for fan state, consent, tickets, admission, commerce, accounting-related state and the outbox. External systems never participate in the public transaction commit.
+
 ## API groups
 
 | Group | Examples |
@@ -101,7 +117,7 @@ Attendance growth and Beacon outreach are relationship- and policy-driven rather
 | Audience | Fan 360, segments, communication intents, analytics |
 | Commerce | inventory, reward campaigns and coupon redemption |
 | Synesthesia | run ledger, completion, leaderboard publication and CD draw entry |
-| Autopilot | opportunities, Beacons, policy, approvals and operator read models |
+| Autopilot | opportunities, Beacons, policy, approvals, plays and operator read models |
 
 Public catalog reads are anonymous. Fan-specific `/me/*` routes use private fan sessions; ticket-order/wallet routes use per-order capability tokens. Admin, staff, service and internal namespaces are intentionally not interchangeable.
 
@@ -138,6 +154,7 @@ Synesthesia uses an isolated run/completion ledger. A valid completed run may cr
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture, consistency and scaling trade-offs
 - [`docs/STABLE_CONTRACT.md`](docs/STABLE_CONTRACT.md) — supported integration boundary
+- [`docs/GROWTH_OS_PLAN.md`](docs/GROWTH_OS_PLAN.md) — autonomous growth plane: phases, decisions and what is deliberately not built yet
 - [`docs/ATTENDANCE_GROWTH_PLAYBOOK.md`](docs/ATTENDANCE_GROWTH_PLAYBOOK.md) — deterministic attendance-growth operating model
 - [`docs/EXPERIMENTATION_PLAYBOOK.md`](docs/EXPERIMENTATION_PLAYBOOK.md) — bounded experimentation
 - [`docs/operations/`](docs/operations/) — production/operator notes

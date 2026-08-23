@@ -222,3 +222,27 @@ pub async fn growth_metric_coverage(State(state): State<AppState>, headers: Head
 struct GrowthMetricCoverageResponse {
     platforms: Vec<FeedCoverage>,
 }
+
+/// The play ledger: what the agent committed to, what it did, and what each
+/// number is allowed to prove.
+///
+/// Every claim carries `claim` and `claim_means`, and an unsettled or
+/// unanswerable one carries `evidence_reason` rather than an absent field. A
+/// consumer that reads only `effect` will find nothing on a claim that could
+/// not be made, which is the intended failure: there is no number there to
+/// misread.
+pub async fn play_ledger(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_play_ledger(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(plays) => private_json(StatusCode::OK, PlayLedgerResponse { plays }),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PlayLedgerResponse {
+    plays: Vec<PlayLedgerEntry>,
+}

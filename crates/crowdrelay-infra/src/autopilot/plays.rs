@@ -254,6 +254,17 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // Same transaction as the play itself. A campaign that existed
+            // without a frozen baseline could never be measured honestly: the
+            // window to capture one closes the moment its first step runs.
+            play_outcomes::open_play_outcomes(
+                &mut transaction,
+                workspace_id,
+                play_id,
+                start,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(true)
         })

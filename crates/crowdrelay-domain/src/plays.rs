@@ -27,7 +27,10 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-use crate::{PlayId, action_class::ActionClass, autonomy::Confidence};
+use crate::{
+    PlayId, action_class::ActionClass, autonomy::Confidence,
+    play_measurement::PlayMeasurementPolicy,
+};
 
 /// A campaign the agent knows how to run.
 ///
@@ -282,6 +285,10 @@ pub struct PlayPolicy {
     /// step still has a window. Starting one for tomorrow's show creates a play
     /// whose every step is already expired.
     pub minimum_lead_hours: u32,
+    /// How the play's effect is read once its last step closes. Nested here
+    /// rather than given its own context because it is the same operator
+    /// setting: a play and the reading of that play are one decision.
+    pub measurement: PlayMeasurementPolicy,
 }
 
 impl Default for PlayPolicy {
@@ -293,6 +300,7 @@ impl Default for PlayPolicy {
             // The announce step is due fourteen days out with a seven-day
             // window, so a show under seven days away can never use it.
             minimum_lead_hours: 7 * 24,
+            measurement: PlayMeasurementPolicy::default(),
         }
     }
 }
