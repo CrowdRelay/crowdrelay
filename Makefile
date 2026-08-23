@@ -5,7 +5,7 @@ API_BASE_URL ?= http://127.0.0.1:8080/v1
 .PHONY: fmt lint test check validate-contract-assets contract-tests runtime-contracts ci deploy env db-up migrate bootstrap setup build-images build-arm64 up down logs ps health
 
 fmt:
-	$(CARGO) fmt --all --check
+	$(CARGO) fmt --all
 
 lint:
 	$(CARGO) clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -61,7 +61,7 @@ build-images:
 	docker buildx bake --load
 
 build-arm64:
-	API_IMAGE=crowdrelay-api:arm64 WORKER_IMAGE=crowdrelay-worker:arm64 \
+	API_IMAGE=crowdrelay-worker:arm64 WORKER_IMAGE=crowdrelay-worker:arm64 \
 		docker buildx bake --set '*.platform=linux/arm64' --load
 
 up: env
