@@ -275,8 +275,9 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
         # Same rule as a show: nothing is shared before there is a link that
         # can be counted.
         execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
-        self.assertIn("ensure_release_tracked_link", execution)
-        self.assertIn("INSERT INTO smart_links", execution)
+        links = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/release_links.rs")
+        self.assertIn("ensure_release_tracked_link", links)
+        self.assertIn("INSERT INTO smart_links", links)
         # Run for every milestone, not only the first: the first can fail on a
         # missing executor capability and the announcement must not then go out
         # untracked.
@@ -289,14 +290,14 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
         # A release key is free text and the slug is unique per workspace, so
         # sanitising is lossy in a way that matters: two keys reducing to the
         # same letters would make the second overwrite the first's destination.
-        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
-        slug = execution.split("fn release_link_slug", 1)[1].split("\n}", 1)[0]
+        links = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/release_links.rs")
+        slug = links.split("fn release_link_slug", 1)[1].split("\n}", 1)[0]
         self.assertIn("key_digest(source_key)", slug)
         self.assertIn("bounded == source_key.to_ascii_lowercase()", slug)
 
     def test_a_release_with_no_listen_url_gets_no_link(self) -> None:
-        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
-        body = execution.split("async fn ensure_release_tracked_link", 1)[1].split(
+        links = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/release_links.rs")
+        body = links.split("async fn ensure_release_tracked_link", 1)[1].split(
             "\n}", 1
         )[0]
         self.assertIn('filter(|url| url.starts_with("http"))', body)
