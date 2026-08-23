@@ -860,23 +860,75 @@ without a human is deliberately narrow.
 ## Phase 9 — target discovery
 
 The pitcher's supply. Without this, Phases 10 and 12 are loops over an empty
-table.
+table: `viryaos_outreach_targets` is written only by operator upsert today.
 
-- Sources, all producing *candidates* rather than targets: operator import
-  (CSV/Sheet), the existing `beacon` discovery path, public directories through
-  n8n adapters, and reply-derived contacts from conversations that already
-  happened.
-- **A candidate is not a target.** Candidates land unverified, with their source
-  recorded, and become targets only when a contact route is confirmed. The
-  existing `verified` flag and `viryaos_beacon_*` discovery precedent are the
-  pattern.
-- Never fabricate a contact address, never guess an email pattern, never scrape
-  something whose terms forbid it. A target the agent invented is a bounce at
-  best and a burned relationship at worst.
-- Deduplicate on contact identity, and carry a fit score per kind so a metal
-  reaction channel is not pitched a folk single.
+### Where curator contacts legitimately come from
 
----
+There is real free playlist pitching outside Spotify for Artists, and the
+routes differ in whether a contact is *published* or *inferred*. Only published
+routes are usable.
+
+- **Spotify playlist descriptions.** The Web API returns a playlist's `name`,
+  `description`, `owner` and follower count. Curators who accept submissions
+  routinely put the route in the description — a form URL, a handle, an address.
+  Reading a submission route the curator published for that purpose is the
+  intended use of that field, and it is the highest-yield source there is.
+  What the API does **not** expose is an owner's email; there is no supported
+  way to get one, and there is no inferring it.
+- **Curator-run sites and link pages** reachable from the description.
+- **Submission platforms**, modelled as channels rather than sources (below).
+- **Reply-derived contacts** — anyone who has already written to us.
+- **Operator import** — a CSV or Sheet of contacts the band already has.
+- **Scene-adjacent playlists**: owners of playlists that already contain
+  comparable artists, which is both a fit signal and a contact route.
+
+### The rule that keeps this clean
+
+**A candidate is not a target.** Candidates arrive unverified, carrying their
+source and the raw evidence the route was extracted from — the description
+snippet, the page, the reply. They become targets only when the route is
+confirmed. Extraction is strict: an explicit submission intent, an explicit
+address or URL. **Never infer a contact**, never guess an address pattern from a
+name and a domain, never take a personal address that was not offered for
+submissions. A contact the agent invented is a bounce at best and a burned
+relationship at worst, and burned curators do not come back.
+
+Never fetch anything a platform's terms forbid, and record the source on every
+candidate so a bad source can be revoked wholesale later.
+
+### Free is enforced, not assumed
+
+Submission platforms differ: some are free, several sell credits, and a few sell
+placement. So a **submission channel** carries its own cost, and the cost decides
+the class:
+
+- free channel → the pitch is `third_party` and follows the normal ceiling
+- credit or fee channel → the pitch is `paid`, and is therefore gated by the
+  spend ceiling no matter how small the fee
+
+That makes "free only" a property the system enforces rather than a habit an
+operator has to remember. **Paid-placement services are refused outright**, at
+every autonomy level and every ceiling: buying a placement is fabricated
+engagement wearing a suit, and it gets the artist flagged.
+
+### Guarding against the other direction
+
+Playlist pitching has a large scam surface. Candidates are screened before they
+are ever pitched: implausible follower-to-engagement ratios, placement-for-sale
+language in the description, and playlists whose track list churns
+indiscriminately. A refusal is recorded with its reason, so the same bad
+candidate is not rediscovered every week.
+
+### Ingestion
+
+`POST /v1/admin/autopilot/outreach/candidates` — idempotent, replay-safe,
+requires `Idempotency-Key`, accepts a bounded batch. n8n calls Spotify and the
+directories and posts candidates in; CrowdRelay stays the authority for
+candidates, targets, screening and policy. No OAuth flow moves into CrowdRelay
+for this — discovery needs only an app token, and the adapter already holds one.
+
+Deduplicate on contact identity, and carry a per-kind fit score so a metal
+reaction channel is never pitched a folk single.
 
 ## Phase 10 — free-reach pitcher
 
@@ -924,9 +976,16 @@ can be automated.
   is delivered), assemble the pitch text and evidence, park it as a human task
   with a hard due date, and escalate as the deadline approaches. That is most of
   the work and all of the discipline.
-- **Independent curators are email**, and those the agent runs as Phase 10
-  waves: fit-ranked targets, evidence packets, cadence, follow-ups, decline
+- **Everything else is the free route, and it is the bigger half.** Independent
+  curators reached through the submission route they published, free submission
+  platforms, and scene-adjacent playlist owners — all run as Phase 10 waves with
+  fit-ranked targets, evidence packets, cadence, follow-ups and decline
   cooldowns.
+- **What we offer, since it is not money.** The track and its assets, a real
+  reason this playlist specifically, the numbers that support it, and a promise
+  we can keep — we push placements to our own audience, which is worth something
+  to a curator building one. Offering anything reciprocal-for-placement is
+  refused: that is a paid placement with extra steps.
 - **Never pay for placement and never route through a service that sells it.**
   Paid or reciprocal placement is fabricated engagement wearing a suit; it also
   gets the artist flagged.
