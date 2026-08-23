@@ -349,7 +349,8 @@ macro_rules! decision_opportunity_reads {
     ) -> Result<TourEconomicsPolicy, RepositoryError> {
         let row = sqlx::query_as::<_, TourEconomicsRow>(
             r#"
-            SELECT vehicle_seats, vehicle_cargo_litres, vehicle_fuel_centilitres_per_100km,
+            SELECT transport_minor_per_100km_round_trip, transport_rate_covers_vehicles,
+                   vehicle_seats, vehicle_cargo_litres, vehicle_fuel_centilitres_per_100km,
                    max_vehicles, crew_size, backline_litres, fuel_price_minor_per_litre,
                    toll_minor_per_km, accommodation_minor_per_room_night, crew_per_room,
                    per_diem_minor_per_person_day, fixed_overhead_minor,
@@ -364,6 +365,9 @@ macro_rules! decision_opportunity_reads {
         .map_err(map_sqlx)?;
 
         Ok(row.map_or_else(TourEconomicsPolicy::default, |row| TourEconomicsPolicy {
+            transport_minor_per_100km_round_trip: row.transport_minor_per_100km_round_trip,
+            transport_rate_covers_vehicles: u8::try_from(row.transport_rate_covers_vehicles)
+                .unwrap_or(1),
             vehicle: VehicleProfile {
                 seats: u8::try_from(row.vehicle_seats).unwrap_or(0),
                 cargo_litres: u32::try_from(row.vehicle_cargo_litres).unwrap_or(0),
