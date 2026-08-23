@@ -450,9 +450,9 @@ impl AutopilotActionPayload {
                 | ShowGrowthLever::HighIntentLastMile
                 | ShowGrowthLever::PostShowMerchFollowUp
                 | ShowGrowthLever::PostShowFollowAsk => ActionClass::OwnedAudience,
-                ShowGrowthLever::FreeListingSweep | ShowGrowthLever::AudienceCaptureSetup => {
-                    ActionClass::FirstPartyReversible
-                }
+                ShowGrowthLever::CanonicalLinkSetup
+                | ShowGrowthLever::FreeListingSweep
+                | ShowGrowthLever::AudienceCaptureSetup => ActionClass::FirstPartyReversible,
             },
             Self::ExecuteReleaseMilestone { milestone, .. } => match milestone {
                 ReleaseMilestone::StartPress => ActionClass::ThirdParty,

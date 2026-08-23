@@ -14,6 +14,7 @@ use crate::{EventId, autonomy::Confidence};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ShowGrowthHistory {
+    pub canonical_link_setup_requested: bool,
     pub free_listing_sweep_requested: bool,
     pub audience_capture_setup_requested: bool,
     pub partner_cross_promo_requested: bool,
@@ -109,6 +110,9 @@ impl Default for ShowGrowthPolicy {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShowGrowthLever {
+    /// Give the show a tracked link before anything is shared, so every share
+    /// after it can be counted.
+    CanonicalLinkSetup,
     FreeListingSweep,
     AudienceCaptureSetup,
     PartnerCrossPromo,
@@ -129,6 +133,7 @@ impl ShowGrowthLever {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CanonicalLinkSetup => "canonical_link_setup",
             Self::FreeListingSweep => "free_listing_sweep",
             Self::AudienceCaptureSetup => "audience_capture_setup",
             Self::PartnerCrossPromo => "partner_cross_promo",
@@ -146,6 +151,7 @@ impl ShowGrowthLever {
     #[must_use]
     pub const fn template_key(self) -> &'static str {
         match self {
+            Self::CanonicalLinkSetup => "show.growth.canonical_link.v1",
             Self::FreeListingSweep => "show.growth.free_listings.v1",
             Self::AudienceCaptureSetup => "show.growth.audience_capture.v1",
             Self::PartnerCrossPromo => "show.growth.partner_cross_promo.v1",
@@ -236,6 +242,15 @@ pub fn evaluate_show_growth(
     let days = until.whole_days();
     if days > i64::from(policy.lookahead_days) {
         return ShowGrowthDecision::Hold(ShowGrowthHoldReason::TooEarly);
+    }
+
+    // Before anything is shared anywhere, the show needs a link that can be
+    // counted. Every lever below hands out a URL, and a URL nobody tracks turns
+    // all of that work into an unmeasurable guess. It costs nothing, touches
+    // nobody outside the workspace, and it is the cheapest thing in the whole
+    // sequence — so it goes first and has no lead time of its own.
+    if !snapshot.history.canonical_link_setup_requested {
+        return request(ShowGrowthLever::CanonicalLinkSetup, 9_800);
     }
 
     // Distribution hygiene first: be present where local people actually look.
@@ -411,7 +426,12 @@ mod tests {
             qualified_referrers_in_city: 4,
             beacon_partners: 0,
             attendees: 0,
-            history: ShowGrowthHistory::default(),
+            history: ShowGrowthHistory {
+                // Every test below describes a show already mid-campaign; the
+                // tracked link is set up once, before anything is shared.
+                canonical_link_setup_requested: true,
+                ..ShowGrowthHistory::default()
+            },
         }
     }
 
@@ -483,6 +503,7 @@ mod tests {
     fn slow_sales_trigger_social_proof_then_high_intent() {
         let mut data = snapshot(8);
         data.history = ShowGrowthHistory {
+            canonical_link_setup_requested: true,
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
@@ -514,6 +535,7 @@ mod tests {
     fn ticket_buyers_get_a_merch_offer() {
         let mut data = snapshot(12);
         data.history = ShowGrowthHistory {
+            canonical_link_setup_requested: true,
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
@@ -550,6 +572,7 @@ mod tests {
     fn free_provider_fan_push_is_due_after_social_proof_wave() {
         let mut data = snapshot(17);
         data.history = ShowGrowthHistory {
+            canonical_link_setup_requested: true,
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
@@ -595,6 +618,46 @@ mod tests {
             decision,
             ShowGrowthDecision::Request {
                 lever: ShowGrowthLever::PostShowMerchFollowUp,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_show_gets_a_tracked_link_before_anything_is_shared() {
+        // Every lever below hands somebody a URL. A URL nobody tracks turns all
+        // of that work into an unmeasurable guess, so this runs first and has
+        // no lead time of its own.
+        let mut data = snapshot(50);
+        data.history.canonical_link_setup_requested = false;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::CanonicalLinkSetup,
+                ..
+            }
+        ));
+
+        // Even a show still outside every lead time gets its link now, because
+        // the link is what makes the rest measurable when it does start.
+        let mut early = snapshot(59);
+        early.history.canonical_link_setup_requested = false;
+        assert!(matches!(
+            evaluate_show_growth(early, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::CanonicalLinkSetup,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_link_is_set_up_once_and_then_gets_out_of_the_way() {
+        let decision = evaluate_show_growth(snapshot(50), ShowGrowthPolicy::default(), now());
+        assert!(matches!(
+            decision,
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::FreeListingSweep,
                 ..
             }
         ));
