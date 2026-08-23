@@ -890,31 +890,84 @@ any of these numbers mean anything.
 
 ---
 
-## Phase 8 — negotiation
+## Phase 8 — negotiation and booking selectivity
 
-Only after Phase 7. The agent may propose and counter; what it may *accept*
-without a human is deliberately narrow.
+Only after Phase 7, because every rule below needs a computed floor. Three
+sub-phases, in this order: knowing how full the year already is, knowing which
+shows matter beyond money, and only then talking terms.
 
-- **Terms ladder** per opportunity, derived from tour economics: a walk-away
-  floor (`cost + minimum_margin`), a target (the fee that makes the show clearly
-  worth it), and an opening ask above the target.
+### 8a — the year is fuller than the calendar says
+
+`committed_shows_year` counts published events. It does not count the eight
+conversations already in progress, so the agent currently believes a year with
+ten promising negotiations is empty and keeps finding more. The operator's rule
+is the opposite: with ten promising already, find the five best remaining, not
+another thirty.
+
+- `pipeline_shows_year`: opportunities in flight for the same calendar year —
+  `viryaos_team_opportunities` in `submitted` or `replied`, plus booking targets
+  whose newest `viryaos_booking_interactions` disposition is `positive` or
+  `booked`. Prepared-but-unsent does **not** count; nothing has been said to
+  anybody yet.
+- The budget gate reads `committed + pipeline` against `annual_target` and
+  `annual_stretch`, not `committed` alone.
+- **Scarcity raises the bar rather than closing the door.** Past the annual
+  target, the minimum score to even prepare climbs with each slot consumed:
+  `effective_minimum = minimum_score + scarcity_step × (committed + pipeline −
+  annual_target)`. Ten in the pipeline against a target of fifteen means only
+  genuinely strong offers get through, which is precisely "find us the five most
+  valuable".
+- Counting an unconfirmed pipeline at full weight is deliberate, and it is
+  self-correcting: when a negotiation dies the opportunity leaves `submitted`
+  or `replied`, the pipeline count drops, and the bar comes back down on the
+  next cycle. No decay curve, no guesswork about probability.
+
+### 8b — some shows are worth more than their fee
+
+A Mystic or Pol'and'Rock slot is worth playing at break-even, and the current
+score cannot express that: economics is 10 of 100 points and prestige is 0.
+
+- `strategic_value_basis_points` on the opportunity, `0..=10_000`, set by the
+  operator or carried in by discovery. Read as three bands for the operator's
+  benefit: **Landmark** at 8 500 and above, **Notable** at 6 000, Standard below.
+- Score weights rebalanced to make room: fit 30, strategic 25, reputation 15,
+  confidence 15, economics 15. Money still counts and counts for more than it
+  did; prestige simply counts for more than money at the top of the range.
+- **Bounded loss tolerance.** `max_strategic_negative_margin_minor` applies only
+  at or above the Landmark floor: a festival slot may run a stated loss, a club
+  date on a Tuesday may not. Bounded, never open-ended, and the refusals that
+  hold regardless: contract required, exclusivity, past the annual stretch, or a
+  cost that could not be computed at all.
+- **A Landmark opportunity is never dropped by a budget rule.** It is exempt
+  from the scarcity ramp, and at or beyond the annual stretch it is escalated to
+  a human rather than silently held. A full year is a reason to ask, not a
+  reason for the agent to throw away the best offer of it.
+- Where the value comes from: the operator sets it, or discovery matches the
+  organiser against a workspace-level list of landmark promoters and festivals.
+  A name match is a *suggestion* that an operator confirms, never an automatic
+  grant of prestige — "Festival" in a title means nothing.
+
+### 8c — terms
+
+- **Terms ladder** from Phase 7: the walk-away floor is
+  `cost + minimum_margin + application_fee`, the target is the fee that makes
+  the show clearly worth it, and the opening ask sits above the target. For a
+  Landmark show the floor drops by the strategic loss tolerance and nothing
+  else changes.
 - **State machine** on the opportunity: `proposed → countered → accepted |
   declined | expired`, every transition durable and idempotent, executed through
   the existing outbox.
-- **What the agent may never do without a human**, at any autonomy level:
-  accept below the floor, accept anything requiring a contract or exclusivity,
-  accept when the date is not free, accept beyond `annual_stretch`, or accept a
-  stretch show below `stretch_minimum_score_basis_points`. These are refusals in
-  the domain, not settings.
-- At the current safest posture, every counter and acceptance is
-  `third_party` and therefore approval-gated: the agent computes the floor,
-  drafts the counter, and parks it. **This is already useful** — the arithmetic
-  and the draft are the slow parts.
-- When the operator later widens the `third_party` ceiling, the agent may
-  counter inside a pre-approved band and accept only at or above target. The
-  ceiling row is the only thing that changes.
-
----
+- **Never, at any autonomy level:** accept below the floor, accept a contract or
+  exclusivity, accept when the date is not free, accept past `annual_stretch`,
+  accept a stretch show below `stretch_minimum_score_basis_points`, or accept a
+  show whose cost is `Insufficient`. These are refusals in the domain, not
+  settings an operator can loosen by accident.
+- At the current posture every counter and acceptance is `third_party` and
+  therefore approval-gated. The agent computes the floor, drafts the counter and
+  parks it — and that is already most of the value, because the arithmetic and
+  the drafting are the slow parts.
+- Widening later changes one ceiling row: the agent may then counter inside a
+  pre-approved band and accept only at or above target.
 
 ## Phase 9 — target discovery
 
@@ -1229,6 +1282,63 @@ In `crowdrelay-control-plane` (operator plane, never tenant-critical):
   success, and recording it as ignored would teach the ranker the wrong thing.
 - Read-only over CrowdRelay's API contract otherwise. The control plane must not
   become a second source of truth, and no business policy moves into it.
+
+---
+
+## Implementation order and state, at a glance
+
+Kept here so a session that starts cold knows what is real, what is planned and
+what depends on what. Phases 1 to 7 are code; 8 onward is plan.
+
+| Phase | What it is | State |
+|---|---|---|
+| 1 | Metric series, trend and anomaly detector | DONE |
+| 2 | First-party metric sources | DONE |
+| 3 | Growth-debt detector | DONE, one kind blocked |
+| 4 | Ranked cross-context queue | DONE |
+| 5 | Autonomy envelope: class ceiling, budgets, kill switch, dry run | DONE |
+| 6 | Objectives | plan |
+| 7 | Tour economics | DONE |
+| 8 | Booking selectivity and negotiation | plan |
+| 9 | Target discovery | plan |
+| 10 | Free-reach pitcher | plan |
+| 11 | Spotify and Bandsintown feeds | plan |
+| 12 | Playlist pitcher | plan |
+| 13 | Plays | plan |
+| 14 | Measurement and honest attribution | plan |
+| 15 | Learning | plan |
+| 16 | Operator brief | plan |
+| 17 | Audit | plan |
+| 18 | Control plane: find, then "do it" | plan |
+
+Hard dependencies, the ones that make a phase pointless if taken out of order:
+
+- **7 before 8.** Negotiating without a computed floor is guessing with the
+  band's money.
+- **9 before 10 and 12.** A pitcher with no targets is a loop over zero rows.
+- **11 before 13's Spotify and Bandsintown plays.** Pushing on a number the
+  agent cannot see is indistinguishable from doing nothing.
+- **5 before anything acts.** Already true; do not undo it.
+- **14 before 15.** Learning from unverified outcomes trains the ranker on
+  somebody else's marketing.
+
+Everything else can move. 6 is small and unblocks ranking by objective; 16 is
+worth pulling forward the moment the agent does anything unattended, because an
+operator who cannot see what it did will switch it off.
+
+### Still open, needing the operator rather than the code
+
+- **Tour config is seeded with declared figures** — 200 zł per 100 km round trip
+  for two cars, 8 l/100 km at 8 zł as the fallback, six crew, 300 zł overhead,
+  500 zł minimum margin, 180 zł a room, 60 zł per diem. Backline volume, cargo
+  capacity and the 350 km overnight threshold are still guesses and should be
+  confirmed. There is **no admin endpoint for this yet** — Phase 8 should add
+  `PUT /v1/admin/autopilot/tour-economics` rather than expecting SQL.
+- **`StaleContactData` growth-debt kind stays blocked** — the schema has no
+  verification timestamp, and `updated_at` is not one. Phase 3's open question.
+- **Nothing has run against a real Postgres.** Migrations 0074 to 0077 exist
+  only on this branch, and no Docker daemon was available. Run them before
+  trusting a single number the agent reports.
 
 ---
 
