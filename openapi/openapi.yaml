@@ -7754,7 +7754,7 @@ components:
     PendingAutopilotAction:
       type: object
       additionalProperties: false
-      required: [id, context, action_kind, subject_kind, subject_id, payload, created_at]
+      required: [id, context, action_kind, subject_kind, subject_id, payload, created_at, executor_ready]
       properties:
         id: { type: string, format: uuid }
         context: { $ref: '#/components/schemas/AutopilotContext' }
@@ -7769,6 +7769,14 @@ components:
           - $ref: '#/components/schemas/TeamAssigneeSummary'
           - type: 'null'
         assignment_due_at: { type: [string, 'null'], format: date-time }
+        # The capability this action needs, or null when CrowdRelay carries it
+        # out itself.
+        required_capability: { type: [string, 'null'], maxLength: 64 }
+        # False means approving this queues it and nothing happens: no live
+        # executor advertises the capability, so the worker parks it as
+        # `awaiting_executor`. A client that presents such an item as ordinary
+        # work is promising an outcome the system cannot deliver.
+        executor_ready: { type: boolean }
     RecentAutopilotDecision:
       type: object
       additionalProperties: false

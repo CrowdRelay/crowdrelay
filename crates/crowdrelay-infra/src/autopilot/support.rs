@@ -58,14 +58,34 @@ fn policy_summary(row: PolicyRow) -> Result<AutopilotPolicySummary, RepositoryEr
     })
 }
 
-fn pending_action(row: PendingActionRow) -> Result<PendingAutopilotAction, RepositoryError> {
+/// Maps one queued row, given the capabilities a live executor advertises now.
+///
+/// The readiness flag is computed here rather than in SQL because the capability
+/// an action needs is a property of its payload variant, and that mapping is
+/// already the authority used by the claim path. Restating it in SQL would let
+/// the queue and the worker disagree about what is runnable, which is the exact
+/// confusion this flag exists to remove.
+fn pending_action(
+    row: PendingActionRow,
+    live_capabilities: &[String],
+) -> Result<PendingAutopilotAction, RepositoryError> {
+    let payload: AutopilotActionPayload =
+        serde_json::from_value(row.payload).map_err(|_| RepositoryError::Unexpected)?;
+    let required_capability = executor_capability_for_payload(&payload);
+    let executor_ready = required_capability.is_none_or(|capability| {
+        live_capabilities
+            .iter()
+            .any(|advertised| advertised == capability)
+    });
     Ok(PendingAutopilotAction {
+        required_capability: required_capability.map(ToOwned::to_owned),
+        executor_ready,
         id: AutopilotActionId::from_uuid(row.id),
         context: parse_context(&row.context)?,
         action_kind: row.action_kind,
         subject_kind: row.subject_kind,
         subject_id: row.subject_id,
-        payload: serde_json::from_value(row.payload).map_err(|_| RepositoryError::Unexpected)?,
+        payload,
         created_at: row.created_at,
         approval_expires_at: row.approval_expires_at,
         assignee: match (

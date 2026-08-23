@@ -1,0 +1,91 @@
+{
+  "name": "VIRYA Autopilot \u2014 viryaos.ops.operator_brief (daily brief delivery)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// A brief is not a condition that opens and recovers, so it carries no\n// alert_key and no state. Branch on the event type before anything else: this\n// workflow shares a destination with viryaos.ops.status_changed, not a shape.\nconst e = $json;\nif (!e || e.type !== 'viryaos.ops.operator_brief' || e.version !== 1) return [];\nconst d = e.data ?? {};\nif (!d.headline || !d.summary) throw new Error('Invalid operator brief');\nconst s = d.snapshot ?? {};\n\n// CrowdRelay decided there was something worth saying and sends at most one a\n// day. Never suppress, batch or re-send: a delivery path that applies its own\n// quiet hours reproduces the silence the brief exists to break.\nconst HEADLINES = {\n  approval_stale: {icon: '\\u23F0', label: 'A decision has been waiting too long'},\n  disabled_with_work_waiting: {icon: '\\u26A0\\uFE0F', label: 'The agent is not running while work waits'},\n  work_parked: {icon: '\\u{1F6A7}', label: 'Work is parked with no executor for it'},\n  awaiting_approval: {icon: '\\u{1F464}', label: 'Decisions need you'},\n  failing: {icon: '\\u274C', label: 'Actions failed'},\n  blind: {icon: '\\u{1F441}\\uFE0F', label: 'The agent cannot see some platforms'},\n  worked: {icon: '\\u2705', label: 'The agent worked'}\n};\nconst h = HEADLINES[d.headline] ?? {icon: '\\u2139\\uFE0F', label: d.headline};\n\n// Facts only. The brief reports; the read models and the operator decide.\nconst lines = [\n  `${h.icon} *VIRYA \\u2014 ${h.label}*`,\n  '',\n  d.summary,\n  '',\n  `Executed (24h): ${s.actions_executed_24h ?? 0}`,\n  `Failed (24h): ${s.actions_failed_24h ?? 0}`,\n  `Awaiting approval: ${s.actions_awaiting_approval ?? 0}`,\n  `Parked (no executor): ${s.actions_parked ?? 0}`,\n  `Platforms not visible: ${s.blind_platforms ?? 0}`,\n  `Agent: ${s.agent_enabled ? 'enabled' : 'disabled'}${s.dry_run ? ', dry run' : ''}`,\n  '',\n  $env.VIRYA_STAFF_TODAY_URL ? `Queue: ${$env.VIRYA_STAFF_TODAY_URL}` : ''\n].filter(Boolean);\n\nreturn [{ json: {\n  event_id: e.id,\n  headline: d.headline,\n  observed_at: d.observed_at,\n  subject: `VIRYA daily brief \\u2014 ${h.label}`,\n  text: lines.join('\\n')\n}}];"
+      },
+      "id": "format",
+      "name": "Validate and format the brief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VIRYA_OPS_ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({text: $json.text}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "deliver",
+      "name": "Deliver to the operator channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        120,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate and format the brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and format the brief": {
+      "main": [
+        [
+          {
+            "node": "Deliver to the operator channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveExecutionProgress": false
+  },
+  "tags": []
+}
