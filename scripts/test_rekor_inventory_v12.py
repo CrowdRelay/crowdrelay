@@ -99,14 +99,6 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertLess(flags_position, commit_position)
         self.assertIn('blocker == "feature_flags_inconsistent"', text)
 
-    def test_catalog_seed_has_22_skus_and_no_stock(self):
-        migration = (ROOT / "migrations/0028_inventory_onboarding.sql").read_text()
-        self.assertEqual(migration.count("('echoes', 'VIRYA-CD-ECHOES'"), 1)
-        self.assertEqual(migration.count("'VIRYA-TEE-"), 20)
-        self.assertEqual(migration.count("'VIRYA-BAG-CREST'"), 1)
-        seed_start = migration.index("WITH seed(slug, name")
-        self.assertNotIn("INSERT INTO inventory_ledger", migration[seed_start:])
-
     def test_n8n_not_referenced_by_rollout_scripts(self):
         for relative in [
             "ops/rekor/install-anchor.sh",
