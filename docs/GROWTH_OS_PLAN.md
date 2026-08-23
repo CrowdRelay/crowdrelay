@@ -1048,11 +1048,88 @@ can be automated.
 - **Never pay for placement and never route through a service that sells it.**
   Paid or reciprocal placement is fabricated engagement wearing a suit; it also
   gets the artist flagged.
-- Measured honestly: pitch sent, reply, placement confirmed, and *then* series
-  movement. A follower rise after a wave is correlational and is reported as
-  correlational.
 
----
+### The conversation does not end at "sent"
+
+A pitcher that only counts sends is a spam cannon with a dashboard. Every pitch
+carries through to an outcome, and the outcomes are the existing
+`OutreachReplyDisposition` values plus the ones a playlist needs:
+
+`sent → replied | bounced | silent` and then
+`placed | declined | ghosted | withdrawn`.
+
+- **Silent is not declined.** A curator who never answered is followed up
+  according to `OutreachPolicy` and then goes quiet, not onto a blacklist.
+- **Ghosted** — replied positively, never placed — is tracked separately from
+  declined, because it predicts differently next release.
+- **Withdrawn** — placed and then removed inside the verification window — is
+  the single strongest scam signal there is.
+
+### Placement is verified, never taken on the curator's word
+
+This is the anti-scam core, and it is cheap because the data is public.
+
+- On a claimed placement, confirm the track is actually in that playlist through
+  the Spotify Web API. A claim without a confirmation is recorded as `ghosted`,
+  never as a placement.
+- Re-check at +7 and +30 days. Playlists that add a track for a screenshot and
+  remove it days later are a known pattern; `withdrawn` catches exactly that.
+- A curator with a `withdrawn` outcome is suppressed permanently and their other
+  playlists are re-screened, because the behaviour belongs to the operator, not
+  to the playlist.
+- **A placement that cannot be verified never counts toward a result.** The
+  measured record has to be the thing that actually happened, or the learning in
+  Phase 15 is trained on somebody else's marketing.
+
+### Screening, stated concretely
+
+Screened before a candidate is ever pitched, refusal recorded with its reason so
+the same one is not rediscovered weekly:
+
+- follower count wildly out of line with saves and with track count — the
+  signature of a bought audience
+- payment, credits or "guaranteed placement" language in the description
+- a demand for a follow, a stream or a reciprocal add in exchange
+- thousands of tracks with near-total churn, where nothing stays
+- one operator behind many playlists that all show the same pattern
+- a submission route that leads to a paid platform we already classify as `paid`
+
+### Suppression is permanent where it should be
+
+- Hard bounce: the address is wrong. Target deactivated, not retried.
+- "Do not contact": permanent, never expires, survives re-discovery — a
+  re-imported candidate matching a suppressed identity stays suppressed.
+- Declined: `declined_cooldown_days` from `OutreachPolicy`, then eligible again
+  for a *different* release. Never the same track twice.
+- Identity is matched across playlists, so a curator who declined once is not
+  pitched again the same week through a second playlist they own.
+
+### Sending like somebody who wants replies
+
+Deliverability is not a detail; a burned sending domain ends the whole channel.
+
+- Volume ramps rather than starting at the weekly cap, and the Phase 5b budget
+  is the ceiling, not the target.
+- Bounces and complaints are ingested and acted on. A rising bounce rate stops
+  the wave rather than being reported after it.
+- Every pitch identifies the sender, says where the contact came from, and
+  carries a working opt-out. Under GDPR, contacting a business address the
+  curator published for submissions is defensible; hiding who is asking is not.
+- No misleading subject lines, no fake threading, no "re:" on a first contact.
+
+### What counts as a result
+
+Reported separately, never added together:
+
+- **First-party and attributable**: pitches sent, replies, verified placements,
+  smart-link clicks.
+- **Correlational**: follower, save and monthly-listener movement after a wave.
+  Reported as correlational with the window stated, because a playlist add and a
+  release week and a show announcement all land in the same fortnight.
+
+The honest summary an operator gets is "eleven pitches, three replies, one
+verified placement, followers up 240 in the following fortnight — the last
+number is not attributed to the first three."
 
 ## Phase 13 — plays
 
