@@ -1737,7 +1737,7 @@ Decide before the first post, not after.
 
 ## Resume checklist
 
-1. `git -C /Users/wojciechbator/dev/crowdrelay status --short --branch`
+1. `git status --short --branch`
 2. Read this file's phase markers; the first phase not marked DONE is next.
 3. `make check` before starting, so a pre-existing failure is not mistaken for
    a new one.
