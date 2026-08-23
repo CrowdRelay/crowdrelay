@@ -1494,6 +1494,90 @@ to report a working growth agent that has nobody to grow.
 
 ---
 
+## Reaching a thousand — the acquisition plan
+
+Target: 1 000 real, consented people. Channels: social, YouTube, Google search
+and LinkedIn, the last by announcing the system itself as a piece of work worth
+looking at.
+
+### Two funnels that must never be added together
+
+They look like one number and they are not.
+
+- **Music funnel** — YouTube, Spotify, Bandsintown, socials, the room at a
+  show. Produces people who might come to a gig and buy a shirt.
+- **Tech funnel** — LinkedIn, Google search, developer communities. Produces
+  people interested in how the thing is built. Some will install the app out of
+  curiosity, a few will become collaborators or employers, and **almost none
+  will become metal fans.**
+
+A person acquired from a LinkedIn post about Rust architecture is not a fan, and
+counting them as one makes every downstream metric lie. Every acquisition
+carries its funnel, and the read models report the two separately, always. The
+temptation to merge them will be strongest exactly when one is doing well.
+
+### The arithmetic, before the optimism
+
+Honest ranges rather than a plan that assumes everything lands:
+
+- LinkedIn suppresses outbound links, so click-through to an external URL runs
+  around **1–2%** of impressions.
+- A strong post from a small account reaches roughly **3 000–20 000**
+  impressions; a genuine breakout can do far more, but cannot be planned for.
+- A landing page that is actually interesting converts **5–15%** of arrivals
+  into a consented signup.
+
+Multiply that through: 10 000 impressions is 100–200 clicks is **5–30 signups**.
+
+**One thousand consented people is therefore not one announcement.** It is
+either a sustained series over months, or one breakout plus capture good enough
+to keep the traffic, or several channels compounding. Any plan that promises
+1 000 from a single post is wrong, and building for it would mean building for a
+number that never arrives. Plan for a series and be delighted by a breakout.
+
+### What must exist before the announcement goes out
+
+In order, because each one is wasted without the one before it.
+
+1. **A tracked link per channel, each with its own campaign.** This is not
+   measurement hygiene, it is the *only* mechanism by which source attribution
+   works: `FanSignupInput` carries no source field, so a fan's channel is
+   derived from the campaign behind the smart link they arrived through.
+   Without per-channel links, launch traffic is unattributable and the second
+   post is planned blind. The link machinery shipped; the links do not exist.
+2. **A landing surface that converts.** Lives in `virya`, not here. A technical
+   audience arriving from LinkedIn and a fan arriving from Bandsintown want
+   different pages, and one page will lose both.
+3. **The code has to survive being looked at.** The LinkedIn pitch is "this is a
+   good piece of engineering", and the first thing a technical reader does is
+   open the repository. Comments that read as machine-written undercut that
+   claim in seconds — this is a prerequisite for the announcement, not a
+   cosmetic cleanup, and it is the one item on this list that is genuinely
+   urgent before posting.
+
+### What the agent does, and what it must not
+
+**Does:** creates the per-channel links, records every click, captures every
+signup with its source, attributes referrals, and reports each funnel
+separately and honestly — including saying "insufficient evidence" when a click
+cannot be tied to a signup.
+
+**Does not:** write the posts. A LinkedIn announcement about a system this
+opinionated has to sound like the person who built it, and a generated one will
+read like every other generated one. This is the highest-leverage hour the band
+spends and it is not automatable.
+
+### Sequencing against the 19 already here
+
+The owned-audience machinery stays off until roughly 500 consented fans. Until
+then acquisition is the only thing that matters, and the agent's contribution is
+capture and attribution rather than outreach. The moment the list crosses the
+threshold, everything already built — milestones, post-show follow asks, dormant
+revival, the follow ladder — switches on against an audience worth running it
+on. That is the order: get the people, then be worth their attention.
+
+---
+
 ## Resume checklist
 
 1. `git -C /Users/wojciechbator/dev/crowdrelay status --short --branch`
