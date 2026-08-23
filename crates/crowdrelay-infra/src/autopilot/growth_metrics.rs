@@ -768,6 +768,26 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
+            // Refresh the activity cache before anything reads it. Recomputed
+            // wholesale rather than maintained by triggers across six tables:
+            // it can be stale by one cycle, and it can never be subtly wrong.
+            sqlx::query(
+                r#"
+                UPDATE fans AS fan
+                SET last_activity_at = fan_last_meaningful_action(
+                    fan.workspace_id, fan.id, fan.normalized_email
+                )
+                WHERE fan.workspace_id = $1
+                  AND fan.last_activity_at IS DISTINCT FROM fan_last_meaningful_action(
+                      fan.workspace_id, fan.id, fan.normalized_email
+                  )
+                "#,
+            )
+            .bind(workspace)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
             // Per-city activation, from the same definition as everything else.
             // A second copy of "active" here would drift from the KPI and
             // nobody would notice, because both numbers would look plausible.

@@ -129,6 +129,11 @@ pub(super) async fn schedule_effect_measurement(
             // ticket or merch movement to an analysis step, which is exactly
             // the kind of invented causality this system must not produce.
         }
+        AutopilotActionPayload::IssueReferralCode { .. } => {
+            // Nothing to measure. The code either exists or it does not, and
+            // whether anybody uses it is measured as a qualified referral
+            // against the fan, not against the act of minting it.
+        }
         AutopilotActionPayload::RaiseGrowthDebt { .. } => {
             // Same reasoning as the raised growth opportunity above, one step
             // further: debt is measured by the work getting done, and the
@@ -323,6 +328,7 @@ pub(super) async fn record_execution_outcome(
             f64::from(*deviation_basis_points),
             None,
         ),
+        AutopilotActionPayload::IssueReferralCode { .. } => ("referral_code_issued", 1.0, None),
         AutopilotActionPayload::RaiseGrowthDebt {
             overdue_basis_points,
             ..

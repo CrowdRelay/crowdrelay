@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-use crate::{BeaconId, EventId, autonomy::Confidence};
+use crate::{BeaconId, CityId, EventId, autonomy::Confidence};
 
 /// Canonical identity used when discovery reconciles a contact with an existing Beacon.
 ///
@@ -265,6 +265,10 @@ pub struct BeaconCampaignPolicy {
     pub minimum_local_beacons: u16,
     /// Do not repeatedly re-scout the same market while external discovery is fresh.
     pub discovery_refresh_days: u32,
+    /// Activated fans a city needs before it is worth scouting for scene nodes
+    /// without a show booked there. Measured in people who did something, not
+    /// signups: a hundred dormant accounts is not a warm city.
+    pub minimum_activated_fans_for_city_scout: u32,
     /// First real pitch. Default ≈ six weeks before the show.
     pub initial_lead_days: u32,
     /// Collaboration/patronage follow-up. Default ≈ four weeks before.
@@ -285,6 +289,10 @@ impl Default for BeaconCampaignPolicy {
             discovery_lead_days: 60,
             minimum_local_beacons: 8,
             discovery_refresh_days: 14,
+            // Ten active people in a city is a scene worth asking about and a
+            // number a band can reach organically. Higher would mean never
+            // scouting until the city no longer needs it.
+            minimum_activated_fans_for_city_scout: 10,
             initial_lead_days: 42,
             collaboration_lead_days: 28,
             local_push_lead_days: 14,
@@ -353,6 +361,67 @@ pub fn evaluate_beacon_discovery(
             .saturating_sub(snapshot.known_local_beacons)
             .max(1),
         confidence: Confidence::saturating_from_basis_points(9_000),
+    }
+}
+
+/// A city worth scouting for scene nodes, as the adapter can see it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CityBeaconSnapshot {
+    pub city_id: CityId,
+    /// Fans in this city who did something meaningful in the last 30 days.
+    /// Real people, not signups — a city full of dormant accounts is not warm.
+    pub activated_fans: u32,
+    pub known_local_beacons: u16,
+    pub last_discovery_at: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CityBeaconDecision {
+    Hold(BeaconDiscoveryHoldReason),
+    Request {
+        target_count: u16,
+        confidence: Confidence,
+    },
+}
+
+/// Decides whether a city is warm enough to go looking for scene nodes in it.
+///
+/// The show-scoped rule above only fires inside the lead time of a booked gig,
+/// which means a band with no shows can never find the people who would help it
+/// get one. This is the other direction and the one a campaign needs: a city
+/// with real active fans and no local scene nodes is worth scouting *before*
+/// anything is booked there.
+///
+/// Warmth is measured in activated fans rather than signups on purpose. A
+/// hundred dormant accounts in Kraków is not a reason to go looking for
+/// promoters there, and treating it as one would send the agent hunting in
+/// cities that only look busy.
+#[must_use]
+pub fn evaluate_city_beacon_discovery(
+    snapshot: CityBeaconSnapshot,
+    policy: BeaconCampaignPolicy,
+    now: OffsetDateTime,
+) -> CityBeaconDecision {
+    if !valid_policy(policy) || policy.minimum_activated_fans_for_city_scout == 0 {
+        return CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::InvalidPolicy);
+    }
+    if snapshot.activated_fans < policy.minimum_activated_fans_for_city_scout {
+        return CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::TooEarly);
+    }
+    if snapshot.known_local_beacons >= policy.minimum_local_beacons {
+        return CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::EnoughKnown);
+    }
+    if snapshot.last_discovery_at.is_some_and(|at| {
+        at > now || now - at < Duration::days(i64::from(policy.discovery_refresh_days))
+    }) {
+        return CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::RecentlyScouted);
+    }
+    CityBeaconDecision::Request {
+        target_count: policy
+            .minimum_local_beacons
+            .saturating_sub(snapshot.known_local_beacons)
+            .max(1),
+        confidence: Confidence::saturating_from_basis_points(8_800),
     }
 }
 
@@ -626,5 +695,112 @@ mod tests {
             )),
         );
         assert_eq!(BeaconContactIdentity::from_normalized(None, None), None);
+    }
+
+    #[test]
+    fn a_warm_city_with_no_scene_nodes_is_scouted_without_a_show() {
+        // The show-scoped rule can never fire for a band with no shows, which
+        // is exactly the band that needs scene nodes most.
+        let decision = evaluate_city_beacon_discovery(
+            CityBeaconSnapshot {
+                city_id: CityId::new(),
+                activated_fans: 25,
+                known_local_beacons: 1,
+                last_discovery_at: None,
+            },
+            BeaconCampaignPolicy::default(),
+            now(),
+        );
+        assert!(matches!(decision, CityBeaconDecision::Request { .. }));
+    }
+
+    #[test]
+    fn a_city_of_dormant_accounts_is_not_warm() {
+        // Signups would say this city is busy. Activated fans say nobody there
+        // has done anything, and sending the agent hunting there wastes the
+        // scouting budget on a number that only looks good.
+        assert_eq!(
+            evaluate_city_beacon_discovery(
+                CityBeaconSnapshot {
+                    city_id: CityId::new(),
+                    activated_fans: 0,
+                    known_local_beacons: 0,
+                    last_discovery_at: None,
+                },
+                BeaconCampaignPolicy::default(),
+                now(),
+            ),
+            CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::TooEarly)
+        );
+    }
+
+    #[test]
+    fn a_city_that_already_has_its_scene_nodes_is_left_alone() {
+        let policy = BeaconCampaignPolicy::default();
+        assert_eq!(
+            evaluate_city_beacon_discovery(
+                CityBeaconSnapshot {
+                    city_id: CityId::new(),
+                    activated_fans: 100,
+                    known_local_beacons: policy.minimum_local_beacons,
+                    last_discovery_at: None,
+                },
+                policy,
+                now(),
+            ),
+            CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::EnoughKnown)
+        );
+    }
+
+    #[test]
+    fn a_recently_scouted_city_is_not_scouted_again() {
+        let policy = BeaconCampaignPolicy::default();
+        assert_eq!(
+            evaluate_city_beacon_discovery(
+                CityBeaconSnapshot {
+                    city_id: CityId::new(),
+                    activated_fans: 100,
+                    known_local_beacons: 0,
+                    last_discovery_at: Some(now() - Duration::days(1)),
+                },
+                policy,
+                now(),
+            ),
+            CityBeaconDecision::Hold(BeaconDiscoveryHoldReason::RecentlyScouted)
+        );
+
+        assert!(matches!(
+            evaluate_city_beacon_discovery(
+                CityBeaconSnapshot {
+                    city_id: CityId::new(),
+                    activated_fans: 100,
+                    known_local_beacons: 0,
+                    last_discovery_at: Some(
+                        now() - Duration::days(i64::from(policy.discovery_refresh_days))
+                    ),
+                },
+                policy,
+                now(),
+            ),
+            CityBeaconDecision::Request { .. }
+        ));
+    }
+
+    #[test]
+    fn the_scout_asks_only_for_the_shortfall() {
+        let policy = BeaconCampaignPolicy::default();
+        let CityBeaconDecision::Request { target_count, .. } = evaluate_city_beacon_discovery(
+            CityBeaconSnapshot {
+                city_id: CityId::new(),
+                activated_fans: 100,
+                known_local_beacons: policy.minimum_local_beacons - 3,
+                last_discovery_at: None,
+            },
+            policy,
+            now(),
+        ) else {
+            panic!("expected a scouting request");
+        };
+        assert_eq!(target_count, 3);
     }
 }

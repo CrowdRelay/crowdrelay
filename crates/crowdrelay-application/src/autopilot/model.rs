@@ -357,6 +357,13 @@ pub enum AutopilotActionPayload {
         priority: u16,
         template_key: String,
     },
+    /// Give a consented fan a referral code.
+    ///
+    /// The only growth mechanism that scales with the audience rather than with
+    /// the band's effort, and it has to exist before anything invites anybody.
+    IssueReferralCode {
+        fan_id: FanId,
+    },
     /// Work that was committed to and then left undone. One action kind covers
     /// every debt kind on purpose: the ranked queue compares them against each
     /// other, and four look-alike action kinds would only make that harder.
@@ -434,6 +441,7 @@ impl AutopilotActionPayload {
             | Self::PrepareFundingPackage { .. }
             | Self::RaiseGrowthOpportunity { .. }
             | Self::RaiseGrowthDebt { .. }
+            | Self::IssueReferralCode { .. }
             | Self::SendTeamAssignmentEmail { .. } => ActionClass::FirstPartyReversible,
 
             // These two carry their own reach inside the payload, so one class
@@ -497,6 +505,7 @@ impl AutopilotActionPayload {
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
             Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
+            Self::IssueReferralCode { .. } => "referral.code.issue",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
         }
     }

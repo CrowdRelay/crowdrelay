@@ -129,12 +129,42 @@ fn lifecycle_candidate(
     let AutopilotPolicyConfig::FanLifecycle(domain_policy) = &policy.config else {
         return Ok(None);
     };
-    let FanLifecycleDecision::RequestMessage {
-        template,
-        confidence,
-    } = evaluate_fan_lifecycle(snapshot, *domain_policy, now)
-    else {
-        return Ok(None);
+    let (template, confidence) = match evaluate_fan_lifecycle(snapshot, *domain_policy, now) {
+        FanLifecycleDecision::RequestMessage {
+            template,
+            confidence,
+        } => (template, confidence),
+        // A code before any message that might carry an invite. Costs nothing,
+        // reaches nobody, and is the precondition for the one growth loop that
+        // compounds without the band doing more work.
+        FanLifecycleDecision::IssueReferralCode { confidence } => {
+            return Ok(Some(DecisionCandidate {
+                context: policy.context,
+                subject: ActionSubject::Fan(snapshot.fan_id),
+                decision_kind: "issue_referral_code",
+                confidence,
+                disposition: disposition(
+                    policy.autonomy_level,
+                    confidence,
+                    policy.minimum_confidence,
+                ),
+                reason: "a consented fan has no referral code, so no invite can be tracked",
+                input_snapshot: serde_json::to_value(snapshot)?,
+                policy_snapshot: policy_evidence(policy, *domain_policy)?,
+                action: AutopilotActionPayload::IssueReferralCode {
+                    fan_id: snapshot.fan_id,
+                },
+                decision_key: format!(
+                    "decision:referral-code:v{}:{}",
+                    policy.version, snapshot.fan_id
+                ),
+                // One code per fan, forever. Not windowed like a message: a
+                // second code would split a fan's referrals across two
+                // identities and make the ledger wrong.
+                action_idempotency_key: format!("action:referral-code:{}", snapshot.fan_id),
+            }));
+        }
+        FanLifecycleDecision::Hold(_) => return Ok(None),
     };
     let template_key = match template {
         LifecycleTemplate::Welcome => "viryaos.fan.welcome.v1",

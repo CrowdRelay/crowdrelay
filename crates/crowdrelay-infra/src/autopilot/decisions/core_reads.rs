@@ -184,7 +184,13 @@ macro_rules! decision_core_reads {
                         FROM referral_attributions AS referral
                         WHERE referral.workspace_id = fan.workspace_id
                           AND referral.referrer_fan_id = fan.id
-                    ) AS last_qualified_referral_at
+                    ) AS last_qualified_referral_at,
+                    EXISTS (
+                        SELECT 1 FROM referral_codes AS code
+                        WHERE code.workspace_id = fan.workspace_id
+                          AND code.fan_id = fan.id
+                          AND code.active
+                    ) AS has_referral_code
                 FROM fans AS fan
                 LEFT JOIN LATERAL (
                     SELECT consent.granted

@@ -140,6 +140,60 @@ class FanActivationContract(unittest.TestCase):
         retire = self.metrics.split("WITH retired AS", 1)[1].split('"#', 1)[0]
         self.assertNotIn("'city'", retire)
 
+    def test_the_activity_cache_is_never_the_source_of_truth(self) -> None:
+        # A denormalized column maintained by triggers across six tables would
+        # be subtly wrong forever. Recomputed wholesale, it can only ever be
+        # stale by one cycle.
+        migration = read(ROOT / "migrations/0080_fan_last_activity_and_city_beacons.sql")
+        self.assertIn("ADD COLUMN last_activity_at timestamptz", migration)
+        self.assertIn("Never the source of truth", migration)
+        refresh = self.metrics.split("UPDATE fans AS fan", 1)[1].split('"#', 1)[0]
+        self.assertIn("fan_last_meaningful_action", refresh)
+        # Only rows that actually changed, so the cycle does not rewrite the
+        # whole table every six hours.
+        self.assertIn("IS DISTINCT FROM", refresh)
+
+    def test_a_warm_city_can_be_scouted_without_a_show(self) -> None:
+        # The show-scoped rule can never fire for a band with no shows, which
+        # is exactly the band that needs scene nodes most.
+        beacons = read(ROOT / "crates/crowdrelay-domain/src/beacons.rs")
+        self.assertIn("pub fn evaluate_city_beacon_discovery", beacons)
+        self.assertIn("a_warm_city_with_no_scene_nodes_is_scouted_without_a_show", beacons)
+
+    def test_city_warmth_is_measured_in_activated_fans_not_signups(self) -> None:
+        # A hundred dormant accounts is not a reason to go hunting for
+        # promoters, and treating it as one wastes the scouting budget.
+        beacons = read(ROOT / "crates/crowdrelay-domain/src/beacons.rs")
+        rule = beacons.split("pub fn evaluate_city_beacon_discovery", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn("snapshot.activated_fans", rule)
+        self.assertNotIn("signups", rule)
+        self.assertIn("a_city_of_dormant_accounts_is_not_warm", beacons)
+
+    def test_a_consented_fan_gets_a_referral_code_before_any_message(self) -> None:
+        # Every message can carry an invite, and an invite with no code behind
+        # it is a dead end.
+        lifecycle = read(ROOT / "crates/crowdrelay-domain/src/audience_lifecycle.rs")
+        self.assertIn("IssueReferralCode", lifecycle)
+        self.assertIn("a_fan_without_a_code_gets_one_before_any_message", lifecycle)
+        self.assertIn("issuing_a_code_outranks_even_a_milestone", lifecycle)
+        # Consent still outranks it: a code for somebody who never agreed to
+        # hear from us implies a relationship that does not exist.
+        self.assertIn("a_fan_without_consent_gets_no_code_either", lifecycle)
+
+    def test_a_fan_can_never_hold_two_referral_codes(self) -> None:
+        # Two codes split one fan's referrals across two identities and make
+        # the ledger wrong.
+        candidates = read(
+            ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/candidates.rs"
+        )
+        self.assertIn('format!("action:referral-code:{}", snapshot.fan_id)', candidates)
+        actions = read(ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs")
+        guard = actions.split("INSERT INTO referral_codes", 1)[1].split('"#', 1)[0]
+        self.assertIn("WHERE NOT EXISTS", guard)
+        self.assertIn("ON CONFLICT DO NOTHING", guard)
+
     def test_the_domain_holds_no_provider_or_sql_concept(self) -> None:
         for forbidden in ("sqlx", "reqwest", "SELECT ", "INSERT "):
             self.assertNotIn(forbidden, self.domain)
