@@ -122,7 +122,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CROWDRELAY_API_URL.replace(/\\/+$/,'') + '/v1/internal/autopilot/outreach/candidates' }}",
+        "url": "={{ ($env.CROWDRELAY_API_URL || 'https://signal-api.virya.music/v1').replace(/\\/$/, '') + '/internal/autopilot/outreach/candidates' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

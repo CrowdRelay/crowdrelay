@@ -1,0 +1,298 @@
+{
+  "name": "CrowdRelay \u2014 VIRYA OS contact import from the pitching sheet",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual",
+      "name": "Run by an operator",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_PITCHING_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "SOURCES",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "sources",
+      "name": "GS \u2014 SOURCES",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -240,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_PITCHING_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "SUBMISSION_LOG",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "logs",
+      "name": "GS \u2014 SUBMISSION_LOG",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the SOURCES tab the pitching engine already maintains into CrowdRelay\n// candidates. It imports what the band worked out by hand; it does not decide\n// who may be contacted \u2014 screening on the CrowdRelay side still does that, and\n// an operator still confirms every route before it becomes a target.\n//\n// Two rules keep this honest:\n//\n//  - `route_is_published` is true only where the row actually records a route.\n//    An import is a route that was *read from a record*, never one worked out\n//    from a name and a domain, so a blank cell is skipped rather than guessed.\n//  - Anyone the submission log says was already pitched is counted and\n//    reported. CrowdRelay must not be handed a contact as though it were fresh\n//    when somebody already used the band's one first approach on them.\n\nfunction clean(v) { return String(v === undefined || v === null ? '' : v).trim(); }\nfunction truth(v) { return ['TRUE','YES','TAK','1'].includes(clean(v).toUpperCase()); }\nfunction isEmail(v) { return /^[^\\s@,;]+@[^\\s@,;]+\\.[^\\s@,;]+$/.test(clean(v).toLowerCase()); }\nfunction rows(node) { try { return $(node).all().map(i => i.json || {}); } catch (e) { return []; } }\n\nconst KIND = {\n  playlist: 'playlist', radio: 'radio', press: 'press', blog: 'press',\n  magazine: 'press', creator: 'creator', youtube: 'creator', podcast: 'creator'\n};\n\n// Everyone the band has already pitched, by contact identity.\nconst contacted = new Set();\nfor (const log of rows('GS \u2014 SUBMISSION_LOG')) {\n  const key = clean(log.Contact_Email || log.Source_ID).toLowerCase();\n  if (key) contacted.add(key);\n}\n\nconst candidates = [];\nconst skipped = { inactive: 0, no_route: 0, already_pitched: 0 };\n\nfor (const row of rows('GS \u2014 SOURCES')) {\n  const sourceId = clean(row.Source_ID);\n  if (!sourceId) continue;\n  if (!truth(row.Active)) { skipped.inactive += 1; continue; }\n\n  const email = clean(row.Contact_Email);\n  const form = clean(row.Submission_URL);\n  let route_kind = null, route_value = null;\n  if (isEmail(email)) { route_kind = 'email'; route_value = email.toLowerCase(); }\n  else if (/^https?:\\/\\//i.test(form)) { route_kind = 'submission_form'; route_value = form; }\n  // No recorded route means no route. Never derive one from the name.\n  if (!route_value) { skipped.no_route += 1; continue; }\n\n  const seen = contacted.has(route_value) || contacted.has(sourceId.toLowerCase());\n  if (seen) skipped.already_pitched += 1;\n\n  const platform = clean(row.Platform).toLowerCase();\n  candidates.push({\n    target_kind: KIND[platform] || 'playlist',\n    display_name: (clean(row.Source_Name) || sourceId).slice(0, 200),\n    source: 'operator_import',\n    source_reference: ('sheet:' + $env.VIRYA_PITCHING_SHEET_ID + '#SOURCES:' + sourceId).slice(0, 2048),\n    // The provenance IS the evidence for an import: which record this route was\n    // read out of, so a human can check it later without guessing.\n    evidence: ('Operator import from the playlist pitching sheet, SOURCES row '\n      + sourceId + '. Platform: ' + (clean(row.Platform) || 'unknown')\n      + '. Recorded action class: ' + (clean(row.Action_Class) || 'unset')\n      + '. Free channel: ' + (truth(row.Free) ? 'yes' : 'no')\n      + (seen ? '. Already pitched at least once by the sheet-driven engine.' : '')).slice(0, 4000),\n    route_kind,\n    route_value: route_value.slice(0, 2048),\n    route_is_published: true,\n    fit_basis_points: Number($env.VIRYA_IMPORT_FIT_BASIS_POINTS || 7000),\n    follower_count: null,\n    engagement_count: null,\n    // A channel that is not free is spend, and CrowdRelay decides that from the\n    // channel, not from us. Placement-selling is a separate claim we cannot\n    // make from a spreadsheet, so it stays false rather than guessed.\n    sells_placement: false,\n    churns_indiscriminately: false\n  });\n}\n\n// Dedupe on contact identity: the same curator listed twice is one candidate.\nconst seenRoute = new Set();\nconst unique = candidates.filter(c => {\n  const key = c.route_kind + ':' + c.route_value.toLowerCase();\n  if (seenRoute.has(key)) return false;\n  seenRoute.add(key); return true;\n});\n\n// Batches of 100, because that is the bound the ingest route enforces.\nconst batches = [];\nfor (let i = 0; i < unique.length; i += 100) batches.push(unique.slice(i, i + 100));\n\nreturn [{ json: {\n  commit: truth($env.VIRYA_IMPORT_COMMIT),\n  total: unique.length,\n  skipped,\n  batches,\n  preview: unique.slice(0, 5).map(c => ({ name: c.display_name, route: c.route_kind }))\n}}];"
+      },
+      "id": "map",
+      "name": "Map sheet rows to candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.commit }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "gate",
+      "name": "Commit or dry run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "batches",
+        "options": {}
+      },
+      "id": "split",
+      "name": "One request per batch",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        480,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.CROWDRELAY_API_URL || 'https://signal-api.virya.music/v1').replace(/\\/$/, '') + '/internal/autopilot/outreach/candidates' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ 'sheet-import:' + $env.VIRYA_PITCHING_SHEET_ID + ':' + $itemIndex }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({candidates: $json.batches}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "post",
+      "name": "Send batch for screening",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dry run by default. An import that writes on its first execution gives\n// nobody a chance to read what it matched, and a wrong mapping is far cheaper\n// to find here than in a queue of contacts nobody recognises.\nconst r = $json;\nconst lines = [\n  '**VIRYA \u2014 import kontaktow z arkusza pitchingu**',\n  '',\n  r.commit ? 'Tryb: ZAPIS do CrowdRelay' : 'Tryb: PROBNY (nic nie zapisano)',\n  'Do zaimportowania: ' + r.total,\n  'Pominiete \u2014 nieaktywne: ' + r.skipped.inactive,\n  'Pominiete \u2014 brak zapisanej sciezki kontaktu: ' + r.skipped.no_route,\n  'Juz pitchowane wczesniej: ' + r.skipped.already_pitched,\n  '',\n  'Przyklady: ' + r.preview.map(p => p.name + ' (' + p.route + ')').join(', ')\n];\nif (!r.commit) lines.push('', 'Ustaw VIRYA_IMPORT_COMMIT=TRUE i uruchom ponownie, aby zapisac.');\nreturn [{ json: { content: lines.join('\\n').slice(0, 1900) } }];"
+      },
+      "id": "report",
+      "name": "Build the import report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VIRYA_OPS_ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({content: $json.content, allowed_mentions: {parse: []}}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "tell",
+      "name": "Report what was matched",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        140
+      ]
+    }
+  ],
+  "connections": {
+    "Run by an operator": {
+      "main": [
+        [
+          {
+            "node": "GS \u2014 SOURCES",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "GS \u2014 SUBMISSION_LOG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GS \u2014 SOURCES": {
+      "main": [
+        [
+          {
+            "node": "Map sheet rows to candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GS \u2014 SUBMISSION_LOG": {
+      "main": [
+        [
+          {
+            "node": "Map sheet rows to candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map sheet rows to candidates": {
+      "main": [
+        [
+          {
+            "node": "Commit or dry run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Commit or dry run?": {
+      "main": [
+        [
+          {
+            "node": "One request per batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build the import report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One request per batch": {
+      "main": [
+        [
+          {
+            "node": "Send batch for screening",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build the import report": {
+      "main": [
+        [
+          {
+            "node": "Report what was matched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "errorWorkflow": "98d5e1a4-2dba-5e5a-9be1-2e5d9220859d",
+    "binaryMode": "separate"
+  },
+  "tags": []
+}
