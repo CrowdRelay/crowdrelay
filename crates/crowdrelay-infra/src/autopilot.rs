@@ -48,6 +48,7 @@ use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
     EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    action_class::ActionClass,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconCampaignSnapshot, BeaconDiscoverySnapshot},

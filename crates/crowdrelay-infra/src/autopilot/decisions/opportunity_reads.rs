@@ -491,6 +491,42 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
+    /// Reads the operator's ceilings.
+    ///
+    /// A row whose class or level this build does not recognise is skipped, so
+    /// the class falls back to its safest ceiling in the caller. Guessing at an
+    /// unreadable authority row in the permissive direction is the one mistake
+    /// this whole mechanism exists to prevent.
+    async fn load_autonomy_ceilings_impl(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                r#"
+                SELECT action_class, ceiling
+                FROM viryaos_growth_autonomy
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            Ok(rows
+                .into_iter()
+                .filter_map(|(class, ceiling)| {
+                    Some((
+                        ActionClass::parse(&class)?,
+                        parse_autonomy_level(&ceiling).ok()?,
+                    ))
+                })
+                .collect())
+        })
+        .await
+    }
+
     async fn load_growth_debt_observations_impl(
         &self,
         workspace_id: WorkspaceId,

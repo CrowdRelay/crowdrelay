@@ -5,6 +5,7 @@ use crowdrelay_domain::{
     ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
     OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
     TicketTypeId,
+    action_class::ActionClass,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
@@ -368,6 +369,84 @@ pub enum AutopilotActionPayload {
 }
 
 impl AutopilotActionPayload {
+    /// What this action costs and how far its effects reach.
+    ///
+    /// Exhaustive on purpose: a new payload variant must not compile until
+    /// somebody has decided whether the agent may take it unattended. A lookup
+    /// table keyed by `action_kind` would silently default a new action to
+    /// whatever the fallback was, which is exactly the mistake this ceiling
+    /// exists to prevent.
+    #[must_use]
+    pub const fn action_class(&self) -> ActionClass {
+        match self {
+            // Money. Ticket and merch prices are here because changing what a
+            // customer pays is not recoverable by changing it back — somebody
+            // already paid the other number.
+            Self::ChangeTicketPrice { .. }
+            | Self::ChangeTicketCapacity { .. }
+            | Self::ChangeMerchPrice { .. }
+            | Self::RequestMerchBundle { .. }
+            | Self::RequestMerchReorder { .. }
+            | Self::RequestPromotionBudgetChange { .. } => ActionClass::Paid,
+
+            // Somebody else's relationship, and the band gets one first
+            // approach to each of them.
+            Self::RequestBookingOutreach { .. }
+            | Self::RequestOutreach { .. }
+            | Self::RequestBeaconOutreach { .. }
+            | Self::ApplyLiveOpportunity { .. }
+            | Self::SubmitFundingApplication { .. } => ActionClass::ThirdParty,
+
+            // Fans who opted in. Free, but a sent message cannot be unsent.
+            Self::RequestFanLifecycleMessage { .. } | Self::RequestAudienceCampaign { .. } => {
+                ActionClass::OwnedAudience
+            }
+
+            // Ours, free and undoable by doing the opposite. The team
+            // assignment email is here deliberately: it reaches our own staff,
+            // not an audience or a stranger, and treating internal task routing
+            // as outward contact would spend the audience budget on ourselves.
+            Self::RequestBeaconDiscovery { .. }
+            | Self::RequestContentArtifact { .. }
+            | Self::AdjustExperiment { .. }
+            | Self::CompleteShowTask { .. }
+            | Self::EscalateShowTask { .. }
+            | Self::PrepareFundingPackage { .. }
+            | Self::RaiseGrowthOpportunity { .. }
+            | Self::RaiseGrowthDebt { .. }
+            | Self::SendTeamAssignmentEmail { .. } => ActionClass::FirstPartyReversible,
+
+            // These two carry their own reach inside the payload, so one class
+            // for the whole variant would be wrong in both directions: it would
+            // either gate a push to our own fans or let a press approach go out
+            // unattended.
+            Self::RequestShowGrowth { lever, .. } => match lever {
+                ShowGrowthLever::PartnerCrossPromo
+                | ShowGrowthLever::GrassrootsSceneRelay
+                | ShowGrowthLever::SocialProofRelay => ActionClass::ThirdParty,
+                ShowGrowthLever::FanAmbassadors
+                | ShowGrowthLever::FreeFanChannelPush
+                | ShowGrowthLever::MerchBuyerOffer
+                | ShowGrowthLever::HighIntentLastMile
+                | ShowGrowthLever::PostShowMerchFollowUp => ActionClass::OwnedAudience,
+                ShowGrowthLever::FreeListingSweep | ShowGrowthLever::AudienceCaptureSetup => {
+                    ActionClass::FirstPartyReversible
+                }
+            },
+            Self::ExecuteReleaseMilestone { milestone, .. } => match milestone {
+                ReleaseMilestone::StartPress => ActionClass::ThirdParty,
+                ReleaseMilestone::Announcement
+                | ReleaseMilestone::FanWarmup
+                | ReleaseMilestone::Countdown
+                | ReleaseMilestone::ReleaseDay
+                | ReleaseMilestone::Sustain => ActionClass::OwnedAudience,
+                ReleaseMilestone::SeedCalendar | ReleaseMilestone::Wrap => {
+                    ActionClass::FirstPartyReversible
+                }
+            },
+        }
+    }
+
     #[must_use]
     pub const fn action_kind(&self) -> &'static str {
         match self {

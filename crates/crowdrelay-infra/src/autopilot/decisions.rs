@@ -213,6 +213,13 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_autonomy_ceilings(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError> {
+        self.load_autonomy_ceilings_impl(workspace_id).await
+    }
+
     async fn persist_candidate(
         &self,
         workspace_id: WorkspaceId,

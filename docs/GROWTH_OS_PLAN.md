@@ -584,12 +584,12 @@ On top of the invariants at the top of this file, which all still hold:
 
 ---
 
-## Phase 5 — autonomy envelope (NEXT)
+## Phase 5 — autonomy envelope (5a DONE, 5b NEXT)
 
 Nothing acts until the envelope exists. This is the phase that makes "the agent
 sent that on its own" a sentence an operator can hear without alarm.
 
-### 5a — action class and the effective-authority ceiling
+### 5a — action class and the effective-authority ceiling (DONE)
 
 - `crates/crowdrelay-domain/src/action_class.rs`: `ActionClass` in
   (`first_party_reversible`, `owned_audience`, `third_party`, `paid`).
@@ -613,7 +613,42 @@ sent that on its own" a sentence an operator can hear without alarm.
   `paid` → `require_approval`. Widening later is a row update plus template
   pre-approval, not a rewrite. That is the whole expansion story.
 
-### 5b — the envelope itself
+**As built.** `action_class.rs` (13 unit tests), migration
+`0075_viryaos_growth_autonomy.sql`, `AutopilotActionPayload::action_class()`,
+`load_autonomy_ceilings` on `AutopilotDecisionRepository`, and the clamp applied
+in `EvaluateAutopilot::persist`. `scripts/test_growth_autonomy_v1.py`,
+12 contract tests. `SCHEMA_VERSION` 74 → 75.
+
+Decisions worth not re-deriving:
+
+- **The clamp lives in `persist`, not in the candidate functions.** Every one of
+  the twenty dispatch arms reaches the database through that one method, so a
+  new detector cannot forget the ceiling and its author cannot choose to skip
+  it. A contract test asserts `clamp_disposition` appears exactly once.
+- **`clamp_disposition` only ever downgrades, and never reopens a denial.** The
+  ceiling answers "how far is the agent allowed to go", not "how far should it
+  go"; a confidence gate that refused is not a permissions question.
+- **A missing or unreadable ceiling row falls back to `safest_ceiling()`**, not
+  to unlimited authority. An unrun migration must never be a grant of authority,
+  and an authority row this build cannot parse is not a reason to guess
+  permissively.
+- **`RequestShowGrowth` and `ExecuteReleaseMilestone` are classified per lever
+  and per milestone**, not per variant. One class for the whole variant would be
+  wrong in both directions: it would gate a push to our own fans, or let
+  `start_press` go out unattended.
+- **Ticket and merch price changes are `paid`.** Changing what a customer pays
+  is not recoverable by changing it back — somebody already paid the other
+  number.
+- **`SendTeamAssignmentEmail` is `first_party_reversible`.** It reaches our own
+  staff; charging internal task routing to the audience budget would let admin
+  traffic silence a fan message.
+- **`Paid` is not `is_outward`.** Spend is capped by money, not by the
+  outward-touch budget — counting an ad buy against the message budget would let
+  it silence a newsletter.
+- Cycle reports now count `actions_gated` separately from `actions_throttled`:
+  throttled work is deferred, gated work is somebody's decision to make.
+
+### 5b — the envelope itself (NEXT)
 
 Per-workspace, operator-editable, with defaults that are deliberately timid:
 
