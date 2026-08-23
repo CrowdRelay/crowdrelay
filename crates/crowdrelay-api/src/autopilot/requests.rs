@@ -37,6 +37,20 @@ pub struct AuthorityRequest {
     expected_version: i64,
 }
 
+/// Whole-envelope write. Every field required: a partial update of a limit set
+/// is how one ceiling gets widened while another is believed tightened.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrowthEnvelopeRequest {
+    pub(super) agent_enabled: bool,
+    pub(super) dry_run: bool,
+    pub(super) weekly_owned_audience_touches: u32,
+    pub(super) weekly_third_party_touches: u32,
+    pub(super) subject_cooldown_hours: u32,
+    pub(super) max_recipients_per_step: u32,
+    pub(super) expected_version: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MerchProductEconomicsRequest {

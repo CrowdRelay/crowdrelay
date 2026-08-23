@@ -616,6 +616,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::manager_booking_policy).post(autopilot::set_manager_booking_policy),
         )
         .route(
+            "/v1/admin/autopilot/growth-envelope",
+            post(autopilot::set_growth_envelope),
+        )
+        .route(
             "/v1/admin/autopilot/policies/{context}",
             post(autopilot::set_authority),
         )
