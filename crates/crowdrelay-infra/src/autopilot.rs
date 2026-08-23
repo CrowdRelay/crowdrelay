@@ -540,4 +540,5 @@ struct ExistingOperatorActionRow {
 include!("autopilot/mapping.rs");
 
 include!("autopilot/execution.rs");
+include!("autopilot/execution_mutations.rs");
 include!("autopilot/support.rs");
