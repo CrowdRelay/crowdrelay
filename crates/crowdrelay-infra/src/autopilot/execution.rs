@@ -587,6 +587,41 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
     }
 }
 
+/// The capability an action will need before it is claimed, so work behind a
+/// gated executor can be parked instead of claimed, attempted and burned.
+///
+/// `None` means the action is executed entirely inside CrowdRelay and no
+/// executor is involved. The strings here are the same ones
+/// `executor_capability_for_event` derives at emission time; a contract test
+/// keeps the two from drifting.
+pub(in crate::autopilot) fn executor_capability_for_payload(
+    payload: &AutopilotActionPayload,
+) -> Option<&'static str> {
+    if !payload_requires_executor(payload) {
+        return None;
+    }
+    Some(match payload {
+        AutopilotActionPayload::RequestFanLifecycleMessage { .. } => "fan.lifecycle.message",
+        AutopilotActionPayload::RequestMerchReorder { .. } => "merch.reorder",
+        AutopilotActionPayload::RequestBookingOutreach { .. } => "booking.outreach",
+        AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
+        AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
+        AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
+        AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
+        AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
+        AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",
+        AutopilotActionPayload::EscalateShowTask { .. } => "show.escalation",
+        AutopilotActionPayload::RequestPromotionBudgetChange { .. } => "promotion.budget",
+        AutopilotActionPayload::ApplyLiveOpportunity { .. } => "opportunity.application",
+        AutopilotActionPayload::PrepareFundingPackage { .. } => "funding.package",
+        AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
+        AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
+        // `payload_requires_executor` is the authority on which variants reach
+        // this point; anything else executes without one.
+        _ => return None,
+    })
+}
+
 fn executor_capability_for_event(event_type: &str) -> &'static str {
     match event_type {
         "viryaos.fan_lifecycle.message_requested" => "fan.lifecycle.message",
@@ -669,6 +704,23 @@ pub(in crate::autopilot) async fn ensure_executor_capability(
 /// a capability an operator has deliberately gated off is a steady state, not a
 /// fault, and treating it as an error makes a healthy system report a failing
 /// cycle every sixty seconds forever.
+/// Whether any executor has registered at all. A workspace with no registry is
+/// one where nothing has ever advertised anything, and gating there would park
+/// every action forever; the same fail-open rule `ensure_executor_capability`
+/// applies.
+pub(in crate::autopilot) async fn executor_registry_is_active(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+) -> Result<bool, RepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1)",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)
+}
+
 pub(in crate::autopilot) async fn executor_capability_available(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,

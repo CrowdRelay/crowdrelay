@@ -85,47 +85,29 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
-            let rows = sqlx::query_as::<_, ClaimedActionRow>(
+            // Candidates are locked before they are claimed, because whether an
+            // action can run at all depends on its payload: a capability nobody
+            // advertises is an operator's decision, and claiming the action
+            // anyway would spend one of its five attempts on a state that no
+            // amount of retrying changes.
+            let candidates = sqlx::query_as::<_, ClaimedActionRow>(
                 r#"
-                WITH candidates AS (
-                    SELECT id
-                    FROM viryaos_autopilot_actions
-                    WHERE workspace_id = $1
-                      AND attempt_count < 5
-                      AND ($4::text IS NULL OR action_kind = $4)
-                      AND ($5::text IS NULL OR action_kind <> $5)
-                      AND (
-                          (status = 'queued' AND available_at <= $2)
-                          OR (
-                              status = 'processing'
-                              AND started_at <= $2 - INTERVAL '15 minutes'
-                          )
+                SELECT id, payload, attempt_count AS attempt_number
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1
+                  AND attempt_count < 5
+                  AND ($4::text IS NULL OR action_kind = $4)
+                  AND ($5::text IS NULL OR action_kind <> $5)
+                  AND (
+                      (status = 'queued' AND available_at <= $2)
+                      OR (
+                          status = 'processing'
+                          AND started_at <= $2 - INTERVAL '15 minutes'
                       )
-                    ORDER BY available_at, id
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT $3
-                ), claimed AS (
-                    UPDATE viryaos_autopilot_actions AS action
-                    SET status = 'processing',
-                        attempt_count = action.attempt_count + 1,
-                        started_at = $2,
-                        last_error_kind = NULL
-                    FROM candidates
-                    WHERE action.workspace_id = $1
-                      AND action.id = candidates.id
-                    RETURNING action.id, action.payload, action.attempt_count
-                ), attempts AS (
-                    INSERT INTO viryaos_autopilot_action_attempts (
-                        workspace_id, action_id, attempt_number, outcome, occurred_at
-                    )
-                    SELECT $1, claimed.id, claimed.attempt_count, 'started', $2
-                    FROM claimed
-                    RETURNING action_id
-                )
-                SELECT claimed.id, claimed.payload, claimed.attempt_count AS attempt_number
-                FROM claimed
-                JOIN attempts ON attempts.action_id = claimed.id
-                ORDER BY claimed.id
+                  )
+                ORDER BY available_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT $3
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -136,6 +118,49 @@ impl PostgresAutopilotRepository {
             .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+
+            let (runnable, parked) =
+                partition_by_executor_capability(&mut transaction, workspace_id, candidates)
+                    .await?;
+            if !parked.is_empty() {
+                park_gated_actions(&mut transaction, workspace_id, &parked, now).await?;
+            }
+
+            let rows = if runnable.is_empty() {
+                Vec::new()
+            } else {
+                sqlx::query_as::<_, ClaimedActionRow>(
+                    r#"
+                    WITH claimed AS (
+                        UPDATE viryaos_autopilot_actions AS action
+                        SET status = 'processing',
+                            attempt_count = action.attempt_count + 1,
+                            started_at = $2,
+                            last_error_kind = NULL
+                        WHERE action.workspace_id = $1
+                          AND action.id = ANY($3)
+                        RETURNING action.id, action.payload, action.attempt_count
+                    ), attempts AS (
+                        INSERT INTO viryaos_autopilot_action_attempts (
+                            workspace_id, action_id, attempt_number, outcome, occurred_at
+                        )
+                        SELECT $1, claimed.id, claimed.attempt_count, 'started', $2
+                        FROM claimed
+                        RETURNING action_id
+                    )
+                    SELECT claimed.id, claimed.payload, claimed.attempt_count AS attempt_number
+                    FROM claimed
+                    JOIN attempts ON attempts.action_id = claimed.id
+                    ORDER BY claimed.id
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(&runnable)
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?
+            };
 
             let mut actions = Vec::with_capacity(rows.len());
             for row in rows {
@@ -154,6 +179,101 @@ impl PostgresAutopilotRepository {
         })
         .await
     }
+}
+
+/// How long a gated action waits before it is looked at again. Long enough that
+/// a permanently gated capability costs one check every few minutes instead of
+/// one per poll, short enough that enabling the gate is felt quickly.
+const GATED_ACTION_PARK: &str = "5 minutes";
+
+/// Splits locked candidates into the ones an advertised executor can carry and
+/// the ones waiting on a capability nobody offers.
+async fn partition_by_executor_capability(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    candidates: Vec<ClaimedActionRow>,
+) -> Result<(Vec<Uuid>, Vec<(Uuid, &'static str)>), RepositoryError> {
+    if candidates.is_empty()
+        || !super::executor_registry_is_active(transaction, workspace_id).await?
+    {
+        return Ok((
+            candidates.into_iter().map(|row| row.id).collect(),
+            Vec::new(),
+        ));
+    }
+
+    let mut availability: Vec<(&'static str, bool)> = Vec::new();
+    let mut runnable = Vec::with_capacity(candidates.len());
+    let mut parked = Vec::new();
+    for row in candidates {
+        let payload = serde_json::from_value::<AutopilotActionPayload>(row.payload)
+            .map_err(|_| RepositoryError::Unexpected)?;
+        let Some(capability) = super::executor_capability_for_payload(&payload) else {
+            runnable.push(row.id);
+            continue;
+        };
+        let available = match availability.iter().find(|(name, _)| *name == capability) {
+            Some((_, available)) => *available,
+            None => {
+                let available =
+                    super::executor_capability_available(transaction, workspace_id, capability)
+                        .await?;
+                availability.push((capability, available));
+                available
+            }
+        };
+        if available {
+            runnable.push(row.id);
+        } else {
+            parked.push((row.id, capability));
+        }
+    }
+    Ok((runnable, parked))
+}
+
+/// Returns gated work to the queue without spending an attempt on it, and says
+/// so once per cycle per capability, because that is a thing an operator can
+/// act on. Retrying an operator's decision is not.
+async fn park_gated_actions(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    parked: &[(Uuid, &'static str)],
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let ids: Vec<Uuid> = parked.iter().map(|(id, _)| *id).collect();
+    sqlx::query(&format!(
+        r#"
+        UPDATE viryaos_autopilot_actions
+        SET status = 'queued',
+            started_at = NULL,
+            available_at = $2 + INTERVAL '{GATED_ACTION_PARK}',
+            last_error_kind = 'awaiting_executor'
+        WHERE workspace_id = $1 AND id = ANY($3)
+        "#
+    ))
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(&ids)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+
+    let mut counted: Vec<(&'static str, usize)> = Vec::new();
+    for (_, capability) in parked {
+        match counted.iter_mut().find(|(name, _)| name == capability) {
+            Some((_, count)) => *count += 1,
+            None => counted.push((capability, 1)),
+        }
+    }
+    for (capability, parked) in counted {
+        tracing::warn!(
+            workspace_id = %workspace_id.into_uuid(),
+            capability,
+            parked,
+            "autopilot actions are parked: no executor advertises this capability"
+        );
+    }
+    Ok(())
 }
 
 #[async_trait]
