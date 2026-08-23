@@ -267,6 +267,9 @@ struct LifecycleSnapshotRow {
     has_paid_ticket: bool,
     last_paid_ticket_at: Option<OffsetDateTime>,
     last_event_interest_at: Option<OffsetDateTime>,
+    paid_ticket_count: i64,
+    qualified_referrals: i64,
+    last_qualified_referral_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, FromRow)]
