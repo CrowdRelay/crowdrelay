@@ -394,6 +394,28 @@ pub struct SetAutopilotAuthority {
     pub expected_version: i64,
 }
 
+/// Operator command for the envelope, including the kill switch.
+///
+/// The envelope had no mutation path at all until the agent was already live:
+/// it was written by its migration and changeable only by hand in psql. The one
+/// control an operator reaches for in a hurry was the one with no button, which
+/// is the wrong shape for a safety mechanism.
+///
+/// Every field is required rather than optional. A partial update of a limit
+/// set is a way to widen one ceiling while believing you tightened another, and
+/// `expected_version` makes two operators editing at once a refusal instead of
+/// a silent last-writer-wins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetGrowthEnvelope {
+    pub agent_enabled: bool,
+    pub dry_run: bool,
+    pub weekly_owned_audience_touches: u32,
+    pub weekly_third_party_touches: u32,
+    pub subject_cooldown_hours: u32,
+    pub max_recipients_per_step: u32,
+    pub expected_version: i64,
+}
+
 /// Result of an audited operator mutation.
 #[derive(Clone, Debug, Serialize)]
 pub struct AutopilotControlMutation {

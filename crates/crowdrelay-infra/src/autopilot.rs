@@ -39,7 +39,7 @@ use crowdrelay_application::{
         RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
         RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
-        SetAutopilotAuthority, SetManagerBookingPolicy, SetTourEconomics, TeamAssigneeSummary,
+        SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics, TeamAssigneeSummary,
         TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
         UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
         UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
