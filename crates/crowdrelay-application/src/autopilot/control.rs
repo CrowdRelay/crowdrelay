@@ -16,6 +16,7 @@ use crowdrelay_domain::{
     market_intelligence::CityMarketSignalKind,
     next_best_action::{AuthorityState, RankFactor},
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    tour_economics::TourEconomicsPolicy,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use time::OffsetDateTime;
@@ -226,6 +227,28 @@ pub struct ChiefOfStaffOpportunity {
     pub confidence: Confidence,
     pub reason: String,
     pub needs_approval: bool,
+}
+
+/// The band's vehicles and rates, as an operator reads and edits them.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct TourEconomicsSummary {
+    pub policy: TourEconomicsPolicy,
+    /// Optimistic-concurrency guard. Two people editing the van in the same
+    /// afternoon should not silently overwrite each other's fuel price.
+    pub version: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SetTourEconomics {
+    pub policy: TourEconomicsPolicy,
+    pub expected_version: i64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct TourEconomicsMutation {
+    pub operation_id: uuid::Uuid,
+    pub version: i64,
+    pub replayed: bool,
 }
 
 /// One entry of the cross-context Next Best Action queue.

@@ -38,10 +38,11 @@ use crowdrelay_application::{
         RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect,
         RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
-        SetAutopilotAuthority, SetManagerBookingPolicy, TeamAssigneeSummary,
-        TicketAllocationGuardrailMutation, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
-        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
+        SetAutopilotAuthority, SetManagerBookingPolicy, SetTourEconomics, TeamAssigneeSummary,
+        TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
+        UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
+        UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
 };
 use crowdrelay_domain::{
@@ -94,6 +95,70 @@ use crate::{
     config::DatabaseConfig,
     database::{SqlxErrorClass, classify_sqlx_error},
 };
+
+/// Rebuilds the policy from the row's own columns.
+///
+/// Reading the row as JSON keeps this one mapping instead of a second `FromRow`
+/// struct that would have to be kept in step with the first; every field is
+/// still named explicitly, so a renamed column fails loudly rather than reading
+/// as a zero.
+fn tour_policy_from_columns(columns: &Value) -> TourEconomicsPolicy {
+    let default = TourEconomicsPolicy::default();
+    let money =
+        |key: &str, fallback: i64| columns.get(key).and_then(Value::as_i64).unwrap_or(fallback);
+    let small = |key: &str, fallback: u8| {
+        columns
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(fallback)
+    };
+    let large = |key: &str, fallback: u32| {
+        columns
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(fallback)
+    };
+    TourEconomicsPolicy {
+        transport_minor_per_100km_round_trip: money(
+            "transport_minor_per_100km_round_trip",
+            default.transport_minor_per_100km_round_trip,
+        ),
+        transport_rate_covers_vehicles: small(
+            "transport_rate_covers_vehicles",
+            default.transport_rate_covers_vehicles,
+        ),
+        vehicle: VehicleProfile {
+            seats: small("vehicle_seats", default.vehicle.seats),
+            cargo_litres: large("vehicle_cargo_litres", default.vehicle.cargo_litres),
+            fuel_centilitres_per_100km: large(
+                "vehicle_fuel_centilitres_per_100km",
+                default.vehicle.fuel_centilitres_per_100km,
+            ),
+        },
+        max_vehicles: small("max_vehicles", default.max_vehicles),
+        crew_size: small("crew_size", default.crew_size),
+        backline_litres: large("backline_litres", default.backline_litres),
+        fuel_price_minor_per_litre: money(
+            "fuel_price_minor_per_litre",
+            default.fuel_price_minor_per_litre,
+        ),
+        toll_minor_per_km: money("toll_minor_per_km", default.toll_minor_per_km),
+        accommodation_minor_per_room_night: money(
+            "accommodation_minor_per_room_night",
+            default.accommodation_minor_per_room_night,
+        ),
+        crew_per_room: small("crew_per_room", default.crew_per_room),
+        per_diem_minor_per_person_day: money(
+            "per_diem_minor_per_person_day",
+            default.per_diem_minor_per_person_day,
+        ),
+        fixed_overhead_minor: money("fixed_overhead_minor", default.fixed_overhead_minor),
+        overnight_threshold_km: large("overnight_threshold_km", default.overnight_threshold_km),
+        minimum_margin_minor: money("minimum_margin_minor", default.minimum_margin_minor),
+    }
+}
 
 const MAX_SNAPSHOTS_PER_CONTEXT: i64 = 500;
 const EXTERNAL_ACTION_EVENT_VERSION: i32 = 1;

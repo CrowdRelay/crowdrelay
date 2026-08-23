@@ -74,6 +74,21 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<NextBestAction>, RepositoryError>;
 
+    /// The band's vehicles and rates. Read before editing so an operator sees
+    /// the version they are about to overwrite.
+    async fn load_tour_economics_config(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<TourEconomicsSummary, RepositoryError>;
+
+    async fn set_tour_economics(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetTourEconomics,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<TourEconomicsMutation, RepositoryError>;
+
     async fn load_manager_booking_policy(
         &self,
         workspace_id: WorkspaceId,

@@ -108,6 +108,33 @@ impl Default for TourEconomicsPolicy {
     }
 }
 
+impl TourEconomicsPolicy {
+    /// Structural validity, checked at the HTTP boundary before anything is
+    /// stored.
+    ///
+    /// Deliberately does **not** require a road model to be configured. An
+    /// unconfigured workspace is a real state, and the honest place to refuse it
+    /// is at estimate time with `Insufficient { TransportRate }` naming the
+    /// field — not by rejecting a save and leaving the operator unable to enter
+    /// their numbers one at a time.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.vehicle.seats >= 1
+            && self.max_vehicles >= 1
+            && self.transport_rate_covers_vehicles >= 1
+            && self.crew_per_room >= 1
+            && self.crew_size <= 100
+            && self.overnight_threshold_km <= 20_000
+            && self.transport_minor_per_100km_round_trip >= 0
+            && self.fuel_price_minor_per_litre >= 0
+            && self.toll_minor_per_km >= 0
+            && self.accommodation_minor_per_room_night >= 0
+            && self.per_diem_minor_per_person_day >= 0
+            && self.fixed_overhead_minor >= 0
+            && self.minimum_margin_minor >= 0
+    }
+}
+
 /// What this particular offer involves.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ShowLogistics {
@@ -958,5 +985,62 @@ mod tests {
         ));
         assert_eq!(cost.nights_away, 0);
         assert_eq!(cost.accommodation_minor, 0);
+    }
+
+    #[test]
+    fn validity_rejects_the_shapes_that_would_divide_by_nothing() {
+        assert!(declared().is_valid());
+        for broken in [
+            TourEconomicsPolicy {
+                max_vehicles: 0,
+                ..declared()
+            },
+            TourEconomicsPolicy {
+                crew_per_room: 0,
+                ..declared()
+            },
+            TourEconomicsPolicy {
+                transport_rate_covers_vehicles: 0,
+                ..declared()
+            },
+            TourEconomicsPolicy {
+                vehicle: VehicleProfile {
+                    seats: 0,
+                    ..declared().vehicle
+                },
+                ..declared()
+            },
+            TourEconomicsPolicy {
+                minimum_margin_minor: -1,
+                ..declared()
+            },
+        ] {
+            assert!(!broken.is_valid());
+        }
+    }
+
+    #[test]
+    fn a_half_configured_workspace_can_still_be_saved() {
+        // An operator enters their numbers one field at a time. Refusing the
+        // save would leave them unable to start; the honest refusal happens at
+        // estimate time instead, naming the field that is missing.
+        let empty = TourEconomicsPolicy {
+            transport_minor_per_100km_round_trip: 0,
+            fuel_price_minor_per_litre: 0,
+            ..declared()
+        };
+        assert!(empty.is_valid());
+        assert_eq!(
+            estimate_show_cost(
+                &ShowLogistics {
+                    distance_km: Some(100),
+                    ..ShowLogistics::default()
+                },
+                &empty
+            ),
+            CostEvidence::Insufficient {
+                missing: MissingInput::TransportRate
+            }
+        );
     }
 }

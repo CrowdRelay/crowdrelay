@@ -12,6 +12,9 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+ROUTING = ROOT / "crates/crowdrelay-api/src/routing.rs"
+OPENAPI = ROOT / "openapi/openapi.yaml"
+CONTROL = ROOT / "crates/crowdrelay-infra/src/autopilot/control.rs"
 MIGRATION = ROOT / "migrations/0077_viryaos_tour_economics.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/tour_economics.rs"
 LIVE = ROOT / "crates/crowdrelay-domain/src/live_opportunities.rs"
@@ -205,6 +208,55 @@ class TourEconomicsContract(unittest.TestCase):
     def test_the_domain_holds_no_provider_or_sql_concept(self) -> None:
         for forbidden in ("sqlx", "http", "reqwest", "SELECT ", "INSERT "):
             self.assertNotIn(forbidden, self.domain)
+
+
+    def test_the_configuration_is_editable_over_the_admin_api(self) -> None:
+        # Without an endpoint the only way to set the band's fuel price is SQL,
+        # and a number nobody can change is a number nobody will fix.
+        self.assertIn('"/v1/admin/autopilot/tour-economics"', read(ROUTING))
+        openapi = read(OPENAPI)
+        block = openapi.split("/admin/autopilot/tour-economics:", 1)[1].split(
+            "  /admin/autopilot/next-best-actions", 1
+        )[0]
+        self.assertIn("adminBearer", block)
+        self.assertIn("IdempotencyKey", block)
+        self.assertIn("'409'", block)
+
+    def test_a_stale_version_is_a_conflict_not_a_silent_overwrite(self) -> None:
+        # Two people editing the van in the same afternoon must not overwrite
+        # each other's fuel price.
+        control = read(CONTROL).split("async fn set_tour_economics", 1)[1].split(
+            "\n    async fn", 1
+        )[0]
+        self.assertIn("WHERE workspace_id=$1 AND version=$18", control)
+        self.assertIn("ok_or(RepositoryError::Conflict)", control)
+        self.assertIn("version=version+1", control)
+
+    def test_saving_the_configuration_is_idempotent(self) -> None:
+        control = read(CONTROL).split("async fn set_tour_economics", 1)[1].split(
+            "\n    async fn", 1
+        )[0]
+        self.assertIn("insert_operator_action", control)
+        self.assertIn("replayed: true", control)
+
+    def test_a_half_configured_policy_can_still_be_saved(self) -> None:
+        # An operator enters figures one at a time; the refusal for a missing
+        # road rate belongs at estimate time, naming the field.
+        code = shipped(self.domain)
+        valid = code.split("pub const fn is_valid", 1)[1].split("\n    }", 1)[0]
+        self.assertNotIn("transport_minor_per_100km_round_trip > 0", valid)
+        self.assertIn("a_half_configured_workspace_can_still_be_saved", self.domain)
+
+    def test_the_shape_that_would_divide_by_nothing_is_rejected(self) -> None:
+        code = shipped(self.domain)
+        valid = code.split("pub const fn is_valid", 1)[1].split("\n    }", 1)[0]
+        for guard in (
+            "self.vehicle.seats >= 1",
+            "self.max_vehicles >= 1",
+            "self.transport_rate_covers_vehicles >= 1",
+            "self.crew_per_room >= 1",
+        ):
+            self.assertIn(guard, valid)
 
 
 if __name__ == "__main__":

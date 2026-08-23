@@ -9,6 +9,18 @@ pub struct ManagerBookingPolicyRequest {
     expected_version: i64,
 }
 
+/// The band's vehicles and rates.
+///
+/// `policy` uses the domain's own `serde(default)` shape, so an operator can
+/// send only the fields they are changing and the rest keep their current
+/// meaning rather than resetting to zero.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TourEconomicsRequest {
+    pub policy: TourEconomicsPolicy,
+    pub expected_version: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssignActionRequest {

@@ -2296,6 +2296,57 @@ paths:
               schema: { $ref: '#/components/schemas/AutopilotChiefOfStaff' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/tour-economics:
+    get:
+      operationId: getAutopilotTourEconomics
+      summary: Read the band's vehicles, rates and margin floor
+      description: >
+        Every booking decision is costed with these numbers, so the response carries the version
+        an update must be made against. A workspace whose row has not been provisioned reads as
+        the conservative default at version 0.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Current tour economics configuration.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TourEconomicsSummary' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    put:
+      operationId: setAutopilotTourEconomics
+      summary: Set the band's vehicles, rates and margin floor
+      description: >
+        Optimistic concurrency on `expected_version`; a stale version is a 409 rather than a
+        silent overwrite. Idempotent per `Idempotency-Key`. A half-configured policy is accepted
+        so an operator can enter figures one at a time — the refusal for a missing road rate or
+        room rate happens when a show is costed, naming the field.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TourEconomicsRequest' }
+      responses:
+        '200':
+          description: Configuration stored, or the replay of an earlier identical request.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TourEconomicsMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/next-best-actions:
     get:
       operationId: getAutopilotNextBestActions
@@ -8081,6 +8132,67 @@ components:
         value_minor_delta: { type: integer, format: int64, minimum: 0 }
         observed_at: { type: string, format: date-time }
 
+    TourEconomicsPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        All money in minor units. The flat road rate replaces the fuel-and-tolls arithmetic when
+        it is above zero. Zero on both is "not configured" and is reported as insufficient
+        evidence when a show is costed, never as a free road.
+      properties:
+        transport_minor_per_100km_round_trip: { type: integer, minimum: 0 }
+        transport_rate_covers_vehicles: { type: integer, minimum: 1, maximum: 20 }
+        vehicle:
+          type: object
+          additionalProperties: false
+          properties:
+            seats: { type: integer, minimum: 1, maximum: 60 }
+            cargo_litres: { type: integer, minimum: 0, maximum: 100000 }
+            fuel_centilitres_per_100km:
+              type: integer
+              minimum: 0
+              maximum: 100000
+              description: Centilitres per 100 km; 800 is 8.0 l/100 km.
+        max_vehicles: { type: integer, minimum: 1, maximum: 20 }
+        crew_size: { type: integer, minimum: 0, maximum: 100 }
+        backline_litres: { type: integer, minimum: 0, maximum: 100000 }
+        fuel_price_minor_per_litre: { type: integer, minimum: 0 }
+        toll_minor_per_km: { type: integer, minimum: 0 }
+        accommodation_minor_per_room_night: { type: integer, minimum: 0 }
+        crew_per_room: { type: integer, minimum: 1, maximum: 20 }
+        per_diem_minor_per_person_day: { type: integer, minimum: 0 }
+        fixed_overhead_minor: { type: integer, minimum: 0 }
+        overnight_threshold_km:
+          type: integer
+          minimum: 0
+          maximum: 20000
+          description: One-way distance at or beyond which the band stays the night.
+        minimum_margin_minor:
+          type: integer
+          minimum: 0
+          description: What a show must clear above cost to be worth playing.
+    TourEconomicsSummary:
+      type: object
+      additionalProperties: false
+      required: [policy, version]
+      properties:
+        policy: { $ref: '#/components/schemas/TourEconomicsPolicy' }
+        version: { type: integer, minimum: 0 }
+    TourEconomicsRequest:
+      type: object
+      additionalProperties: false
+      required: [policy, expected_version]
+      properties:
+        policy: { $ref: '#/components/schemas/TourEconomicsPolicy' }
+        expected_version: { type: integer, minimum: 0 }
+    TourEconomicsMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        replayed: { type: boolean }
     NextBestAction:
       type: object
       additionalProperties: false
