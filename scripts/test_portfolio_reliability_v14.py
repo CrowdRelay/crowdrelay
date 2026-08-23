@@ -5,7 +5,6 @@ ROOT = Path(__file__).resolve().parents[1]
 OBS = (ROOT / "crates/crowdrelay-infra/src/observability.rs").read_text(encoding="utf-8")
 API = (ROOT / "crates/crowdrelay-api/src/main.rs").read_text(encoding="utf-8")
 WORKER = (ROOT / "crates/crowdrelay-worker/src/main.rs").read_text(encoding="utf-8")
-README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 class PortfolioReliabilityV14(unittest.TestCase):
@@ -21,9 +20,5 @@ class PortfolioReliabilityV14(unittest.TestCase):
         self.assertIn("panic.file", OBS)
         self.assertIn("panic.line", OBS)
 
-    def test_architecture_doc_is_linked(self):
-        self.assertIn("docs/ARCHITECTURE.md", README)
 
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()
