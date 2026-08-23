@@ -31,6 +31,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 
 mod acquisition_channels;
 mod chief;
+mod discovery;
 mod execution;
 mod growth_debt;
 mod ingress;

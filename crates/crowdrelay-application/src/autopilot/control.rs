@@ -18,6 +18,7 @@ use crowdrelay_domain::{
     market_intelligence::CityMarketSignalKind,
     next_best_action::{AuthorityState, RankFactor},
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,
 };
 use serde::{Deserialize, Serialize, Serializer};
@@ -396,3 +397,4 @@ include!("control/state_ports.rs");
 include!("control/runtime_ports.rs");
 include!("control/growth_ports.rs");
 include!("control/growth_metric_ports.rs");
+include!("control/target_discovery_ports.rs");

@@ -189,3 +189,36 @@ pub async fn growth_metric_trends(State(state): State<AppState>, headers: Header
 struct GrowthMetricTrendsResponse {
     series: Vec<GrowthMetricTrendView>,
 }
+
+/// What the agent can actually see off-platform.
+///
+/// A missing feed is the most expensive kind of silence: nothing is stale,
+/// nothing is anomalous, and none of that is evidence that anything is fine. It
+/// is reported as a state so an operator sees "Spotify: not connected" instead
+/// of an empty list.
+pub async fn growth_metric_coverage(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_growth_metric_trends(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(series) => {
+            let observed: Vec<(MetricPlatform, bool)> = series
+                .iter()
+                .map(|view| (view.platform, view.stale))
+                .collect();
+            private_json(
+                StatusCode::OK,
+                GrowthMetricCoverageResponse {
+                    platforms: off_platform_coverage(&observed),
+                },
+            )
+        }
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct GrowthMetricCoverageResponse {
+    platforms: Vec<FeedCoverage>,
+}

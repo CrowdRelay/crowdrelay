@@ -582,9 +582,121 @@ pub fn velocity_ratio_basis_points(
     ))
 }
 
+/// The platforms the band's audience actually lives on and CrowdRelay cannot
+/// see by itself. First-party platforms are deliberately absent: ticketing,
+/// Signal and merch are measured from our own rows and cannot go unconnected.
+///
+/// `Social` covers the Meta surfaces, which report through one adapter.
+pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 4] = [
+    MetricPlatform::Spotify,
+    MetricPlatform::YouTube,
+    MetricPlatform::Bandsintown,
+    MetricPlatform::Social,
+];
+
+/// Whether the agent can currently see a platform at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedState {
+    /// No series exists. The agent is blind here, and silence is the worst
+    /// possible report: nothing is stale, nothing is anomalous, nothing is
+    /// happening, and none of that is evidence of anything.
+    Missing,
+    /// Series exist but every one of them has stopped reporting.
+    Stale,
+    /// At least one series is current.
+    Live,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct FeedCoverage {
+    pub platform: MetricPlatform,
+    pub series: u32,
+    pub live_series: u32,
+    pub state: FeedState,
+}
+
+/// Turns the trend read model into an answer to "what can the agent see?".
+///
+/// A growth agent that cannot measure a platform cannot move it and cannot
+/// honestly attribute anything to it, so a missing feed is a reportable state
+/// rather than an absence of rows.
+#[must_use]
+pub fn off_platform_coverage(observed: &[(MetricPlatform, bool)]) -> Vec<FeedCoverage> {
+    OFF_PLATFORM_FEEDS
+        .iter()
+        .map(|platform| {
+            let series = observed
+                .iter()
+                .filter(|(candidate, _)| candidate == platform)
+                .count();
+            let live_series = observed
+                .iter()
+                .filter(|(candidate, stale)| candidate == platform && !stale)
+                .count();
+            let state = if series == 0 {
+                FeedState::Missing
+            } else if live_series == 0 {
+                FeedState::Stale
+            } else {
+                FeedState::Live
+            };
+            FeedCoverage {
+                platform: *platform,
+                series: clamp_u32(series as i64),
+                live_series: clamp_u32(live_series as i64),
+                state,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_platform_with_no_series_reads_as_blind_rather_than_quiet() {
+        let coverage = off_platform_coverage(&[(MetricPlatform::Spotify, false)]);
+        let spotify = coverage
+            .iter()
+            .find(|entry| entry.platform == MetricPlatform::Spotify)
+            .expect("spotify is an off-platform feed");
+        assert_eq!(spotify.state, FeedState::Live);
+        let youtube = coverage
+            .iter()
+            .find(|entry| entry.platform == MetricPlatform::YouTube)
+            .expect("youtube is an off-platform feed");
+        assert_eq!(youtube.state, FeedState::Missing);
+        assert_eq!(youtube.series, 0);
+    }
+
+    #[test]
+    fn a_platform_whose_every_series_stopped_is_stale_not_live() {
+        let coverage = off_platform_coverage(&[
+            (MetricPlatform::Social, true),
+            (MetricPlatform::Social, true),
+        ]);
+        let social = coverage
+            .iter()
+            .find(|entry| entry.platform == MetricPlatform::Social)
+            .expect("social is an off-platform feed");
+        assert_eq!(social.state, FeedState::Stale);
+        assert_eq!(social.series, 2);
+        assert_eq!(social.live_series, 0);
+    }
+
+    #[test]
+    fn first_party_platforms_are_never_reported_as_coverage_gaps() {
+        // Ticketing, Signal and merch are measured from our own rows, so a
+        // "missing" verdict on them would be noise an operator cannot act on.
+        let coverage = off_platform_coverage(&[]);
+        assert!(coverage.iter().all(|entry| !matches!(
+            entry.platform,
+            MetricPlatform::Ticketing | MetricPlatform::Signal | MetricPlatform::Merch
+        )));
+        assert_eq!(coverage.len(), OFF_PLATFORM_FEEDS.len());
+    }
 
     fn series() -> GrowthMetricSeriesId {
         GrowthMetricSeriesId::from_uuid(uuid::Uuid::from_u128(7))
