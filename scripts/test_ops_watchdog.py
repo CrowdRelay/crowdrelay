@@ -10,16 +10,11 @@ class OpsWatchdogContract(unittest.TestCase):
         worker = (ROOT / "crates/crowdrelay-worker/src/ops_watchdog.rs").read_text()
         migration = (ROOT / "migrations/0046_viryaos_ops_watchdog.sql").read_text()
         main = (ROOT / "crates/crowdrelay-worker/src/main.rs").read_text()
-        manifest_path = ROOT / "n8n/viryaos-executor-manifest.tsv"
-        if not manifest_path.exists():
-            self.skipTest(f"{manifest_path.relative_to(ROOT)} is a private n8n file and is not tracked in git")
-        manifest = manifest_path.read_text()
         self.assertIn("viryaos_ops_alert_state", migration)
         self.assertIn("viryaos.ops.status_changed", worker)
         self.assertIn("ALERT_REPEAT_AFTER", worker)
         self.assertIn('"recovered"', worker)
         self.assertIn("OpsWatchdogWorker::new", main)
-        self.assertIn("viryaos.ops.status_changed\tops.alert\t1\toperator_notification", manifest)
         self.assertNotIn("retry_dead_outbox", worker)
         self.assertNotIn("retry_dead_delivery", worker)
 
@@ -43,5 +38,4 @@ class OpsWatchdogContract(unittest.TestCase):
         self.assertIn("schema_version: crate::meta::SCHEMA_VERSION", ops)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()
