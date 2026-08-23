@@ -204,6 +204,20 @@ class OutreachSupplyContract(unittest.TestCase):
         self.assertIn("window_ends_at", loader)
         self.assertIn("lead(action.created_at)", loader)
 
+    def test_the_example_sweep_never_infers_a_contact(self) -> None:
+        # The published workflow is the thing an operator actually imports, so
+        # the rule that keeps the supply clean has to survive in it too.
+        sweep = read(ROOT / "n8n/examples/autopilot-outreach-discovery.example.json")
+        self.assertIn("viryaos.outreach.discovery_requested", sweep)
+        self.assertIn("route_is_published", sweep)
+        self.assertIn("evidence", sweep)
+        self.assertIn("/v1/admin/autopilot/outreach/candidates", sweep)
+        # An empty sweep must still be reported: silence is read as an
+        # unanswered request and keeps the agent asking for ever.
+        self.assertIn("empty sweep", sweep)
+        for secret in ("Bearer sk-", "xoxb-", "hooks.slack.com/services/T"):
+            self.assertNotIn(secret, sweep, "a literal secret leaked into the example")
+
     def test_the_domain_holds_no_provider_or_sql_concept(self) -> None:
         for forbidden in ("sqlx", "reqwest", "SELECT ", "INSERT "):
             self.assertNotIn(

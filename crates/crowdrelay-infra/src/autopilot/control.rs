@@ -78,10 +78,36 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .bind(workspace_id.into_uuid())
             .fetch_all(&self.pool)
             .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(pending_action)
-            .collect::<Result<Vec<_>, _>>()?;
+            .map_err(map_sqlx)?;
+
+            // Read once for the whole queue rather than per row: the answer is
+            // the same for every action, and asking fifty times would make an
+            // exception screen the most expensive query in the cockpit.
+            let live_capabilities = sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT DISTINCT capability_row.capability
+                FROM viryaos_executor_capabilities capability_row
+                JOIN viryaos_executor_instances executor
+                  ON executor.workspace_id=capability_row.workspace_id
+                 AND executor.executor_id=capability_row.executor_id
+                LEFT JOIN viryaos_executor_circuit_breakers breaker
+                  ON breaker.workspace_id=executor.workspace_id
+                 AND breaker.executor_id=executor.executor_id
+                WHERE capability_row.workspace_id=$1
+                  AND capability_row.expires_at>now()
+                  AND executor.expires_at>now()
+                  AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            let needs_you = needs_you
+                .into_iter()
+                .map(|row| pending_action(row, &live_capabilities))
+                .collect::<Result<Vec<_>, _>>()?;
 
             let available_assignees = sqlx::query_as::<_, (Uuid, String, String)>(
                 r#"
@@ -954,7 +980,28 @@ impl PostgresAutopilotRepository {
                 .await
                 .map_err(map_sqlx)?
             };
-            let status = updated.ok_or(RepositoryError::Conflict)?;
+            // The transition matched nothing, and the operator deserves to know
+            // which nothing. Collapsing all three into `Conflict` made a wrong
+            // action id, an already-approved action and an expired approval
+            // read identically in the cockpit, so a stale queue looked like a
+            // broken button.
+            let status = match updated {
+                Some(status) => status,
+                None => {
+                    let existing = sqlx::query_scalar::<_, String>(
+                        "SELECT status FROM viryaos_autopilot_actions
+                         WHERE workspace_id = $1 AND id = $2",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(action_id.into_uuid())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    return Err(existing.map_or(RepositoryError::NotFound, |_| {
+                        RepositoryError::Conflict
+                    }));
+                }
+            };
             if target_status == "queued" {
                 sqlx::query(
                     r#"

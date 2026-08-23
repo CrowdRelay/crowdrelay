@@ -154,6 +154,19 @@ class OperatorBriefContract(unittest.TestCase):
     def test_the_executor_contract_documents_the_new_event(self) -> None:
         self.assertIn(EVENT_TYPE, read(CONTRACT))
 
+    def test_the_example_workflow_branches_on_the_event_type(self) -> None:
+        # It shares a destination with viryaos.ops.status_changed, not a shape:
+        # a brief carries no alert_key and no state.
+        workflow = read(ROOT / "n8n/examples/autopilot-operator-brief.example.json")
+        self.assertIn(EVENT_TYPE, workflow)
+        self.assertIn("headline", workflow)
+        # It must not *read* an alert_key; the comment explaining why it has
+        # none is allowed to name it.
+        self.assertNotIn("d.alert_key", workflow)
+        self.assertNotIn("data.alert_key", workflow)
+        for secret in ("Bearer sk-", "xoxb-", "hooks.slack.com/services/T"):
+            self.assertNotIn(secret, workflow, "a literal secret leaked into the example")
+
     def test_the_domain_holds_no_provider_or_sql_concept(self) -> None:
         for forbidden in ("sqlx", "reqwest", "SELECT ", "INSERT "):
             self.assertNotIn(

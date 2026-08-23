@@ -119,6 +119,16 @@ pub struct PendingAutopilotAction {
     pub assignee: Option<TeamAssigneeSummary>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub assignment_due_at: Option<OffsetDateTime>,
+    /// The executor capability this action needs, where it needs one at all.
+    /// `None` means CrowdRelay carries it out itself.
+    pub required_capability: Option<String>,
+    /// Whether a live executor currently advertises that capability.
+    ///
+    /// False means approving this action queues it and nothing happens: the
+    /// worker parks it as `awaiting_executor` until somebody advertises the
+    /// capability. An operator who approves it has not passed it on, and a
+    /// queue that cannot say so is asking for work it will silently discard.
+    pub executor_ready: bool,
 }
 
 /// Compact immutable decision trail shown in the operator cockpit.
