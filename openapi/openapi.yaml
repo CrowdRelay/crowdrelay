@@ -2296,6 +2296,28 @@ paths:
               schema: { $ref: '#/components/schemas/AutopilotChiefOfStaff' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/acquisition-channels:
+    get:
+      operationId: getAutopilotAcquisitionChannels
+      summary: Which acquisition channels produced people who stayed
+      description: >
+        Signups and 30-day-active fans per channel, never merged, because a channel that produced
+        two hundred signups and four active people is a bad channel wearing a good number. People
+        whose channel cannot be established are reported separately by reason, with the fix for
+        each — a signup with no click is unattributed, never "direct".
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Channel performance with the unattributable part in view.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcquisitionChannels' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/tour-economics:
     get:
       operationId: getAutopilotTourEconomics
@@ -8132,6 +8154,76 @@ components:
         value_minor_delta: { type: integer, format: int64, minimum: 0 }
         observed_at: { type: string, format: date-time }
 
+    ChannelIdentity:
+      type: object
+      additionalProperties: false
+      required: [source]
+      properties:
+        source: { type: string, maxLength: 64 }
+        community: { type: string, maxLength: 120, nullable: true }
+        creative: { type: string, maxLength: 120, nullable: true }
+    ChannelAttribution:
+      type: object
+      additionalProperties: false
+      required: [evidence]
+      description: >
+        Either an attributed channel or an honest statement that the chain is broken. There is no
+        "direct" bucket: bucketing unknowns as direct makes the channel you cannot see look like
+        one that works.
+      properties:
+        evidence: { type: string, enum: [attributed, unattributed] }
+        source: { type: string, maxLength: 64 }
+        community: { type: string, maxLength: 120, nullable: true }
+        creative: { type: string, maxLength: 120, nullable: true }
+        reason:
+          type: string
+          enum: [no_visitor, no_click_before_signup, link_not_labelled]
+    ChannelPerformance:
+      type: object
+      additionalProperties: false
+      required: [attribution, signups, activated_30d]
+      properties:
+        attribution: { $ref: '#/components/schemas/ChannelAttribution' }
+        signups: { type: integer, minimum: 0 }
+        activated_30d:
+          type: integer
+          minimum: 0
+          description: Signed up, consented, and did something meaningful in the last 30 days.
+        activation_basis_points:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Null when there are no signups to divide by; a rate from an empty denominator is not a zero.
+        best_action:
+          type: string
+          nullable: true
+          enum: [ticket_purchase, merch_purchase, qualified_referral, event_interest, synesthesia_run, signal_session]
+    UnattributedGroup:
+      type: object
+      additionalProperties: false
+      required: [reason, remedy, signups, activated_30d]
+      properties:
+        reason:
+          type: string
+          enum: [no_visitor, no_click_before_signup, link_not_labelled]
+        remedy: { type: string, maxLength: 240 }
+        signups: { type: integer, minimum: 0 }
+        activated_30d: { type: integer, minimum: 0 }
+    AcquisitionChannels:
+      type: object
+      additionalProperties: false
+      required: [channels, total_signups, total_activated_30d, unattributed]
+      properties:
+        channels:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/ChannelPerformance' }
+        total_signups: { type: integer, minimum: 0 }
+        total_activated_30d: { type: integer, minimum: 0 }
+        unattributed:
+          type: array
+          maxItems: 3
+          items: { $ref: '#/components/schemas/UnattributedGroup' }
     TourEconomicsPolicy:
       type: object
       additionalProperties: false

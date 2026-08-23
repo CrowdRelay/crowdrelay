@@ -74,6 +74,16 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<NextBestAction>, RepositoryError>;
 
+    /// Which channels produced people who stayed.
+    ///
+    /// The question a zero-budget campaign lives on, and the one the system
+    /// could not answer at all before channel identity existed on links.
+    async fn load_acquisition_channels(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<AcquisitionChannels, RepositoryError>;
+
     /// The band's vehicles and rates. Read before editing so an operator sees
     /// the version they are about to overwrite.
     async fn load_tour_economics_config(

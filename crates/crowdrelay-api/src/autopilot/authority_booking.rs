@@ -314,3 +314,19 @@ pub async fn set_tour_economics(
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }
+
+/// Which channels produced people who stayed.
+///
+/// Signups and activated fans side by side, and the unattributable part kept in
+/// view rather than dropped — a report that hides its unknowns is how a large
+/// attribution gap goes unnoticed for a month.
+pub async fn acquisition_channels(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_acquisition_channels(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(channels) => private_json(StatusCode::OK, channels),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}

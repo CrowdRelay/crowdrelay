@@ -18,29 +18,30 @@ use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_application::{
     RepositoryError,
     autopilot::{
-        AutopilotActionPayload, AutopilotActionRepository, AutopilotBookingStateRepository,
-        AutopilotContext, AutopilotControlMutation, AutopilotControlOverview,
-        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotFirstPartyGrowthMetrics,
-        AutopilotGrowthMetricRepository, AutopilotGrowthOverview, AutopilotManualStep,
-        AutopilotMarketStateRepository, AutopilotMeasurementKind, AutopilotMeasurementRepository,
-        AutopilotMerchStateRepository, AutopilotPolicy, AutopilotPolicyConfig,
-        AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotTicketStateRepository,
-        BookingTargetMutation, CandidatePersistence, CityMarketSignalMutation, ClaimExecution,
-        ClaimedAutopilotAction, ClaimedAutopilotMeasurement, DecisionCandidate,
-        ExecutionClaimMutation, ExecutionReportMutation, ExecutorHeartbeatMutation,
-        ExecutorReportStatus, FirstPartyGrowthMetricReport, GROWTH_STALL_AFTER_MINUTES,
-        GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress, GrowthDeliveryTotals,
-        GrowthMetricPointMutation, GrowthMetricSeriesMutation, GrowthMetricSubject,
-        GrowthMetricTrendView, GrowthOutreachSummary, ManagerBookingPolicySummary,
-        ManagerConfigMutation, MerchProductEconomicsMutation, NextBestAction,
-        PLAYLIST_TEMPLATE_KEY, PendingAutopilotAction, PromotionBudgetGuardrailMutation,
-        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
-        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect,
-        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
+        AcquisitionChannels, AutopilotActionPayload, AutopilotActionRepository,
+        AutopilotBookingStateRepository, AutopilotContext, AutopilotControlMutation,
+        AutopilotControlOverview, AutopilotControlRepository, AutopilotDecisionRepository,
+        AutopilotFirstPartyGrowthMetrics, AutopilotGrowthMetricRepository, AutopilotGrowthOverview,
+        AutopilotManualStep, AutopilotMarketStateRepository, AutopilotMeasurementKind,
+        AutopilotMeasurementRepository, AutopilotMerchStateRepository, AutopilotPolicy,
+        AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
+        AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
+        ChannelPerformance, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
+        ClaimedAutopilotMeasurement, DecisionCandidate, ExecutionClaimMutation,
+        ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
+        FirstPartyGrowthMetricReport, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
+        GrowthCampaignProgress, GrowthDeliveryTotals, GrowthMetricPointMutation,
+        GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
+        GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
+        MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
+        PendingAutopilotAction, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
+        RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
+        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
         SetAutopilotAuthority, SetManagerBookingPolicy, SetTourEconomics, TeamAssigneeSummary,
         TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
+        UnattributedGroup, UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
         UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
         UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
@@ -49,6 +50,9 @@ use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
     EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    acquisition_channel::{
+        AttributionEvidence, ChannelAttribution, ChannelIdentity, attribute_channel,
+    },
     action_class::ActionClass,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
@@ -194,6 +198,17 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(|_| RepositoryError::Unavailable)?
     }
+}
+
+#[derive(Debug, FromRow)]
+struct ChannelPerformanceRow {
+    had_visitor: bool,
+    had_click: bool,
+    channel_source: Option<String>,
+    channel_community: Option<String>,
+    channel_creative: Option<String>,
+    signups: i64,
+    activated_30d: i64,
 }
 
 #[derive(Debug, FromRow)]
