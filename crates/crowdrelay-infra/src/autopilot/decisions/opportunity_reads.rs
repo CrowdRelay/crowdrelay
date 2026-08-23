@@ -527,6 +527,121 @@ macro_rules! decision_opportunity_reads {
         .await
     }
 
+    /// The envelope and what has already been spent against it.
+    ///
+    /// Spend is counted from the durable action rows rather than a separate
+    /// ledger, and only from rows the agent itself created — `action_class` is
+    /// NULL for everything that predates the envelope, and work done before the
+    /// agent existed was not the agent's to be charged for.
+    async fn load_growth_envelope_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError> {
+        self.bounded(async {
+            let envelope = sqlx::query_as::<_, GrowthEnvelopeRow>(
+                r#"
+                SELECT agent_enabled, dry_run, weekly_owned_audience_touches,
+                       weekly_third_party_touches, subject_cooldown_hours,
+                       max_recipients_per_step
+                FROM viryaos_growth_envelope
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            // A missing row is the timid default, which has the agent switched
+            // off. An absent envelope must never read as an absent limit.
+            let envelope = envelope.map_or_else(GrowthEnvelope::default, |row| GrowthEnvelope {
+                agent_enabled: row.agent_enabled,
+                dry_run: row.dry_run,
+                weekly_owned_audience_touches: bounded_u32(i64::from(
+                    row.weekly_owned_audience_touches,
+                ))
+                .unwrap_or(0),
+                weekly_third_party_touches: bounded_u32(i64::from(row.weekly_third_party_touches))
+                    .unwrap_or(0),
+                subject_cooldown_hours: bounded_u32(i64::from(row.subject_cooldown_hours))
+                    .unwrap_or(0),
+                max_recipients_per_step: bounded_u32(i64::from(row.max_recipients_per_step))
+                    .unwrap_or(1),
+            });
+
+            // Cancelled actions are excluded: an approval that was refused is
+            // not a touch anybody received. Everything else counts, including
+            // failures, because a send that errored may still have gone out.
+            let spend = sqlx::query_as::<_, (String, i64)>(
+                r#"
+                SELECT action_class, count(*)::bigint
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1
+                  AND action_class IN ('owned_audience', 'third_party')
+                  AND status <> 'cancelled'
+                  AND created_at >= $2 - INTERVAL '7 days'
+                GROUP BY action_class
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            let mut usage = EnvelopeUsage::default();
+            for (class, count) in spend {
+                let count = bounded_u32(count).unwrap_or(u32::MAX);
+                match ActionClass::parse(&class) {
+                    Some(ActionClass::OwnedAudience) => usage.owned_audience_touches_7d = count,
+                    Some(ActionClass::ThirdParty) => usage.third_party_touches_7d = count,
+                    _ => {}
+                }
+            }
+            Ok((envelope, usage))
+        })
+        .await
+    }
+
+    async fn load_outward_touch_ages_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(Uuid, u32)>, RepositoryError> {
+        self.bounded(async {
+            // Bounded by the longest cooldown the schema allows (a year), so a
+            // workspace with years of history does not scan all of it.
+            let rows = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+                r#"
+                SELECT subject_id, max(created_at)
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1
+                  AND action_class IN ('owned_audience', 'third_party')
+                  AND status <> 'cancelled'
+                  AND created_at >= $2 - INTERVAL '365 days'
+                GROUP BY subject_id
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            Ok(rows
+                .into_iter()
+                .map(|(subject_id, touched_at)| {
+                    (
+                        subject_id,
+                        u32::try_from((now - touched_at).whole_hours().max(0)).unwrap_or(u32::MAX),
+                    )
+                })
+                .collect())
+        })
+        .await
+    }
+
     async fn load_growth_debt_observations_impl(
         &self,
         workspace_id: WorkspaceId,

@@ -61,6 +61,7 @@ use crowdrelay_domain::{
     experimentation::{ExperimentPolicy, ExperimentSnapshot},
     funding::{FundingOpportunitySnapshot, FundingPolicy},
     growth_debt::{GrowthDebtObservation, GrowthDebtPolicy},
+    growth_envelope::{EnvelopeUsage, GrowthEnvelope},
     growth_metrics::{
         GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
         MetricValueTier, compute_trend, velocity_ratio_basis_points,
@@ -127,6 +128,16 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(|_| RepositoryError::Unavailable)?
     }
+}
+
+#[derive(Debug, FromRow)]
+struct GrowthEnvelopeRow {
+    agent_enabled: bool,
+    dry_run: bool,
+    weekly_owned_audience_touches: i32,
+    weekly_third_party_touches: i32,
+    subject_cooldown_hours: i32,
+    max_recipients_per_step: i32,
 }
 
 #[derive(Debug, FromRow)]
