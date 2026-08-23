@@ -9,7 +9,12 @@
 
 use std::time::Duration;
 
-use crowdrelay_application::autopilot::AutopilotDecisionRepository;
+use crowdrelay_application::{
+    IdempotencyKey,
+    autopilot::{
+        AutopilotDecisionRepository, AutopilotTargetDiscoveryRepository, OutreachSweepReport,
+    },
+};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use sqlx::postgres::PgPoolOptions;
@@ -153,6 +158,74 @@ async fn supply_counts_the_run_of_barren_sweeps_not_the_total()
     assert_eq!(
         stocked.pitchable_targets, 1,
         "do-not-contact and inactive targets are not supply"
+    );
+
+    // What the sweep read, written through the real ingest path rather than
+    // seeded: the point of the column is that the insert and the read agree,
+    // and a hand-written fixture would prove only that the read works.
+    seed_sweep(&pool, workspace_id, now - time::Duration::minutes(2)).await?;
+    repository
+        .ingest_outreach_candidates(
+            workspace_id,
+            Vec::new(),
+            Some(OutreachSweepReport {
+                sources_read: 4,
+                items_seen: 0,
+            }),
+            &IdempotencyKey::parse("supply-e2e-read-nothing")?,
+            None,
+        )
+        .await?;
+    let read_nothing = repository
+        .load_outreach_supply_snapshot(workspace_id, now)
+        .await?;
+    assert_eq!(
+        read_nothing.items_seen_in_last_sweep,
+        Some(0),
+        "an adapter that queried four sources and saw nothing is a broken read \
+         path, and the rule cannot say so unless the zero survives the round trip"
+    );
+
+    // The same empty batch from a sweep that read plenty is a dry source, and
+    // the two must not report the same number.
+    seed_sweep(&pool, workspace_id, now - time::Duration::minutes(1)).await?;
+    repository
+        .ingest_outreach_candidates(
+            workspace_id,
+            Vec::new(),
+            Some(OutreachSweepReport {
+                sources_read: 4,
+                items_seen: 120,
+            }),
+            &IdempotencyKey::parse("supply-e2e-read-plenty")?,
+            None,
+        )
+        .await?;
+    let read_plenty = repository
+        .load_outreach_supply_snapshot(workspace_id, now)
+        .await?;
+    assert_eq!(read_plenty.items_seen_in_last_sweep, Some(120));
+
+    // A sweep still waiting on its adapter reports nothing rather than the
+    // previous sweep's count. A carried-forward number would let one stale
+    // zero condemn an adapter that has not answered yet.
+    //
+    // Dated from a fresh clock read rather than from `now`: the ingestions
+    // above were stamped by the database, which is necessarily later than the
+    // `now` captured at the top of this test, and a sweep older than the report
+    // it is meant to precede would test nothing.
+    seed_sweep(
+        &pool,
+        workspace_id,
+        OffsetDateTime::now_utc() + time::Duration::seconds(1),
+    )
+    .await?;
+    let unreported = repository
+        .load_outreach_supply_snapshot(workspace_id, now)
+        .await?;
+    assert_eq!(
+        unreported.items_seen_in_last_sweep, None,
+        "the count is scoped to the most recent sweep, not to the workspace"
     );
 
     // No teardown: `operator_actions` is append-only, so cascading the

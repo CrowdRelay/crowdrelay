@@ -78,6 +78,29 @@ runtime as stale with `apiHealthy: false`.
 
 n8n binds its own `wg0` WireGuard address on port 5678, so the edge can reach it and
 the LAN and internet cannot. It must not depend on the retired `oracle-bridge`.
+`virya-n8n-home-crowdrelay-bridge-1`, from the same compose file, is a different and
+still-live service that answers `POST /commit`; leave it running.
+
+virya-home no longer hosts any part of the Control Plane. Its containers, volume,
+images, systemd units and `/srv/crowdrelay-control-plane*` files were removed on
+2026-08-23; the final dump of that host's stale `control_plane` database is kept at
+`/srv/crowdrelay-control-plane/backups/home-preremoval-control-plane-20260823T174308Z.sql.gz`
+on production.
+
+## 8. Database backups on production
+
+Two oneshot units, both keeping 14 days:
+
+- `crowdrelay-control-plane-backup.timer` at 03:25 UTC runs
+  `/srv/crowdrelay-control-plane/deploy/backup-control-plane.sh` into that directory's
+  `backups/`.
+- `crowdrelay-db-backup.timer` at 03:05 UTC runs `/srv/crowdrelay-db/backup-crowdrelay.sh`,
+  which `pg_dump`s the authoritative `crowdrelay` database out of the `virya-postgres18`
+  container into `/srv/crowdrelay-db/backups/`.
+
+Postgres 18 writes an `\unrestrict <token>` line *after* the
+`-- PostgreSQL database dump complete` marker, so a dump verification that matches only
+the final line will reject a perfectly good dump. Search the tail instead.
 
 ## Editing bind-mounted files
 

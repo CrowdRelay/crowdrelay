@@ -47,5 +47,9 @@
   "ticket.order.refund_recorded": "a4d01240-d313-5d1c-9f02-33e6c2a558db",
   "viryaos.team.assignment_email_requested": "xKKQ7m0nYxvfGCCM",
   "viryaos.ops.operator_brief": "K35zjjtGjBUkoloM",
-  "viryaos.outreach.discovery_requested": "z94prDnSfhC2xV0k"
+  "viryaos.outreach.discovery_requested": "z94prDnSfhC2xV0k",
+  "viryaos.content.artifact_requested": "VOSTEAMOPS00001",
+  "viryaos.merch.reorder_requested": "VOSTEAMOPS00001",
+  "viryaos.merch.bundle_requested": "VOSTEAMOPS00001",
+  "viryaos.show.task_attention_required": "VOSTEAMOPS00001"
 }

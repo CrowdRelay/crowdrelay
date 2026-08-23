@@ -134,6 +134,18 @@ impl OperatorBriefWorker {
                       SELECT 1 FROM viryaos_growth_metric_series series
                       WHERE series.workspace_id=$1 AND series.platform=expected.platform
                   ))::bigint AS blind_platforms,
+                -- The last sweep's own answer about what it read. Deliberately
+                -- the latest report rather than a barren run: a read path that
+                -- returned nothing on the most recent attempt is broken now,
+                -- and waiting for it to fail three times before saying so is
+                -- three days of a growth loop that cannot find anybody.
+                coalesce((
+                    SELECT report.items_seen = 0
+                    FROM viryaos_outreach_discovery_sweep_reports report
+                    WHERE report.workspace_id=$1
+                    ORDER BY report.created_at DESC, report.id DESC
+                    LIMIT 1
+                ), false) AS last_sweep_read_nothing,
                 (SELECT agent_enabled FROM viryaos_growth_envelope
                   WHERE workspace_id=$1) AS agent_enabled,
                 (SELECT dry_run FROM viryaos_growth_envelope
@@ -154,6 +166,7 @@ impl OperatorBriefWorker {
             oldest_approval_age_hours: row.oldest_approval_hours.map(clamp),
             actions_parked: clamp(row.parked),
             blind_platforms: u16::try_from(row.blind_platforms.max(0)).unwrap_or(u16::MAX),
+            last_sweep_read_nothing: row.last_sweep_read_nothing,
             // A workspace with no envelope row has never been configured, and
             // an unconfigured agent is not a running one.
             agent_enabled: row.agent_enabled.unwrap_or(false),
@@ -247,6 +260,10 @@ fn summary(snapshot: &OperatorBriefSnapshot, headline: BriefHeadline) -> String 
             "{} off-platform feeds have no data, so their metrics cannot be read as unchanged",
             snapshot.blind_platforms
         ),
+        BriefHeadline::DiscoveryReadNothing => {
+            "the last discovery sweep read nothing, so no new outreach targets can be found"
+                .to_owned()
+        }
         BriefHeadline::Worked => format!(
             "{} actions completed in the last 24 hours and nothing needs you",
             snapshot.actions_executed_24h
@@ -266,6 +283,7 @@ struct BriefRow {
     oldest_approval_hours: Option<i64>,
     parked: i64,
     blind_platforms: i64,
+    last_sweep_read_nothing: bool,
     agent_enabled: Option<bool>,
     dry_run: Option<bool>,
     last_brief_at: Option<OffsetDateTime>,
@@ -283,6 +301,7 @@ mod tests {
             oldest_approval_age_hours: Some(70),
             actions_parked: 4,
             blind_platforms: 3,
+            last_sweep_read_nothing: false,
             agent_enabled: false,
             dry_run: true,
             last_brief_at: None,
@@ -300,6 +319,7 @@ mod tests {
             oldest_approval_hours: None,
             parked: 0,
             blind_platforms: 0,
+            last_sweep_read_nothing: false,
             agent_enabled: None,
             dry_run: None,
             last_brief_at: None,

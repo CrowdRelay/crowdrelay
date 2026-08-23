@@ -277,6 +277,16 @@ pub struct OutreachSupplySnapshot {
     /// How many sweeps in a row returned candidates but nothing admissible.
     /// A source that keeps producing refusals is exhausted, not unlucky.
     pub consecutive_barren_sweeps: u16,
+    /// Items the most recent sweep reported reading, before any screening.
+    ///
+    /// `None` means the adapter reported no such count, which is how every
+    /// sweep predating the report looks; the rule then falls back to its
+    /// previous reading rather than inventing a fault.
+    ///
+    /// `Some(0)` is the one that matters: the adapter answered and read
+    /// nothing, so there was never anything to screen. That is a broken read
+    /// path, not a dry source, and the two need different owners.
+    pub items_seen_in_last_sweep: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -324,6 +334,10 @@ pub enum SupplyHold {
     /// Repeated sweeps found nothing admissible. The source needs widening,
     /// which is not something the agent can decide.
     SourceExhausted,
+    /// Repeated sweeps answered having read nothing at all. Nothing was ever
+    /// screened, so the source cannot be called dry: the read path is broken,
+    /// and the fix is a credential or an adapter rather than a wider query.
+    AdapterReadNothing,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -347,7 +361,14 @@ pub fn evaluate_outreach_supply(
     now: OffsetDateTime,
 ) -> OutreachSupplyDecision {
     if snapshot.consecutive_barren_sweeps >= policy.barren_sweep_limit {
-        return OutreachSupplyDecision::Hold(SupplyHold::SourceExhausted);
+        // The back-off is the same either way — the agent stops asking, because
+        // neither a dry source nor a broken adapter is fixed by asking again.
+        // Only the reported cause differs, and it has to, because it decides
+        // whether an operator widens a query or renews a credential.
+        return OutreachSupplyDecision::Hold(match snapshot.items_seen_in_last_sweep {
+            Some(0) => SupplyHold::AdapterReadNothing,
+            _ => SupplyHold::SourceExhausted,
+        });
     }
     if snapshot.pitchable_targets >= policy.minimum_pitchable_targets {
         return OutreachSupplyDecision::Hold(SupplyHold::SupplyIsAdequate);
@@ -574,6 +595,7 @@ mod tests {
             last_sweep_requested_at: None,
             candidates_since_last_sweep: 0,
             consecutive_barren_sweeps: 0,
+            items_seen_in_last_sweep: None,
         }
     }
 
@@ -687,6 +709,78 @@ mod tests {
             )),
             SupplyHold::SourceExhausted
         );
+    }
+
+    #[test]
+    fn a_sweep_that_read_nothing_is_a_broken_adapter_not_a_dry_source() {
+        // The production failure this exists for: the sweep answered, reported
+        // zero candidates and was counted barren three times, and the agent was
+        // about to tell an operator to widen a source that had never returned a
+        // single item to screen.
+        let snapshot = OutreachSupplySnapshot {
+            consecutive_barren_sweeps: 3,
+            items_seen_in_last_sweep: Some(0),
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::AdapterReadNothing
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_read_plenty_and_admitted_none_is_still_a_dry_source() {
+        let snapshot = OutreachSupplySnapshot {
+            consecutive_barren_sweeps: 3,
+            items_seen_in_last_sweep: Some(200),
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::SourceExhausted
+        );
+    }
+
+    #[test]
+    fn an_unreported_read_count_does_not_invent_an_adapter_fault() {
+        // Every sweep from before the report existed looks like this. Silence
+        // about what was read is not evidence that nothing was.
+        let snapshot = OutreachSupplySnapshot {
+            consecutive_barren_sweeps: 3,
+            items_seen_in_last_sweep: None,
+            ..starving()
+        };
+        assert_eq!(
+            hold(evaluate_outreach_supply(
+                &snapshot,
+                OutreachSupplyPolicy::default(),
+                now()
+            )),
+            SupplyHold::SourceExhausted
+        );
+    }
+
+    #[test]
+    fn a_read_count_of_zero_never_stops_a_sweep_that_was_not_yet_barren() {
+        // The count only ever renames an existing hold. Below the barren limit
+        // there is no hold to rename, and a starving pitcher still sweeps.
+        let snapshot = OutreachSupplySnapshot {
+            consecutive_barren_sweeps: 1,
+            items_seen_in_last_sweep: Some(0),
+            ..starving()
+        };
+        assert!(matches!(
+            evaluate_outreach_supply(&snapshot, OutreachSupplyPolicy::default(), now()),
+            OutreachSupplyDecision::Request { .. }
+        ));
     }
 
     #[test]
