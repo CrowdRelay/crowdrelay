@@ -271,6 +271,36 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
         self.assertIn("ON CONFLICT (workspace_id, slug) DO UPDATE", body)
         self.assertIn("active = true", body)
 
+    def test_a_release_is_given_a_tracked_link_too(self) -> None:
+        # Same rule as a show: nothing is shared before there is a link that
+        # can be counted.
+        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
+        self.assertIn("ensure_release_tracked_link", execution)
+        self.assertIn("INSERT INTO smart_links", execution)
+        # Run for every milestone, not only the first: the first can fail on a
+        # missing executor capability and the announcement must not then go out
+        # untracked.
+        milestone = execution.split("async fn execute_release_milestone", 1)[1].split(
+            "\n    use crowdrelay_domain::release_autopilot", 1
+        )[0]
+        self.assertIn("ensure_release_tracked_link(tx", milestone)
+
+    def test_two_releases_can_never_share_one_link(self) -> None:
+        # A release key is free text and the slug is unique per workspace, so
+        # sanitising is lossy in a way that matters: two keys reducing to the
+        # same letters would make the second overwrite the first's destination.
+        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
+        slug = execution.split("fn release_link_slug", 1)[1].split("\n}", 1)[0]
+        self.assertIn("key_digest(source_key)", slug)
+        self.assertIn("bounded == source_key.to_ascii_lowercase()", slug)
+
+    def test_a_release_with_no_listen_url_gets_no_link(self) -> None:
+        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
+        body = execution.split("async fn ensure_release_tracked_link", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn('filter(|url| url.starts_with("http"))', body)
+
     def test_the_room_is_asked_to_follow_after_the_show(self) -> None:
         # Attendance is the strongest signal in the system and the ask is free.
         self.assertIn("PostShowFollowAsk", self.domain)
