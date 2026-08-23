@@ -2397,6 +2397,106 @@ paths:
                 $ref: '#/components/schemas/PlayLedgerResponse'
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/show-economics:
+    get:
+      operationId: getAutopilotShowEconomics
+      summary: Read predicted show cost against settled show cost
+      description: >
+        Returns every show the cost model was asked about, the estimate frozen before it and the
+        settlement reported after it. A show with no settlement carries no verdict rather than a
+        neutral one. A `drifting` verdict names the line that moved the most money and what an
+        operator changes about it; `insufficient` names why the show could not be scored. The
+        implied road rate is evidence for an operator and is never applied automatically.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Shows with their predicted and settled cost.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowEconomicsResponse'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/events/{event_id}/show-cost/prediction:
+    post:
+      operationId: freezeShowCostPrediction
+      summary: Freeze what the cost model says this show will cost
+      description: >
+        Computes the estimate from the tour economics in force and stores it with those rates,
+        once. Called while the show is still ahead: recomputing an estimate at settlement time
+        scores today's model against itself and always passes. A repeat call returns the frozen
+        row unchanged with `replayed: true`. An estimate that could not be computed is stored as
+        an honest refusal naming the missing input.
+      security:
+      - adminBearer: []
+      parameters:
+      - name: event_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShowCostPredictionRequest'
+      responses:
+        '200':
+          description: Prediction frozen, or already frozen.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowCostMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/events/{event_id}/show-cost/settlement:
+    post:
+      operationId: settleShowCost
+      summary: Report what the show actually cost and score the model against it
+      description: >
+        Records the settled lines and derives the verdict in the same transaction. Returns 404 when
+        no prediction was frozen for the show: a model cannot be scored against a show it was never
+        asked about, and a retrospective estimate would be the model marking its own work. A repeat
+        call returns the first settlement with `replayed: true` — the first account of what happened
+        stands.
+      security:
+      - adminBearer: []
+      parameters:
+      - name: event_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShowCostSettlementRequest'
+      responses:
+        '200':
+          description: Settlement recorded, or already recorded.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowCostMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/chief-of-staff:
     get:
       operationId: getAutopilotChiefOfStaff
@@ -7943,6 +8043,86 @@ components:
         baseline_value: { type: number, format: double, minimum: 0 }
         observed_value: { type: number, format: double, minimum: 0 }
         observed_at: { type: string, format: date-time }
+    ShowCostAccuracy:
+      type: string
+      description: >
+        The verdict on the cost model, not on the show. `insufficient` always carries a reason.
+      enum: [calibrated, drifting, insufficient]
+    ShowCostGap:
+      type: string
+      enum: [no_prediction, prediction_incomplete, no_settlement]
+    ShowCostLine:
+      type: string
+      description: >
+        `unmodelled` is real money the model has no line for; when it is the worst line the finding
+        is a missing cost rather than a wrong rate. `fee` compares what arrived against what was
+        offered, which is a deal problem rather than a cost problem.
+      enum: [transport, accommodation, per_diem, overhead, unmodelled, fee]
+    ShowCostPredictionRequest:
+      type: object
+      additionalProperties: false
+      required: [offered_fee_minor]
+      properties:
+        distance_km: { type: [integer, 'null'], minimum: 0, maximum: 20000 }
+        nights_away: { type: [integer, 'null'], minimum: 0, maximum: 255 }
+        offered_fee_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        application_fee_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+    ShowCostSettlementRequest:
+      type: object
+      additionalProperties: false
+      required: [transport_minor, accommodation_minor, per_diem_minor, overhead_minor, fee_received_minor, settled_by]
+      properties:
+        transport_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        accommodation_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        per_diem_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        overhead_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        other_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        fee_received_minor: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        settled_by: { type: string, minLength: 1, maxLength: 120 }
+    ShowCostMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, event_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        accuracy: { $ref: '#/components/schemas/ShowCostAccuracy' }
+        accuracy_reason: { $ref: '#/components/schemas/ShowCostGap' }
+        replayed: { type: boolean }
+    ShowCostLedgerEntry:
+      type: object
+      additionalProperties: false
+      required: [event_id, event_title, starts_at, predicted_at, offered_fee_minor]
+      properties:
+        event_id: { type: string, format: uuid }
+        event_title: { type: string, maxLength: 400 }
+        starts_at: { type: string, format: date-time }
+        predicted_at: { type: string, format: date-time }
+        offered_fee_minor: { type: integer, format: int64 }
+        predicted_total_cost_minor: { type: [integer, 'null'], format: int64 }
+        predicted_net_margin_minor: { type: [integer, 'null'], format: int64 }
+        prediction_missing_input: { type: [string, 'null'], maxLength: 64 }
+        settled_at: { type: [string, 'null'], format: date-time }
+        settled_by: { type: [string, 'null'], maxLength: 120 }
+        settled_total_cost_minor: { type: [integer, 'null'], format: int64 }
+        settled_net_margin_minor: { type: [integer, 'null'], format: int64 }
+        fee_received_minor: { type: [integer, 'null'], format: int64 }
+        accuracy: { $ref: '#/components/schemas/ShowCostAccuracy' }
+        accuracy_reason: { $ref: '#/components/schemas/ShowCostGap' }
+        total_variance_basis_points: { type: [integer, 'null'] }
+        worst_line: { $ref: '#/components/schemas/ShowCostLine' }
+        worst_line_delta_minor: { type: [integer, 'null'], format: int64 }
+        worst_line_remedy: { type: [string, 'null'], maxLength: 400 }
+        implied_transport_rate_minor_per_100km: { type: [integer, 'null'], format: int64 }
+    ShowEconomicsResponse:
+      type: object
+      additionalProperties: false
+      required: [shows]
+      properties:
+        shows:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/ShowCostLedgerEntry' }
     PlayClaimStrength:
       type: string
       description: >

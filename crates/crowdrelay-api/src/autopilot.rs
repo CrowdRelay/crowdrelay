@@ -18,13 +18,14 @@ use crowdrelay_application::{
         AutopilotExperimentStateRepository, AutopilotGrowthMetricRepository,
         AutopilotMarketStateRepository, AutopilotMerchStateRepository,
         AutopilotOutreachStateRepository, AutopilotPlayLedgerRepository,
-        AutopilotTargetDiscoveryRepository, AutopilotTeamStateRepository,
-        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
-        ExperimentObservation, GrowthMetricSubject, GrowthMetricTrendView, IngestOutreachCandidate,
-        ManagerConfigSource, OutreachSweepReport, PlayLedgerEntry, RecordBeaconReply,
-        RecordBookingReply, RecordGrowthMetricPoint, RecordOutreachReply,
-        RecordTeamOpportunityProgress, SetAutopilotAuthority, SetGrowthEnvelope,
-        SetManagerBookingPolicy, SetTourEconomics, TeamOpportunityKind, TeamOpportunityProgress,
+        AutopilotShowCostRepository, AutopilotTargetDiscoveryRepository,
+        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
+        CreateExperimentVariant, ExperimentObservation, FreezeShowCostPrediction,
+        GrowthMetricSubject, GrowthMetricTrendView, IngestOutreachCandidate, ManagerConfigSource,
+        OutreachSweepReport, PlayLedgerEntry, RecordBeaconReply, RecordBookingReply,
+        RecordGrowthMetricPoint, RecordOutreachReply, RecordTeamOpportunityProgress,
+        SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
+        SettleShowCost, ShowCostLedgerEntry, TeamOpportunityKind, TeamOpportunityProgress,
         UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource,
         UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
         UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
@@ -47,6 +48,7 @@ use crowdrelay_domain::{
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    show_settlement::SettledShowCost,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,
 };
@@ -146,5 +148,6 @@ include!("autopilot/promotion_market.rs");
 include!("autopilot/outreach_release.rs");
 include!("autopilot/experiments_actions.rs");
 include!("autopilot/growth_metrics.rs");
+include!("autopilot/show_cost.rs");
 include!("autopilot/target_discovery.rs");
 include!("autopilot/validation.rs");

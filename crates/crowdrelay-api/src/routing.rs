@@ -819,6 +819,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route("/v1/admin/autopilot/plays", get(autopilot::play_ledger))
         .route(
+            "/v1/admin/autopilot/show-economics",
+            get(autopilot::show_economics),
+        )
+        .route(
+            "/v1/admin/events/{event_id}/show-cost/prediction",
+            post(autopilot::freeze_show_cost_prediction),
+        )
+        .route(
+            "/v1/admin/events/{event_id}/show-cost/settlement",
+            post(autopilot::settle_show_cost),
+        )
+        .route(
             "/v1/admin/autopilot/actions/{action_id}/assign",
             post(autopilot::assign_action),
         )

@@ -21,6 +21,7 @@ use crowdrelay_domain::{
     performance::EffectAssessment,
     play_measurement::PlayClaim,
     plays::PlayKind,
+    show_settlement::SettledShowCost,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,
 };
@@ -434,3 +435,4 @@ include!("control/growth_ports.rs");
 include!("control/growth_metric_ports.rs");
 include!("control/target_discovery_ports.rs");
 include!("control/play_ports.rs");
+include!("control/show_cost_ports.rs");

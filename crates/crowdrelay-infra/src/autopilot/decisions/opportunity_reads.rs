@@ -343,7 +343,7 @@ macro_rules! decision_opportunity_reads {
     ///
     /// A missing row is the timid default, whose fuel price is zero and which
     /// therefore reports every trip as uncosted rather than as free to drive.
-    async fn load_tour_economics(
+    pub(in crate::autopilot) async fn load_tour_economics(
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<TourEconomicsPolicy, RepositoryError> {

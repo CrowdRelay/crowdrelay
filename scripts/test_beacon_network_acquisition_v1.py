@@ -108,7 +108,13 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
         self.assertIn('"operation": "xlsx"', discovery_text)
         self.assertIn("MarketingConsent", discovery_text)
         self.assertIn("NOT CONFIRMED", discovery_text)
-        self.assertIn("human", README.lower())
+        # The public README no longer enumerates the review step by name. What
+        # it still has to say is the boundary that makes the step necessary:
+        # n8n executes, and chooses nothing.
+        self.assertIn(
+            "does not own business state, recipient selection, policy, authority",
+            README.lower(),
+        )
         invite_text = json.dumps(invite)
         self.assertIn("claim", invite_text)
         self.assertIn('"retryOnFail": false', invite_text)
