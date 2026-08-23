@@ -61,7 +61,7 @@ build-images:
 	docker buildx bake --load
 
 build-arm64:
-	API_IMAGE=crowdrelay-worker:arm64 WORKER_IMAGE=crowdrelay-worker:arm64 \
+	API_IMAGE=crowdrelay-api:arm64 WORKER_IMAGE=crowdrelay-worker:arm64 \
 		docker buildx bake --set '*.platform=linux/arm64' --load
 
 up: env
