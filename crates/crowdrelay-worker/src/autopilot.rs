@@ -5,11 +5,13 @@ use std::time::Duration;
 use crowdrelay_application::{
     RepositoryError,
     autopilot::{
-        AutopilotActionRepository, AutopilotFirstPartyGrowthMetrics,
-        AutopilotMeasurementRepository, EvaluateAutopilot, assess_measurement_effect,
+        AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository,
+        AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementRepository,
+        AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, EvaluateAutopilot,
+        assess_measurement_effect, assess_play_claim,
     },
 };
-use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
 use crowdrelay_infra::autopilot::PostgresAutopilotRepository;
 use time::OffsetDateTime;
 use tokio::{
@@ -19,6 +21,10 @@ use tokio::{
 
 const ACTION_BATCH_SIZE: u32 = 32;
 const MEASUREMENT_BATCH_SIZE: u32 = 16;
+/// Play outcomes settle once per play, weeks after the campaign ran. A small
+/// batch is right: there is never a backlog unless something has been broken
+/// for a month, and in that case draining it slowly is the safer failure.
+const PLAY_OUTCOME_BATCH_SIZE: u32 = 8;
 
 #[derive(Clone, Debug)]
 pub struct AutopilotWorker {
@@ -232,11 +238,94 @@ impl AutopilotWorker {
             }
         }
 
+        // Play outcomes settle last, and settle even when the plays context is
+        // switched off. Measuring what already happened is not acting on it,
+        // and a campaign that ran before the operator paused the agent still
+        // deserves an honest answer about what it did.
+        let measurement_policy = self.play_measurement_policy().await;
+        match self
+            .repository
+            .claim_due_play_outcomes(self.workspace_id, PLAY_OUTCOME_BATCH_SIZE, now)
+            .await
+        {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let settled_at = OffsetDateTime::now_utc();
+                    let result = async {
+                        let observation = self
+                            .repository
+                            .observe_play_outcome(self.workspace_id, &outcome, settled_at)
+                            .await?;
+                        let verdict = assess_play_claim(&outcome, &observation, measurement_policy);
+                        self.repository
+                            .complete_play_outcome(
+                                self.workspace_id,
+                                &outcome,
+                                &observation,
+                                verdict,
+                                settled_at,
+                            )
+                            .await
+                    }
+                    .await;
+
+                    if let Err(error) = result {
+                        phase_failed = true;
+                        let error_kind = repository_error_kind(error);
+                        let retryable = repository_error_retryable(error);
+                        tracing::warn!(
+                            play_id = %outcome.play_id,
+                            claim = outcome.claim.as_str(),
+                            error_kind,
+                            "ViryaOS play outcome measurement failed"
+                        );
+                        let _ = self
+                            .repository
+                            .fail_play_outcome(
+                                self.workspace_id,
+                                outcome.id,
+                                error_kind,
+                                retryable,
+                                OffsetDateTime::now_utc(),
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS play outcome claim failed");
+            }
+        }
+
         if phase_failed {
             Err(RepositoryError::Unexpected)
         } else {
             Ok(())
         }
+    }
+
+    /// The operator's reading policy, or the default when the context has none.
+    ///
+    /// A policy that cannot be read must not stop a measurement: the outcome
+    /// would be silently deferred for ever, and an unmeasured play is exactly
+    /// what this phase exists to prevent.
+    async fn play_measurement_policy(&self) -> PlayMeasurementPolicy {
+        self.repository
+            .load_policies(self.workspace_id)
+            .await
+            .ok()
+            .and_then(|policies| {
+                policies
+                    .into_iter()
+                    .find_map(|policy| match (policy.context, policy.config) {
+                        (AutopilotContext::Plays, AutopilotPolicyConfig::Plays(plays)) => {
+                            Some(plays.measurement)
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap_or_default()
     }
 }
 

@@ -817,6 +817,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/autopilot/growth-metrics/trends",
             get(autopilot::growth_metric_trends),
         )
+        .route("/v1/admin/autopilot/plays", get(autopilot::play_ledger))
         .route(
             "/v1/admin/autopilot/actions/{action_id}/assign",
             post(autopilot::assign_action),

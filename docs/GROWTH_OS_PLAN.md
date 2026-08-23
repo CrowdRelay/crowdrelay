@@ -1416,6 +1416,54 @@ The unit of measurement is the play.
 - Where a join key is missing, return `evidence: insufficient` with the reason.
   Never interpolate a path, never fill a gap with a plausible number.
 
+### As built — 2026-08-23
+
+`crates/crowdrelay-domain/src/play_measurement.rs` (the rule and 17 unit tests),
+migration `0089_viryaos_play_outcomes.sql`, `AutopilotPlayOutcomeRepository` and
+`AutopilotPlayLedgerRepository`, a worker phase that settles due outcomes, and
+`GET /v1/admin/autopilot/plays`. `scripts/test_play_measurement_v1.py`, 18
+contract tests, plus three Postgres integration tests.
+`SCHEMA_VERSION` 88 → 89.
+
+One row per **claim**, not per play. Both claims are opened in the transaction
+that creates the play, with the baseline frozen there: computed later it would
+be read from a series the play has already moved. The attributed claim is opened
+even though nothing can satisfy it yet, and settles as `insufficient` /
+`no_attribution_key` — an absent row is invisible, a row that says the claim
+cannot be made is a fact somebody can act on.
+
+Decisions worth not re-deriving:
+
+- **Velocity, not level.** A play is judged on the rate its success metric moved
+  over its own window against the rate before it. A level comparison would
+  credit a play for growth that was already happening.
+- **An absolute floor outranks the ratio.** A series creeping from one new
+  tracker a day to two is a hundred per cent improvement and nothing happened.
+  Movement below the floor is neutral whatever the percentage says.
+- **A flat baseline yields a verdict but never a percentage.** The movement is
+  real; the ratio against a standing-still series would be invented.
+- **Reach is checked before either claim speaks.** A campaign that reached
+  nobody settles as `nothing_delivered`, because a campaign that did not run is
+  not a campaign that did not work.
+- **Two live series answering to one metric are refused, not added.** Summing
+  them would merge two artists' audiences into one timeline.
+- **The window is read as of its own end.** A worker running two days late still
+  describes the play's window rather than everything since.
+
+Two bugs the Postgres tests caught and reading the SQL did not. A CHECK whose
+expression evaluates to NULL *passes*, so `effect_assessment IS NULL OR evidence
+= 'measured'` waved through a verdict on an unsettled row — every evidence
+constraint now uses `IS NOT DISTINCT FROM`. And deriving the window rate from
+`whole_days()` turned a window a fraction under ten days into nine, inflating
+every rate by a tenth, always in the direction of claiming the play worked; the
+rate is scaled from seconds.
+
+Not delivered: **show economics, predicted against settled**. Nothing in the
+schema records what a show actually cost — `viryaos_tour_economics` holds the
+rates the estimate is built from, and there is no settlement anywhere to compare
+it against. Closing that loop is a show-settlement ingestion path, not a
+measurement change, so it is left out rather than approximated.
+
 ---
 
 ## Phase 15 — learning
@@ -1511,7 +1559,7 @@ what depends on what. Phases 1 to 7 are code; 8 onward is plan.
 | 11 | Spotify and Bandsintown feeds | partial: coverage is visible, adapters unwritten |
 | 12 | Playlist pitcher | plan |
 | 13 | Plays | DONE (state machine, track-us play, per-recipient send through the outbox) |
-| 14 | Measurement and honest attribution | plan |
+| 14 | Measurement and honest attribution | DONE for plays; show settlement blocked |
 | 15 | Learning | plan |
 | 16 | Operator brief | DONE (rule, ledger, daily delivery on `ops.alert`) |
 | 17 | Audit | plan |

@@ -139,6 +139,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
                 }
             })
             .collect(),
+        measurement_window_end: anchor_at + time::Duration::days(14),
     };
     assert!(repository.start_play(workspace_id, &start).await?);
     assert!(
@@ -462,6 +463,7 @@ async fn a_cancelled_show_withdraws_its_play_anchor() -> Result<(), Box<dyn std:
                 }
             })
             .collect(),
+        measurement_window_end: anchor_at + time::Duration::days(14),
     };
     assert!(repository.start_play(workspace_id, &start).await?);
 

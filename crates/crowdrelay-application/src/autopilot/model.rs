@@ -15,11 +15,12 @@ use crowdrelay_domain::{
     experimentation::ExperimentPolicy,
     funding::FundingPolicy,
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
-    growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricPlatform},
+    growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
     outreach::{OutreachPhase, OutreachPolicy},
+    play_measurement::PlayClaim,
     plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepSkipReason},
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
@@ -664,6 +665,11 @@ pub struct PlayStart {
     pub success_metric_platform: &'static str,
     pub success_metric_key: &'static str,
     pub steps: Vec<PlayStepPlan>,
+    /// When the play's effect may first be read: after its last step closes,
+    /// plus the settle period. Carried on the start because the baseline is
+    /// frozen in the same transaction that creates the play — a baseline
+    /// computed later would be read from a series the play has already moved.
+    pub measurement_window_end: OffsetDateTime,
 }
 
 /// Who is left for the open step of a play.
@@ -716,6 +722,42 @@ pub struct PlayStepSettlement {
     pub play_id: PlayId,
     pub step_index: u16,
     pub reason: StepSkipReason,
+}
+
+/// One claim about one play, claimed for settlement by the worker.
+#[derive(Clone, Debug)]
+pub struct ClaimedPlayOutcome {
+    pub id: uuid::Uuid,
+    pub play_id: PlayId,
+    pub kind: PlayKind,
+    pub claim: PlayClaim,
+    pub success_metric_platform: String,
+    pub success_metric_key: String,
+    /// Frozen when the play started. `None` when the series had no usable trend
+    /// then, which settles as `no_baseline` rather than as zero.
+    pub baseline_value: Option<i64>,
+    pub baseline_milli_per_day: Option<i64>,
+    pub window_start: OffsetDateTime,
+    pub window_end: OffsetDateTime,
+    pub attempt_number: u32,
+}
+
+/// What the window actually holds, read once when the outcome settles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayOutcomeObservation {
+    pub observed_at: OffsetDateTime,
+    pub observed_value: Option<i64>,
+    pub observed_milli_per_day: Option<i64>,
+    /// Fans the play reached, from the delivered-recipient rows rather than
+    /// from the actions it created. An effect needs a denominator, and the
+    /// denominator is who actually heard from the band.
+    pub recipients_reached: u32,
+    /// Clicks our own rows join to this play. `None` means no join key exists —
+    /// a different fact from zero clicks, and the difference is the whole
+    /// separation between the two claims.
+    pub attributed_clicks: Option<i64>,
+    pub direction: MetricDirection,
+    pub ambiguous_series: bool,
 }
 
 /// Action claimed for execution by the worker.
