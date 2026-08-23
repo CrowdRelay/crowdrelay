@@ -54,6 +54,41 @@ pub enum AutopilotContext {
 }
 
 impl AutopilotContext {
+    /// Every context, in policy-store order.
+    ///
+    /// Storage parsing is derived from this list rather than restating the
+    /// names: a context the policy table can hold but a reader cannot parse
+    /// fails the whole overview read, not just its own row.
+    pub const ALL: [Self; 19] = [
+        Self::TicketYield,
+        Self::FanLifecycle,
+        Self::CampaignLifecycle,
+        Self::Merchandising,
+        Self::MerchPricing,
+        Self::MerchBundle,
+        Self::BookingOpportunity,
+        Self::Outreach,
+        Self::ContentSupply,
+        Self::PromotionBudget,
+        Self::Experimentation,
+        Self::ShowOperations,
+        Self::Release,
+        Self::LiveOpportunity,
+        Self::Funding,
+        Self::Beacon,
+        Self::ShowGrowth,
+        Self::GrowthMetrics,
+        Self::GrowthDebt,
+    ];
+
+    /// Parse the stored representation written by [`Self::as_str`].
+    #[must_use]
+    pub fn from_storage(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|context| context.as_str() == value)
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

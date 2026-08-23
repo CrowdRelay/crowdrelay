@@ -251,26 +251,7 @@ fn parse_market_signal_kind(value: &str) -> Result<CityMarketSignalKind, Reposit
 }
 
 fn parse_context(value: &str) -> Result<AutopilotContext, RepositoryError> {
-    match value {
-        "ticket_yield" => Ok(AutopilotContext::TicketYield),
-        "fan_lifecycle" => Ok(AutopilotContext::FanLifecycle),
-        "campaign_lifecycle" => Ok(AutopilotContext::CampaignLifecycle),
-        "merchandising" => Ok(AutopilotContext::Merchandising),
-        "merch_pricing" => Ok(AutopilotContext::MerchPricing),
-        "merch_bundle" => Ok(AutopilotContext::MerchBundle),
-        "booking_opportunity" => Ok(AutopilotContext::BookingOpportunity),
-        "outreach" => Ok(AutopilotContext::Outreach),
-        "content_supply" => Ok(AutopilotContext::ContentSupply),
-        "promotion_budget" => Ok(AutopilotContext::PromotionBudget),
-        "experimentation" => Ok(AutopilotContext::Experimentation),
-        "show_operations" => Ok(AutopilotContext::ShowOperations),
-        "release" => Ok(AutopilotContext::Release),
-        "live_opportunity" => Ok(AutopilotContext::LiveOpportunity),
-        "funding" => Ok(AutopilotContext::Funding),
-        "beacon" => Ok(AutopilotContext::Beacon),
-        "show_growth" => Ok(AutopilotContext::ShowGrowth),
-        _ => Err(RepositoryError::Unexpected),
-    }
+    AutopilotContext::from_storage(value).ok_or(RepositoryError::Unexpected)
 }
 
 fn parse_autonomy_level(value: &str) -> Result<AutonomyLevel, RepositoryError> {
