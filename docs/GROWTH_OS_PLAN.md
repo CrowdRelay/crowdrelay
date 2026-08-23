@@ -1578,6 +1578,88 @@ on. That is the order: get the people, then be worth their attention.
 
 ---
 
+## Snowballing — the loop, and the order to build it in
+
+The sequence is right: get ready, finish the agent, then run the campaign. One
+sharpening, because it changes what "finish the agent" means.
+
+**Finish the capture and intelligence half. Leave the outreach half switched
+off.** Those are two different halves of the same agent, and only one of them is
+useful before the campaign. Outreach machinery aimed at nineteen people is the
+system nobody can afford; capture and intelligence aimed at a thousand arrivals
+is the difference between a campaign that compounds and one that produces a
+spike and nothing after it.
+
+### The loop that actually snowballs
+
+It is already closed in the schema, which is why it is worth naming rather than
+inventing something new:
+
+```
+fan signs up with a city
+      -> city_signal_fans counts real people per city
+      -> viryaos_city_market_signals turns that into live_demand evidence
+      -> booking_opportunity picks the city that is actually warm
+      -> a show gets played there
+      -> concert QR captures the room
+      -> more fans in that city
+      -> stronger signal
+```
+
+Every arrow exists. A fan signup already requires a city, `city_signal_fans`
+already counts distinct fans per city, and the booking rule already reads city
+opportunity. Nothing needs building for the loop to turn — it needs **people
+entering at the top and being captured at the bottom.**
+
+This is why Polish metalheads specifically is the right target and not a
+limitation: the loop is geographic. A thousand fans scattered across Europe
+produce no bookable city; two hundred in Wrocław, Kraków, Poznań and Warszawa
+produce four shows, and four shows captured properly produce the next four.
+
+### Scene nodes are the multiplier
+
+For a Polish metal scene the amplifier is not advertising, it is the people who
+already convene metalheads: venues, local promoters, zines, radio shows, other
+bands, Discord and Facebook groups. That is exactly what a beacon is, and there
+are **three**. Beacon discovery (`RequestBeaconDiscovery`, first-party and free)
+is the single highest-leverage autonomous action available, because one scene
+node reaches a room the band cannot reach alone and the invite machinery behind
+it is already built and idle.
+
+### Ready for snowballing means these five things and no more
+
+1. **Per-channel tracked links with campaigns**, so every arrival carries a
+   source. Without this the campaign teaches nothing.
+2. **City on every signup**, which the API already enforces — verify it survives
+   the landing page rather than defaulting to one city.
+3. **A referral code per fan**, so each person is a door. The ledger exists and
+   the codes do not.
+4. **Concert QR live for every show**, so the room is captured. Campaigns exist
+   and none are running.
+5. **Beacon discovery running**, filling the latarnik table the invite endpoints
+   are waiting for.
+
+Nothing else is required before the campaign, and adding more would be
+building ahead of evidence again.
+
+### Then the campaign, and what it must return
+
+A real campaign for a thousand Polish metalheads, run across the music funnel
+with the tech funnel kept separate and separately counted. What it has to give
+back, beyond the people:
+
+- which channel produced fans who **stayed**, not just fans who signed up
+- which **cities** crossed the threshold where a show becomes bookable
+- which **scene nodes** produced more than they cost to approach
+- and where the evidence is too thin to say — reported as thin rather than
+  rounded up
+
+That intelligence is what makes the second thousand cheaper than the first. A
+campaign that delivers a thousand people and no answer to those four questions
+has bought a number instead of a position.
+
+---
+
 ## Resume checklist
 
 1. `git -C /Users/wojciechbator/dev/crowdrelay status --short --branch`
