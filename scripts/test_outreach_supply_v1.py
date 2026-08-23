@@ -242,7 +242,9 @@ class OutreachSupplyContract(unittest.TestCase):
         self.assertIn("viryaos.outreach.discovery_requested", sweep)
         self.assertIn("route_is_published", sweep)
         self.assertIn("evidence", sweep)
-        self.assertIn("/v1/internal/autopilot/outreach/candidates", sweep)
+        # The base URL already carries /v1, so the path is appended without it.
+        self.assertIn("/internal/autopilot/outreach/candidates", sweep)
+        self.assertNotIn("/v1/internal/autopilot/outreach/candidates", sweep)
         # An empty sweep must still be reported: silence is read as an
         # unanswered request and keeps the agent asking for ever, so the
         # extractor must always emit exactly one batch item.
