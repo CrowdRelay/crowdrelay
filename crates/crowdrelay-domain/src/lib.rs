@@ -63,6 +63,7 @@ pub mod pricing;
 pub mod promotion;
 pub mod referrals;
 pub mod release_autopilot;
+pub mod plays;
 pub mod show_growth;
 pub mod show_operations;
 pub mod target_discovery;
@@ -102,7 +103,7 @@ pub use ids::{
     AutopilotMeasurementId, BeaconId, BookingTargetId, CampaignId, CityId, ContentSourceId,
     EventId, ExperimentId, ExperimentVariantId, FanId, GrowthMetricSeriesId, MarketSignalId,
     MerchCouponId, MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId,
-    PassSessionId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId, RewardDrawId,
+    PassSessionId, PlayId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId, RewardDrawId,
     RewardGrantId, RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId, TicketTypeId,
     VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
 };

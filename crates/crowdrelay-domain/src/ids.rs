@@ -118,6 +118,7 @@ typed_uuid_id!(
     BeaconId,
     TeamAssignmentId,
     GrowthMetricSeriesId,
+    PlayId,
 );
 
 #[cfg(test)]
