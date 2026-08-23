@@ -28,8 +28,9 @@ n8n/*
 !n8n/examples/
 !n8n/examples/**
 
-# Local-only growth planning. Keep the working copy, never publish it.
-/docs/GROWTH_OS_PLAN.md
+# Docs are local-only except for the canonical architecture document.
+docs/*
+!docs/ARCHITECTURE.md
 
 # AppleDouble sidecars, written whenever a macOS copy reaches a host. They
 # leave the production worktree dirty and the deploy preflight refuses it.
