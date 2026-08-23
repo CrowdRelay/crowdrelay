@@ -77,7 +77,13 @@ impl PostgresAutopilotRepository {
                 tx.commit().await.map_err(map_sqlx)?;
                 return Ok(0);
             }
-            super::ensure_executor_capability_strict(&mut tx, workspace_id, "team.email").await?;
+            // Checked without erroring, because an operator who has gated
+            // team.email off has not broken anything. Erroring here also rolled
+            // back `close_resolved_assignments`, which needs no executor at
+            // all — a missing capability was undoing housekeeping that had
+            // already succeeded.
+            let can_email =
+                super::executor_capability_available(&mut tx, workspace_id, "team.email").await?;
 
             let approvals = sqlx::query_as::<_, UnassignedApprovalRow>(
                 r#"
@@ -101,6 +107,22 @@ impl PostgresAutopilotRepository {
             .fetch_all(&mut *tx)
             .await
             .map_err(map_sqlx)?;
+
+            // Nothing parked means the gated capability is costing nothing, so
+            // it stays silent. Work parked behind it is worth exactly one line
+            // per cycle, because that is a thing an operator can act on.
+            if !can_email {
+                if !approvals.is_empty() {
+                    tracing::warn!(
+                        workspace_id = %workspace_id.into_uuid(),
+                        capability = "team.email",
+                        parked = approvals.len(),
+                        "team handoff reminders are parked: no executor advertises this capability"
+                    );
+                }
+                tx.commit().await.map_err(map_sqlx)?;
+                return Ok(0);
+            }
 
             let show_tasks = sqlx::query_as::<_, UnassignedShowTaskRow>(
                 r#"
@@ -271,7 +293,11 @@ impl PostgresAutopilotRepository {
     ) -> Result<u32, RepositoryError> {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-            super::ensure_executor_capability_strict(&mut tx, workspace_id, "team.email").await?;
+            // Same reasoning as the handoff sweep: a gated capability is an
+            // operator's decision, not a fault, and reporting it as a failed
+            // cycle every sixty seconds trains everyone to ignore the log.
+            let can_email =
+                super::executor_capability_available(&mut tx, workspace_id, "team.email").await?;
             let rows = sqlx::query_as::<_, ReminderRow>(
                 r#"
                 SELECT assignment.id assignment_id,
@@ -306,6 +332,19 @@ impl PostgresAutopilotRepository {
             .fetch_all(&mut *tx)
             .await
             .map_err(map_sqlx)?;
+
+            if !can_email {
+                if !rows.is_empty() {
+                    tracing::warn!(
+                        workspace_id = %workspace_id.into_uuid(),
+                        capability = "team.email",
+                        due = rows.len(),
+                        "team reminders are due but no executor advertises this capability"
+                    );
+                }
+                tx.commit().await.map_err(map_sqlx)?;
+                return Ok(0);
+            }
 
             let mut queued = 0_u32;
             for row in rows {
