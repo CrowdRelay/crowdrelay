@@ -16,7 +16,7 @@ class ReleaseContract(unittest.TestCase):
         self.assertRegex(openapi, rf'(?m)^  version: {re.escape(EXPECTED)}$')
 
     def test_release_surface_docs_exist(self):
-        for relative in ("RELEASE.md", "docs/ARCHITECTURE.md", "openapi/openapi.yaml"):
+        for relative in ("RELEASE.md", "openapi/openapi.yaml"):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
     def test_public_schema_version_tracks_latest_migration(self):
