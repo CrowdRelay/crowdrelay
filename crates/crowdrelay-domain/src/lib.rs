@@ -43,6 +43,7 @@ pub mod campaign_lifecycle;
 pub mod content_supply;
 pub mod events;
 pub mod experimentation;
+pub mod fan_activation;
 pub mod fan_lifecycle;
 pub mod funding;
 pub mod growth_debt;
