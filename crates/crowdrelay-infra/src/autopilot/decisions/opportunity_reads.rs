@@ -339,6 +339,55 @@ macro_rules! decision_opportunity_reads {
         }).await
     }
 
+    /// The band's own vehicles and rates.
+    ///
+    /// A missing row is the timid default, whose fuel price is zero and which
+    /// therefore reports every trip as uncosted rather than as free to drive.
+    async fn load_tour_economics(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<TourEconomicsPolicy, RepositoryError> {
+        let row = sqlx::query_as::<_, TourEconomicsRow>(
+            r#"
+            SELECT transport_minor_per_100km_round_trip, transport_rate_covers_vehicles,
+                   vehicle_seats, vehicle_cargo_litres, vehicle_fuel_centilitres_per_100km,
+                   max_vehicles, crew_size, backline_litres, fuel_price_minor_per_litre,
+                   toll_minor_per_km, accommodation_minor_per_room_night, crew_per_room,
+                   per_diem_minor_per_person_day, fixed_overhead_minor,
+                   overnight_threshold_km, minimum_margin_minor
+            FROM viryaos_tour_economics
+            WHERE workspace_id = $1
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+
+        Ok(row.map_or_else(TourEconomicsPolicy::default, |row| TourEconomicsPolicy {
+            transport_minor_per_100km_round_trip: row.transport_minor_per_100km_round_trip,
+            transport_rate_covers_vehicles: u8::try_from(row.transport_rate_covers_vehicles)
+                .unwrap_or(1),
+            vehicle: VehicleProfile {
+                seats: u8::try_from(row.vehicle_seats).unwrap_or(0),
+                cargo_litres: u32::try_from(row.vehicle_cargo_litres).unwrap_or(0),
+                fuel_centilitres_per_100km: u32::try_from(row.vehicle_fuel_centilitres_per_100km)
+                    .unwrap_or(0),
+            },
+            max_vehicles: u8::try_from(row.max_vehicles).unwrap_or(1),
+            crew_size: u8::try_from(row.crew_size).unwrap_or(0),
+            backline_litres: u32::try_from(row.backline_litres).unwrap_or(0),
+            fuel_price_minor_per_litre: row.fuel_price_minor_per_litre,
+            toll_minor_per_km: row.toll_minor_per_km,
+            accommodation_minor_per_room_night: row.accommodation_minor_per_room_night,
+            crew_per_room: u8::try_from(row.crew_per_room).unwrap_or(1),
+            per_diem_minor_per_person_day: row.per_diem_minor_per_person_day,
+            fixed_overhead_minor: row.fixed_overhead_minor,
+            overnight_threshold_km: u32::try_from(row.overnight_threshold_km).unwrap_or(0),
+            minimum_margin_minor: row.minimum_margin_minor,
+        }))
+    }
+
     async fn load_live_opportunity_snapshots_impl(
         &self,
         workspace_id: WorkspaceId,
@@ -354,6 +403,7 @@ macro_rules! decision_opportunity_reads {
                        opportunity.estimated_cost_minor, opportunity.application_fee_minor,
                        opportunity.requires_contract, opportunity.exclusive, opportunity.deadline,
                        opportunity.status, opportunity.event_starts_at, opportunity.travel_band,
+                       opportunity.distance_km, opportunity.nights_away,
                        (
                            SELECT COUNT(*)
                            FROM events event
@@ -385,6 +435,9 @@ macro_rules! decision_opportunity_reads {
                 LIMIT $3
             "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
               .fetch_all(&self.pool).await.map_err(map_sqlx)?;
+            // Read once for the whole batch: the band's vehicles and rates do
+            // not change between two opportunities in the same cycle.
+            let tour_policy = self.load_tour_economics(workspace_id).await?;
             rows.into_iter().map(|row| {
                 let kind=match row.opportunity_kind.as_str(){
                     "festival"=>LiveOpportunityKind::Festival,"showcase"=>LiveOpportunityKind::Showcase,
@@ -399,6 +452,18 @@ macro_rules! decision_opportunity_reads {
                     None=>None,
                     Some(_)=>return Err(RepositoryError::Unexpected),
                 };
+                // A computed cost is authoritative. When the inputs are not
+                // there the stored figure is still shown, but the opportunity is
+                // marked uncosted so it can be prepared and never auto-submitted.
+                let costed = estimate_show_cost(
+                    &ShowLogistics{
+                        distance_km: row.distance_km.and_then(|km| u32::try_from(km).ok()),
+                        nights_away: row.nights_away.and_then(|nights| u8::try_from(nights).ok()),
+                        offered_fee_minor: row.expected_fee_minor,
+                        application_fee_minor: row.application_fee_minor,
+                    },
+                    &tour_policy,
+                );
                 Ok(LiveOpportunitySnapshot{
                     opportunity_id:TeamOpportunityId::from_uuid(row.opportunity_id),kind,active:row.active,
                     verified_destination:row.verified_destination,
@@ -409,10 +474,13 @@ macro_rules! decision_opportunity_reads {
                     fit_basis_points:u16::try_from(row.fit_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     reputation_basis_points:u16::try_from(row.reputation_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     evidence_confidence:parse_confidence(row.confidence_basis_points)?,
-                    expected_fee_minor:row.expected_fee_minor, estimated_cost_minor:row.estimated_cost_minor,
+                    expected_fee_minor:row.expected_fee_minor,
+                    estimated_cost_minor:costed.cost().map_or(row.estimated_cost_minor, |cost| cost.total_cost_minor),
                     application_fee_minor:row.application_fee_minor, requires_contract:row.requires_contract,
                     exclusive:row.exclusive, deadline:row.deadline, event_starts_at:row.event_starts_at,
-                    travel_band, committed_shows_year:u16::try_from(row.committed_shows_year).unwrap_or(u16::MAX),
+                    travel_band,
+                    costed_from_logistics: costed.cost().is_some(),
+                    committed_shows_year:u16::try_from(row.committed_shows_year).unwrap_or(u16::MAX),
                     annual_target:u16::try_from(row.annual_target).map_err(|_|RepositoryError::Unexpected)?,
                     annual_stretch:u16::try_from(row.annual_stretch).map_err(|_|RepositoryError::Unexpected)?,
                     stretch_minimum_score_basis_points:u16::try_from(row.stretch_minimum_score_basis_points).map_err(|_|RepositoryError::Unexpected)?,
@@ -484,6 +552,170 @@ macro_rules! decision_opportunity_reads {
         now: OffsetDateTime,
     ) -> Result<Vec<ShowGrowthSnapshot>, RepositoryError> {
         self.bounded(operations::load_show_growth_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
+    /// Reads the operator's ceilings.
+    ///
+    /// A row whose class or level this build does not recognise is skipped, so
+    /// the class falls back to its safest ceiling in the caller. Guessing at an
+    /// unreadable authority row in the permissive direction is the one mistake
+    /// this whole mechanism exists to prevent.
+    async fn load_autonomy_ceilings_impl(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                r#"
+                SELECT action_class, ceiling
+                FROM viryaos_growth_autonomy
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            Ok(rows
+                .into_iter()
+                .filter_map(|(class, ceiling)| {
+                    Some((
+                        ActionClass::parse(&class)?,
+                        parse_autonomy_level(&ceiling).ok()?,
+                    ))
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// The envelope and what has already been spent against it.
+    ///
+    /// Spend is counted from the durable action rows rather than a separate
+    /// ledger, and only from rows the agent itself created — `action_class` is
+    /// NULL for everything that predates the envelope, and work done before the
+    /// agent existed was not the agent's to be charged for.
+    async fn load_growth_envelope_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError> {
+        self.bounded(async {
+            let envelope = sqlx::query_as::<_, GrowthEnvelopeRow>(
+                r#"
+                SELECT agent_enabled, dry_run, weekly_owned_audience_touches,
+                       weekly_third_party_touches, subject_cooldown_hours,
+                       max_recipients_per_step
+                FROM viryaos_growth_envelope
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            // A missing row is the timid default, which has the agent switched
+            // off. An absent envelope must never read as an absent limit.
+            let envelope = envelope.map_or_else(GrowthEnvelope::default, |row| GrowthEnvelope {
+                agent_enabled: row.agent_enabled,
+                dry_run: row.dry_run,
+                weekly_owned_audience_touches: bounded_u32(i64::from(
+                    row.weekly_owned_audience_touches,
+                ))
+                .unwrap_or(0),
+                weekly_third_party_touches: bounded_u32(i64::from(row.weekly_third_party_touches))
+                    .unwrap_or(0),
+                subject_cooldown_hours: bounded_u32(i64::from(row.subject_cooldown_hours))
+                    .unwrap_or(0),
+                max_recipients_per_step: bounded_u32(i64::from(row.max_recipients_per_step))
+                    .unwrap_or(1),
+            });
+
+            // Cancelled actions are excluded: an approval that was refused is
+            // not a touch anybody received. Everything else counts, including
+            // failures, because a send that errored may still have gone out.
+            let spend = sqlx::query_as::<_, (String, i64)>(
+                r#"
+                SELECT action_class, count(*)::bigint
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1
+                  AND action_class IN ('owned_audience', 'third_party')
+                  AND status <> 'cancelled'
+                  AND created_at >= $2 - INTERVAL '7 days'
+                GROUP BY action_class
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            let mut usage = EnvelopeUsage::default();
+            for (class, count) in spend {
+                let count = bounded_u32(count).unwrap_or(u32::MAX);
+                match ActionClass::parse(&class) {
+                    Some(ActionClass::OwnedAudience) => usage.owned_audience_touches_7d = count,
+                    Some(ActionClass::ThirdParty) => usage.third_party_touches_7d = count,
+                    _ => {}
+                }
+            }
+            Ok((envelope, usage))
+        })
+        .await
+    }
+
+    async fn load_outward_touch_ages_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(Uuid, u32)>, RepositoryError> {
+        self.bounded(async {
+            // Bounded by the longest cooldown the schema allows (a year), so a
+            // workspace with years of history does not scan all of it.
+            let rows = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+                r#"
+                SELECT subject_id, max(created_at)
+                FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1
+                  AND action_class IN ('owned_audience', 'third_party')
+                  AND status <> 'cancelled'
+                  AND created_at >= $2 - INTERVAL '365 days'
+                GROUP BY subject_id
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            Ok(rows
+                .into_iter()
+                .map(|(subject_id, touched_at)| {
+                    (
+                        subject_id,
+                        u32::try_from((now - touched_at).whole_hours().max(0)).unwrap_or(u32::MAX),
+                    )
+                })
+                .collect())
+        })
+        .await
+    }
+
+    async fn load_growth_debt_observations_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthDebtObservation>, RepositoryError> {
+        self.bounded(operations::load_growth_debt_observations(
             self,
             workspace_id,
             now,

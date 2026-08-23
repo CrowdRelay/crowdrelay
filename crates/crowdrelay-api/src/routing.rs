@@ -596,6 +596,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(autopilot::chief_of_staff),
         )
         .route(
+            "/v1/admin/autopilot/next-best-actions",
+            get(autopilot::next_best_actions),
+        )
+        .route(
+            "/v1/admin/autopilot/acquisition-channels",
+            get(autopilot::acquisition_channels),
+        )
+        .route(
+            "/v1/admin/autopilot/tour-economics",
+            get(autopilot::tour_economics).put(autopilot::set_tour_economics),
+        )
+        .route(
             "/v1/admin/autopilot/manager-config/booking-policy",
             get(autopilot::manager_booking_policy).post(autopilot::set_manager_booking_policy),
         )
@@ -768,6 +780,18 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/market-signals/city",
             post(autopilot::upsert_city_market_signal),
+        )
+        .route(
+            "/v1/admin/autopilot/growth-metrics/series",
+            post(autopilot::upsert_growth_metric_series),
+        )
+        .route(
+            "/v1/admin/autopilot/growth-metrics/points",
+            post(autopilot::record_growth_metric_point),
+        )
+        .route(
+            "/v1/admin/autopilot/growth-metrics/trends",
+            get(autopilot::growth_metric_trends),
         )
         .route(
             "/v1/admin/autopilot/actions/{action_id}/assign",

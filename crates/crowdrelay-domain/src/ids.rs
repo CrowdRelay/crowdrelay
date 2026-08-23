@@ -117,6 +117,7 @@ typed_uuid_id!(
     TeamOpportunityId,
     BeaconId,
     TeamAssignmentId,
+    GrowthMetricSeriesId,
 );
 
 #[cfg(test)]

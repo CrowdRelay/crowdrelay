@@ -2187,6 +2187,95 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/growth-metrics/series:
+    post:
+      operationId: upsertAutopilotGrowthMetricSeries
+      summary: Declare or update a tracked external metric
+      description: >
+        Declares the identity of one number tracked on an external platform. Identity is
+        (platform, metric_key, subject), so re-declaring a series updates it rather than opening a
+        second timeline for the same number. Declaring a series does not fetch anything: observations
+        arrive through the points endpoint.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrowthMetricSeriesRequest'
+      responses:
+        '200':
+          description: Series declared or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthMetricSeriesMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/growth-metrics/points:
+    post:
+      operationId: recordAutopilotGrowthMetricPoint
+      summary: Record one absolute observation of a tracked metric
+      description: >
+        Appends one observation at the provider's own capture time. Values are absolute levels, never
+        deltas. An observation already recorded at that capture time is left untouched and the
+        response reports accepted=false, so a retry cannot rewrite a value a decision was already
+        derived from.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrowthMetricPointRequest'
+      responses:
+        '200':
+          description: Observation recorded, rejected as a duplicate capture time, or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthMetricPointMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/growth-metrics/trends:
+    get:
+      operationId: getAutopilotGrowthMetricTrends
+      summary: Read derived trends for every tracked metric
+      description: >
+        Returns 24h/7d/28d deltas, recent velocity, the 21-day baseline preceding the last 7 days,
+        and window coverage for each active series. Windows with no observation old enough to compare
+        against are reported as null rather than zero: "no evidence" and "no movement" are different
+        facts. Deltas are derived on read and never stored.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Derived trends for all active series.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthMetricTrendsResponse'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/chief-of-staff:
     get:
       operationId: getAutopilotChiefOfStaff
@@ -2205,6 +2294,106 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AutopilotChiefOfStaff' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/acquisition-channels:
+    get:
+      operationId: getAutopilotAcquisitionChannels
+      summary: Which acquisition channels produced people who stayed
+      description: >
+        Signups and 30-day-active fans per channel, never merged, because a channel that produced
+        two hundred signups and four active people is a bad channel wearing a good number. People
+        whose channel cannot be established are reported separately by reason, with the fix for
+        each — a signup with no click is unattributed, never "direct".
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Channel performance with the unattributable part in view.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcquisitionChannels' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/tour-economics:
+    get:
+      operationId: getAutopilotTourEconomics
+      summary: Read the band's vehicles, rates and margin floor
+      description: >
+        Every booking decision is costed with these numbers, so the response carries the version
+        an update must be made against. A workspace whose row has not been provisioned reads as
+        the conservative default at version 0.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Current tour economics configuration.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TourEconomicsSummary' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    put:
+      operationId: setAutopilotTourEconomics
+      summary: Set the band's vehicles, rates and margin floor
+      description: >
+        Optimistic concurrency on `expected_version`; a stale version is a 409 rather than a
+        silent overwrite. Idempotent per `Idempotency-Key`. A half-configured policy is accepted
+        so an operator can enter figures one at a time — the refusal for a missing road rate or
+        room rate happens when a show is costed, naming the field.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TourEconomicsRequest' }
+      responses:
+        '200':
+          description: Configuration stored, or the replay of an earlier identical request.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TourEconomicsMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/next-best-actions:
+    get:
+      operationId: getAutopilotNextBestActions
+      summary: Read one prioritized queue across every Autopilot context
+      description: >
+        Returns at most ten entries, ranked lexicographically by authority state, deadline
+        proximity, value tier, measured effect, confidence and deviation magnitude. Each entry
+        states the factor that decided its position and what happens if it is ignored. The
+        response is a derived read model over existing decisions and actions; nothing is stored,
+        and expected impact is always a measured deviation in basis points, never a currency
+        amount.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Ranked next best actions, newest evidence first.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 10
+                items: { $ref: '#/components/schemas/NextBestAction' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/booking-targets/{target_id}/reply:
@@ -6325,8 +6514,7 @@ components:
       name: context
       required: true
       schema:
-        type: string
-        enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding]
+        $ref: '#/components/schemas/AutopilotContext'
     AutopilotActionId:
       in: path
       name: action_id
@@ -7411,7 +7599,7 @@ components:
       enum: [observe, recommend, require_approval, bounded_auto]
     AutopilotContext:
       type: string
-      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth]
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth, growth_metrics, growth_debt]
     AutopilotDisposition:
       type: string
       enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
@@ -7444,7 +7632,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email, raise_growth_opportunity]
       additionalProperties: true
     TeamAssigneeSummary:
       type: object
@@ -7540,7 +7728,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 17
+          maxItems: 19
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array
@@ -7967,6 +8155,174 @@ components:
         value_minor_delta: { type: integer, format: int64, minimum: 0 }
         observed_at: { type: string, format: date-time }
 
+    ChannelIdentity:
+      type: object
+      additionalProperties: false
+      required: [source]
+      properties:
+        source: { type: string, maxLength: 64 }
+        community: { type: string, maxLength: 120, nullable: true }
+        creative: { type: string, maxLength: 120, nullable: true }
+    ChannelAttribution:
+      type: object
+      additionalProperties: false
+      required: [evidence]
+      description: >
+        Either an attributed channel or an honest statement that the chain is broken. There is no
+        "direct" bucket: bucketing unknowns as direct makes the channel you cannot see look like
+        one that works.
+      properties:
+        evidence: { type: string, enum: [attributed, unattributed] }
+        source: { type: string, maxLength: 64 }
+        community: { type: string, maxLength: 120, nullable: true }
+        creative: { type: string, maxLength: 120, nullable: true }
+        reason:
+          type: string
+          enum: [no_visitor, no_click_before_signup, link_not_labelled]
+    ChannelPerformance:
+      type: object
+      additionalProperties: false
+      required: [attribution, signups, activated_30d]
+      properties:
+        attribution: { $ref: '#/components/schemas/ChannelAttribution' }
+        signups: { type: integer, minimum: 0 }
+        activated_30d:
+          type: integer
+          minimum: 0
+          description: Signed up, consented, and did something meaningful in the last 30 days.
+        activation_basis_points:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Null when there are no signups to divide by; a rate from an empty denominator is not a zero.
+        best_action:
+          type: string
+          nullable: true
+          enum: [ticket_purchase, merch_purchase, qualified_referral, event_interest, synesthesia_run, signal_session]
+    UnattributedGroup:
+      type: object
+      additionalProperties: false
+      required: [reason, remedy, signups, activated_30d]
+      properties:
+        reason:
+          type: string
+          enum: [no_visitor, no_click_before_signup, link_not_labelled]
+        remedy: { type: string, maxLength: 240 }
+        signups: { type: integer, minimum: 0 }
+        activated_30d: { type: integer, minimum: 0 }
+    AcquisitionChannels:
+      type: object
+      additionalProperties: false
+      required: [channels, total_signups, total_activated_30d, unattributed]
+      properties:
+        channels:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/ChannelPerformance' }
+        total_signups: { type: integer, minimum: 0 }
+        total_activated_30d: { type: integer, minimum: 0 }
+        unattributed:
+          type: array
+          maxItems: 3
+          items: { $ref: '#/components/schemas/UnattributedGroup' }
+    TourEconomicsPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        All money in minor units. The flat road rate replaces the fuel-and-tolls arithmetic when
+        it is above zero. Zero on both is "not configured" and is reported as insufficient
+        evidence when a show is costed, never as a free road.
+      properties:
+        transport_minor_per_100km_round_trip: { type: integer, minimum: 0 }
+        transport_rate_covers_vehicles: { type: integer, minimum: 1, maximum: 20 }
+        vehicle:
+          type: object
+          additionalProperties: false
+          properties:
+            seats: { type: integer, minimum: 1, maximum: 60 }
+            cargo_litres: { type: integer, minimum: 0, maximum: 100000 }
+            fuel_centilitres_per_100km:
+              type: integer
+              minimum: 0
+              maximum: 100000
+              description: Centilitres per 100 km; 800 is 8.0 l/100 km.
+        max_vehicles: { type: integer, minimum: 1, maximum: 20 }
+        crew_size: { type: integer, minimum: 0, maximum: 100 }
+        backline_litres: { type: integer, minimum: 0, maximum: 100000 }
+        fuel_price_minor_per_litre: { type: integer, minimum: 0 }
+        toll_minor_per_km: { type: integer, minimum: 0 }
+        accommodation_minor_per_room_night: { type: integer, minimum: 0 }
+        crew_per_room: { type: integer, minimum: 1, maximum: 20 }
+        per_diem_minor_per_person_day: { type: integer, minimum: 0 }
+        fixed_overhead_minor: { type: integer, minimum: 0 }
+        overnight_threshold_km:
+          type: integer
+          minimum: 0
+          maximum: 20000
+          description: One-way distance at or beyond which the band stays the night.
+        minimum_margin_minor:
+          type: integer
+          minimum: 0
+          description: What a show must clear above cost to be worth playing.
+    TourEconomicsSummary:
+      type: object
+      additionalProperties: false
+      required: [policy, version]
+      properties:
+        policy: { $ref: '#/components/schemas/TourEconomicsPolicy' }
+        version: { type: integer, minimum: 0 }
+    TourEconomicsRequest:
+      type: object
+      additionalProperties: false
+      required: [policy, expected_version]
+      properties:
+        policy: { $ref: '#/components/schemas/TourEconomicsPolicy' }
+        expected_version: { type: integer, minimum: 0 }
+    TourEconomicsMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, version, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        replayed: { type: boolean }
+    NextBestAction:
+      type: object
+      additionalProperties: false
+      required: [position, context, decision_kind, subject_kind, subject_id, authority, confidence, reason, recommended_action, ranked_by, consequence]
+      properties:
+        position: { type: integer, minimum: 1, maximum: 10 }
+        context: { $ref: '#/components/schemas/AutopilotContext' }
+        decision_kind: { type: string, maxLength: 96 }
+        subject_kind: { type: string, maxLength: 64 }
+        subject_id: { type: string, format: uuid }
+        authority:
+          type: string
+          enum: [awaiting_approval, recommended, observed, auto_executing]
+        confidence: { type: integer, minimum: 0, maximum: 10000 }
+        reason: { type: string, maxLength: 240 }
+        recommended_action: { type: string, maxLength: 96 }
+        ranked_by:
+          type: string
+          enum: [authority, deadline, value_tier, measured_effect, confidence, magnitude, tie]
+          description: The single factor that decided this entry's position against its neighbour.
+        consequence:
+          type: string
+          maxLength: 240
+          description: >
+            What happens if this entry is ignored. Always a statement about the system's own
+            behaviour, never a predicted business outcome.
+        due_at: { type: string, format: date-time, nullable: true }
+        value_tier:
+          type: string
+          nullable: true
+          enum: [vanity, intermediate, downstream]
+        deviation_basis_points:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: >
+            Measured deviation or overdue ratio. Deliberately not a currency amount.
     ChiefOfStaffOpportunity:
       type: object
       additionalProperties: false
@@ -8373,6 +8729,112 @@ components:
         operation_id: { type: string, format: uuid }
         signal_id: { type: string, format: uuid }
         replayed: { type: boolean }
+
+    GrowthMetricPlatform:
+      type: string
+      enum: [spotify, youtube, bandsintown, social, website, ticketing, signal, merch]
+    GrowthMetricDirection:
+      type: string
+      enum: [higher_is_better, lower_is_better]
+    GrowthMetricValueTier:
+      type: string
+      description: >
+        How close the metric sits to banked value. A vanity series is not surfaced as an opportunity
+        while a stronger tier is tracked for the same platform.
+      enum: [vanity, intermediate, downstream]
+    GrowthMetricSeriesRequest:
+      type: object
+      additionalProperties: false
+      required: [platform, metric_key, display_name, direction, value_tier, expected_interval_hours, active]
+      properties:
+        platform: { $ref: '#/components/schemas/GrowthMetricPlatform' }
+        metric_key: { type: string, minLength: 1, maxLength: 64 }
+        subject_kind:
+          type: string
+          nullable: true
+          enum: [event, city, release_plan, content_source, beacon]
+        subject_id: { type: string, format: uuid, nullable: true }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        direction: { $ref: '#/components/schemas/GrowthMetricDirection' }
+        value_tier: { $ref: '#/components/schemas/GrowthMetricValueTier' }
+        expected_interval_hours: { type: integer, minimum: 1, maximum: 720 }
+        active: { type: boolean }
+    GrowthMetricSeriesMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, series_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        series_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+    GrowthMetricPointRequest:
+      type: object
+      additionalProperties: false
+      required: [series_id, captured_at, value, source]
+      properties:
+        series_id: { type: string, format: uuid }
+        captured_at:
+          type: string
+          format: date-time
+          description: The provider's own observation time, not ingestion time.
+        value:
+          type: integer
+          minimum: 0
+          description: Absolute level of the metric at captured_at, never a delta.
+        source: { type: string, minLength: 1, maxLength: 64 }
+    GrowthMetricPointMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, series_id, replayed, accepted]
+      properties:
+        operation_id: { type: string, format: uuid }
+        series_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+        accepted:
+          type: boolean
+          description: False when an observation already existed at that capture time; the stored value is unchanged.
+    GrowthMetricTrend:
+      type: object
+      additionalProperties: false
+      required: [series_id, platform, metric_key, display_name, direction, value_tier, expected_interval_hours, latest_value, latest_at, points_in_window, age_seconds, stale]
+      properties:
+        series_id: { type: string, format: uuid }
+        platform: { $ref: '#/components/schemas/GrowthMetricPlatform' }
+        metric_key: { type: string }
+        display_name: { type: string }
+        subject_kind: { type: string, nullable: true }
+        subject_id: { type: string, format: uuid, nullable: true }
+        direction: { $ref: '#/components/schemas/GrowthMetricDirection' }
+        value_tier: { $ref: '#/components/schemas/GrowthMetricValueTier' }
+        expected_interval_hours: { type: integer }
+        latest_value: { type: integer }
+        latest_at: { type: string, format: date-time }
+        delta_24h: { type: integer, nullable: true }
+        delta_7d: { type: integer, nullable: true }
+        delta_28d: { type: integer, nullable: true }
+        velocity_milli_per_day:
+          type: integer
+          nullable: true
+          description: Movement over the last 7 days in milli-units per day.
+        baseline_milli_per_day:
+          type: integer
+          nullable: true
+          description: Movement over the 21 days preceding the last 7, in milli-units per day.
+        velocity_ratio_basis_points:
+          type: integer
+          nullable: true
+          description: Recent velocity against the series' own baseline; 10000 is exactly on baseline. Absent when the baseline is too flat to divide by.
+        points_in_window: { type: integer }
+        age_seconds: { type: integer }
+        stale: { type: boolean }
+    GrowthMetricTrendsResponse:
+      type: object
+      additionalProperties: false
+      required: [series]
+      properties:
+        series:
+          type: array
+          items: { $ref: '#/components/schemas/GrowthMetricTrend' }
 
     PromotionBudgetGuardrailRequest:
       type: object

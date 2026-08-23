@@ -63,6 +63,42 @@ pub trait AutopilotControlRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<AutopilotChiefOfStaff, RepositoryError>;
 
+    /// One ranked queue across every context, already capped by the domain.
+    ///
+    /// Separate from `load_chief_of_staff` because the brief answers "what
+    /// happened" and this answers "what should I do next" — they are read at
+    /// different moments and the queue must stay short enough to work through.
+    async fn load_next_best_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<NextBestAction>, RepositoryError>;
+
+    /// Which channels produced people who stayed.
+    ///
+    /// The question a zero-budget campaign lives on, and the one the system
+    /// could not answer at all before channel identity existed on links.
+    async fn load_acquisition_channels(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<AcquisitionChannels, RepositoryError>;
+
+    /// The band's vehicles and rates. Read before editing so an operator sees
+    /// the version they are about to overwrite.
+    async fn load_tour_economics_config(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<TourEconomicsSummary, RepositoryError>;
+
+    async fn set_tour_economics(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetTourEconomics,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<TourEconomicsMutation, RepositoryError>;
+
     async fn load_manager_booking_policy(
         &self,
         workspace_id: WorkspaceId,

@@ -195,6 +195,47 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_growth_metric_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthMetricSnapshot>, RepositoryError> {
+        self.load_growth_metric_snapshots_impl(workspace_id, now)
+            .await
+    }
+
+    async fn load_growth_debt_observations(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthDebtObservation>, RepositoryError> {
+        self.load_growth_debt_observations_impl(workspace_id, now)
+            .await
+    }
+
+    async fn load_autonomy_ceilings(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError> {
+        self.load_autonomy_ceilings_impl(workspace_id).await
+    }
+
+    async fn load_growth_envelope(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError> {
+        self.load_growth_envelope_impl(workspace_id, now).await
+    }
+
+    async fn load_outward_touch_ages(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(Uuid, u32)>, RepositoryError> {
+        self.load_outward_touch_ages_impl(workspace_id, now).await
+    }
+
     async fn persist_candidate(
         &self,
         workspace_id: WorkspaceId,

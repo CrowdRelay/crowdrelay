@@ -14,6 +14,7 @@ use crate::{EventId, autonomy::Confidence};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ShowGrowthHistory {
+    pub canonical_link_setup_requested: bool,
     pub free_listing_sweep_requested: bool,
     pub audience_capture_setup_requested: bool,
     pub partner_cross_promo_requested: bool,
@@ -24,6 +25,7 @@ pub struct ShowGrowthHistory {
     pub merch_buyer_offer_requested: bool,
     pub high_intent_last_mile_requested: bool,
     pub post_show_merch_requested: bool,
+    pub post_show_follow_ask_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -59,11 +61,16 @@ pub struct ShowGrowthPolicy {
     pub merch_preorder_lead_days: u32,
     pub last_mile_lead_days: u32,
     pub post_show_merch_hours: u32,
+    /// How long after the show the follow ask stays worth sending. Longer than
+    /// the merch window because it asks for something free, and the memory of a
+    /// good night outlasts the impulse to buy a shirt.
+    pub post_show_follow_ask_hours: u32,
     pub minimum_city_signal_fans: u32,
     pub minimum_referrers_for_ambassador_push: u32,
     pub minimum_paid_buyers_for_merch_offer: u32,
     pub minimum_unconverted_interest: u32,
     pub minimum_attendees_for_post_show_merch: u32,
+    pub minimum_attendees_for_follow_ask: u32,
     /// Pace floor at <= 28 days before show.
     pub target_sold_28d_basis_points: u16,
     /// Pace floor at <= 14 days before show.
@@ -86,11 +93,13 @@ impl Default for ShowGrowthPolicy {
             merch_preorder_lead_days: 14,
             last_mile_lead_days: 10,
             post_show_merch_hours: 36,
+            post_show_follow_ask_hours: 72,
             minimum_city_signal_fans: 5,
             minimum_referrers_for_ambassador_push: 1,
             minimum_paid_buyers_for_merch_offer: 2,
             minimum_unconverted_interest: 3,
             minimum_attendees_for_post_show_merch: 3,
+            minimum_attendees_for_follow_ask: 1,
             target_sold_28d_basis_points: 1_500,
             target_sold_14d_basis_points: 3_000,
             target_sold_7d_basis_points: 4_500,
@@ -101,6 +110,9 @@ impl Default for ShowGrowthPolicy {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShowGrowthLever {
+    /// Give the show a tracked link before anything is shared, so every share
+    /// after it can be counted.
+    CanonicalLinkSetup,
     FreeListingSweep,
     AudienceCaptureSetup,
     PartnerCrossPromo,
@@ -112,12 +124,16 @@ pub enum ShowGrowthLever {
     MerchBuyerOffer,
     HighIntentLastMile,
     PostShowMerchFollowUp,
+    /// Ask the people who were actually in the room to follow and track the
+    /// band, so the next show finds them without anybody paying for reach.
+    PostShowFollowAsk,
 }
 
 impl ShowGrowthLever {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CanonicalLinkSetup => "canonical_link_setup",
             Self::FreeListingSweep => "free_listing_sweep",
             Self::AudienceCaptureSetup => "audience_capture_setup",
             Self::PartnerCrossPromo => "partner_cross_promo",
@@ -128,12 +144,14 @@ impl ShowGrowthLever {
             Self::MerchBuyerOffer => "merch_buyer_offer",
             Self::HighIntentLastMile => "high_intent_last_mile",
             Self::PostShowMerchFollowUp => "post_show_merch_follow_up",
+            Self::PostShowFollowAsk => "post_show_follow_ask",
         }
     }
 
     #[must_use]
     pub const fn template_key(self) -> &'static str {
         match self {
+            Self::CanonicalLinkSetup => "show.growth.canonical_link.v1",
             Self::FreeListingSweep => "show.growth.free_listings.v1",
             Self::AudienceCaptureSetup => "show.growth.audience_capture.v1",
             Self::PartnerCrossPromo => "show.growth.partner_cross_promo.v1",
@@ -144,6 +162,7 @@ impl ShowGrowthLever {
             Self::MerchBuyerOffer => "show.growth.merch_buyer_offer.v1",
             Self::HighIntentLastMile => "show.growth.high_intent.v1",
             Self::PostShowMerchFollowUp => "show.growth.post_show_merch.v1",
+            Self::PostShowFollowAsk => "show.growth.post_show_follow_ask.v1",
         }
     }
 
@@ -156,6 +175,7 @@ impl ShowGrowthLever {
                 | Self::MerchBuyerOffer
                 | Self::HighIntentLastMile
                 | Self::PostShowMerchFollowUp
+                | Self::PostShowFollowAsk
         )
     }
 }
@@ -204,12 +224,33 @@ pub fn evaluate_show_growth(
         {
             return request(ShowGrowthLever::PostShowMerchFollowUp, 9_200);
         }
+        // The people who were in the room are the warmest audience the band
+        // will ever have, and asking them to follow costs nothing. It runs
+        // after the merch window rather than beside it, so nobody gets two
+        // messages about the same night, and it stays open longer because a
+        // free ask does not go stale the way an offer does.
+        if since_show <= Duration::hours(i64::from(policy.post_show_follow_ask_hours))
+            && !snapshot.history.post_show_follow_ask_requested
+            && snapshot.communication_enabled
+            && snapshot.attendees >= policy.minimum_attendees_for_follow_ask
+        {
+            return request(ShowGrowthLever::PostShowFollowAsk, 9_400);
+        }
         return ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue);
     }
 
     let days = until.whole_days();
     if days > i64::from(policy.lookahead_days) {
         return ShowGrowthDecision::Hold(ShowGrowthHoldReason::TooEarly);
+    }
+
+    // Before anything is shared anywhere, the show needs a link that can be
+    // counted. Every lever below hands out a URL, and a URL nobody tracks turns
+    // all of that work into an unmeasurable guess. It costs nothing, touches
+    // nobody outside the workspace, and it is the cheapest thing in the whole
+    // sequence — so it goes first and has no lead time of its own.
+    if !snapshot.history.canonical_link_setup_requested {
+        return request(ShowGrowthLever::CanonicalLinkSetup, 9_800);
     }
 
     // Distribution hygiene first: be present where local people actually look.
@@ -351,6 +392,8 @@ const fn valid_policy(policy: ShowGrowthPolicy) -> bool {
         && policy.merch_preorder_lead_days >= policy.last_mile_lead_days
         && policy.last_mile_lead_days > 0
         && policy.post_show_merch_hours > 0
+        && policy.post_show_follow_ask_hours >= policy.post_show_merch_hours
+        && policy.minimum_attendees_for_follow_ask > 0
         && policy.minimum_city_signal_fans > 0
         && policy.minimum_paid_buyers_for_merch_offer > 0
         && policy.minimum_unconverted_interest > 0
@@ -383,7 +426,12 @@ mod tests {
             qualified_referrers_in_city: 4,
             beacon_partners: 0,
             attendees: 0,
-            history: ShowGrowthHistory::default(),
+            history: ShowGrowthHistory {
+                // Every test below describes a show already mid-campaign; the
+                // tracked link is set up once, before anything is shared.
+                canonical_link_setup_requested: true,
+                ..ShowGrowthHistory::default()
+            },
         }
     }
 
@@ -455,6 +503,7 @@ mod tests {
     fn slow_sales_trigger_social_proof_then_high_intent() {
         let mut data = snapshot(8);
         data.history = ShowGrowthHistory {
+            canonical_link_setup_requested: true,
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
@@ -486,6 +535,7 @@ mod tests {
     fn ticket_buyers_get_a_merch_offer() {
         let mut data = snapshot(12);
         data.history = ShowGrowthHistory {
+            canonical_link_setup_requested: true,
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
@@ -522,6 +572,7 @@ mod tests {
     fn free_provider_fan_push_is_due_after_social_proof_wave() {
         let mut data = snapshot(17);
         data.history = ShowGrowthHistory {
+            canonical_link_setup_requested: true,
             free_listing_sweep_requested: true,
             audience_capture_setup_requested: true,
             partner_cross_promo_requested: true,
@@ -570,6 +621,116 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_show_gets_a_tracked_link_before_anything_is_shared() {
+        // Every lever below hands somebody a URL. A URL nobody tracks turns all
+        // of that work into an unmeasurable guess, so this runs first and has
+        // no lead time of its own.
+        let mut data = snapshot(50);
+        data.history.canonical_link_setup_requested = false;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::CanonicalLinkSetup,
+                ..
+            }
+        ));
+
+        // Even a show still outside every lead time gets its link now, because
+        // the link is what makes the rest measurable when it does start.
+        let mut early = snapshot(59);
+        early.history.canonical_link_setup_requested = false;
+        assert!(matches!(
+            evaluate_show_growth(early, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::CanonicalLinkSetup,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_link_is_set_up_once_and_then_gets_out_of_the_way() {
+        let decision = evaluate_show_growth(snapshot(50), ShowGrowthPolicy::default(), now());
+        assert!(matches!(
+            decision,
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::FreeListingSweep,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_room_is_asked_to_follow_once_the_merch_window_closes() {
+        // The warmest audience the band will ever have, asked for something
+        // free. This is the lever that actually moves followers and trackers.
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(48);
+        data.attendees = 40;
+        data.history.post_show_merch_requested = true;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowFollowAsk,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_merch_window_still_wins_while_it_is_open() {
+        // Two messages about the same night is how an audience unsubscribes.
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(6);
+        data.attendees = 40;
+        assert!(matches!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Request {
+                lever: ShowGrowthLever::PostShowMerchFollowUp,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_follow_ask_is_made_once_and_then_stops() {
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(48);
+        data.attendees = 40;
+        data.history.post_show_merch_requested = true;
+        data.history.post_show_follow_ask_requested = true;
+        assert_eq!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue)
+        );
+    }
+
+    #[test]
+    fn a_show_nobody_came_to_is_asked_for_nothing() {
+        let mut data = snapshot(-1);
+        data.starts_at = now() - Duration::hours(48);
+        data.attendees = 0;
+        data.history.post_show_merch_requested = true;
+        assert_eq!(
+            evaluate_show_growth(data, ShowGrowthPolicy::default(), now()),
+            ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue)
+        );
+    }
+
+    #[test]
+    fn the_follow_window_may_not_close_before_the_merch_window() {
+        // Otherwise the merch message runs and the free ask silently never can.
+        let policy = ShowGrowthPolicy {
+            post_show_follow_ask_hours: 1,
+            ..ShowGrowthPolicy::default()
+        };
+        assert_eq!(
+            evaluate_show_growth(snapshot(10), policy, now()),
+            ShowGrowthDecision::Hold(ShowGrowthHoldReason::InvalidPolicy)
+        );
     }
 }
 
@@ -651,6 +812,10 @@ pub fn show_lifecycle(
         ("show_start", starts_at),
         ("afterglow", live_end),
         ("post_show_merch", afterglow_end),
+        (
+            "post_show_follow_ask",
+            starts_at + Duration::hours(i64::from(policy.post_show_follow_ask_hours)),
+        ),
         ("review_complete", review_end),
     ];
     let next = milestones.into_iter().find(|(_, at)| *at > now);

@@ -165,7 +165,32 @@ macro_rules! decision_core_reads {
                         FROM event_interests AS interest
                         WHERE interest.workspace_id = fan.workspace_id
                           AND interest.fan_id = fan.id
-                    ) AS last_event_interest_at
+                    ) AS last_event_interest_at,
+                    (
+                        SELECT count(*)
+                        FROM ticket_orders AS ticket_order
+                        WHERE ticket_order.workspace_id = fan.workspace_id
+                          AND ticket_order.buyer_email = fan.normalized_email
+                          AND ticket_order.status IN ('paid', 'partially_refunded')
+                    ) AS paid_ticket_count,
+                    (
+                        SELECT count(*)
+                        FROM referral_attributions AS referral
+                        WHERE referral.workspace_id = fan.workspace_id
+                          AND referral.referrer_fan_id = fan.id
+                    ) AS qualified_referrals,
+                    (
+                        SELECT max(referral.accepted_at)
+                        FROM referral_attributions AS referral
+                        WHERE referral.workspace_id = fan.workspace_id
+                          AND referral.referrer_fan_id = fan.id
+                    ) AS last_qualified_referral_at,
+                    EXISTS (
+                        SELECT 1 FROM referral_codes AS code
+                        WHERE code.workspace_id = fan.workspace_id
+                          AND code.fan_id = fan.id
+                          AND code.active
+                    ) AS has_referral_code
                 FROM fans AS fan
                 LEFT JOIN LATERAL (
                     SELECT consent.granted

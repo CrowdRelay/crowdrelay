@@ -17,15 +17,11 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "funding" => AutopilotContext::Funding,
         "beacon" => AutopilotContext::Beacon,
         "show_growth" => AutopilotContext::ShowGrowth,
+        "growth_metrics" => AutopilotContext::GrowthMetrics,
+        "growth_debt" => AutopilotContext::GrowthDebt,
         _ => return Err(RepositoryError::Unexpected),
     };
-    let autonomy_level = match row.autonomy_level.as_str() {
-        "observe" => AutonomyLevel::Observe,
-        "recommend" => AutonomyLevel::Recommend,
-        "require_approval" => AutonomyLevel::RequireApproval,
-        "bounded_auto" => AutonomyLevel::BoundedAuto,
-        _ => return Err(RepositoryError::Unexpected),
-    };
+    let autonomy_level = parse_autonomy_level(&row.autonomy_level)?;
     let confidence = u16::try_from(row.minimum_confidence_basis_points)
         .ok()
         .and_then(|value| Confidence::from_basis_points(value).ok())
@@ -88,6 +84,14 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
             AutopilotContext::Beacon => AutopilotPolicyConfig::Beacon(parse_config(
                 row.config,
                 BeaconCampaignPolicy::default(),
+            )?),
+            AutopilotContext::GrowthMetrics => AutopilotPolicyConfig::GrowthMetrics(parse_config(
+                row.config,
+                GrowthMetricPolicy::default(),
+            )?),
+            AutopilotContext::GrowthDebt => AutopilotPolicyConfig::GrowthDebt(parse_config(
+                row.config,
+                GrowthDebtPolicy::default(),
             )?),
             AutopilotContext::ShowGrowth => AutopilotPolicyConfig::ShowGrowth(parse_config(
                 row.config,
@@ -161,6 +165,10 @@ fn lifecycle_snapshot(row: LifecycleSnapshotRow) -> Result<FanLifecycleSnapshot,
         created_at: row.created_at,
         synesthesia_completed_at: row.synesthesia_completed_at,
         last_marketing_touch_at: row.last_marketing_touch_at,
+        paid_ticket_count: bounded_u32(row.paid_ticket_count)?,
+        qualified_referrals: bounded_u32(row.qualified_referrals)?,
+        last_qualified_referral_at: row.last_qualified_referral_at,
+        has_referral_code: row.has_referral_code,
         has_paid_ticket: row.has_paid_ticket,
         last_paid_ticket_at: row.last_paid_ticket_at,
         last_event_interest_at: row.last_event_interest_at,

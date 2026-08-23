@@ -19,6 +19,7 @@ struct ShowGrowthRow {
     beacon_partners: i64,
     attendees: i64,
     free_listing_sweep_requested: bool,
+    canonical_link_setup_requested: bool,
     audience_capture_setup_requested: bool,
     partner_cross_promo_requested: bool,
     grassroots_scene_relay_requested: bool,
@@ -28,6 +29,7 @@ struct ShowGrowthRow {
     merch_buyer_offer_requested: bool,
     high_intent_last_mile_requested: bool,
     post_show_merch_requested: bool,
+    post_show_follow_ask_requested: bool,
 }
 
 pub(in crate::autopilot) async fn load_show_growth_snapshots(
@@ -52,6 +54,7 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
             COALESCE(beacons.beacon_partners, 0)::bigint AS beacon_partners,
             COALESCE(attendance.attendees, 0)::bigint AS attendees,
             COALESCE(history.free_listing_sweep_requested, false) AS free_listing_sweep_requested,
+            COALESCE(history.canonical_link_setup_requested, false) AS canonical_link_setup_requested,
             COALESCE(history.audience_capture_setup_requested, false) AS audience_capture_setup_requested,
             COALESCE(history.partner_cross_promo_requested, false) AS partner_cross_promo_requested,
             COALESCE(history.grassroots_scene_relay_requested, false) AS grassroots_scene_relay_requested,
@@ -60,7 +63,8 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
             COALESCE(history.free_fan_channel_push_requested, false) AS free_fan_channel_push_requested,
             COALESCE(history.merch_buyer_offer_requested, false) AS merch_buyer_offer_requested,
             COALESCE(history.high_intent_last_mile_requested, false) AS high_intent_last_mile_requested,
-            COALESCE(history.post_show_merch_requested, false) AS post_show_merch_requested
+            COALESCE(history.post_show_merch_requested, false) AS post_show_merch_requested,
+            COALESCE(history.post_show_follow_ask_requested, false) AS post_show_follow_ask_requested
         FROM events AS event
         LEFT JOIN ecosystem_feature_flags AS comm
           ON comm.workspace_id = event.workspace_id
@@ -142,6 +146,7 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
         LEFT JOIN LATERAL (
             SELECT
                 BOOL_OR(action.payload ->> 'lever' = 'free_listing_sweep') AS free_listing_sweep_requested,
+                BOOL_OR(action.payload ->> 'lever' = 'canonical_link_setup') AS canonical_link_setup_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'audience_capture_setup') AS audience_capture_setup_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'partner_cross_promo') AS partner_cross_promo_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'grassroots_scene_relay') AS grassroots_scene_relay_requested,
@@ -150,7 +155,8 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
                 BOOL_OR(action.payload ->> 'lever' = 'free_fan_channel_push') AS free_fan_channel_push_requested,
                 BOOL_OR(action.payload ->> 'lever' IN ('merch_buyer_offer','merch_preorder_pickup')) AS merch_buyer_offer_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'high_intent_last_mile') AS high_intent_last_mile_requested,
-                BOOL_OR(action.payload ->> 'lever' = 'post_show_merch_follow_up') AS post_show_merch_requested
+                BOOL_OR(action.payload ->> 'lever' = 'post_show_merch_follow_up') AS post_show_merch_requested,
+                BOOL_OR(action.payload ->> 'lever' = 'post_show_follow_ask') AS post_show_follow_ask_requested
             FROM viryaos_autopilot_actions AS action
             WHERE action.workspace_id = event.workspace_id
               AND action.context = 'show_growth'
@@ -192,6 +198,7 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
         attendees: bounded_u32(row.attendees)?,
         history: ShowGrowthHistory {
             free_listing_sweep_requested: row.free_listing_sweep_requested,
+            canonical_link_setup_requested: row.canonical_link_setup_requested,
             audience_capture_setup_requested: row.audience_capture_setup_requested,
             partner_cross_promo_requested: row.partner_cross_promo_requested,
             grassroots_scene_relay_requested: row.grassroots_scene_relay_requested,
@@ -201,6 +208,7 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
             merch_buyer_offer_requested: row.merch_buyer_offer_requested,
             high_intent_last_mile_requested: row.high_intent_last_mile_requested,
             post_show_merch_requested: row.post_show_merch_requested,
+            post_show_follow_ask_requested: row.post_show_follow_ask_requested,
         },
     })
 }

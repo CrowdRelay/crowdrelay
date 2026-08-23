@@ -120,6 +120,28 @@ pub(super) async fn schedule_effect_measurement(
                 now + time::Duration::hours(72),
             ));
         }
+        AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
+            // No measurement is scheduled yet. Measuring a raised finding means
+            // comparing the series' own later velocity against the baseline it
+            // was raised from, which needs a growth-metric measurement kind that
+            // does not exist yet (see Phase 5 in docs/GROWTH_OS_PLAN.md).
+            // Scheduling one of the existing kinds here would attribute a
+            // ticket or merch movement to an analysis step, which is exactly
+            // the kind of invented causality this system must not produce.
+        }
+        AutopilotActionPayload::IssueReferralCode { .. } => {
+            // Nothing to measure. The code either exists or it does not, and
+            // whether anybody uses it is measured as a qualified referral
+            // against the fan, not against the act of minting it.
+        }
+        AutopilotActionPayload::RaiseGrowthDebt { .. } => {
+            // Same reasoning as the raised growth opportunity above, one step
+            // further: debt is measured by the work getting done, and the
+            // signal that it did lives in the owning table (an interaction
+            // recorded, a surface published, a milestone completed), not in a
+            // ticket or merch movement. Phase 5 adds the measurement kind that
+            // can read those honestly.
+        }
         AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => {
             use crowdrelay_domain::show_growth::ShowGrowthLever;
 
@@ -298,6 +320,23 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconOutreach { .. } => ("beacon_outreach_requested", 1.0, None),
+        AutopilotActionPayload::RaiseGrowthOpportunity {
+            deviation_basis_points,
+            ..
+        } => (
+            "growth_opportunity_raised",
+            f64::from(*deviation_basis_points),
+            None,
+        ),
+        AutopilotActionPayload::IssueReferralCode { .. } => ("referral_code_issued", 1.0, None),
+        AutopilotActionPayload::RaiseGrowthDebt {
+            overdue_basis_points,
+            ..
+        } => (
+            "growth_debt_raised",
+            f64::from(*overdue_basis_points),
+            None,
+        ),
         AutopilotActionPayload::RequestShowGrowth { .. } => ("show_growth_lever_requested", 1.0, None),
         AutopilotActionPayload::RequestContentArtifact { .. } => {
             ("content_artifact_requested", 1.0, None)

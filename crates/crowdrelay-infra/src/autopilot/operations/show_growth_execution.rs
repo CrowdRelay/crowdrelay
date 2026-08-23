@@ -48,6 +48,10 @@ pub(in crate::autopilot) async fn execute_show_growth(
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
 
+    if lever == ShowGrowthLever::CanonicalLinkSetup {
+        return ensure_canonical_show_link(tx, workspace_id, event_id, &event).await;
+    }
+
     if lever.is_first_party_campaign() {
         return execute_first_party_growth_campaign(
             tx,
@@ -262,6 +266,73 @@ pub(in crate::autopilot) async fn execute_show_growth(
     .await
 }
 
+/// Gives the show a tracked link, or reactivates the one it already had.
+///
+/// Every other lever hands somebody a URL, and a URL nobody tracks turns all of
+/// that work into an unmeasurable guess — the difference between "we shared it
+/// and followers went up" and "forty people clicked". This is the cheapest
+/// action in the whole system and the one the rest of the measurement rests on.
+///
+/// It writes only to the workspace's own link table, so it is safe to run
+/// unattended: worst case it recreates a link that already pointed where it
+/// should.
+async fn ensure_canonical_show_link(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: EventId,
+    event: &GrowthEventFacts,
+) -> Result<(), RepositoryError> {
+    // No destination, no link. Inventing one would produce a tracked route to
+    // nowhere, which is worse than an untracked route to the right place.
+    let Some(destination) = event.4.clone().filter(|url| url.starts_with("http")) else {
+        return Err(RepositoryError::Conflict);
+    };
+
+    // The slug has to satisfy the smart-link pattern, and the event slug
+    // already does; the prefix keeps agent-created links identifiable so an
+    // operator can tell at a glance which links they made and which it did.
+    let slug = format!("show-{}", event.0);
+    if slug.len() > 128 {
+        return Err(RepositoryError::Conflict);
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO smart_links (workspace_id, slug, destination_url, active)
+        VALUES ($1, $2, $3, true)
+        ON CONFLICT (workspace_id, slug) DO UPDATE SET
+            destination_url = EXCLUDED.destination_url,
+            active = true,
+            version = smart_links.version + 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(&destination)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    // The event row is the one place a later lever looks for the canonical
+    // route, so record which link belongs to this show rather than leaving the
+    // association implied by a naming convention.
+    sqlx::query(
+        r#"
+        UPDATE viryaos_show_growth_surfaces
+        SET attribution_url = $3, last_checked_at = now()
+        WHERE workspace_id = $1 AND event_id = $2 AND attribution_url IS NULL
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(format!("/l/{slug}"))
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_first_party_growth_campaign(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -328,6 +399,11 @@ async fn execute_first_party_growth_campaign(
             "attended_event_slugs": [event.0.clone()],
             "marketing_consent": true
         }),
+        ShowGrowthLever::PostShowFollowAsk => json!({
+            "statuses": ["active"],
+            "attended_event_slugs": [event.0.clone()],
+            "marketing_consent": true
+        }),
         _ => return Err(RepositoryError::Conflict),
     };
 
@@ -386,6 +462,38 @@ async fn execute_first_party_growth_campaign(
                     "use_existing_marketing_consent_only",
                     "one_email_per_fan_per_show_growth_wave",
                     "do_not_claim_exclusive_access_unless_true",
+                    "include_unsubscribe_via_existing_mailer_contract",
+                    "prefer_one_primary_cta_and_one_secondary_cta",
+                    "never fabricate follower_or_stream_numbers"
+                ]
+            }
+        }),
+        ShowGrowthLever::PostShowFollowAsk => json!({
+            "event_id": event_id,
+            "lever": lever.as_str(),
+            "ticket_url": event.4,
+            "venue": event.3,
+            "managed_by": "viryaos_show_growth",
+            // Same canonical links as the pre-show push. The difference is who
+            // receives it: people who were in the room, which is the warmest
+            // list the band will ever have and the only one where "come with us
+            // to the next one" is a statement of fact rather than a pitch.
+            "growth_ctas": {
+                "bandsintown_follow_url": "env:VIRYA_BANDSINTOWN_FOLLOW_URL",
+                "spotify_artist_url": event
+                    .5
+                    .clone()
+                    .unwrap_or_else(|| "env:VIRYA_SPOTIFY_ARTIST_URL".to_owned()),
+                "spotify_playlist_url": "env:VIRYA_SPOTIFY_PLAYLIST_URL"
+            },
+            "email_contract": {
+                "goal": "thank the people who were actually there and convert that night into a Spotify follow and a Bandsintown track, so the next show in their city finds them without paid reach",
+                "rules": [
+                    "use_existing_marketing_consent_only",
+                    "one_email_per_fan_per_show",
+                    "must_read_as_a_thank_you_first_and_an_ask_second",
+                    "do_not_ask_for_money_in_this_message",
+                    "do_not_claim_attendance_the_records_do_not_support",
                     "include_unsubscribe_via_existing_mailer_contract",
                     "prefer_one_primary_cta_and_one_secondary_cta",
                     "never fabricate follower_or_stream_numbers"
