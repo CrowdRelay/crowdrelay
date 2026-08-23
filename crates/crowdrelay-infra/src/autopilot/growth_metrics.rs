@@ -606,6 +606,52 @@ impl PostgresAutopilotRepository {
         ))
     }
 
+    /// Declares one activated-fan series per city the band has any interest in.
+    ///
+    /// The snowball loop is geographic: a thousand fans scattered across Europe
+    /// produce no bookable city, while two hundred across four Polish cities
+    /// produce four shows. Counting activated people per city is what turns
+    /// "we have fans" into "Wrocław is worth playing", and it is the evidence
+    /// the booking rule already knows how to read.
+    ///
+    /// A city is never retired once it has a series. A city that goes quiet is
+    /// a fact worth keeping visible, and retiring on an empty month would make
+    /// the series flap between active and retired every time somebody moved.
+    async fn sync_city_series(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        workspace_id: WorkspaceId,
+    ) -> Result<u32, RepositoryError> {
+        let tracked = sqlx::query_scalar::<_, i64>(
+            r#"
+            WITH tracked AS (
+                INSERT INTO viryaos_growth_metric_series (
+                    workspace_id, platform, metric_key, subject_kind, subject_id,
+                    display_name, direction, value_tier, expected_interval_hours, active
+                )
+                SELECT DISTINCT $1, 'signal', 'activated_fans_30d', 'city', city.id,
+                       left('Active fans · ' || city.name, 120),
+                       'higher_is_better', 'downstream', $2, true
+                FROM fan_city_interests AS interest
+                JOIN cities AS city ON city.id = interest.city_id
+                WHERE interest.workspace_id = $1
+                ON CONFLICT (workspace_id, platform, metric_key, subject_kind, subject_id)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    active = true
+                RETURNING 1
+            )
+            SELECT count(*)::bigint FROM tracked
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(FIRST_PARTY_INTERVAL_HOURS)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(u32::try_from(tracked).unwrap_or(u32::MAX))
+    }
+
     /// Declares the workspace-level series. These have no subject, which is why
     /// the series uniqueness has to treat NULL subjects as equal.
     async fn sync_workspace_series(
@@ -662,6 +708,9 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
             let workspace_series = self
                 .sync_workspace_series(&mut transaction, workspace_id)
                 .await?;
+            let city_series = self
+                .sync_city_series(&mut transaction, workspace_id)
+                .await?;
 
             // Observations are bucketed to the top of the hour and inserted with
             // DO NOTHING. The worker cycle is far shorter than an hour, so
@@ -706,6 +755,66 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                     WHERE series.workspace_id = $1
                       AND series.platform = 'ticketing'
                       AND series.subject_kind = 'event'
+                      AND series.active
+                    ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
+                    RETURNING 1
+                )
+                SELECT count(*)::bigint FROM recorded
+                "#,
+            )
+            .bind(workspace)
+            .bind(now)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
+            // Per-city activation, from the same definition as everything else.
+            // A second copy of "active" here would drift from the KPI and
+            // nobody would notice, because both numbers would look plausible.
+            let city_points = sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH per_city AS (
+                    SELECT interest.city_id,
+                           count(DISTINCT fan.id)::bigint AS activated
+                    FROM fan_city_interests AS interest
+                    JOIN fans AS fan
+                      ON fan.workspace_id = interest.workspace_id
+                     AND fan.id = interest.fan_id
+                    WHERE interest.workspace_id = $1
+                      AND fan.status = 'active'
+                      AND EXISTS (
+                          SELECT 1 FROM fan_consents AS consent
+                          WHERE consent.workspace_id = fan.workspace_id
+                            AND consent.fan_id = fan.id
+                            AND consent.purpose = 'marketing'
+                            AND consent.granted
+                            AND consent.recorded_at = (
+                                SELECT max(latest.recorded_at) FROM fan_consents AS latest
+                                WHERE latest.workspace_id = fan.workspace_id
+                                  AND latest.fan_id = fan.id
+                                  AND latest.purpose = 'marketing'
+                            )
+                      )
+                      AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
+                          BETWEEN $2 - INTERVAL '30 days' AND $2
+                    GROUP BY interest.city_id
+                ), recorded AS (
+                    INSERT INTO viryaos_growth_metric_points (
+                        workspace_id, series_id, captured_at, value, source
+                    )
+                    SELECT series.workspace_id, series.id,
+                           date_trunc('hour', $2::timestamptz),
+                           -- A city whose fans all went quiet records a zero, and
+                           -- a zero is a measurement. Skipping the row would read
+                           -- as a dead feed rather than as a city that cooled.
+                           COALESCE(per_city.activated, 0),
+                           'crowdrelay'
+                    FROM viryaos_growth_metric_series AS series
+                    LEFT JOIN per_city ON per_city.city_id = series.subject_id
+                    WHERE series.workspace_id = $1
+                      AND series.platform = 'signal'
+                      AND series.metric_key = 'activated_fans_30d'
+                      AND series.subject_kind = 'city'
                       AND series.active
                     ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING
                     RETURNING 1
@@ -787,10 +896,16 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
 
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(FirstPartyGrowthMetricReport {
-                series_tracked: event_series.saturating_add(workspace_series),
+                series_tracked: event_series
+                    .saturating_add(workspace_series)
+                    .saturating_add(city_series),
                 series_retired,
-                points_recorded: u32::try_from(event_points.saturating_add(workspace_points))
-                    .unwrap_or(u32::MAX),
+                points_recorded: u32::try_from(
+                    event_points
+                        .saturating_add(workspace_points)
+                        .saturating_add(city_points),
+                )
+                .unwrap_or(u32::MAX),
             })
         })
         .await

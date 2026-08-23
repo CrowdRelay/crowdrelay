@@ -137,18 +137,23 @@ class GrowthMetricsContract(unittest.TestCase):
     def test_first_party_capture_is_bucketed_and_never_overwrites(self) -> None:
         # The worker cycle is far shorter than an hour. Without a bucket the
         # window would describe our polling rate rather than the business.
+        # Counted against the number of capture statements rather than pinned
+        # to a fixed number, so adding a series cannot silently ship one that
+        # skips the bucket or overwrites history.
         infra = read(INFRA)
         capture = infra.split("impl AutopilotFirstPartyGrowthMetrics", 1)[1]
+        statements = capture.count("INSERT INTO viryaos_growth_metric_points")
+        self.assertGreaterEqual(statements, 2)
         self.assertEqual(
             capture.count("date_trunc('hour', $2::timestamptz)"),
-            2,
-            "both first-party capture statements must bucket capture time",
+            statements,
+            "every first-party capture statement must bucket capture time",
         )
         self.assertEqual(
             capture.count(
                 "ON CONFLICT (workspace_id, series_id, captured_at) DO NOTHING"
             ),
-            2,
+            statements,
             "first-party capture must never overwrite an existing observation",
         )
 
