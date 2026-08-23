@@ -13,7 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/acquisition_channel.rs"
 MIGRATION = ROOT / "migrations/0079_smart_link_channel_identity.sql"
-CONTROL = ROOT / "crates/crowdrelay-infra/src/autopilot/control.rs"
+LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/acquisition_channels.rs"
 APP = ROOT / "crates/crowdrelay-application/src/autopilot/control.rs"
 ROUTING = ROOT / "crates/crowdrelay-api/src/routing.rs"
 OPENAPI = ROOT / "openapi/openapi.yaml"
@@ -27,14 +27,14 @@ def shipped(rust: str) -> str:
     return rust.split("#[cfg(test)]", 1)[0]
 
 
-def query(control: str) -> str:
-    return control.split("async fn load_acquisition_channels", 1)[1].split('"#', 1)[0]
+def query(loader: str) -> str:
+    return loader.split("async fn load_acquisition_channels", 1)[1].split('"#', 1)[0]
 
 
 class AcquisitionChannelContract(unittest.TestCase):
     def setUp(self) -> None:
         self.domain = read(DOMAIN)
-        self.control = read(CONTROL)
+        self.loader = read(LOADER)
 
     def test_there_is_no_direct_bucket_anywhere(self) -> None:
         # Every analytics tool invents one, and it makes the channel you cannot
@@ -52,24 +52,24 @@ class AcquisitionChannelContract(unittest.TestCase):
     def test_the_first_acquisition_event_is_the_acquisition(self) -> None:
         # A later event is a return visit, and crediting the channel somebody
         # came back through would rob the one that found them.
-        sql = query(self.control)
+        sql = query(self.loader)
         self.assertIn("ORDER BY event.occurred_at ASC", sql)
         self.assertIn("LIMIT 1", sql)
 
     def test_the_click_must_precede_the_signup(self) -> None:
-        sql = query(self.control)
+        sql = query(self.loader)
         self.assertIn("click.occurred_at <= arrival.signed_up_at", sql)
         self.assertIn("ORDER BY click.occurred_at DESC", sql)
 
     def test_activation_reuses_the_one_definition(self) -> None:
         # Not a second copy of "active" that can drift from the KPI series.
-        sql = query(self.control)
+        sql = query(self.loader)
         self.assertIn("fan_last_meaningful_action", sql)
         self.assertIn("INTERVAL '30 days'", sql)
         self.assertIn("consent.granted", sql)
 
     def test_only_the_latest_consent_decision_counts(self) -> None:
-        sql = query(self.control)
+        sql = query(self.loader)
         self.assertIn("max(latest.recorded_at)", sql)
 
     def test_signups_and_activation_are_reported_side_by_side(self) -> None:
@@ -81,7 +81,7 @@ class AcquisitionChannelContract(unittest.TestCase):
 
     def test_a_rate_from_an_empty_denominator_is_not_a_zero(self) -> None:
         self.assertIn("activation_basis_points: Option<u32>", read(APP))
-        self.assertIn("(signups > 0).then(", self.control)
+        self.assertIn("(signups > 0).then(", self.loader)
 
     def test_the_unattributable_part_stays_in_view(self) -> None:
         # A report that hides its unknowns is how a large attribution gap goes
@@ -91,13 +91,13 @@ class AcquisitionChannelContract(unittest.TestCase):
 
     def test_groups_sharing_a_reason_are_merged_into_one_line(self) -> None:
         # An operator wants one line per fix, not one per underlying shape.
-        self.assertIn("iter_mut().find(|group| group.reason == reason)", self.control)
+        self.assertIn("iter_mut().find(|group| group.reason == reason)", self.loader)
 
     def test_the_result_is_bounded(self) -> None:
-        sql = query(self.control)
+        sql = query(self.loader)
         self.assertIn("GROUP BY", sql)
         self.assertIn("LIMIT $3", sql)
-        self.assertIn("MAX_SNAPSHOTS_PER_CONTEXT", self.control)
+        self.assertIn("MAX_SNAPSHOTS_PER_CONTEXT", self.loader)
 
     def test_the_attribution_walk_is_indexed(self) -> None:
         migration = read(MIGRATION)

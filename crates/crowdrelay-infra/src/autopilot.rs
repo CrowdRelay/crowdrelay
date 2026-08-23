@@ -26,7 +26,7 @@ use crowdrelay_application::{
         AutopilotMeasurementRepository, AutopilotMerchStateRepository, AutopilotPolicy,
         AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
         AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
-        ChannelPerformance, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
+        CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, DecisionCandidate, ExecutionClaimMutation,
         ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
         FirstPartyGrowthMetricReport, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
@@ -41,7 +41,7 @@ use crowdrelay_application::{
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
         SetAutopilotAuthority, SetManagerBookingPolicy, SetTourEconomics, TeamAssigneeSummary,
         TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
-        UnattributedGroup, UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
         UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
         UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
@@ -50,9 +50,6 @@ use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
     EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
-    acquisition_channel::{
-        AttributionEvidence, ChannelAttribution, ChannelIdentity, attribute_channel,
-    },
     action_class::ActionClass,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
@@ -198,17 +195,6 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(|_| RepositoryError::Unavailable)?
     }
-}
-
-#[derive(Debug, FromRow)]
-struct ChannelPerformanceRow {
-    had_visitor: bool,
-    had_click: bool,
-    channel_source: Option<String>,
-    channel_community: Option<String>,
-    channel_creative: Option<String>,
-    signups: i64,
-    activated_30d: i64,
 }
 
 #[derive(Debug, FromRow)]
