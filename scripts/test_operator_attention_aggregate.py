@@ -44,8 +44,17 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
 
     def test_aggregate_keeps_the_same_bounds_as_the_list_endpoints(self):
         # Control Plane previously requested limit=50 explicitly; the aggregate
-        # must not quietly return a different page size.
-        self.assertEqual(len(re.findall(r"LIMIT 50", self.attention)), 3)
+        # must not quietly return a different page size. Asserted per loader
+        # rather than as a total so a new list section cannot pass by borrowing
+        # another section's bound.
+        for loader in (
+            "load_alerts",
+            "load_dead_outbox",
+            "load_dead_deliveries",
+            "load_open_findings",
+        ):
+            body = self.attention.split(f"async fn {loader}", 1)[1].split("async fn ", 1)[0]
+            self.assertIn("LIMIT 50", body, f"{loader} must stay bounded")
 
     def test_aggregate_filters_open_findings_only(self):
         findings = self.attention.split("async fn load_open_findings", 1)[1]
@@ -65,8 +74,20 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
         self.assertIn("ORDER BY delivery.created_at DESC, delivery.id DESC", deliveries)
 
     def test_aggregate_bounds_every_section_with_a_timeout(self):
-        # One slow section must not hang the whole operator page.
-        self.assertEqual(len(re.findall(r"run_with_timeout\(", self.attention)), 5)
+        # One slow section must not hang the whole operator page. Named instead
+        # of counted: a new section has to be added here deliberately.
+        sections = re.findall(r"let (\w+) = run_with_timeout\(", self.attention)
+        self.assertEqual(
+            sorted(sections),
+            [
+                "alerts",
+                "dead_deliveries",
+                "dead_outbox",
+                "ecosystem",
+                "findings",
+                "summary",
+            ],
+        )
 
 
 if __name__ == "__main__":
