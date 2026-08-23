@@ -28,6 +28,7 @@ struct ShowGrowthRow {
     merch_buyer_offer_requested: bool,
     high_intent_last_mile_requested: bool,
     post_show_merch_requested: bool,
+    post_show_follow_ask_requested: bool,
 }
 
 pub(in crate::autopilot) async fn load_show_growth_snapshots(
@@ -60,7 +61,8 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
             COALESCE(history.free_fan_channel_push_requested, false) AS free_fan_channel_push_requested,
             COALESCE(history.merch_buyer_offer_requested, false) AS merch_buyer_offer_requested,
             COALESCE(history.high_intent_last_mile_requested, false) AS high_intent_last_mile_requested,
-            COALESCE(history.post_show_merch_requested, false) AS post_show_merch_requested
+            COALESCE(history.post_show_merch_requested, false) AS post_show_merch_requested,
+            COALESCE(history.post_show_follow_ask_requested, false) AS post_show_follow_ask_requested
         FROM events AS event
         LEFT JOIN ecosystem_feature_flags AS comm
           ON comm.workspace_id = event.workspace_id
@@ -150,7 +152,8 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
                 BOOL_OR(action.payload ->> 'lever' = 'free_fan_channel_push') AS free_fan_channel_push_requested,
                 BOOL_OR(action.payload ->> 'lever' IN ('merch_buyer_offer','merch_preorder_pickup')) AS merch_buyer_offer_requested,
                 BOOL_OR(action.payload ->> 'lever' = 'high_intent_last_mile') AS high_intent_last_mile_requested,
-                BOOL_OR(action.payload ->> 'lever' = 'post_show_merch_follow_up') AS post_show_merch_requested
+                BOOL_OR(action.payload ->> 'lever' = 'post_show_merch_follow_up') AS post_show_merch_requested,
+                BOOL_OR(action.payload ->> 'lever' = 'post_show_follow_ask') AS post_show_follow_ask_requested
             FROM viryaos_autopilot_actions AS action
             WHERE action.workspace_id = event.workspace_id
               AND action.context = 'show_growth'
@@ -201,6 +204,7 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
             merch_buyer_offer_requested: row.merch_buyer_offer_requested,
             high_intent_last_mile_requested: row.high_intent_last_mile_requested,
             post_show_merch_requested: row.post_show_merch_requested,
+            post_show_follow_ask_requested: row.post_show_follow_ask_requested,
         },
     })
 }

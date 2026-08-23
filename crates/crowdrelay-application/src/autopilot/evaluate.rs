@@ -555,9 +555,18 @@ where
         // a full budget must not be able to let a third-party action through,
         // and an empty one must not promote anything.
         let subject_usage = EnvelopeUsage {
-            hours_since_subject_touched: touch_ages.iter().find_map(|(subject, hours)| {
-                (*subject == candidate.subject.uuid()).then_some(*hours)
-            }),
+            // Only contacts have a cooldown. An event is a topic, not a person:
+            // keying it there would let one show run a single growth lever a
+            // week and quietly starve the other nine.
+            hours_since_subject_touched: candidate
+                .subject
+                .is_contactable_person()
+                .then(|| {
+                    touch_ages.iter().find_map(|(subject, hours)| {
+                        (*subject == candidate.subject.uuid()).then_some(*hours)
+                    })
+                })
+                .flatten(),
             ..*usage
         };
         let clamped = match check_envelope(class, envelope, &subject_usage) {

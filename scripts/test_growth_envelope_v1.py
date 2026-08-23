@@ -16,6 +16,7 @@ DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_envelope.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/opportunity_reads.rs"
 PERSIST = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs"
+MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 
 
 def read(path: Path) -> str:
@@ -146,6 +147,24 @@ class GrowthEnvelopeContract(unittest.TestCase):
         self.assertIn("owned_audience_touches_7d.saturating_add(1)", spend)
         self.assertIn("third_party_touches_7d.saturating_add(1)", spend)
         self.assertIn("let (envelope, mut usage)", self.evaluate)
+
+    def test_the_cooldown_applies_to_people_and_not_to_topics(self) -> None:
+        # A show legitimately needs a listing sweep, an ambassador push and a
+        # last-mile nudge over the weeks before it, each reaching different
+        # people. A cooldown keyed on the event would allow one of them a week
+        # and silently starve the rest.
+        model = read(MODEL)
+        self.assertIn("pub const fn is_contactable_person", model)
+        persons = model.split("pub const fn is_contactable_person", 1)[1].split(
+            "\n    }", 1
+        )[0]
+        for contact in ("Self::Fan(_)", "Self::BookingTarget(_)", "Self::OutreachTarget(_)", "Self::Beacon(_)"):
+            self.assertIn(contact, persons)
+        for topic in ("Self::Event(_)", "Self::ReleasePlan(_)", "Self::GrowthMetricSeries(_)"):
+            self.assertNotIn(topic, persons)
+        persist = self.evaluate.split("async fn persist(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("is_contactable_person()", persist)
+        self.assertIn("hours_since_subject_touched", persist)
 
     def test_held_decisions_are_counted_apart_from_gated_and_throttled_ones(self) -> None:
         report = self.evaluate.split("pub struct AutopilotCycleReport {", 1)[1].split(
