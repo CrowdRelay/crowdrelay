@@ -68,10 +68,47 @@ ALTER TABLE viryaos_autopilot_actions
 
 -- One sweep a day at most, so the quota is 2: enough to allow a retry after a
 -- failed emission, far too few to turn a cooldown bug into a crawl.
+--
+-- Both halves are needed. The backfill covers workspaces that already exist;
+-- the trigger covers the ones created later. A context added to only one of
+-- them works perfectly until the next workspace is created and then silently
+-- does nothing for it, which is the kind of gap nobody finds for months.
 INSERT INTO viryaos_autopilot_policies (workspace_id, context, max_actions_24h)
 SELECT workspace.id, 'outreach_supply', 2
 FROM workspaces workspace
 ON CONFLICT (workspace_id, context) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION viryaos_provision_autopilot_policies()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO viryaos_autopilot_policies (workspace_id, context, max_actions_24h)
+    VALUES
+        (NEW.id, 'ticket_yield', 10),
+        (NEW.id, 'fan_lifecycle', 100),
+        (NEW.id, 'campaign_lifecycle', 20),
+        (NEW.id, 'merchandising', 20),
+        (NEW.id, 'merch_pricing', 10),
+        (NEW.id, 'merch_bundle', 5),
+        (NEW.id, 'booking_opportunity', 10),
+        (NEW.id, 'outreach', 20),
+        (NEW.id, 'content_supply', 30),
+        (NEW.id, 'promotion_budget', 20),
+        (NEW.id, 'experimentation', 10),
+        (NEW.id, 'show_operations', 50),
+        (NEW.id, 'release', 30),
+        (NEW.id, 'live_opportunity', 15),
+        (NEW.id, 'funding', 10),
+        (NEW.id, 'beacon', 12),
+        (NEW.id, 'show_growth', 14),
+        (NEW.id, 'growth_debt', 10),
+        (NEW.id, 'growth_metrics', 12),
+        (NEW.id, 'outreach_supply', 2)
+    ON CONFLICT (workspace_id, context) DO NOTHING;
+    RETURN NEW;
+END;
+$$;
 
 -- Finding the most recent sweep, and the window each sweep owns, is the only
 -- query this context runs; without the index it is a scan of every action the
