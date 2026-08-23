@@ -21,13 +21,7 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "growth_debt" => AutopilotContext::GrowthDebt,
         _ => return Err(RepositoryError::Unexpected),
     };
-    let autonomy_level = match row.autonomy_level.as_str() {
-        "observe" => AutonomyLevel::Observe,
-        "recommend" => AutonomyLevel::Recommend,
-        "require_approval" => AutonomyLevel::RequireApproval,
-        "bounded_auto" => AutonomyLevel::BoundedAuto,
-        _ => return Err(RepositoryError::Unexpected),
-    };
+    let autonomy_level = parse_autonomy_level(&row.autonomy_level)?;
     let confidence = u16::try_from(row.minimum_confidence_basis_points)
         .ok()
         .and_then(|value| Confidence::from_basis_points(value).ok())

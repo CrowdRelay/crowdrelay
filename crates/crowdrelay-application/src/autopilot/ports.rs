@@ -3,7 +3,9 @@
 use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, WorkspaceId,
+    action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
+    autonomy::AutonomyLevel,
     beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
     campaign_lifecycle::EventCampaignSnapshot,
@@ -174,6 +176,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthDebtObservation>, RepositoryError>;
+
+    /// The operator's autonomy ceiling per action class.
+    ///
+    /// A class missing from the returned map is read as its safest ceiling, not
+    /// as an absent limit: a migration that has not run must never be a grant
+    /// of authority.
+    async fn load_autonomy_ceilings(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.

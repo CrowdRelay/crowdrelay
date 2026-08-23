@@ -31,6 +31,7 @@
 //! logs and error messages.
 
 pub mod acquisition;
+pub mod action_class;
 pub mod admission;
 pub mod area;
 pub mod audience_lifecycle;

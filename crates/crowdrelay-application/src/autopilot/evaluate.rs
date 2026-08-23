@@ -2,10 +2,11 @@
 
 use crowdrelay_domain::{
     WorkspaceId,
+    action_class::{ActionClass, clamp_disposition},
     audience_lifecycle::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
     },
-    autonomy::{PolicyDisposition, disposition},
+    autonomy::{AutonomyLevel, PolicyDisposition, disposition},
     beacons::{
         BeaconCampaignSnapshot, BeaconDecision, BeaconDiscoveryDecision, BeaconDiscoverySnapshot,
         BeaconOutreachPhase, evaluate_beacon_campaign, evaluate_beacon_discovery,
@@ -81,6 +82,13 @@ where
         now: OffsetDateTime,
     ) -> Result<AutopilotCycleReport, AutopilotError> {
         let policies = self.repository.load_policies(self.workspace_id).await?;
+        // Loaded once per cycle rather than per candidate: the ceiling is an
+        // operator setting that does not change mid-cycle, and re-reading it
+        // for every decision would be a query per finding.
+        let ceilings = self
+            .repository
+            .load_autonomy_ceilings(self.workspace_id)
+            .await?;
         let mut report = AutopilotCycleReport::default();
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
@@ -92,12 +100,12 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = ticket_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                         if let Some(candidate) =
                             ticket_allocation_candidate(snapshot, &policy, now)?
                         {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -108,7 +116,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = lifecycle_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -121,7 +129,7 @@ where
                         if let Some(candidate) =
                             campaign_lifecycle_candidate(snapshot, &policy, now)?
                         {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -132,7 +140,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = merch_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -143,7 +151,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = merch_price_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -154,7 +162,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = merch_bundle_candidate(snapshot, &policy)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -169,14 +177,14 @@ where
                         .await?;
                     for target in &targets {
                         if let Some(candidate) = booking_followup_candidate(target, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                     for snapshot in snapshots {
                         if let Some(candidate) =
                             booking_candidate(snapshot, &targets, &policy, now)?
                         {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -187,7 +195,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = outreach_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -198,7 +206,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = content_candidate(&snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -209,7 +217,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = experiment_candidate(&snapshot, &policy)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -221,7 +229,7 @@ where
                     for snapshot in snapshots {
                         if let Some(candidate) = show_operations_candidate(snapshot, &policy, now)?
                         {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -232,7 +240,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = promotion_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -243,7 +251,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = release_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -255,7 +263,7 @@ where
                     for snapshot in snapshots {
                         if let Some(candidate) = live_opportunity_candidate(snapshot, &policy, now)?
                         {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -266,7 +274,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = funding_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -278,7 +286,7 @@ where
                     for snapshot in discovery {
                         if let Some(candidate) = beacon_discovery_candidate(snapshot, &policy, now)?
                         {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                     let snapshots = self
@@ -287,7 +295,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = beacon_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -298,7 +306,7 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = show_growth_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -309,7 +317,7 @@ where
                         .await?;
                     for snapshot in &snapshots {
                         if let Some(candidate) = growth_metric_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -320,7 +328,7 @@ where
                         .await?;
                     for observation in &observations {
                         if let Some(candidate) = growth_debt_candidate(observation, &policy, now)? {
-                            self.persist(&candidate, &mut report).await?;
+                            self.persist(&candidate, &ceilings, &mut report).await?;
                         }
                     }
                 }
@@ -330,11 +338,32 @@ where
         Ok(report)
     }
 
+    /// The one place every candidate passes through, and therefore the only
+    /// place the class ceiling has to be applied.
+    ///
+    /// Doing it here rather than inside each of the twenty candidate functions
+    /// means a new detector cannot forget it, and a detector author cannot
+    /// choose to skip it.
     async fn persist(
         &self,
         candidate: &DecisionCandidate,
+        ceilings: &[(ActionClass, AutonomyLevel)],
         report: &mut AutopilotCycleReport,
     ) -> Result<(), AutopilotError> {
+        let class = candidate.action.action_class();
+        let ceiling = ceilings
+            .iter()
+            .find_map(|(known, level)| (*known == class).then_some(*level))
+            // An absent row is the safest ceiling, never an absent limit.
+            .unwrap_or_else(|| class.safest_ceiling());
+        let clamped = clamp_disposition(candidate.disposition, ceiling);
+        if clamped != candidate.disposition {
+            report.actions_gated = report.actions_gated.saturating_add(1);
+        }
+        let candidate = &DecisionCandidate {
+            disposition: clamped,
+            ..candidate.clone()
+        };
         let persisted = self
             .repository
             .persist_candidate(self.workspace_id, candidate)
@@ -357,6 +386,11 @@ pub struct AutopilotCycleReport {
     pub decisions: u32,
     pub actions_enqueued: u32,
     pub actions_throttled: u32,
+    /// Decisions the class ceiling lowered — an action the context was willing
+    /// to take unattended that now waits for a human. Counted separately from
+    /// quota throttling because the two mean different things: throttled work
+    /// is deferred, gated work is somebody's decision to make.
+    pub actions_gated: u32,
 }
 
 #[derive(Debug, Error)]
