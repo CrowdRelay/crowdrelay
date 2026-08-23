@@ -67,6 +67,7 @@ pub mod referrals;
 pub mod release_autopilot;
 pub mod show_growth;
 pub mod show_operations;
+pub mod show_settlement;
 pub mod target_discovery;
 pub mod team_operations;
 pub mod tour_economics;

@@ -164,13 +164,16 @@ class OperatorBriefContract(unittest.TestCase):
             "the bridge's asserted route count drifted from the route map",
         )
 
-    def test_the_public_readme_documents_the_new_event(self) -> None:
-        # Asserted against the tracked README rather than the private executor
+    def test_the_event_is_published_somewhere_tracked(self) -> None:
+        # Asserted against tracked files rather than the private executor
         # contract: that file is gitignored, so a test reading it passes on a
-        # workstation and can never pass in CI.
-        readme = read(CONTRACT)
-        self.assertIn(EVENT_TYPE, readme)
-        self.assertIn("ops.alert", readme)
+        # workstation and can never pass in CI. The public README no longer
+        # enumerates event types, so the tracked example workflow carries the
+        # claim instead — an event no tracked file names is an event an
+        # integrator cannot discover.
+        self.assertIn(
+            EVENT_TYPE, read(ROOT / "n8n/examples/autopilot-operator-brief.example.json")
+        )
 
     def test_the_example_workflow_branches_on_the_event_type(self) -> None:
         # It shares a destination with viryaos.ops.status_changed, not a shape:

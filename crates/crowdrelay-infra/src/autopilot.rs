@@ -10,6 +10,7 @@ mod operations;
 mod play_outcomes;
 mod plays;
 mod runtime;
+mod show_cost;
 mod state;
 mod team;
 
@@ -28,27 +29,28 @@ use crowdrelay_application::{
         AutopilotMeasurementRepository, AutopilotMerchStateRepository,
         AutopilotPlayLedgerRepository, AutopilotPlayOutcomeRepository, AutopilotPolicy,
         AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
-        AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
-        CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
+        AutopilotShowCostRepository, AutopilotTicketStateRepository, BookingTargetMutation,
+        CandidatePersistence, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, ClaimedPlayOutcome, DecisionCandidate, ExecutionClaimMutation,
         ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
-        FirstPartyGrowthMetricReport, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
-        GrowthCampaignProgress, GrowthDeliveryTotals, GrowthMetricPointMutation,
-        GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
-        GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
-        MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
-        PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView, PlayLedgerEntry,
-        PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
+        FirstPartyGrowthMetricReport, FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES,
+        GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress, GrowthDeliveryTotals,
+        GrowthMetricPointMutation, GrowthMetricSeriesMutation, GrowthMetricSubject,
+        GrowthMetricTrendView, GrowthOutreachSummary, ManagerBookingPolicySummary,
+        ManagerConfigMutation, MerchProductEconomicsMutation, NextBestAction,
+        PLAYLIST_TEMPLATE_KEY, PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView,
+        PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
         PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
         RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
         RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
         SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
-        TeamAssigneeSummary, TicketAllocationGuardrailMutation, TourEconomicsMutation,
-        TourEconomicsSummary, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
-        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
+        SettleShowCost, ShowCostLedgerEntry, ShowCostMutation, TeamAssigneeSummary,
+        TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
+        UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
+        UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
 };
 use crowdrelay_domain::{
@@ -91,8 +93,15 @@ use crowdrelay_domain::{
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
     show_growth::{ShowGrowthPolicy, ShowGrowthSnapshot},
     show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
+    show_settlement::{
+        CostLine, ModelAccuracy, SettlementGap, SettlementPolicy, assess_model_accuracy,
+        implied_transport_rate_minor_per_100km,
+    },
     target_discovery::{OutreachSupplyPolicy, OutreachSupplySnapshot},
-    tour_economics::{ShowLogistics, TourEconomicsPolicy, VehicleProfile, estimate_show_cost},
+    tour_economics::{
+        CostEvidence, ShowCost, ShowLogistics, TourEconomicsPolicy, TransportBasis, VehicleProfile,
+        estimate_show_cost,
+    },
 };
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
