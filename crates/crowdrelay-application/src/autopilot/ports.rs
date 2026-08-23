@@ -3,13 +3,18 @@
 use async_trait::async_trait;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, WorkspaceId,
+    action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
+    autonomy::AutonomyLevel,
     beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::ContentSupplySnapshot,
     experimentation::ExperimentSnapshot,
     funding::FundingOpportunitySnapshot,
+    growth_debt::GrowthDebtObservation,
+    growth_envelope::{EnvelopeUsage, GrowthEnvelope},
+    growth_metrics::GrowthMetricSnapshot,
     live_opportunities::LiveOpportunitySnapshot,
     merch_bundle::MerchBundleSnapshot,
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
@@ -149,6 +154,59 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<ShowGrowthSnapshot>, RepositoryError>;
+
+    /// Returns every active metric series with its derived trend and the two
+    /// pieces of context the rule needs but cannot see from one series alone:
+    /// how long ago this series last produced a decision, and whether the same
+    /// platform has a stronger-tier series being tracked.
+    async fn load_growth_metric_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthMetricSnapshot>, RepositoryError>;
+
+    /// Returns one observation per subject that has outstanding committed work,
+    /// across every debt kind, already carrying `hours_since_last_signal`.
+    ///
+    /// The adapter reports facts only — how long the work has been outstanding,
+    /// how much of it is outstanding, and what date applies. Every horizon and
+    /// threshold lives in `GrowthDebtPolicy`, so what counts as neglect can
+    /// change without touching a query.
+    async fn load_growth_debt_observations(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthDebtObservation>, RepositoryError>;
+
+    /// The operator's autonomy ceiling per action class.
+    ///
+    /// A class missing from the returned map is read as its safest ceiling, not
+    /// as an absent limit: a migration that has not run must never be a grant
+    /// of authority.
+    async fn load_autonomy_ceilings(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ActionClass, AutonomyLevel)>, RepositoryError>;
+
+    /// The operator's volume limits, and what the workspace has already spent
+    /// against them in the trailing seven days.
+    ///
+    /// Returned together because they are read together once per cycle: the
+    /// limits without the spend cannot decide anything, and reading the spend
+    /// per candidate would be a query per finding.
+    async fn load_growth_envelope(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(GrowthEnvelope, EnvelopeUsage), RepositoryError>;
+
+    /// Hours since the agent last reached each subject through an outward
+    /// action, for the cooldown. One query per cycle, not one per candidate.
+    async fn load_outward_touch_ages(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(uuid::Uuid, u32)>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.

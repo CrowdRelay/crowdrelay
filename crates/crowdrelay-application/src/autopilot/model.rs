@@ -2,8 +2,10 @@
 
 use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
-    ExperimentVariantId, FanId, MerchProductId, MerchVariantId, OutreachOpportunityId,
-    OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
+    ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
+    OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId,
+    TicketTypeId,
+    action_class::ActionClass,
     audience_lifecycle::FanLifecyclePolicy,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconOutreachPhase},
@@ -12,6 +14,8 @@ use crowdrelay_domain::{
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
     funding::FundingPolicy,
+    growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
+    growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricPlatform},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
@@ -45,6 +49,8 @@ pub enum AutopilotContext {
     Funding,
     Beacon,
     ShowGrowth,
+    GrowthMetrics,
+    GrowthDebt,
 }
 
 impl AutopilotContext {
@@ -68,6 +74,8 @@ impl AutopilotContext {
             Self::Funding => "funding",
             Self::Beacon => "beacon",
             Self::ShowGrowth => "show_growth",
+            Self::GrowthMetrics => "growth_metrics",
+            Self::GrowthDebt => "growth_debt",
         }
     }
 }
@@ -92,6 +100,8 @@ pub enum AutopilotPolicyConfig {
     Funding(FundingPolicy),
     Beacon(BeaconCampaignPolicy),
     ShowGrowth(ShowGrowthPolicy),
+    GrowthMetrics(GrowthMetricPolicy),
+    GrowthDebt(GrowthDebtPolicy),
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -125,6 +135,21 @@ pub enum ActionSubject {
     ReleasePlan(ReleasePlanId),
     TeamOpportunity(TeamOpportunityId),
     Beacon(BeaconId),
+    GrowthMetricSeries(GrowthMetricSeriesId),
+    BookingTarget(BookingTargetId),
+    OutreachTarget(OutreachTargetId),
+}
+
+impl From<GrowthDebtSubject> for ActionSubject {
+    fn from(subject: GrowthDebtSubject) -> Self {
+        match subject {
+            GrowthDebtSubject::BookingTarget(id) => Self::BookingTarget(id),
+            GrowthDebtSubject::OutreachTarget(id) => Self::OutreachTarget(id),
+            GrowthDebtSubject::Beacon(id) => Self::Beacon(id),
+            GrowthDebtSubject::Event(id) => Self::Event(id),
+            GrowthDebtSubject::ReleasePlan(id) => Self::ReleasePlan(id),
+        }
+    }
 }
 
 impl ActionSubject {
@@ -144,7 +169,30 @@ impl ActionSubject {
             Self::ReleasePlan(_) => "release_plan",
             Self::TeamOpportunity(_) => "team_opportunity",
             Self::Beacon(_) => "beacon",
+            Self::GrowthMetricSeries(_) => "growth_metric_series",
+            Self::BookingTarget(_) => "booking_target",
+            Self::OutreachTarget(_) => "outreach_target",
         }
+    }
+
+    /// True when the subject *is* the person being contacted.
+    ///
+    /// The envelope's cooldown exists so no one hears from the agent twice in a
+    /// week. That only means anything when the subject is a contact. An event
+    /// or a release is a *topic*: a show legitimately needs a listing sweep, an
+    /// ambassador push and a last-mile nudge over the weeks before it, each
+    /// reaching different people, and a cooldown keyed on the event would allow
+    /// exactly one of them per week and silently starve the rest.
+    ///
+    /// Per-recipient frequency for those campaigns is the audience filter's job,
+    /// not this one — the agent cannot enforce at the action level something it
+    /// only resolves at delivery.
+    #[must_use]
+    pub const fn is_contactable_person(self) -> bool {
+        matches!(
+            self,
+            Self::Fan(_) | Self::BookingTarget(_) | Self::OutreachTarget(_) | Self::Beacon(_)
+        )
     }
 
     #[must_use]
@@ -163,6 +211,9 @@ impl ActionSubject {
             Self::ReleasePlan(id) => id.into_uuid(),
             Self::TeamOpportunity(id) => id.into_uuid(),
             Self::Beacon(id) => id.into_uuid(),
+            Self::GrowthMetricSeries(id) => id.into_uuid(),
+            Self::BookingTarget(id) => id.into_uuid(),
+            Self::OutreachTarget(id) => id.into_uuid(),
         }
     }
 }
@@ -290,6 +341,48 @@ pub enum AutopilotActionPayload {
     SubmitFundingApplication {
         opportunity_id: TeamOpportunityId,
     },
+    /// Surfaces a detected movement in an external metric as durable work. The
+    /// payload carries the evidence and the class of response, never a
+    /// provider call: what a platform can actually do is not the domain's to
+    /// assume, so execution stays with the operator or an executor that owns
+    /// that capability.
+    RaiseGrowthOpportunity {
+        series_id: GrowthMetricSeriesId,
+        platform: MetricPlatform,
+        metric_key: String,
+        signal: GrowthSignal,
+        recommended_action: String,
+        /// Measured deviation from the series' own baseline, in basis points.
+        deviation_basis_points: u32,
+        priority: u16,
+        template_key: String,
+    },
+    /// Give a consented fan a referral code.
+    ///
+    /// The only growth mechanism that scales with the audience rather than with
+    /// the band's effort, and it has to exist before anything invites anybody.
+    IssueReferralCode {
+        fan_id: FanId,
+    },
+    /// Work that was committed to and then left undone. One action kind covers
+    /// every debt kind on purpose: the ranked queue compares them against each
+    /// other, and four look-alike action kinds would only make that harder.
+    RaiseGrowthDebt {
+        subject_kind: String,
+        subject_id: uuid::Uuid,
+        debt_kind: GrowthDebtKind,
+        recommended_action: String,
+        /// How far past its horizon the work is, in basis points. `10_000` is
+        /// exactly at the horizon. Measured, never forecast.
+        overdue_basis_points: u32,
+        /// Tracked items still outstanding, and how many were tracked at all.
+        /// Both travel with the action so the operator sees the denominator
+        /// rather than a bare count.
+        outstanding_items: u32,
+        tracked_items: u32,
+        priority: u16,
+        template_key: String,
+    },
     SendTeamAssignmentEmail {
         assignment_id: uuid::Uuid,
         recipient_email: String,
@@ -303,6 +396,86 @@ pub enum AutopilotActionPayload {
 }
 
 impl AutopilotActionPayload {
+    /// What this action costs and how far its effects reach.
+    ///
+    /// Exhaustive on purpose: a new payload variant must not compile until
+    /// somebody has decided whether the agent may take it unattended. A lookup
+    /// table keyed by `action_kind` would silently default a new action to
+    /// whatever the fallback was, which is exactly the mistake this ceiling
+    /// exists to prevent.
+    #[must_use]
+    pub const fn action_class(&self) -> ActionClass {
+        match self {
+            // Money. Ticket and merch prices are here because changing what a
+            // customer pays is not recoverable by changing it back — somebody
+            // already paid the other number.
+            Self::ChangeTicketPrice { .. }
+            | Self::ChangeTicketCapacity { .. }
+            | Self::ChangeMerchPrice { .. }
+            | Self::RequestMerchBundle { .. }
+            | Self::RequestMerchReorder { .. }
+            | Self::RequestPromotionBudgetChange { .. } => ActionClass::Paid,
+
+            // Somebody else's relationship, and the band gets one first
+            // approach to each of them.
+            Self::RequestBookingOutreach { .. }
+            | Self::RequestOutreach { .. }
+            | Self::RequestBeaconOutreach { .. }
+            | Self::ApplyLiveOpportunity { .. }
+            | Self::SubmitFundingApplication { .. } => ActionClass::ThirdParty,
+
+            // Fans who opted in. Free, but a sent message cannot be unsent.
+            Self::RequestFanLifecycleMessage { .. } | Self::RequestAudienceCampaign { .. } => {
+                ActionClass::OwnedAudience
+            }
+
+            // Ours, free and undoable by doing the opposite. The team
+            // assignment email is here deliberately: it reaches our own staff,
+            // not an audience or a stranger, and treating internal task routing
+            // as outward contact would spend the audience budget on ourselves.
+            Self::RequestBeaconDiscovery { .. }
+            | Self::RequestContentArtifact { .. }
+            | Self::AdjustExperiment { .. }
+            | Self::CompleteShowTask { .. }
+            | Self::EscalateShowTask { .. }
+            | Self::PrepareFundingPackage { .. }
+            | Self::RaiseGrowthOpportunity { .. }
+            | Self::RaiseGrowthDebt { .. }
+            | Self::IssueReferralCode { .. }
+            | Self::SendTeamAssignmentEmail { .. } => ActionClass::FirstPartyReversible,
+
+            // These two carry their own reach inside the payload, so one class
+            // for the whole variant would be wrong in both directions: it would
+            // either gate a push to our own fans or let a press approach go out
+            // unattended.
+            Self::RequestShowGrowth { lever, .. } => match lever {
+                ShowGrowthLever::PartnerCrossPromo
+                | ShowGrowthLever::GrassrootsSceneRelay
+                | ShowGrowthLever::SocialProofRelay => ActionClass::ThirdParty,
+                ShowGrowthLever::FanAmbassadors
+                | ShowGrowthLever::FreeFanChannelPush
+                | ShowGrowthLever::MerchBuyerOffer
+                | ShowGrowthLever::HighIntentLastMile
+                | ShowGrowthLever::PostShowMerchFollowUp
+                | ShowGrowthLever::PostShowFollowAsk => ActionClass::OwnedAudience,
+                ShowGrowthLever::CanonicalLinkSetup
+                | ShowGrowthLever::FreeListingSweep
+                | ShowGrowthLever::AudienceCaptureSetup => ActionClass::FirstPartyReversible,
+            },
+            Self::ExecuteReleaseMilestone { milestone, .. } => match milestone {
+                ReleaseMilestone::StartPress => ActionClass::ThirdParty,
+                ReleaseMilestone::Announcement
+                | ReleaseMilestone::FanWarmup
+                | ReleaseMilestone::Countdown
+                | ReleaseMilestone::ReleaseDay
+                | ReleaseMilestone::Sustain => ActionClass::OwnedAudience,
+                ReleaseMilestone::SeedCalendar | ReleaseMilestone::Wrap => {
+                    ActionClass::FirstPartyReversible
+                }
+            },
+        }
+    }
+
     #[must_use]
     pub const fn action_kind(&self) -> &'static str {
         match self {
@@ -330,6 +503,9 @@ impl AutopilotActionPayload {
             Self::ApplyLiveOpportunity { .. } => "opportunity.live.apply",
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
+            Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
+            Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
+            Self::IssueReferralCode { .. } => "referral.code.issue",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
         }
     }

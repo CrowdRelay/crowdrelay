@@ -29,15 +29,21 @@ use super::{
 use crowdrelay_application::autopilot::{AutopilotControlMutation, RecordBookingReply};
 use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 
+mod acquisition_channels;
 mod chief;
 mod execution;
+mod growth_debt;
 mod ingress;
+mod next_best_action;
 mod show_growth;
 mod show_growth_execution;
 mod snapshots;
 
+pub(super) use acquisition_channels::*;
 pub(super) use chief::*;
 pub(super) use execution::*;
+pub(super) use growth_debt::*;
+pub(super) use next_best_action::*;
 pub(super) use show_growth::*;
 pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;

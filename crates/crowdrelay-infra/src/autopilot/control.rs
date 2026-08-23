@@ -294,6 +294,15 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_next_best_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<NextBestAction>, RepositoryError> {
+        self.bounded(operations::load_next_best_actions(self, workspace_id, now))
+            .await
+    }
+
     async fn load_manager_booking_policy(
         &self,
         workspace_id: WorkspaceId,
@@ -343,6 +352,161 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     synced_at: None,
                 }),
             }
+        })
+        .await
+    }
+
+    async fn load_acquisition_channels(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<AcquisitionChannels, RepositoryError> {
+        self.bounded(operations::load_acquisition_channels(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
+    async fn load_tour_economics_config(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<TourEconomicsSummary, RepositoryError> {
+        self.bounded(async {
+            let row = sqlx::query_as::<_, (Value, i64)>(
+                r#"
+                SELECT to_jsonb(config) - 'workspace_id' - 'version' - 'updated_at', config.version
+                FROM viryaos_tour_economics AS config
+                WHERE config.workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            // A workspace whose row has not been provisioned reads as the timid
+            // default at version zero, so an operator can save without first
+            // having to discover that nothing exists.
+            let Some((columns, version)) = row else {
+                return Ok(TourEconomicsSummary {
+                    policy: TourEconomicsPolicy::default(),
+                    version: 0,
+                });
+            };
+            Ok(TourEconomicsSummary {
+                policy: tour_policy_from_columns(&columns),
+                version,
+            })
+        })
+        .await
+    }
+
+    async fn set_tour_economics(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetTourEconomics,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<TourEconomicsMutation, RepositoryError> {
+        self.bounded(async {
+            if command.expected_version < 0 || !command.policy.is_valid() {
+                return Err(RepositoryError::Unexpected);
+            }
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let details = json!({
+                "policy": command.policy,
+                "expected_version": command.expected_version,
+            });
+            if let Some(existing) = insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "set_tour_economics",
+                "tour_economics",
+                workspace_id.into_uuid(),
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?
+            {
+                let version = sqlx::query_scalar::<_, i64>(
+                    "SELECT version FROM viryaos_tour_economics WHERE workspace_id=$1",
+                )
+                .bind(workspace_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?
+                .ok_or(RepositoryError::Conflict)?;
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(TourEconomicsMutation {
+                    operation_id: existing,
+                    version,
+                    replayed: true,
+                });
+            }
+
+            // Optimistic concurrency: two people editing the van in the same
+            // afternoon must not silently overwrite each other's fuel price.
+            let version = sqlx::query_scalar::<_, i64>(
+                r#"
+                UPDATE viryaos_tour_economics SET
+                    transport_minor_per_100km_round_trip=$2,
+                    transport_rate_covers_vehicles=$3,
+                    vehicle_seats=$4,
+                    vehicle_cargo_litres=$5,
+                    vehicle_fuel_centilitres_per_100km=$6,
+                    max_vehicles=$7,
+                    crew_size=$8,
+                    backline_litres=$9,
+                    fuel_price_minor_per_litre=$10,
+                    toll_minor_per_km=$11,
+                    accommodation_minor_per_room_night=$12,
+                    crew_per_room=$13,
+                    per_diem_minor_per_person_day=$14,
+                    fixed_overhead_minor=$15,
+                    overnight_threshold_km=$16,
+                    minimum_margin_minor=$17,
+                    version=version+1
+                WHERE workspace_id=$1 AND version=$18
+                RETURNING version
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.policy.transport_minor_per_100km_round_trip)
+            .bind(i16::from(command.policy.transport_rate_covers_vehicles))
+            .bind(i16::from(command.policy.vehicle.seats))
+            .bind(i32::try_from(command.policy.vehicle.cargo_litres).unwrap_or(i32::MAX))
+            .bind(
+                i32::try_from(command.policy.vehicle.fuel_centilitres_per_100km)
+                    .unwrap_or(i32::MAX),
+            )
+            .bind(i16::from(command.policy.max_vehicles))
+            .bind(i16::from(command.policy.crew_size))
+            .bind(i32::try_from(command.policy.backline_litres).unwrap_or(i32::MAX))
+            .bind(command.policy.fuel_price_minor_per_litre)
+            .bind(command.policy.toll_minor_per_km)
+            .bind(command.policy.accommodation_minor_per_room_night)
+            .bind(i16::from(command.policy.crew_per_room))
+            .bind(command.policy.per_diem_minor_per_person_day)
+            .bind(command.policy.fixed_overhead_minor)
+            .bind(i32::try_from(command.policy.overnight_threshold_km).unwrap_or(i32::MAX))
+            .bind(command.policy.minimum_margin_minor)
+            .bind(command.expected_version)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?
+            .ok_or(RepositoryError::Conflict)?;
+
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(TourEconomicsMutation {
+                operation_id,
+                version,
+                replayed: false,
+            })
         })
         .await
     }

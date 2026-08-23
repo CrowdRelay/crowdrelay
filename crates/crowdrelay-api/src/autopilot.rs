@@ -15,31 +15,34 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotBeaconStateRepository, AutopilotBookingStateRepository,
         AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
-        AutopilotExperimentStateRepository, AutopilotMarketStateRepository,
-        AutopilotMerchStateRepository, AutopilotOutreachStateRepository,
-        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
-        CreateExperimentVariant, ExperimentObservation, ManagerConfigSource, RecordBeaconReply,
-        RecordBookingReply, RecordOutreachReply, RecordTeamOpportunityProgress,
-        SetAutopilotAuthority, SetManagerBookingPolicy, TeamOpportunityKind,
-        TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertContentSource, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
-        UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertReleasePlan, UpsertTeamOpportunity, UpsertTicketAllocationGuardrail,
-        assign_experiment_variant,
+        AutopilotExperimentStateRepository, AutopilotGrowthMetricRepository,
+        AutopilotMarketStateRepository, AutopilotMerchStateRepository,
+        AutopilotOutreachStateRepository, AutopilotTeamStateRepository,
+        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
+        ExperimentObservation, GrowthMetricSubject, GrowthMetricTrendView, ManagerConfigSource,
+        RecordBeaconReply, RecordBookingReply, RecordGrowthMetricPoint, RecordOutreachReply,
+        RecordTeamOpportunityProgress, SetAutopilotAuthority, SetManagerBookingPolicy,
+        SetTourEconomics, TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
+        UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
+        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
+        UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, CitySlug, ContentSourceId, EventId,
-    ExperimentId, ExperimentVariantId, MerchProductId, OutreachOpportunityId, OutreachTargetId,
-    ReleasePlanId, TeamOpportunityId, TicketTypeId,
+    ExperimentId, ExperimentVariantId, GrowthMetricSeriesId, MerchProductId, OutreachOpportunityId,
+    OutreachTargetId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
     autonomy::{AutonomyLevel, Confidence},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::ExperimentMetric,
+    growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    tour_economics::TourEconomicsPolicy,
 };
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
@@ -105,6 +108,22 @@ pub async fn chief_of_staff(State(state): State<AppState>, headers: HeaderMap) -
     }
 }
 
+/// One ranked queue across every context.
+///
+/// `chief-of-staff` answers "what happened"; this answers "what should I do
+/// next". The queue is capped by the domain, so this handler has no page size
+/// and no filters to get wrong.
+pub async fn next_best_actions(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_next_best_actions(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(queue) => private_json(StatusCode::OK, queue),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn manager_booking_policy(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match state
         .autopilot
@@ -120,4 +139,5 @@ include!("autopilot/authority_booking.rs");
 include!("autopilot/promotion_market.rs");
 include!("autopilot/outreach_release.rs");
 include!("autopilot/experiments_actions.rs");
+include!("autopilot/growth_metrics.rs");
 include!("autopilot/validation.rs");

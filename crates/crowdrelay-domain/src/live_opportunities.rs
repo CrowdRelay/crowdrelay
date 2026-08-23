@@ -59,6 +59,13 @@ pub struct LiveOpportunitySnapshot {
     /// the infrastructure adapter so the domain owns the actual booking gate.
     pub event_starts_at: Option<OffsetDateTime>,
     pub travel_band: Option<LiveTravelBand>,
+    /// True when [`crate::tour_economics`] costed this trip from real inputs
+    /// rather than the number falling back to whatever was typed in.
+    ///
+    /// An uncosted show can still be prepared for a human — that is the whole
+    /// point of preparing — but it can never be submitted automatically. The
+    /// band does not commit to a 500 km drive on an unverified cost.
+    pub costed_from_logistics: bool,
     pub committed_shows_year: u16,
     pub annual_target: u16,
     pub annual_stretch: u16,
@@ -230,6 +237,11 @@ pub fn evaluate_live_opportunity(
 
 #[must_use]
 fn economics_score(snapshot: LiveOpportunitySnapshot) -> u32 {
+    if !snapshot.costed_from_logistics {
+        // No costed trip, no economics points. Scoring an unknown cost as
+        // break-even is how an uncosted gig outranks a costed profitable one.
+        return 0;
+    }
     let margin = net_margin_minor(snapshot);
     if margin >= 100_000 {
         10
@@ -251,6 +263,7 @@ fn may_auto_submit(
     score >= policy.minimum_auto_score
         && schedule_allows_auto_submit(snapshot, score)
         && snapshot.auto_submission_capable
+        && snapshot.costed_from_logistics
         && snapshot.application_fee_minor <= policy.max_auto_application_fee_minor
         && net_margin_minor(snapshot) >= -policy.max_auto_negative_margin_minor
         && !snapshot.requires_contract
@@ -328,6 +341,7 @@ mod tests {
             active: true,
             verified_destination: true,
             auto_submission_capable: true,
+            costed_from_logistics: true,
             fit_basis_points: 9_500,
             reputation_basis_points: 9_000,
             evidence_confidence: Confidence::saturating_from_basis_points(9_000),
@@ -412,5 +426,35 @@ mod tests {
             evaluate_live_opportunity(candidate, LiveOpportunityPolicy::default(), now()),
             LiveOpportunityDecision::Hold
         );
+    }
+
+    #[test]
+    fn an_uncosted_show_is_prepared_for_a_human_but_never_submitted_alone() {
+        // The band does not commit to a long drive on a cost nobody computed.
+        let uncosted = LiveOpportunitySnapshot {
+            costed_from_logistics: false,
+            ..snapshot()
+        };
+        assert!(matches!(
+            evaluate_live_opportunity(uncosted, LiveOpportunityPolicy::default(), now()),
+            LiveOpportunityDecision::PrepareForApproval { .. } | LiveOpportunityDecision::Hold
+        ));
+        assert!(!may_auto_submit(
+            uncosted,
+            LiveOpportunityPolicy::default(),
+            100
+        ));
+    }
+
+    #[test]
+    fn an_uncosted_show_scores_no_economics_points() {
+        // Otherwise an unknown cost reads as break-even, and an uncosted gig
+        // outranks a costed profitable one.
+        let costed = snapshot();
+        let uncosted = LiveOpportunitySnapshot {
+            costed_from_logistics: false,
+            ..costed
+        };
+        assert!(live_opportunity_score(uncosted) < live_opportunity_score(costed));
     }
 }

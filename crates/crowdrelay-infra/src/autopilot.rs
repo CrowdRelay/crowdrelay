@@ -4,6 +4,7 @@ mod actions;
 mod control;
 mod decisions;
 mod growth;
+mod growth_metrics;
 mod measurement;
 mod operations;
 mod runtime;
@@ -17,9 +18,10 @@ use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_application::{
     RepositoryError,
     autopilot::{
-        AutopilotActionPayload, AutopilotActionRepository, AutopilotBookingStateRepository,
-        AutopilotContext, AutopilotControlMutation, AutopilotControlOverview,
-        AutopilotControlRepository, AutopilotDecisionRepository, AutopilotGrowthOverview,
+        AcquisitionChannels, AutopilotActionPayload, AutopilotActionRepository,
+        AutopilotBookingStateRepository, AutopilotContext, AutopilotControlMutation,
+        AutopilotControlOverview, AutopilotControlRepository, AutopilotDecisionRepository,
+        AutopilotFirstPartyGrowthMetrics, AutopilotGrowthMetricRepository, AutopilotGrowthOverview,
         AutopilotManualStep, AutopilotMarketStateRepository, AutopilotMeasurementKind,
         AutopilotMeasurementRepository, AutopilotMerchStateRepository, AutopilotPolicy,
         AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
@@ -27,24 +29,28 @@ use crowdrelay_application::{
         CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, DecisionCandidate, ExecutionClaimMutation,
         ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
-        GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress,
-        GrowthDeliveryTotals, GrowthOutreachSummary, ManagerBookingPolicySummary,
-        ManagerConfigMutation, MerchProductEconomicsMutation, PLAYLIST_TEMPLATE_KEY,
+        FirstPartyGrowthMetricReport, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
+        GrowthCampaignProgress, GrowthDeliveryTotals, GrowthMetricPointMutation,
+        GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
+        GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
+        MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
         PendingAutopilotAction, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
         PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
         RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
-        RecordExecutorHeartbeat, RecordRumSample, ReleaseComponentMutation,
-        ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority,
-        SetManagerBookingPolicy, TeamAssigneeSummary, TicketAllocationGuardrailMutation,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertMerchProductEconomics,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleaseComponent,
-        UpsertTicketAllocationGuardrail,
+        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
+        ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
+        SetAutopilotAuthority, SetManagerBookingPolicy, SetTourEconomics, TeamAssigneeSummary,
+        TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
+        UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
+        UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
 };
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
-    EventId, FanId, MarketSignalId, MerchProductId, MerchVariantId, PromotionCampaignId,
-    ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId,
+    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    action_class::ActionClass,
     audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignPolicy, BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
@@ -56,6 +62,12 @@ use crowdrelay_domain::{
     content_supply::{ContentSupplyPolicy, ContentSupplySnapshot},
     experimentation::{ExperimentPolicy, ExperimentSnapshot},
     funding::{FundingOpportunitySnapshot, FundingPolicy},
+    growth_debt::{GrowthDebtObservation, GrowthDebtPolicy},
+    growth_envelope::{EnvelopeUsage, GrowthEnvelope},
+    growth_metrics::{
+        GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
+        MetricValueTier, compute_trend, velocity_ratio_basis_points,
+    },
     live_opportunities::{
         BookingManagerPolicy, LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
         LiveTravelBand,
@@ -72,6 +84,7 @@ use crowdrelay_domain::{
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
     show_growth::{ShowGrowthPolicy, ShowGrowthSnapshot},
     show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
+    tour_economics::{ShowLogistics, TourEconomicsPolicy, VehicleProfile, estimate_show_cost},
 };
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -83,6 +96,70 @@ use crate::{
     config::DatabaseConfig,
     database::{SqlxErrorClass, classify_sqlx_error},
 };
+
+/// Rebuilds the policy from the row's own columns.
+///
+/// Reading the row as JSON keeps this one mapping instead of a second `FromRow`
+/// struct that would have to be kept in step with the first; every field is
+/// still named explicitly, so a renamed column fails loudly rather than reading
+/// as a zero.
+fn tour_policy_from_columns(columns: &Value) -> TourEconomicsPolicy {
+    let default = TourEconomicsPolicy::default();
+    let money =
+        |key: &str, fallback: i64| columns.get(key).and_then(Value::as_i64).unwrap_or(fallback);
+    let small = |key: &str, fallback: u8| {
+        columns
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(fallback)
+    };
+    let large = |key: &str, fallback: u32| {
+        columns
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(fallback)
+    };
+    TourEconomicsPolicy {
+        transport_minor_per_100km_round_trip: money(
+            "transport_minor_per_100km_round_trip",
+            default.transport_minor_per_100km_round_trip,
+        ),
+        transport_rate_covers_vehicles: small(
+            "transport_rate_covers_vehicles",
+            default.transport_rate_covers_vehicles,
+        ),
+        vehicle: VehicleProfile {
+            seats: small("vehicle_seats", default.vehicle.seats),
+            cargo_litres: large("vehicle_cargo_litres", default.vehicle.cargo_litres),
+            fuel_centilitres_per_100km: large(
+                "vehicle_fuel_centilitres_per_100km",
+                default.vehicle.fuel_centilitres_per_100km,
+            ),
+        },
+        max_vehicles: small("max_vehicles", default.max_vehicles),
+        crew_size: small("crew_size", default.crew_size),
+        backline_litres: large("backline_litres", default.backline_litres),
+        fuel_price_minor_per_litre: money(
+            "fuel_price_minor_per_litre",
+            default.fuel_price_minor_per_litre,
+        ),
+        toll_minor_per_km: money("toll_minor_per_km", default.toll_minor_per_km),
+        accommodation_minor_per_room_night: money(
+            "accommodation_minor_per_room_night",
+            default.accommodation_minor_per_room_night,
+        ),
+        crew_per_room: small("crew_per_room", default.crew_per_room),
+        per_diem_minor_per_person_day: money(
+            "per_diem_minor_per_person_day",
+            default.per_diem_minor_per_person_day,
+        ),
+        fixed_overhead_minor: money("fixed_overhead_minor", default.fixed_overhead_minor),
+        overnight_threshold_km: large("overnight_threshold_km", default.overnight_threshold_km),
+        minimum_margin_minor: money("minimum_margin_minor", default.minimum_margin_minor),
+    }
+}
 
 const MAX_SNAPSHOTS_PER_CONTEXT: i64 = 500;
 const EXTERNAL_ACTION_EVENT_VERSION: i32 = 1;
@@ -118,6 +195,36 @@ impl PostgresAutopilotRepository {
             .await
             .map_err(|_| RepositoryError::Unavailable)?
     }
+}
+
+#[derive(Debug, FromRow)]
+struct TourEconomicsRow {
+    transport_minor_per_100km_round_trip: i64,
+    transport_rate_covers_vehicles: i16,
+    vehicle_seats: i16,
+    vehicle_cargo_litres: i32,
+    vehicle_fuel_centilitres_per_100km: i32,
+    max_vehicles: i16,
+    crew_size: i16,
+    backline_litres: i32,
+    fuel_price_minor_per_litre: i64,
+    toll_minor_per_km: i64,
+    accommodation_minor_per_room_night: i64,
+    crew_per_room: i16,
+    per_diem_minor_per_person_day: i64,
+    fixed_overhead_minor: i64,
+    overnight_threshold_km: i32,
+    minimum_margin_minor: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct GrowthEnvelopeRow {
+    agent_enabled: bool,
+    dry_run: bool,
+    weekly_owned_audience_touches: i32,
+    weekly_third_party_touches: i32,
+    subject_cooldown_hours: i32,
+    max_recipients_per_step: i32,
 }
 
 #[derive(Debug, FromRow)]
@@ -161,6 +268,10 @@ struct LifecycleSnapshotRow {
     has_paid_ticket: bool,
     last_paid_ticket_at: Option<OffsetDateTime>,
     last_event_interest_at: Option<OffsetDateTime>,
+    paid_ticket_count: i64,
+    qualified_referrals: i64,
+    last_qualified_referral_at: Option<OffsetDateTime>,
+    has_referral_code: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -284,6 +395,8 @@ struct LiveOpportunityRow {
     status: String,
     event_starts_at: Option<OffsetDateTime>,
     travel_band: Option<String>,
+    distance_km: Option<i32>,
+    nights_away: Option<i16>,
     committed_shows_year: i64,
     annual_target: i32,
     annual_stretch: i32,
