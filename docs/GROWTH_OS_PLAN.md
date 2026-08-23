@@ -584,7 +584,7 @@ On top of the invariants at the top of this file, which all still hold:
 
 ---
 
-## Phase 5 — autonomy envelope (5a, 5b DONE; 5c NEXT)
+## Phase 5 — autonomy envelope (DONE)
 
 Nothing acts until the envelope exists. This is the phase that makes "the agent
 sent that on its own" a sentence an operator can hear without alarm.
@@ -714,12 +714,22 @@ would be throttled wrongly by the coarser bucket.
 migration has run against a real Postgres. Do that before switching
 `agent_enabled` on anywhere.
 
-### 5c — proof
+### 5c — proof (DONE)
 
-Contract tests that matter: a `third_party` payload can never reach
-`auto_execute` while its ceiling says otherwise; the kill switch stops
-scheduling within one cycle; a play cannot exceed its weekly budget by
-racing itself; dry run writes no outbox intent.
+All four properties this phase named are pinned: a `third_party` payload cannot
+reach `auto_execute` while its ceiling says otherwise, the kill switch stops
+outward scheduling within one cycle, dry run produces no approvable action and
+therefore no outbox intent, and the weekly budget cannot be exceeded.
+
+**The budget one was a real bug, found by writing the proof.** The envelope is
+loaded once per cycle, so the spend it carried never moved: a single cycle with
+fifty findings would have enqueued all fifty against a budget of five, and every
+one of those is a send nobody authorised. The spend is now topped up as actions
+are created, so the cap holds *within* a cycle and not only between cycles.
+Pinned by a contract test.
+
+Totals across Phase 5: 24 domain unit tests, 29 contract tests, `make check`
+green, contract suite green apart from the two known PyYAML import errors.
 
 ---
 
