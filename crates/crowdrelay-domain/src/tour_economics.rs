@@ -53,6 +53,15 @@ impl Default for VehicleProfile {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct TourEconomicsPolicy {
+    /// All-in road cost per 100 km of **round trip**, the way a band actually
+    /// quotes it: fuel, tolls and wear in one number somebody can state from
+    /// experience. When set, this replaces the fuel-and-tolls arithmetic below,
+    /// which needs three figures nobody keeps in their head.
+    pub transport_minor_per_100km_round_trip: i64,
+    /// How many vehicles that rate was quoted for. A band that says "200 zł per
+    /// 100 km" usually means their normal convoy, so a trip needing more
+    /// vehicles scales the rate rather than pretending the extra car is free.
+    pub transport_rate_covers_vehicles: u8,
     pub vehicle: VehicleProfile,
     /// Hard ceiling on vehicles. Beyond this the trip is not a logistics
     /// question any more and a human should be looking at it.
@@ -79,6 +88,8 @@ pub struct TourEconomicsPolicy {
 impl Default for TourEconomicsPolicy {
     fn default() -> Self {
         Self {
+            transport_minor_per_100km_round_trip: 0,
+            transport_rate_covers_vehicles: 1,
             vehicle: VehicleProfile::default(),
             max_vehicles: 3,
             crew_size: 5,
@@ -116,9 +127,12 @@ pub struct ShowLogistics {
 #[serde(rename_all = "snake_case")]
 pub enum MissingInput {
     Distance,
-    FuelPrice,
+    /// Neither an all-in road rate nor a fuel price is configured.
+    TransportRate,
     VehicleCapacity,
     CrewSize,
+    /// The trip needs beds and nobody has said what a bed costs.
+    AccommodationRate,
 }
 
 impl MissingInput {
@@ -126,9 +140,10 @@ impl MissingInput {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Distance => "distance_km",
-            Self::FuelPrice => "fuel_price_minor_per_litre",
+            Self::TransportRate => "transport_minor_per_100km_round_trip",
             Self::VehicleCapacity => "vehicle_capacity",
             Self::CrewSize => "crew_size",
+            Self::AccommodationRate => "accommodation_minor_per_room_night",
         }
     }
 
@@ -138,9 +153,14 @@ impl MissingInput {
     pub const fn remedy(self) -> &'static str {
         match self {
             Self::Distance => "supply the one-way road distance from home base",
-            Self::FuelPrice => "set the fuel price in tour economics config",
+            Self::TransportRate => {
+                "set the all-in road cost per 100 km round trip, or a fuel price and consumption"
+            }
             Self::VehicleCapacity => "set vehicle seats, cargo litres and consumption",
             Self::CrewSize => "set how many people travel",
+            Self::AccommodationRate => {
+                "set the room rate, or raise the overnight threshold if the band never pays for beds"
+            }
         }
     }
 }
@@ -179,9 +199,23 @@ impl CostEvidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportBasis {
+    /// One all-in rate the operator stated.
+    FlatRate,
+    /// Fuel from consumption and price, plus tolls per kilometre.
+    FuelAndTolls,
+}
+
 /// Every line of what the trip costs, and what is left of the fee.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ShowCost {
+    /// Which road-cost model produced `transport_minor`.
+    pub transport_basis: TransportBasis,
+    /// The whole road cost, whichever way it was reached. `fuel_minor` and
+    /// `tolls_minor` are the itemisation and are zero under a flat rate.
+    pub transport_minor: i64,
     /// Derived from crew and backline against one vehicle's capacity — never
     /// assumed to be one.
     pub vehicles: u8,
@@ -274,28 +308,60 @@ pub fn estimate_show_cost(logistics: &ShowLogistics, policy: &TourEconomicsPolic
             missing: MissingInput::VehicleCapacity,
         };
     };
-    if policy.vehicle.fuel_centilitres_per_100km == 0 || policy.fuel_price_minor_per_litre <= 0 {
-        // Free fuel is not a thing. An unset price is an unanswered question,
+    let flat_rate = policy.transport_minor_per_100km_round_trip > 0;
+    let itemised =
+        policy.vehicle.fuel_centilitres_per_100km > 0 && policy.fuel_price_minor_per_litre > 0;
+    if !flat_rate && !itemised {
+        // Free road is not a thing. An unset rate is an unanswered question,
         // and answering it with zero makes every distant gig look profitable.
         return CostEvidence::Insufficient {
-            missing: MissingInput::FuelPrice,
+            missing: MissingInput::TransportRate,
         };
     }
 
     let round_trip_km = distance_km.saturating_mul(2);
     let vehicles_i128 = i128::from(vehicles);
 
-    // centilitres per 100 km × km ÷ 100 gives centilitres; ÷ 100 again gives
-    // litres. Kept as one division so the rounding happens once.
-    let fuel_minor = money(
-        i128::from(round_trip_km)
-            * i128::from(policy.vehicle.fuel_centilitres_per_100km)
-            * i128::from(policy.fuel_price_minor_per_litre)
-            * vehicles_i128
-            / 10_000,
-    );
-    let tolls_minor =
-        money(i128::from(round_trip_km) * i128::from(policy.toll_minor_per_km) * vehicles_i128);
+    let (transport_basis, transport_minor, fuel_minor, tolls_minor) = if flat_rate {
+        // The rate is quoted for a normal convoy, so a trip that needs more
+        // vehicles scales it. Fewer never discounts it: the quote is what the
+        // band knows their road costs to be.
+        let covers = i128::from(policy.transport_rate_covers_vehicles.max(1));
+        let scale = if vehicles_i128 > covers {
+            vehicles_i128
+        } else {
+            covers
+        };
+        (
+            TransportBasis::FlatRate,
+            money(
+                i128::from(round_trip_km)
+                    * i128::from(policy.transport_minor_per_100km_round_trip)
+                    * scale
+                    / (100 * covers),
+            ),
+            0,
+            0,
+        )
+    } else {
+        // centilitres per 100 km × km ÷ 100 gives centilitres; ÷ 100 again gives
+        // litres. Kept as one division so the rounding happens once.
+        let fuel_minor = money(
+            i128::from(round_trip_km)
+                * i128::from(policy.vehicle.fuel_centilitres_per_100km)
+                * i128::from(policy.fuel_price_minor_per_litre)
+                * vehicles_i128
+                / 10_000,
+        );
+        let tolls_minor =
+            money(i128::from(round_trip_km) * i128::from(policy.toll_minor_per_km) * vehicles_i128);
+        (
+            TransportBasis::FuelAndTolls,
+            money(i128::from(fuel_minor) + i128::from(tolls_minor)),
+            fuel_minor,
+            tolls_minor,
+        )
+    };
 
     let nights_away = logistics.nights_away.unwrap_or({
         if distance_km >= policy.overnight_threshold_km {
@@ -304,6 +370,14 @@ pub fn estimate_show_cost(logistics: &ShowLogistics, policy: &TourEconomicsPolic
             0
         }
     });
+    if nights_away > 0 && policy.accommodation_minor_per_room_night <= 0 {
+        // Somebody has to sleep somewhere. A band that genuinely never pays for
+        // beds says so by raising the overnight threshold, not by leaving the
+        // rate at zero and hoping.
+        return CostEvidence::Insufficient {
+            missing: MissingInput::AccommodationRate,
+        };
+    }
     let rooms = if policy.crew_per_room == 0 {
         policy.crew_size
     } else {
@@ -323,8 +397,7 @@ pub fn estimate_show_cost(logistics: &ShowLogistics, policy: &TourEconomicsPolic
     );
 
     let total_cost_minor = money(
-        i128::from(fuel_minor)
-            + i128::from(tolls_minor)
+        i128::from(transport_minor)
             + i128::from(accommodation_minor)
             + i128::from(per_diem_minor)
             + i128::from(policy.fixed_overhead_minor),
@@ -341,6 +414,8 @@ pub fn estimate_show_cost(logistics: &ShowLogistics, policy: &TourEconomicsPolic
     );
 
     CostEvidence::Complete(ShowCost {
+        transport_basis,
+        transport_minor,
         vehicles,
         round_trip_km,
         nights_away,
@@ -365,6 +440,10 @@ mod tests {
     /// config replaces them.
     fn band() -> TourEconomicsPolicy {
         TourEconomicsPolicy {
+            // Flat rate off in this fixture so the itemised arithmetic stays
+            // under test; the flat path has its own tests below.
+            transport_minor_per_100km_round_trip: 0,
+            transport_rate_covers_vehicles: 2,
             vehicle: VehicleProfile {
                 seats: 5,
                 cargo_litres: 900,
@@ -556,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_fuel_price_is_not_free_fuel() {
+    fn an_unset_road_rate_is_not_a_free_road() {
         // Zero would make every distant gig look profitable.
         let evidence = estimate_show_cost(
             &ShowLogistics {
@@ -571,7 +650,7 @@ mod tests {
         assert_eq!(
             evidence,
             CostEvidence::Insufficient {
-                missing: MissingInput::FuelPrice
+                missing: MissingInput::TransportRate
             }
         );
     }
@@ -624,7 +703,7 @@ mod tests {
                 missing: MissingInput::Distance,
             },
             CostEvidence::Insufficient {
-                missing: MissingInput::FuelPrice,
+                missing: MissingInput::TransportRate,
             },
         ] {
             assert!(!evidence.clears_floor());
@@ -655,7 +734,7 @@ mod tests {
     fn every_missing_input_names_itself_and_its_remedy() {
         for missing in [
             MissingInput::Distance,
-            MissingInput::FuelPrice,
+            MissingInput::TransportRate,
             MissingInput::VehicleCapacity,
             MissingInput::CrewSize,
         ] {
@@ -685,5 +764,199 @@ mod tests {
         ));
         assert_eq!(cost.total_cost_minor, i64::MAX);
         assert!(cost.net_margin_minor < 0);
+    }
+
+    /// The operator's own declared figures: an all-in 200 zł per 100 km of
+    /// round trip quoted for the usual two cars, six people, 300 zł of overhead
+    /// and a 500 zł minimum the band wants to clear.
+    fn declared() -> TourEconomicsPolicy {
+        TourEconomicsPolicy {
+            transport_minor_per_100km_round_trip: 20_000,
+            transport_rate_covers_vehicles: 2,
+            vehicle: VehicleProfile {
+                seats: 5,
+                cargo_litres: 900,
+                // The fallback if the flat rate is ever cleared: 8 l/100 km at
+                // 8 zł a litre. Two cars at those figures is 128 zł per 100 km,
+                // so the 200 zł flat rate carries about 72 zł of tolls and wear.
+                fuel_centilitres_per_100km: 800,
+            },
+            max_vehicles: 3,
+            crew_size: 6,
+            backline_litres: 1_200,
+            fuel_price_minor_per_litre: 800,
+            toll_minor_per_km: 0,
+            accommodation_minor_per_room_night: 18_000,
+            crew_per_room: 2,
+            per_diem_minor_per_person_day: 6_000,
+            fixed_overhead_minor: 30_000,
+            overnight_threshold_km: 350,
+            minimum_margin_minor: 50_000,
+        }
+    }
+
+    #[test]
+    fn the_declared_flat_rate_costs_the_five_hundred_kilometre_trip() {
+        let cost = complete(estimate_show_cost(
+            &ShowLogistics {
+                distance_km: Some(500),
+                nights_away: None,
+                offered_fee_minor: 400_000,
+                application_fee_minor: 0,
+            },
+            &declared(),
+        ));
+
+        assert_eq!(cost.transport_basis, TransportBasis::FlatRate);
+        // 1000 km round trip at 200 zł per 100 km, the rate already covering
+        // the two cars this trip needs.
+        assert_eq!(cost.transport_minor, 200_000);
+        assert_eq!(cost.vehicles, 2);
+        // The itemisation is empty under a flat rate; the whole road cost is
+        // the one number the operator stated.
+        assert_eq!(cost.fuel_minor, 0);
+        assert_eq!(cost.tolls_minor, 0);
+        assert_eq!(cost.rooms, 3);
+        assert_eq!(cost.accommodation_minor, 54_000);
+        assert_eq!(cost.per_diem_minor, 72_000);
+        assert_eq!(cost.overhead_minor, 30_000);
+        assert_eq!(cost.total_cost_minor, 356_000);
+        assert_eq!(cost.net_margin_minor, 44_000);
+        // Cost plus the 500 zł the band will not go below.
+        assert_eq!(cost.walk_away_fee_minor, 406_000);
+    }
+
+    #[test]
+    fn a_flat_rate_scales_when_the_trip_needs_more_cars_than_it_covers() {
+        // The quote is what the band knows two cars to cost. A third car is
+        // not free just because the rate did not mention it.
+        let policy = TourEconomicsPolicy {
+            crew_size: 12,
+            backline_litres: 2_500,
+            ..declared()
+        };
+        let cost = complete(estimate_show_cost(
+            &ShowLogistics {
+                distance_km: Some(100),
+                nights_away: Some(0),
+                offered_fee_minor: 0,
+                application_fee_minor: 0,
+            },
+            &policy,
+        ));
+        assert_eq!(cost.vehicles, 3);
+        // 200 km round trip is 400 zł for two cars, half as much again for three.
+        assert_eq!(cost.transport_minor, 60_000);
+    }
+
+    #[test]
+    fn a_flat_rate_is_never_discounted_below_what_it_covers() {
+        // A solo acoustic run does not make the band's stated road cost cheaper
+        // than the band says it is.
+        let policy = TourEconomicsPolicy {
+            crew_size: 1,
+            backline_litres: 0,
+            ..declared()
+        };
+        let cost = complete(estimate_show_cost(
+            &ShowLogistics {
+                distance_km: Some(100),
+                nights_away: Some(0),
+                offered_fee_minor: 0,
+                application_fee_minor: 0,
+            },
+            &policy,
+        ));
+        assert_eq!(cost.vehicles, 1);
+        assert_eq!(cost.transport_minor, 40_000);
+    }
+
+    #[test]
+    fn the_flat_rate_replaces_the_fuel_arithmetic_rather_than_adding_to_it() {
+        let logistics = ShowLogistics {
+            distance_km: Some(300),
+            nights_away: Some(0),
+            offered_fee_minor: 0,
+            application_fee_minor: 0,
+        };
+        let flat = complete(estimate_show_cost(&logistics, &declared()));
+        let itemised = complete(estimate_show_cost(
+            &logistics,
+            &TourEconomicsPolicy {
+                transport_minor_per_100km_round_trip: 0,
+                ..declared()
+            },
+        ));
+
+        assert_eq!(flat.transport_basis, TransportBasis::FlatRate);
+        assert_eq!(itemised.transport_basis, TransportBasis::FuelAndTolls);
+        // 600 km round trip: 1200 zł flat, against 600 × 8 l/100 km × 8 zł × 2
+        // cars = 768 zł of fuel with no tolls configured.
+        assert_eq!(flat.transport_minor, 120_000);
+        assert_eq!(itemised.transport_minor, 76_800);
+        assert_eq!(itemised.fuel_minor, 76_800);
+        assert_eq!(
+            itemised.total_cost_minor,
+            itemised.transport_minor + itemised.per_diem_minor + itemised.overhead_minor
+        );
+    }
+
+    #[test]
+    fn a_trip_that_needs_beds_refuses_when_nobody_priced_a_bed() {
+        // Zero rooms cost would make an overnight look like a day trip. A band
+        // that never pays for beds raises the overnight threshold instead.
+        let evidence = estimate_show_cost(
+            &ShowLogistics {
+                distance_km: Some(500),
+                nights_away: None,
+                offered_fee_minor: 400_000,
+                application_fee_minor: 0,
+            },
+            &TourEconomicsPolicy {
+                accommodation_minor_per_room_night: 0,
+                ..declared()
+            },
+        );
+        assert_eq!(
+            evidence,
+            CostEvidence::Insufficient {
+                missing: MissingInput::AccommodationRate
+            }
+        );
+
+        // The same band that never pays for beds, saying so properly.
+        let never_stays = complete(estimate_show_cost(
+            &ShowLogistics {
+                distance_km: Some(500),
+                nights_away: None,
+                offered_fee_minor: 400_000,
+                application_fee_minor: 0,
+            },
+            &TourEconomicsPolicy {
+                accommodation_minor_per_room_night: 0,
+                overnight_threshold_km: 20_000,
+                ..declared()
+            },
+        ));
+        assert_eq!(never_stays.nights_away, 0);
+        assert_eq!(never_stays.accommodation_minor, 0);
+    }
+
+    #[test]
+    fn a_day_trip_needs_no_bed_rate_at_all() {
+        let cost = complete(estimate_show_cost(
+            &ShowLogistics {
+                distance_km: Some(120),
+                nights_away: None,
+                offered_fee_minor: 200_000,
+                application_fee_minor: 0,
+            },
+            &TourEconomicsPolicy {
+                accommodation_minor_per_room_night: 0,
+                ..declared()
+            },
+        ));
+        assert_eq!(cost.nights_away, 0);
+        assert_eq!(cost.accommodation_minor, 0);
     }
 }

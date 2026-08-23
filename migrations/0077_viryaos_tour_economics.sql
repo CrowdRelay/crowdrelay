@@ -17,6 +17,18 @@
 CREATE TABLE viryaos_tour_economics (
     workspace_id uuid PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
 
+    -- All-in road cost per 100 km of round trip: fuel, tolls and wear in the
+    -- one number a band can state from experience. When set it replaces the
+    -- fuel-and-tolls arithmetic below, which needs three figures nobody keeps
+    -- in their head. Zero falls back to that arithmetic.
+    --
+    -- The default is the operator's own declared rate, quoted for the two cars
+    -- they normally travel in. Any other workspace should overwrite it.
+    transport_minor_per_100km_round_trip bigint NOT NULL DEFAULT 20000
+        CHECK (transport_minor_per_100km_round_trip >= 0),
+    transport_rate_covers_vehicles smallint NOT NULL DEFAULT 2
+        CHECK (transport_rate_covers_vehicles BETWEEN 1 AND 20),
+
     -- One vehicle the band owns or hires.
     vehicle_seats smallint NOT NULL DEFAULT 5
         CHECK (vehicle_seats BETWEEN 1 AND 60),
@@ -28,23 +40,31 @@ CREATE TABLE viryaos_tour_economics (
         CHECK (vehicle_fuel_centilitres_per_100km BETWEEN 0 AND 100000),
     max_vehicles smallint NOT NULL DEFAULT 3 CHECK (max_vehicles BETWEEN 1 AND 20),
 
-    crew_size smallint NOT NULL DEFAULT 5 CHECK (crew_size BETWEEN 0 AND 100),
+    crew_size smallint NOT NULL DEFAULT 6 CHECK (crew_size BETWEEN 0 AND 100),
     backline_litres integer NOT NULL DEFAULT 1200
         CHECK (backline_litres BETWEEN 0 AND 100000),
 
-    -- Zero means "not configured", and the domain reports that as insufficient
-    -- evidence rather than as free fuel. Zero fuel makes every distant gig look
-    -- profitable, which is the exact failure this table exists to prevent.
-    fuel_price_minor_per_litre bigint NOT NULL DEFAULT 0
+    -- The fallback road model, used when the flat rate above is cleared: 8 l
+    -- per 100 km at 8 zl a litre, the operator's declared figures. Two cars at
+    -- those numbers is 128 zl per 100 km, so the 200 zl flat rate carries about
+    -- 72 zl of tolls and wear on top of fuel.
+    --
+    -- Zero on both the flat rate and the fuel price means "not configured", and
+    -- the domain reports that as insufficient evidence rather than as a free
+    -- road. A free road makes every distant gig look profitable, which is the
+    -- exact failure this table exists to prevent.
+    fuel_price_minor_per_litre bigint NOT NULL DEFAULT 800
         CHECK (fuel_price_minor_per_litre >= 0),
     toll_minor_per_km bigint NOT NULL DEFAULT 0 CHECK (toll_minor_per_km >= 0),
-    accommodation_minor_per_room_night bigint NOT NULL DEFAULT 0
+    -- Zero with an overnight trip is refused rather than treated as free beds.
+    -- A band that genuinely never pays raises the overnight threshold instead.
+    accommodation_minor_per_room_night bigint NOT NULL DEFAULT 18000
         CHECK (accommodation_minor_per_room_night >= 0),
     crew_per_room smallint NOT NULL DEFAULT 2 CHECK (crew_per_room BETWEEN 1 AND 20),
-    per_diem_minor_per_person_day bigint NOT NULL DEFAULT 0
+    per_diem_minor_per_person_day bigint NOT NULL DEFAULT 6000
         CHECK (per_diem_minor_per_person_day >= 0),
     -- Paid whether or not the show sells: rehearsal, loading, wear.
-    fixed_overhead_minor bigint NOT NULL DEFAULT 0 CHECK (fixed_overhead_minor >= 0),
+    fixed_overhead_minor bigint NOT NULL DEFAULT 30000 CHECK (fixed_overhead_minor >= 0),
 
     -- One-way distance at or beyond which the band stays the night. Operator
     -- policy, not something the domain infers.
@@ -52,7 +72,7 @@ CREATE TABLE viryaos_tour_economics (
         CHECK (overnight_threshold_km BETWEEN 0 AND 20000),
     -- What the band must clear above cost for a show to be worth playing. This
     -- is the floor Phase 8 negotiates up from.
-    minimum_margin_minor bigint NOT NULL DEFAULT 0 CHECK (minimum_margin_minor >= 0),
+    minimum_margin_minor bigint NOT NULL DEFAULT 50000 CHECK (minimum_margin_minor >= 0),
 
     version bigint NOT NULL DEFAULT 1 CHECK (version > 0),
     updated_at timestamptz NOT NULL DEFAULT now()

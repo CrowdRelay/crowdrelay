@@ -133,6 +133,8 @@ impl PostgresAutopilotRepository {
 
 #[derive(Debug, FromRow)]
 struct TourEconomicsRow {
+    transport_minor_per_100km_round_trip: i64,
+    transport_rate_covers_vehicles: i16,
     vehicle_seats: i16,
     vehicle_cargo_litres: i32,
     vehicle_fuel_centilitres_per_100km: i32,

@@ -69,17 +69,35 @@ class TourEconomicsContract(unittest.TestCase):
 
     def test_every_missing_input_is_refused_and_named(self) -> None:
         code = shipped(self.domain)
-        for missing in ("Distance", "FuelPrice", "VehicleCapacity", "CrewSize"):
+        for missing in (
+            "Distance",
+            "TransportRate",
+            "VehicleCapacity",
+            "CrewSize",
+            "AccommodationRate",
+        ):
             self.assertIn(f"MissingInput::{missing}", code)
         self.assertIn("an_unknown_distance_is_never_filled_in", self.domain)
-        self.assertIn("an_unset_fuel_price_is_not_free_fuel", self.domain)
+        self.assertIn("an_unset_road_rate_is_not_a_free_road", self.domain)
+        self.assertIn("a_trip_that_needs_beds_refuses_when_nobody_priced_a_bed", self.domain)
 
     def test_an_unset_rate_is_never_read_as_a_free_one(self) -> None:
-        # Zero fuel price makes every distant gig look profitable.
+        # A free road makes every distant gig look profitable.
         code = shipped(self.domain)
-        self.assertIn("policy.fuel_price_minor_per_litre <= 0", code)
-        schema = strip_sql_comments(self.migration)
-        self.assertIn("fuel_price_minor_per_litre bigint NOT NULL DEFAULT 0", schema)
+        self.assertIn("if !flat_rate && !itemised", code)
+        self.assertIn("MissingInput::TransportRate", code)
+        # And an overnight with no room rate is not free beds.
+        self.assertIn("policy.accommodation_minor_per_room_night <= 0", code)
+
+    def test_the_flat_rate_replaces_the_itemised_model_rather_than_adding(self) -> None:
+        # Adding both would double-count the road on every trip.
+        code = shipped(self.domain)
+        self.assertIn("TransportBasis::FlatRate", code)
+        self.assertIn("TransportBasis::FuelAndTolls", code)
+        self.assertIn(
+            "the_flat_rate_replaces_the_fuel_arithmetic_rather_than_adding_to_it", self.domain
+        )
+        self.assertIn("a_flat_rate_scales_when_the_trip_needs_more_cars_than_it_covers", self.domain)
 
     def test_unknown_cost_is_never_profitable(self) -> None:
         code = shipped(self.domain)
