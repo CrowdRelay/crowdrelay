@@ -18,4 +18,4 @@ Do not test against production accounts, attempt persistence, exfiltrate data, o
 
 ## High-impact areas
 
-Please treat authentication, cross-workspace access, consent, referrals, coupon use, webhook replay, claim links, QR signatures, pass redemption, logs, and backups as security-sensitive. See `docs/SECURITY.md` for the threat model and expected regression tests.
+Authentication, cross-workspace access, consent, referrals, coupon use, webhook replay, claim links, QR signatures, pass redemption, logs and backups are security-sensitive areas and should receive regression coverage when changed.
