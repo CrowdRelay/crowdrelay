@@ -258,11 +258,15 @@ class ShowGrowthDoesTheWorkContract(unittest.TestCase):
     def test_a_show_with_no_destination_gets_no_link(self) -> None:
         # A tracked route to nowhere is worse than an untracked route to the
         # right place.
+        # And a show with no destination is a normal state, not a failure: most
+        # shows have no ticket URL until they go on sale. Erroring retries five
+        # times and then marks the action dead.
         body = self.execution.split("async fn ensure_canonical_show_link", 1)[1].split(
             "\n#[allow", 1
         )[0]
         self.assertIn('filter(|url| url.starts_with("http"))', body)
-        self.assertIn("RepositoryError::Conflict", body)
+        self.assertNotIn("RepositoryError::Conflict", body)
+        self.assertIn("return Ok(());", body)
 
     def test_rerunning_the_setup_repairs_rather_than_duplicates(self) -> None:
         body = self.execution.split("async fn ensure_canonical_show_link", 1)[1].split(

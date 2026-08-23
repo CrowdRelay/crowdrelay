@@ -282,10 +282,14 @@ async fn ensure_canonical_show_link(
     event_id: EventId,
     event: &GrowthEventFacts,
 ) -> Result<(), RepositoryError> {
-    // No destination, no link. Inventing one would produce a tracked route to
-    // nowhere, which is worse than an untracked route to the right place.
+    // No destination, no link — and that is a normal state, not a failure. A
+    // show that has not gone on sale yet has no ticket URL, which is most of
+    // them most of the time. Treating it as an error retries five times and
+    // then marks the action dead, turning ordinary quiet into a queue full of
+    // corpses. The release version of this already returned Ok here; shows
+    // were the inconsistent one.
     let Some(destination) = event.4.clone().filter(|url| url.starts_with("http")) else {
-        return Err(RepositoryError::Conflict);
+        return Ok(());
     };
 
     // The slug has to satisfy the smart-link pattern, and the event slug
@@ -293,7 +297,7 @@ async fn ensure_canonical_show_link(
     // operator can tell at a glance which links they made and which it did.
     let slug = format!("show-{}", event.0);
     if slug.len() > 128 {
-        return Err(RepositoryError::Conflict);
+        return Ok(());
     }
 
     sqlx::query(
