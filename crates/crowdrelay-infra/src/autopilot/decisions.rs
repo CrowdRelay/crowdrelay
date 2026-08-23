@@ -213,6 +213,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_outreach_supply_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<OutreachSupplySnapshot, RepositoryError> {
+        self.load_outreach_supply_snapshot_impl(workspace_id, now)
+            .await
+    }
+
     async fn load_autonomy_ceilings(
         &self,
         workspace_id: WorkspaceId,

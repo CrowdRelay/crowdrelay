@@ -19,6 +19,7 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "show_growth" => AutopilotContext::ShowGrowth,
         "growth_metrics" => AutopilotContext::GrowthMetrics,
         "growth_debt" => AutopilotContext::GrowthDebt,
+        "outreach_supply" => AutopilotContext::OutreachSupply,
         _ => return Err(RepositoryError::Unexpected),
     };
     let autonomy_level = parse_autonomy_level(&row.autonomy_level)?;
@@ -97,6 +98,9 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
                 row.config,
                 ShowGrowthPolicy::default(),
             )?),
+            AutopilotContext::OutreachSupply => AutopilotPolicyConfig::OutreachSupply(
+                parse_config(row.config, OutreachSupplyPolicy::default())?,
+            ),
         };
     let max_actions_24h = u32::try_from(row.max_actions_24h)
         .ok()

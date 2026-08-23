@@ -1072,6 +1072,15 @@ and four admin routes under `/v1/admin/autopilot/outreach/`.
 Proven end to end against Postgres 18 in
 `crates/crowdrelay-infra/tests/autopilot_target_discovery_postgres.rs`.
 
+### The half that was missing — added 2026-08-23
+
+Everything above is inbound. Nothing decided to *go looking*, so an empty
+`viryaos_outreach_targets` was a stable state rather than a problem the agent
+could see, and in production it stayed at zero rows while `outreach.send` sat
+advertised and idle. `outreach_supply` (migration `0083`) is the context that
+notices the floor and asks for a sweep; see the production audit below for what
+it does and what it deliberately refuses to do.
+
 ## Phase 10 — free-reach pitcher
 
 Reviews, radio interviews, reaction-channel creators, collabs, media patronage.
@@ -1344,7 +1353,7 @@ what depends on what. Phases 1 to 7 are code; 8 onward is plan.
 | 6 | Objectives | plan |
 | 7 | Tour economics | DONE |
 | 8 | Booking selectivity and negotiation | plan |
-| 9 | Target discovery | DONE (ingestion, screening, promotion) |
+| 9 | Target discovery | DONE (ingestion, screening, promotion, **and the request that fills it**) |
 | 10 | Free-reach pitcher | plan |
 | 11 | Spotify and Bandsintown feeds | partial: coverage is visible, adapters unwritten |
 | 12 | Playlist pitcher | plan |
@@ -1390,6 +1399,129 @@ operator who cannot see what it did will switch it off.
   `crates/crowdrelay-infra/tests/autopilot_gated_claim_postgres.rs`, which is
   run with `CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL`. The numbers the agent
   reports are still unverified against production volumes.
+
+---
+
+---
+
+## Production audit — 2026-08-23, against the deployed agent
+
+Taken from the production database and executor registry at commit `d42ace9`,
+not from this file. The roadmap above says what was built; this section says
+what is *running*, which turned out to be a different question.
+
+### The three post-deploy checks
+
+All three pass on the deployed build, over roughly three autopilot cycles
+(poll interval 300 s):
+
+- **`awaiting_executor` = 0**, and parked capabilities warn once per capability
+  per cycle rather than once per action — two "autopilot actions are parked"
+  lines over three cycles, four team-handoff lines over sixteen.
+- **Content-source versions stopped moving.** Frozen since the deploy itself;
+  the runaway that took one source from version 1 to 283 in thirteen days is
+  gone.
+- **No new `state_changed`.** The last one is timestamped before the deploy.
+  The twenty-four failed `content.artifact.request` actions all predate it.
+
+### What is actually running
+
+| Capability | State | Evidence from production |
+|---|---|---|
+| Autonomy envelope | **DISABLED** | `agent_enabled=false`, `dry_run=true` |
+| Metric series, trend, anomaly | REAL | 5 series, 60 points, current to the hour |
+| First-party metric sources | REAL | `active_fans`, `activated_fans_30d`, `paid_tickets`, `paid_buyers`, `paid_orders` |
+| Spotify / YouTube / Bandsintown metrics | **EMPTY** | 0 series; only the *coverage* report is real |
+| Meta / Instagram metrics | **PLAN ONLY** | `MetricPlatform::Social` exists; nothing writes it |
+| Growth-debt detectors | REAL, one kind blocked | `StaleContactData` still has no clock |
+| Next Best Action queue | REAL | route and reads live |
+| Target discovery | REAL code, **EMPTY data** | 0 candidates, 0 channels, 0 targets |
+| Outreach send | REAL executor, **EMPTY supply** | `outreach.send` advertised and idle |
+| Booking outreach | REAL executor, **EMPTY supply** | `booking.outreach` advertised, 0 booking targets |
+| Tour economics | REAL, three inputs guessed | unchanged from Phase 7 |
+| Booking negotiation | PLAN ONLY | — |
+| Free-reach pitcher, playlist pitcher | PLAN ONLY | — |
+| Press / reviews / interviews | **PARTIAL**, effectively empty | routes exist; 3 beacons total |
+| Fan growth (`show_growth`) | **DISABLED** | `show.growth` not advertised; 3 failed actions |
+| Content supply | **DISABLED** | `content.artifact` not advertised; 4 parked |
+| Beacon discovery / outreach | **DISABLED** | `beacon.*` not advertised |
+| Experiments | REAL code, EMPTY | 0 experiments |
+| Measurement and attribution | PLAN ONLY | — |
+| Learning | PLAN ONLY | — |
+| Operator brief | **PARTIAL** | `chief-of-staff` is a read endpoint; nothing is ever sent |
+
+### The biggest blocker, stated precisely
+
+It is not the envelope. The envelope is a switch, and flipping it today would
+change nothing, which is the actual finding.
+
+**Every live execution path starves, and every path with something to work on
+is gated.** The executor advertises six capabilities:
+`fan.lifecycle.message`, `booking.outreach`, `outreach.send`, `funding.submit`,
+`opportunity.application`, `ops.alert`. Of those, the two that grow anything —
+`outreach.send` and `booking.outreach` — read from tables holding **zero rows**.
+Meanwhile `content.artifact` (5 content sources), `show.growth` (5 events) and
+`beacon.*` (3 beacons) have subjects to act on and are not advertised at all.
+
+Underneath that sits one thing that is squarely CrowdRelay's problem rather
+than n8n's: **the agent could not ask for supply.** Discovery was inbound only,
+so zero targets was a stable state rather than something the agent could
+notice. A brain that cannot say "I have nothing to work with" is not blocked on
+autonomy; it is blocked on perception.
+
+### Smallest safe implementation — DONE 2026-08-23
+
+`outreach_supply`, the twentieth context. Migration `0083`,
+`crowdrelay_domain::target_discovery::evaluate_outreach_supply`,
+`AutopilotActionPayload::RequestOutreachDiscovery`, capability
+`outreach.discovery`.
+
+- **`first_party_reversible`.** It reads published data, contacts nobody and
+  buys nothing, so it needs no new autonomy and spends no outreach budget.
+  Every judgement about who may be contacted stays in screening.
+- **It holds when the queue is waiting on a human.** Admitted candidates above
+  the floor produce `AwaitingRouteConfirmation`, not another sweep. Fetching
+  more supply while an unworked queue is full is how an autonomous system feels
+  busy and changes nothing.
+- **It stops after three barren sweeps.** Counted as a *run ending at the most
+  recent sweep*, not a total, and a sweep nobody answered breaks the run rather
+  than extending it — otherwise one broken workflow disables discovery
+  permanently.
+- **Quota 2/day, cooldown 24 h, provisioned disabled at `observe`.**
+
+Proven against Postgres 18 in
+`crates/crowdrelay-infra/tests/autopilot_outreach_supply_postgres.rs`: the
+per-sweep window, the barren run, the unanswered sweep, and the fact that
+do-not-contact and inactive targets are not supply.
+
+### What is still missing, in the order that unblocks the most
+
+1. **The executor must advertise `outreach.discovery`** and run a sweep. Until
+   it does, the new context emits an action that parks — visible, correct and
+   still zero targets. This is now a workflow task, not a code task.
+2. **Advertise `content.artifact`, `show.growth` and `beacon.*`.** Three
+   capabilities with real subjects waiting, gated by heartbeat rather than by
+   policy. This is the cheapest growth available and needs no Rust at all.
+3. **Off-platform metric adapters** (Phase 11). The agent reports honestly that
+   it cannot see Spotify, YouTube or Bandsintown, which is better than guessing
+   and still means it cannot tell whether anything worked.
+4. **Turn the envelope on** — after 1 and 2, not before. Enabling an agent whose
+   every path is empty proves nothing and teaches the operator to distrust it.
+5. **Phase 14 (verification) then 15 (learning).** Both are still plan, and
+   ranking without verified outcomes trains on somebody else's marketing.
+6. **Phase 16 (operator brief).** `chief-of-staff` already computes it; nothing
+   delivers it. Worth pulling forward the moment step 4 happens.
+
+### Next measurable growth loop
+
+`outreach_supply` notices the floor → adapter sweeps published sources →
+candidates screened on write → operator confirms routes → `outreach.send`
+pitches confirmed targets → replies recorded on the target → supply and reply
+rate become the first honest measure of whether any of it works.
+
+The loop is closed in CrowdRelay end to end today except for the sweep itself
+and the pitcher, and the count to watch is the one that has never moved:
+`viryaos_outreach_targets`.
 
 ---
 

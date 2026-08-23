@@ -38,6 +38,7 @@ use crowdrelay_domain::{
     promotion::{PromotionBudgetDecision, PromotionPerformanceSnapshot, evaluate_promotion_budget},
     release_autopilot::{ReleaseDecision, ReleaseMilestone, ReleasePlanSnapshot, evaluate_release},
     show_operations::{ShowOperationsDecision, ShowTaskSnapshot, evaluate_show_task},
+    target_discovery::{OutreachSupplyDecision, OutreachSupplySnapshot, evaluate_outreach_supply},
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -48,6 +49,7 @@ mod beacons;
 mod commercial;
 mod growth_debt;
 mod growth_metrics;
+mod outreach_supply;
 mod show_growth;
 
 use beacons::{beacon_candidate, beacon_discovery_candidate};
@@ -57,6 +59,7 @@ use commercial::{
 };
 use growth_debt::growth_debt_candidate;
 use growth_metrics::growth_metric_candidate;
+use outreach_supply::outreach_supply_candidate;
 use show_growth::show_growth_candidate;
 
 use crate::RepositoryError;
@@ -498,6 +501,25 @@ where
                             )
                             .await?;
                         }
+                    }
+                }
+                AutopilotContext::OutreachSupply => {
+                    let snapshot = self
+                        .repository
+                        .load_outreach_supply_snapshot(self.workspace_id, now)
+                        .await?;
+                    if let Some(candidate) =
+                        outreach_supply_candidate(&snapshot, &policy, self.workspace_id, now)?
+                    {
+                        self.persist(
+                            &candidate,
+                            &ceilings,
+                            &envelope,
+                            &mut usage,
+                            &touch_ages,
+                            &mut report,
+                        )
+                        .await?;
                     }
                 }
                 AutopilotContext::GrowthDebt => {

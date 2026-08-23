@@ -554,6 +554,48 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestOutreachDiscovery { requested_candidates } => {
+                    let policy = crowdrelay_domain::target_discovery::TargetDiscoveryPolicy::default();
+                    emit_external_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "viryaos.outreach.discovery_requested",
+                        json!({
+                            "action_id": action.id,
+                            "requested_candidates": requested_candidates,
+                            // The adapter sweeps and reports; it never decides.
+                            // These thresholds are published so a sweep can skip
+                            // what would be refused on arrival anyway, and the
+                            // same rules are re-applied on ingest regardless of
+                            // what the adapter believed about them.
+                            "callback_path": "/v1/admin/autopilot/outreach/candidates",
+                            "screening_contract": {
+                                "minimum_fit_basis_points": policy.minimum_fit_basis_points,
+                                "minimum_follower_count": policy.minimum_follower_count,
+                                "minimum_engagement_basis_points":
+                                    policy.minimum_engagement_basis_points,
+                                "engagement_scrutiny_follower_count":
+                                    policy.engagement_scrutiny_follower_count,
+                            },
+                            "discovery_rules": [
+                                "read_a_submission_route_only_where_it_was_published_for_that_purpose",
+                                "never_infer_or_pattern_guess_an_address_from_a_name_or_domain",
+                                "send_the_verbatim_published_evidence_the_route_was_read_from",
+                                "record_the_source_reference_so_a_bad_source_can_be_revoked_wholesale",
+                                "never_submit_through_a_channel_that_sells_placement",
+                                "respect_platform_terms_and_never_fetch_what_they_forbid",
+                                "a_paid_or_credit_channel_must_be_reported_as_such_not_as_free"
+                            ],
+                            "allowed_sources": [
+                                "playlist_description", "curator_site", "submission_channel",
+                                "reply", "operator_import", "scene_adjacent_playlist"
+                            ],
+                            "allowed_route_kinds": ["email", "submission_form", "handle"]
+                        }),
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RequestBeaconDiscovery { event_id, target_count } => {
                     let event = sqlx::query_as::<_, (String, Option<String>, OffsetDateTime, String, String, Option<String>)>(
                         r#"
