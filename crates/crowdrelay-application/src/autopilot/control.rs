@@ -6,11 +6,13 @@ use crowdrelay_domain::{
     EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId, MarketSignalId,
     MerchProductId, OutreachOpportunityId, OutreachTargetId, PromotionCampaignId, ReleasePlanId,
     TeamOpportunityId, WorkspaceId,
+    acquisition_channel::{ChannelAttribution, UnattributedReason},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
     experimentation::{ExperimentAllocationSlot, ExperimentMetric, assign_variant},
+    fan_activation::MeaningfulAction,
     growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
@@ -227,6 +229,49 @@ pub struct ChiefOfStaffOpportunity {
     pub confidence: Confidence,
     pub reason: String,
     pub needs_approval: bool,
+}
+
+/// How one acquisition channel actually performed.
+///
+/// Signups and activated fans are reported side by side and never merged,
+/// because a channel that produced two hundred signups and four active people
+/// is a bad channel wearing a good number.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChannelPerformance {
+    /// Where these people came from, or an honest statement that we cannot say.
+    pub attribution: ChannelAttribution,
+    pub signups: u32,
+    /// Signed up, consented, and did something meaningful in the last 30 days.
+    pub activated_30d: u32,
+    /// Activated out of signed up, in basis points. `None` when there are no
+    /// signups to divide by — a rate from an empty denominator is not a zero.
+    pub activation_basis_points: Option<u32>,
+    /// The strongest thing anybody from this channel actually did, so a channel
+    /// that produces ticket buyers is distinguishable from one that produces
+    /// people who clicked once.
+    pub best_action: Option<MeaningfulAction>,
+}
+
+/// The whole picture, with the unattributable part kept in view rather than
+/// quietly dropped.
+#[derive(Clone, Debug, Serialize)]
+pub struct AcquisitionChannels {
+    pub channels: Vec<ChannelPerformance>,
+    pub total_signups: u32,
+    pub total_activated_30d: u32,
+    /// People whose channel could not be established, by reason. Reported
+    /// prominently: a report that hides its unknowns is how a 40% attribution
+    /// gap goes unnoticed for a month.
+    pub unattributed: Vec<UnattributedGroup>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct UnattributedGroup {
+    pub reason: UnattributedReason,
+    /// What to do about it. Each reason is a different fix.
+    pub remedy: &'static str,
+    pub signups: u32,
+    pub activated_30d: u32,
 }
 
 /// The band's vehicles and rates, as an operator reads and edits them.
