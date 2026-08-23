@@ -14,7 +14,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// CrowdRelay decides WHEN to sweep and WHAT is admissible. This reads\n// published text and reports what it read. It never judges a candidate and\n// never invents a contact.\nconst e = $json;\nif (!e || e.type !== 'viryaos.outreach.discovery_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nconst requested = Number(d.requested_candidates ?? 0);\nif (!Number.isInteger(requested) || requested < 1 || requested > 100) {\n  throw new Error('Invalid discovery request');\n}\nif (!$env.SPOTIFY_CLIENT_ID || !$env.SPOTIFY_CLIENT_SECRET) {\n  throw new Error('Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET');\n}\nconst queries = String($env.VIRYA_DISCOVERY_PLAYLIST_QUERIES || '')\n  .split('|').map(q => q.trim()).filter(Boolean);\nif (queries.length === 0) throw new Error('Set VIRYA_DISCOVERY_PLAYLIST_QUERIES');\nconst screening = d.screening_contract ?? {};\nreturn [{ json: {\n  event_id: e.id,\n  action_id: String(d.action_id || ''),\n  requested,\n  queries,\n  // Published so a sweep can skip what CrowdRelay would refuse anyway; the\n  // same rules are re-applied on ingest whatever this believed.\n  min_followers: Number(screening.minimum_follower_count ?? 250)\n}}];"
+        "jsCode": "// CrowdRelay decides WHEN to sweep and WHAT is admissible. This reads\n// published text and reports what it read. It never judges a candidate and\n// never invents a contact.\nconst e = $json;\nif (!e || e.type !== 'viryaos.outreach.discovery_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nconst requested = Number(d.requested_candidates ?? 0);\nif (!Number.isInteger(requested) || requested < 1 || requested > 100) {\n  throw new Error('Invalid discovery request');\n}\nconst queries = String($env.VIRYA_DISCOVERY_PLAYLIST_QUERIES || '')\n  .split('|').map(q => q.trim()).filter(Boolean);\nif (queries.length === 0) throw new Error('Set VIRYA_DISCOVERY_PLAYLIST_QUERIES');\nconst screening = d.screening_contract ?? {};\n// One item per search: the credential is attached by n8n, so nothing here\n// carries a token.\nreturn queries.map(query => ({ json: {\n  event_id: e.id,\n  action_id: String(d.action_id || ''),\n  requested,\n  query,\n  min_followers: Number(screening.minimum_follower_count ?? 250)\n}}));"
       },
       "id": "validate",
       "name": "Validate sweep request",
@@ -27,58 +27,6 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://accounts.spotify.com/api/token",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "User-Agent",
-              "value": "Virya-n8n/1.0 (https://virya.music)"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/x-www-form-urlencoded"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Basic ' + Buffer.from($env.SPOTIFY_CLIENT_ID + ':' + $env.SPOTIFY_CLIENT_SECRET).toString('base64') }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/x-www-form-urlencoded",
-        "body": "grant_type=client_credentials",
-        "options": {
-          "timeout": 10000
-        }
-      },
-      "id": "token",
-      "name": "Get Spotify app token",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        40,
-        0
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const token = $json.access_token;\nif (!token) throw new Error('Spotify token missing');\nconst plan = $('Validate sweep request').first().json;\nreturn plan.queries.map(q => ({ json: { ...plan, access_token: token, query: q } }));"
-      },
-      "id": "fanout",
-      "name": "One item per query",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        260,
-        0
-      ]
-    },
-    {
-      "parameters": {
-        "method": "GET",
         "url": "=https://api.spotify.com/v1/search?type=playlist&limit=50&q={{ encodeURIComponent($json.query) }}",
         "sendHeaders": true,
         "headerParameters": {
@@ -86,10 +34,6 @@
             {
               "name": "User-Agent",
               "value": "Virya-n8n/1.0 (https://virya.music)"
-            },
-            {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $json.access_token }}"
             }
           ]
         },
@@ -102,7 +46,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        480,
+        60,
         0
       ]
     },
@@ -115,7 +59,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        700,
+        300,
         0
       ]
     },
@@ -123,6 +67,7 @@
       "parameters": {
         "method": "POST",
         "url": "={{ ($env.CROWDRELAY_API_URL || 'https://signal-api.virya.music/v1').replace(/\\/$/, '') + '/internal/autopilot/outreach/candidates' }}",
+        "genericAuthType": "httpHeaderAuth",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -149,7 +94,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        940,
+        540,
         0
       ]
     },
@@ -160,7 +105,7 @@
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        1160,
+        780,
         0
       ]
     }
@@ -178,28 +123,6 @@
       ]
     },
     "Validate sweep request": {
-      "main": [
-        [
-          {
-            "node": "Get Spotify app token",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get Spotify app token": {
-      "main": [
-        [
-          {
-            "node": "One item per query",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "One item per query": {
       "main": [
         [
           {
