@@ -1660,6 +1660,81 @@ has bought a number instead of a position.
 
 ---
 
+## Campaign brief — 1 000 active Polish metalheads (recorded 2026-08-23, not yet started)
+
+Operator's brief, kept verbatim in substance so a later session does not
+reinterpret it, with the engineering gaps named underneath.
+
+**Goal.** 1 000 real *active* users in Poland. Not followers, impressions or
+signups. Active = signup + consent + at least one meaningful action within 30
+days. Meaningful: content, music, event/RSVP, referral, merch, Signal.
+
+**Budget.** 0 PLN paid acquisition. Existing audiences and organic distribution
+only: FB groups, Reddit, Discord, bands, promoters, venues, festivals,
+playlists, metal media, IG/TikTok/YouTube, referrals.
+
+**Core strategy.** Do not sell "follow Virya". Build something metalheads want
+whether or not they have heard of the band — Polish metal discovery, curated
+tracks, exclusive live/demo/stems, a useful scene resource. Flow: distribution,
+useful offer, low-friction signup, immediate value, meaningful action, referral.
+
+**Referral is a product feature, not a hope.** Join, get exclusive value, invite
+two metalheads, unlock more. Measure activated referrals; never assume virality.
+
+**Experiment discipline.** Test each channel separately. First milestone 100
+activated users in 7 days at 0 PLN, then 100 → 250 → 500 → 1 000. Kill losers,
+scale repeatable winners. Operating loop: hypothesis, small test, measure,
+kill or scale, repeat.
+
+**Working funnel hypothesis, explicitly not a forecast.** 10k–30k qualified
+visits → 3k–5k signups → 1.5k–2k activated → 1k active at 30 days. Replace every
+number with real data as it arrives.
+
+**Primary KPI.** 1 000 deduplicated 30-day-active users. Supporting: activation
+rate, 30-day retention, source→active, community→active, referral conversion,
+activated referral rate. Vanity metrics are ignored unless they predict active
+users.
+
+**Core question.** Is there a free, repeatable mechanism that continuously adds
+real active Polish metalheads?
+
+### What CrowdRelay must hold, and what is actually missing
+
+The brief requires tracking: identity, consent, source, campaign, creative,
+community, referrer, intent, activity, activation, last_activity, 30d_active —
+deduplicated, with external platforms as execution surfaces and never as
+durable truth.
+
+Against the current schema:
+
+| field | state |
+|---|---|
+| identity | `fans`, deduplicated on normalized email |
+| consent | `fan_consents`, latest-wins per purpose |
+| source | `fan_acquisition_events.source`, but derived from the campaign |
+| campaign | `campaigns` + `smart_links.campaign_id` |
+| referrer | `referral_attributions.referrer_fan_id` |
+| intent | partial — `event_interests` only |
+| activity | scattered across tickets, interests, Synesthesia, beacon sessions |
+| **creative** | **missing** — no field distinguishes which post or image |
+| **community** | **missing** — no field for *which* group, subreddit or Discord |
+| **activation** | **missing** — the definition exists only in this brief |
+| **last_activity** | **missing** — never materialized |
+| **30d_active** | **missing** — the primary KPI cannot currently be computed |
+
+Five real gaps, and the last three matter most: **the primary KPI of this
+campaign cannot be measured by the system today.** Building the campaign before
+they exist means running the operating loop blind, which is the one thing the
+brief rules out.
+
+Note also that `FanSignupInput` carries no `source`, `creative` or `community`
+field at all — the channel is inferred from the campaign behind the smart link.
+Community and creative therefore need either a campaign per community (cheap,
+crude, works immediately) or explicit fields (correct, needs an API change).
+Decide before the first post, not after.
+
+---
+
 ## Resume checklist
 
 1. `git -C /Users/wojciechbator/dev/crowdrelay status --short --branch`
