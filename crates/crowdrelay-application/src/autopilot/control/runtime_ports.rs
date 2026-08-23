@@ -120,6 +120,18 @@ pub trait AutopilotControlRepository: Send + Sync {
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;
 
+    /// Sets the envelope, kill switch included, under optimistic concurrency.
+    ///
+    /// Stopping the agent must never depend on anything the agent itself runs,
+    /// so this is a direct write with no queue and no worker in the path.
+    async fn set_growth_envelope(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetGrowthEnvelope,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
     async fn assign_action(
         &self,
         workspace_id: WorkspaceId,

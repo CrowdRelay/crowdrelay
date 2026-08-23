@@ -94,6 +94,57 @@ pub async fn set_authority(
     }
 }
 
+/// Sets the growth envelope, kill switch included.
+///
+/// Deliberately a whole-envelope write rather than a patch. A partial update of
+/// a limit set is how somebody widens one ceiling while believing they
+/// tightened another, and an operator stopping the agent in a hurry should be
+/// stating the world they want, not editing one field of the world they have.
+pub async fn set_growth_envelope(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GrowthEnvelopeRequest>,
+) -> Response {
+    // The same bounds the table enforces, refused here so an operator gets a
+    // 400 with their input intact rather than a constraint violation.
+    if request.expected_version <= 0
+        || request.weekly_owned_audience_touches > 100_000
+        || request.weekly_third_party_touches > 1_000
+        || request.subject_cooldown_hours > 8_760
+        || !(1..=100_000).contains(&request.max_recipients_per_step)
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .set_growth_envelope(
+            state.ops.workspace_id(),
+            SetGrowthEnvelope {
+                agent_enabled: request.agent_enabled,
+                dry_run: request.dry_run,
+                weekly_owned_audience_touches: request.weekly_owned_audience_touches,
+                weekly_third_party_touches: request.weekly_third_party_touches,
+                subject_cooldown_hours: request.subject_cooldown_hours,
+                max_recipients_per_step: request.max_recipients_per_step,
+                expected_version: request.expected_version,
+            },
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 pub async fn upsert_booking_target(
     State(state): State<AppState>,
     headers: HeaderMap,

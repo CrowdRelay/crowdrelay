@@ -644,6 +644,102 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn set_growth_envelope(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetGrowthEnvelope,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let details = json!({
+                "agent_enabled": command.agent_enabled,
+                "dry_run": command.dry_run,
+                "weekly_owned_audience_touches": command.weekly_owned_audience_touches,
+                "weekly_third_party_touches": command.weekly_third_party_touches,
+                "subject_cooldown_hours": command.subject_cooldown_hours,
+                "max_recipients_per_step": command.max_recipients_per_step,
+                "expected_version": command.expected_version,
+            });
+            let inserted = insert_operator_action(
+                &mut transaction,
+                workspace_id,
+                operation_id,
+                "set_growth_envelope",
+                "growth_envelope",
+                workspace_id.into_uuid(),
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?;
+            if let Some(existing) = inserted {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: workspace_id.into_uuid(),
+                    status: "envelope_updated".to_owned(),
+                    replayed: true,
+                });
+            }
+
+            let bounded_i32 = |value: u32| -> Result<i32, RepositoryError> {
+                i32::try_from(value).map_err(|_| RepositoryError::Unexpected)
+            };
+            let updated = sqlx::query(
+                r#"
+                UPDATE viryaos_growth_envelope
+                SET agent_enabled = $2,
+                    dry_run = $3,
+                    weekly_owned_audience_touches = $4,
+                    weekly_third_party_touches = $5,
+                    subject_cooldown_hours = $6,
+                    max_recipients_per_step = $7,
+                    version = version + 1,
+                    updated_at = now()
+                WHERE workspace_id = $1 AND version = $8
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(command.agent_enabled)
+            .bind(command.dry_run)
+            .bind(bounded_i32(command.weekly_owned_audience_touches)?)
+            .bind(bounded_i32(command.weekly_third_party_touches)?)
+            .bind(bounded_i32(command.subject_cooldown_hours)?)
+            .bind(bounded_i32(command.max_recipients_per_step)?)
+            .bind(command.expected_version)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if updated.rows_affected() != 1 {
+                // A workspace with no envelope row has never been configured,
+                // which is a different problem from losing a version race.
+                let exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM viryaos_growth_envelope WHERE workspace_id = $1)",
+                )
+                .bind(workspace_id.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                return Err(if exists {
+                    RepositoryError::Conflict
+                } else {
+                    RepositoryError::NotFound
+                });
+            }
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: workspace_id.into_uuid(),
+                status: "envelope_updated".to_owned(),
+                replayed: false,
+            })
+        })
+        .await
+    }
+
     async fn set_authority(
         &self,
         workspace_id: WorkspaceId,
