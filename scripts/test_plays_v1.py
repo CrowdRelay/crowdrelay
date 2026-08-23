@@ -62,6 +62,10 @@ class PlaysContract(unittest.TestCase):
         self.domain = read(DOMAIN)
         self.infra = read(INFRA)
 
+    def _skip_if_private(self, path: Path) -> None:
+        if not path.exists():
+            self.skipTest(f"{path.relative_to(ROOT)} is a private n8n file and is not tracked in git")
+
     def contexts(self) -> set[str]:
         model = read(MODEL)
         block = model.split("impl AutopilotContext", 1)[1].split(
@@ -224,6 +228,7 @@ class PlaysContract(unittest.TestCase):
         self.assertIn('"viryaos.play.step_requested" => "play.step"', execution)
         requires = execution.split("fn payload_requires_executor", 1)[1].split("\n}", 1)[0]
         self.assertIn("RunPlayStep", requires)
+        self._skip_if_private(CONTRACT)
         self.assertIn("`play.step`", read(CONTRACT))
         self.assertIn("run_play_step", read(OPENAPI))
 
