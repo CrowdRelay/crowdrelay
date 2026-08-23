@@ -90,7 +90,9 @@ where
             .repository
             .load_autonomy_ceilings(self.workspace_id)
             .await?;
-        let (envelope, usage) = self
+        // Mutable for the whole cycle: the spend is topped up as actions are
+        // created, so the cap holds within one cycle and not only across them.
+        let (envelope, mut usage) = self
             .repository
             .load_growth_envelope(self.workspace_id, now)
             .await?;
@@ -113,7 +115,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -126,7 +128,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -145,7 +147,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -166,7 +168,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -185,7 +187,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -204,7 +206,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -223,7 +225,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -246,7 +248,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -261,7 +263,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -280,7 +282,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -299,7 +301,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -318,7 +320,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -338,7 +340,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -357,7 +359,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -376,7 +378,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -396,7 +398,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -415,7 +417,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -435,7 +437,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -452,7 +454,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -471,7 +473,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -490,7 +492,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -509,7 +511,7 @@ where
                                 &candidate,
                                 &ceilings,
                                 &envelope,
-                                &usage,
+                                &mut usage,
                                 &touch_ages,
                                 &mut report,
                             )
@@ -534,7 +536,7 @@ where
         candidate: &DecisionCandidate,
         ceilings: &[(ActionClass, AutonomyLevel)],
         envelope: &GrowthEnvelope,
-        usage: &EnvelopeUsage,
+        usage: &mut EnvelopeUsage,
         touch_ages: &[(uuid::Uuid, u32)],
         report: &mut AutopilotCycleReport,
     ) -> Result<(), AutopilotError> {
@@ -587,6 +589,20 @@ where
         }
         if persisted.action_created {
             report.actions_enqueued = report.actions_enqueued.saturating_add(1);
+            // Spend the budget as it is used, not once at the start of the
+            // cycle. Without this the weekly cap is read from a snapshot that
+            // never moves, and a single cycle with fifty findings enqueues all
+            // fifty against a budget of five.
+            match class {
+                ActionClass::OwnedAudience => {
+                    usage.owned_audience_touches_7d =
+                        usage.owned_audience_touches_7d.saturating_add(1);
+                }
+                ActionClass::ThirdParty => {
+                    usage.third_party_touches_7d = usage.third_party_touches_7d.saturating_add(1);
+                }
+                ActionClass::FirstPartyReversible | ActionClass::Paid => {}
+            }
         }
         if persisted.quota_throttled {
             report.actions_throttled = report.actions_throttled.saturating_add(1);

@@ -136,6 +136,17 @@ class GrowthEnvelopeContract(unittest.TestCase):
         self.assertIn("load_outward_touch_ages", execute)
         self.assertIn("load_growth_envelope", execute)
 
+    def test_the_budget_is_spent_as_it_is_used_not_read_once_per_cycle(self) -> None:
+        # The cap is loaded once and would otherwise never move, so a single
+        # cycle with fifty findings would enqueue all fifty against a budget of
+        # five. Every one of them would be a send nobody authorised.
+        persist = self.evaluate.split("async fn persist(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("usage: &mut EnvelopeUsage", persist)
+        spend = persist.split("if persisted.action_created {", 1)[1]
+        self.assertIn("owned_audience_touches_7d.saturating_add(1)", spend)
+        self.assertIn("third_party_touches_7d.saturating_add(1)", spend)
+        self.assertIn("let (envelope, mut usage)", self.evaluate)
+
     def test_held_decisions_are_counted_apart_from_gated_and_throttled_ones(self) -> None:
         report = self.evaluate.split("pub struct AutopilotCycleReport {", 1)[1].split(
             "}", 1
