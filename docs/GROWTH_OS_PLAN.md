@@ -1418,6 +1418,82 @@ Last, deliberately, because doing it earlier means doing it twice.
 
 ---
 
+## Acquisition — measured 2026-08-23, before the Google Play launch
+
+The plan above assumes an audience to activate. Counted against production on
+the day of the app launch, the reachable universe is:
+
+| source | count |
+|---|---|
+| fans | 19 total, 8 active, 19 with marketing consent |
+| beacons (latarniks) | 3 |
+| booking targets | 0 |
+| outreach targets | 0 |
+| distinct ticket buyers | 0 |
+| event interests | 5 |
+
+**Nineteen people.** This is the single most important number in this document
+and it reorders everything below it.
+
+### What follows from that
+
+- **Do not automate outreach at this scale.** Nineteen personal messages
+  written by a human on a Sunday afternoon will convert better than any campaign
+  system, and cost less to build. The owned-audience machinery already
+  shipped — post-show follow ask, milestones, dormant revival — is correct and
+  should stay switched off until there is a list worth running it on.
+- **The machinery is not the gap.** Beacon invites (`create_invite`,
+  `create_invite_batch`, delivery jobs, `exchange_invite`), fan signup
+  (`POST /v1/fans`), tracked links (`/v1/go/{slug}`), concert QR and referral
+  codes all exist and work. There is simply nobody in the tables to send to.
+- **The band's real audience is off-platform.** It is on Spotify, on
+  Bandsintown, on socials, and in the room at shows. CrowdRelay holds none of
+  it. Acquisition here means *migrating* an audience the band already has into
+  one it owns — and every lever for that starts outside this system.
+
+### The threshold, stated so it is not argued about later
+
+Automated owned-audience campaigns earn their place at roughly **500 consented
+fans**. Below that a human wins on quality and costs nothing to run. At 19, the
+agent's job is not to message anybody: it is to make sure that every person who
+arrives from the launch is captured, attributed and reachable next time.
+
+### What the agent should actually do for the launch
+
+Ordered by what it can do alone, today, for free.
+
+1. **Make every launch channel a tracked link.** One smart link per place the
+   band posts — Play listing, Spotify bio, Bandsintown, each social account,
+   each personal profile. Without this, launch day produces installs nobody can
+   attribute and the next campaign is planned blind. The link machinery shipped;
+   the links themselves do not exist yet.
+2. **Give the nineteen a referral code each.** At this size every existing fan
+   is a door, and a referral that converts is the only growth loop that
+   compounds without a budget. The referral ledger already exists.
+3. **Concert QR at the merch table for every show.** The room is the highest-
+   intent audience the band will ever stand in front of, and capture there costs
+   a printed square. `concert_qr` campaigns already exist and none are running.
+4. **Capture, then ask.** A fan captured on launch day with consent is worth
+   more than ten invitations sent to people who never asked.
+
+### The latarnik campaign, honestly
+
+Recruiting beacons by email needs candidate beacons, and there are three. The
+sequence is discovery first, invitation second — Phase 9 exists for exactly
+this, and running an invitation campaign before it is running a campaign to an
+empty list. Beacon discovery (`RequestBeaconDiscovery`, first-party and free)
+is the piece that fills the table; the invite batch endpoint is already waiting
+for it.
+
+### What this does not change
+
+Everything built so far stays. The measurement, the ceilings, the envelope, the
+cost model and the levers are all correct and all cheap to keep. They are
+simply premature to *switch on*, and the honest thing is to say so rather than
+to report a working growth agent that has nobody to grow.
+
+---
+
 ## Resume checklist
 
 1. `git -C /Users/wojciechbator/dev/crowdrelay status --short --branch`
