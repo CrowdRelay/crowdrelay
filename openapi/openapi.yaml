@@ -7787,7 +7787,7 @@ components:
       enum: [observe, recommend, require_approval, bounded_auto]
     AutopilotContext:
       type: string
-      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth, growth_metrics, growth_debt, outreach_supply]
+      enum: [ticket_yield, fan_lifecycle, campaign_lifecycle, merchandising, merch_pricing, merch_bundle, booking_opportunity, outreach, beacon, content_supply, promotion_budget, experimentation, show_operations, release, live_opportunity, funding, show_growth, growth_metrics, growth_debt, outreach_supply, plays]
     AutopilotDisposition:
       type: string
       enum: [observe_only, recommend_only, require_approval, auto_execute, deny]
@@ -7820,7 +7820,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email, raise_growth_opportunity]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email, raise_growth_opportunity, raise_growth_debt, issue_referral_code, run_play_step]
       additionalProperties: true
     TeamAssigneeSummary:
       type: object
@@ -7924,7 +7924,7 @@ components:
         runtime_enabled: { type: boolean }
         policies:
           type: array
-          maxItems: 20
+          maxItems: 21
           items: { $ref: '#/components/schemas/AutopilotPolicySummary' }
         promotion_budget_guardrails:
           type: array

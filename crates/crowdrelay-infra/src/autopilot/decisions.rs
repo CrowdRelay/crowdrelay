@@ -222,6 +222,50 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_play_anchors(
+        &self,
+        workspace_id: WorkspaceId,
+        kind: PlayKind,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PlayAnchor>, RepositoryError> {
+        self.load_play_anchors_impl(workspace_id, kind, now).await
+    }
+
+    async fn start_play(
+        &self,
+        workspace_id: WorkspaceId,
+        start: &PlayStart,
+    ) -> Result<bool, RepositoryError> {
+        self.start_play_impl(workspace_id, start).await
+    }
+
+    async fn load_play_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PlayRunSnapshot>, RepositoryError> {
+        self.load_play_snapshots_impl(workspace_id, now).await
+    }
+
+    async fn settle_play_step(
+        &self,
+        workspace_id: WorkspaceId,
+        settlement: &PlayStepSettlement,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.settle_play_step_impl(workspace_id, settlement, now)
+            .await
+    }
+
+    async fn complete_play(
+        &self,
+        workspace_id: WorkspaceId,
+        play_id: PlayId,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.complete_play_impl(workspace_id, play_id, now).await
+    }
+
     async fn load_autonomy_ceilings(
         &self,
         workspace_id: WorkspaceId,

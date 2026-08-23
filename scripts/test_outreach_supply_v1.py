@@ -15,8 +15,10 @@ that state, or turn the fix into a crawler:
 - it stops asking a dry source;
 - the database, the Rust enum and the published contract still agree.
 
-As the newest context migration, this file also owns the enum/constraint
-equality claim.
+The claim that the *whole* context set agrees with the Rust enum belongs to
+whichever migration defines it last, which is no longer this one. It lives in
+`test_plays_v1.py`; pinned here it would keep passing against a set the
+database had stopped enforcing.
 """
 
 from pathlib import Path
@@ -58,8 +60,12 @@ class OutreachSupplyContract(unittest.TestCase):
         )[0]
         return set(re.findall(r'Self::\w+ => "([a-z0-9_]+)"', block))
 
-    def test_every_context_check_constraint_matches_the_rust_enum(self) -> None:
-        # This is the newest context migration, so it owns the equality claim.
+    def test_this_context_is_stored_and_provisioned(self) -> None:
+        # Everything this file may claim about the context set as a whole moved
+        # to the newest migration that defines it, in `test_plays_v1.py`. What
+        # is left here is what this migration is still the authority on: that
+        # `outreach_supply` was added to all three constraints, and that both
+        # halves of provisioning name it.
         constraints = re.findall(
             r"ADD CONSTRAINT viryaos_autopilot_\w+_context_check CHECK \(context IN \((.*?)\)\)",
             self.migration,
@@ -69,32 +75,17 @@ class OutreachSupplyContract(unittest.TestCase):
             len(constraints), 3, "policies, decisions and actions must all be updated"
         )
         for constraint in constraints:
-            allowed = set(re.findall(r"'([a-z0-9_]+)'", constraint))
-            self.assertEqual(
-                allowed,
-                self.contexts(),
-                "database context constraint drifted from AutopilotContext",
-            )
-
-    def test_the_context_stores_nothing_of_its_own(self) -> None:
-        # Supply is counted from the target and candidate tables that already
-        # own those facts. A supply table would be a second, stale copy.
-        self.assertNotIn("CREATE TABLE", strip_sql_comments(self.migration))
-
-    def test_a_workspace_created_later_also_gets_the_context(self) -> None:
-        # The backfill covers today's workspaces and the trigger covers
-        # tomorrow's. Updating only one works until the next workspace exists.
+            self.assertIn("'outreach_supply'", constraint)
         self.assertIn("SELECT workspace.id, 'outreach_supply', 2", self.migration)
         trigger = self.migration.split(
             "CREATE OR REPLACE FUNCTION viryaos_provision_autopilot_policies", 1
         )[1]
         self.assertIn("'outreach_supply', 2", trigger)
-        provisioned = set(re.findall(r"NEW\.id, '([a-z_]+)'", trigger))
-        self.assertEqual(
-            provisioned,
-            self.contexts(),
-            "the provisioning trigger drifted from AutopilotContext",
-        )
+
+    def test_the_context_stores_nothing_of_its_own(self) -> None:
+        # Supply is counted from the target and candidate tables that already
+        # own those facts. A supply table would be a second, stale copy.
+        self.assertNotIn("CREATE TABLE", strip_sql_comments(self.migration))
 
     def test_the_context_arrives_disabled_and_tightly_quota_limited(self) -> None:
         provisioning = self.migration.split(

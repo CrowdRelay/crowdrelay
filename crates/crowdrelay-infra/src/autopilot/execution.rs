@@ -238,6 +238,11 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::ApplyLiveOpportunity { .. }
         | AutopilotActionPayload::PrepareFundingPackage { .. }
         | AutopilotActionPayload::SubmitFundingApplication { .. }
+        // A play's effect is the play's, not one send's: a tracker count moves
+        // because a campaign ran, and attributing it to whichever message
+        // happened to be last would be a number that reads as attribution and
+        // is not. Phase 14 measures the play against its own pre-play baseline.
+        | AutopilotActionPayload::RunPlayStep { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {}
     }
 
@@ -331,6 +336,9 @@ pub(super) async fn record_execution_outcome(
             None,
         ),
         AutopilotActionPayload::IssueReferralCode { .. } => ("referral_code_issued", 1.0, None),
+        AutopilotActionPayload::RunPlayStep { step_index, .. } => {
+            ("play_step_dispatched", f64::from(*step_index), None)
+        }
         AutopilotActionPayload::RaiseGrowthDebt {
             overdue_basis_points,
             ..
@@ -585,6 +593,7 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::ApplyLiveOpportunity { .. }
                 | AutopilotActionPayload::PrepareFundingPackage { .. }
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
+                | AutopilotActionPayload::RunPlayStep { .. }
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
         ),
     }
@@ -619,6 +628,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::ApplyLiveOpportunity { .. } => "opportunity.application",
         AutopilotActionPayload::PrepareFundingPackage { .. } => "funding.package",
         AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
+        AutopilotActionPayload::RunPlayStep { .. } => "play.step",
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.
@@ -648,6 +658,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.funding.package_requested" => "funding.package",
         "viryaos.funding.submission_requested" => "funding.submit",
         "viryaos.calendar.upsert_requested" => "calendar.upsert",
+        "viryaos.play.step_requested" => "play.step",
         "viryaos.team.assignment_email_requested" => "team.email",
         _ => "unknown",
     }

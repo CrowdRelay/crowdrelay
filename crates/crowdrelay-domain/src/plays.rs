@@ -120,7 +120,7 @@ const TRACK_US_ASK_STEPS: [PlayStepSpec; 2] = [
     PlayStepSpec {
         index: 0,
         kind: PlayStepKind::AnnounceAsk,
-        class: ActionClass::OwnedAudience,
+        class: PlayStepKind::AnnounceAsk.action_class(),
         offset_hours: -14 * 24,
         window_hours: 7 * 24,
     },
@@ -129,7 +129,7 @@ const TRACK_US_ASK_STEPS: [PlayStepSpec; 2] = [
     PlayStepSpec {
         index: 1,
         kind: PlayStepKind::PostShowAsk,
-        class: ActionClass::OwnedAudience,
+        class: PlayStepKind::PostShowAsk.action_class(),
         offset_hours: 18,
         window_hours: 3 * 24,
     },
@@ -167,6 +167,38 @@ impl PlayStepKind {
         match self {
             Self::AnnounceAsk => "play.track_us.announce",
             Self::PostShowAsk => "play.track_us.post_show",
+        }
+    }
+
+    /// Why this step is worth sending, recorded on the decision so an operator
+    /// reading the queue sees the argument rather than the mechanism.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::AnnounceAsk => {
+                "a date near this fan is announced, which is one of the two moments they are most \
+                 willing to follow the band where future dates appear"
+            }
+            Self::PostShowAsk => {
+                "the fan was at the show yesterday, the highest-intent moment the band gets and the \
+                 one it currently does nothing with"
+            }
+        }
+    }
+
+    /// How far this step reaches, and therefore what authority it needs.
+    ///
+    /// The step kind decides, not the step table: a spec is data a play author
+    /// writes, and a play author who could pick the class could route a curator
+    /// email through a step the operator only ever approved for their own fans.
+    /// Exhaustive, so a new step kind cannot compile until somebody has said
+    /// what it costs.
+    #[must_use]
+    pub const fn action_class(self) -> ActionClass {
+        match self {
+            // Both asks go to consented fans of this workspace. Free, and
+            // irreversible only in the sense every sent message is.
+            Self::AnnounceAsk | Self::PostShowAsk => ActionClass::OwnedAudience,
         }
     }
 }
@@ -309,7 +341,11 @@ pub enum PlayHold {
 /// step holds rather than skipping, because "we sent all we were allowed" is not
 /// the same fact as "we sent none".
 #[must_use]
-pub fn evaluate_play(snapshot: &PlaySnapshot, policy: PlayPolicy, now: OffsetDateTime) -> PlayDecision {
+pub fn evaluate_play(
+    snapshot: &PlaySnapshot,
+    policy: PlayPolicy,
+    now: OffsetDateTime,
+) -> PlayDecision {
     let Some(step) = snapshot.steps.iter().find(|step| !step.settled) else {
         return PlayDecision::Complete;
     };
@@ -378,7 +414,10 @@ pub const fn play_is_worth_starting(
 /// Derives one step's schedule from the anchor. The only place offsets are
 /// applied, so a step's due time and its expiry can never disagree.
 #[must_use]
-pub fn step_schedule(spec: PlayStepSpec, anchor_at: OffsetDateTime) -> (OffsetDateTime, OffsetDateTime) {
+pub fn step_schedule(
+    spec: PlayStepSpec,
+    anchor_at: OffsetDateTime,
+) -> (OffsetDateTime, OffsetDateTime) {
     let due_at = anchor_at + Duration::hours(i64::from(spec.offset_hours));
     let expires_at = due_at + Duration::hours(i64::from(spec.window_hours));
     (due_at, expires_at)
@@ -575,8 +614,10 @@ mod tests {
             PlayPolicy::default(),
             snapshot.steps[0].expires_at - Duration::hours(1),
         );
-        let (PlayDecision::RunStep { confidence: a, .. }, PlayDecision::RunStep { confidence: b, .. }) =
-            (early, late)
+        let (
+            PlayDecision::RunStep { confidence: a, .. },
+            PlayDecision::RunStep { confidence: b, .. },
+        ) = (early, late)
         else {
             panic!("both are inside the window");
         };
@@ -592,7 +633,10 @@ mod tests {
         let steps = PlayKind::TrackUsAsk.steps();
         let (announce_due, announce_expiry) = step_schedule(steps[0], anchor());
         let (post_due, _) = step_schedule(steps[1], anchor());
-        assert!(announce_due < anchor(), "the announce ask precedes the show");
+        assert!(
+            announce_due < anchor(),
+            "the announce ask precedes the show"
+        );
         assert!(
             announce_expiry < anchor(),
             "and closes before it, so it is never sent as a reminder about a show already played"
