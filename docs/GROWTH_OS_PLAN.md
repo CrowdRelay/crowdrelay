@@ -794,7 +794,7 @@ is compared against, and a missed one is reported as missed.
 
 ---
 
-## Phase 7 — tour economics
+## Phase 7 — tour economics (DONE)
 
 Nothing about venue autonomy is safe until the agent can answer "does this gig
 pay" from facts rather than from a number somebody typed. This phase is the
@@ -828,6 +828,65 @@ prerequisite for Phase 8, and Phase 8 is the prerequisite for ever widening the
 Merch and bar revenue are **not** modelled. They are real but unpredictable, and
 an agent that books a loss-making show because it assumed merch would cover it
 is worse than one that refuses.
+
+### As built
+
+`crates/crowdrelay-domain/src/tour_economics.rs` (14 unit tests), migration
+`0077_viryaos_tour_economics.sql`, wired into
+`load_live_opportunity_snapshots_impl`. `scripts/test_tour_economics_v1.py`,
+17 contract tests. `SCHEMA_VERSION` 76 → 77.
+
+The worked example, pinned as a test — five people, a backline that does not fit
+in one car, 500 km each way, Polish rates:
+
+| line | value |
+|---|---|
+| vehicles | 2 (forced by backline, not by seats) |
+| round trip | 1 000 km |
+| fuel | 1 000 km × 8 l/100 km × 6.50 zł × 2 = 1 040 zł |
+| tolls | 240 zł |
+| accommodation | 3 rooms × 1 night × 180 zł = 540 zł |
+| per diem | 5 people × 2 days × 60 zł = 600 zł |
+| overhead | 200 zł |
+| **total cost** | **2 620 zł** |
+| walk-away fee | cost + 500 zł minimum margin = 3 120 zł |
+
+At a 4 000 zł offer the show clears 1 380 zł. At 1 500 zł it is a loss and the
+model says so with the itemisation attached, so the operator sees *why*.
+
+Decisions worth not re-deriving:
+
+- **Vehicle count is `max(ceil(crew/seats), ceil(backline/cargo))`**, capped by
+  `max_vehicles`. Both answers are computed and the larger wins: four people
+  with a full backline still need two vehicles, six people with no gear also
+  need two. Counting only people would have halved the fuel and the tolls on
+  exactly the trip this was built for.
+- **`costed_from_logistics` is a new field on `LiveOpportunitySnapshot`, and
+  `may_auto_submit` requires it.** An uncosted show is still prepared for a
+  human — that is what preparing is for — but the band never commits to a long
+  drive on a cost nobody computed.
+- **An uncosted show scores zero economics points**, rather than defaulting to
+  break-even. Otherwise an unknown cost reads as neutral and an uncosted gig
+  outranks a costed profitable one.
+- **A computed cost overrides the stored `estimated_cost_minor`.** The stored
+  figure is still shown when the inputs are missing, but the opportunity is
+  marked uncosted, so the typed number can inform a human and can never
+  authorise a submission.
+- **Zero rates mean "not configured", not "free".** Zero fuel makes every
+  distant gig look profitable, which is the precise failure the module exists to
+  prevent, so a zero fuel price returns `Insufficient { FuelPrice }`.
+- **`nights_away` stated by a promoter beats the overnight threshold.** The
+  threshold is operator policy for when nobody said; a stated count is a fact.
+- **Money products go through `i128` and saturate**, because distance × rate ×
+  vehicles overflows `i64` more easily than it looks in a currency with grosze,
+  and an overflow would turn an impossible trip into a bargain.
+- `walk_away_fee_minor` is computed here rather than in Phase 8, because the
+  floor is arithmetic and the negotiation is policy.
+
+**Not runtime-verified.** No Docker daemon on this machine; migration 0077 has
+never run against a real Postgres, and the config still has to be filled with
+the band's actual fuel consumption, crew size, backline volume and rates before
+any of these numbers mean anything.
 
 ---
 
