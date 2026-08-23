@@ -108,6 +108,38 @@ class FanActivationContract(unittest.TestCase):
         ):
             self.assertIn(index, self.migration)
 
+    def test_activation_is_measured_per_city_because_the_loop_is_geographic(
+        self,
+    ) -> None:
+        # A thousand fans scattered across Europe produce no bookable city;
+        # two hundred across four Polish cities produce four shows.
+        self.assertIn("async fn sync_city_series", self.metrics)
+        self.assertIn("'city', city.id", self.metrics)
+        self.assertIn("FROM fan_city_interests", self.metrics)
+
+    def test_a_city_series_reuses_the_one_activation_definition(self) -> None:
+        city = self.metrics.split("let city_points = sqlx::query_scalar", 1)[1].split(
+            '"#', 1
+        )[0]
+        self.assertIn("fan_last_meaningful_action", city)
+        self.assertIn("INTERVAL '30 days'", city)
+        self.assertIn("consent.granted", city)
+
+    def test_a_quiet_city_records_a_zero_rather_than_no_row(self) -> None:
+        # Skipping the row would read as a dead feed rather than as a city that
+        # cooled, and those call for opposite responses.
+        city = self.metrics.split("let city_points = sqlx::query_scalar", 1)[1].split(
+            '"#', 1
+        )[0]
+        self.assertIn("LEFT JOIN per_city", city)
+        self.assertIn("COALESCE(per_city.activated, 0)", city)
+
+    def test_a_city_series_is_never_retired(self) -> None:
+        # A city that goes quiet is a fact worth keeping visible, and retiring
+        # on an empty month would flap the series every time somebody moved.
+        retire = self.metrics.split("WITH retired AS", 1)[1].split('"#', 1)[0]
+        self.assertNotIn("'city'", retire)
+
     def test_the_domain_holds_no_provider_or_sql_concept(self) -> None:
         for forbidden in ("sqlx", "reqwest", "SELECT ", "INSERT "):
             self.assertNotIn(forbidden, self.domain)
