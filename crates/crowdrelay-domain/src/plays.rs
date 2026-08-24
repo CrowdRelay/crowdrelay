@@ -48,6 +48,13 @@ pub enum PlayKind {
     /// the two moments a fan is most willing to press that button are when a
     /// date near them is announced and the morning after they enjoyed one.
     TrackUsAsk,
+    /// Make sure every published upcoming show has a complete free listing
+    /// before anybody is asked to look at it.
+    ///
+    /// The cheapest work in the whole system and the least glamorous: a show
+    /// that is not listed, or listed without a ticket link, cannot be found by
+    /// the people already looking for it. Nothing here contacts anyone.
+    ListingCompletenessSweep,
 }
 
 impl PlayKind {
@@ -55,6 +62,7 @@ impl PlayKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TrackUsAsk => "track_us_ask",
+            Self::ListingCompletenessSweep => "listing_completeness_sweep",
         }
     }
 
@@ -62,13 +70,14 @@ impl PlayKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "track_us_ask" => Some(Self::TrackUsAsk),
+            "listing_completeness_sweep" => Some(Self::ListingCompletenessSweep),
             _ => None,
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 1] {
-        [Self::TrackUsAsk]
+    pub const fn all() -> [Self; 2] {
+        [Self::TrackUsAsk, Self::ListingCompletenessSweep]
     }
 
     /// What the play claims will happen, recorded when it starts so the claim
@@ -80,6 +89,10 @@ impl PlayKind {
                 "fans reached around a show will follow the band where future dates are announced, \
                  raising the tracker count that future announcements reach for free"
             }
+            Self::ListingCompletenessSweep => {
+                "a show that is listed completely, with a working ticket link, is found by people \
+                 already searching for it, so the free listing surfaces reach more of them"
+            }
         }
     }
 
@@ -89,6 +102,12 @@ impl PlayKind {
     pub const fn success_metric(self) -> (&'static str, &'static str) {
         match self {
             Self::TrackUsAsk => ("bandsintown", "trackers"),
+            // The listing is first-party work whose reach is not first-party
+            // measurable: nothing tells us how many people found a complete
+            // listing. The tracker series is the number a complete listing is
+            // supposed to move, and the measurement layer reports it as
+            // correlational — which is exactly what it is.
+            Self::ListingCompletenessSweep => ("bandsintown", "trackers"),
         }
     }
 
@@ -97,6 +116,7 @@ impl PlayKind {
     pub const fn steps(self) -> &'static [PlayStepSpec] {
         match self {
             Self::TrackUsAsk => &TRACK_US_ASK_STEPS,
+            Self::ListingCompletenessSweep => &LISTING_SWEEP_STEPS,
         }
     }
 }
@@ -138,11 +158,37 @@ const TRACK_US_ASK_STEPS: [PlayStepSpec; 2] = [
     },
 ];
 
+// Three weeks out: far enough that a missing listing can still be fixed before
+// anyone looks for the show, and near enough that the date is real.
+const LISTING_SWEEP_STEPS: [PlayStepSpec; 1] = [PlayStepSpec {
+    index: 0,
+    kind: PlayStepKind::ListingSweep,
+    class: PlayStepKind::ListingSweep.action_class(),
+    offset_hours: -21 * 24,
+    window_hours: 14 * 24,
+}];
+
+/// Who a step is sent to.
+///
+/// Not every step has recipients. A listing sweep is work on the band's own
+/// surfaces, and running it through an audience check would settle it as
+/// `no_eligible_recipients` — a campaign refusing to do the one thing that
+/// needs nobody's consent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepAudience {
+    /// Consented fans, one action each.
+    Fans,
+    /// Nobody. The step runs once for its anchor.
+    None,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayStepKind {
     AnnounceAsk,
     PostShowAsk,
+    ListingSweep,
 }
 
 impl PlayStepKind {
@@ -151,6 +197,7 @@ impl PlayStepKind {
         match self {
             Self::AnnounceAsk => "announce_ask",
             Self::PostShowAsk => "post_show_ask",
+            Self::ListingSweep => "listing_sweep",
         }
     }
 
@@ -159,6 +206,7 @@ impl PlayStepKind {
         match value {
             "announce_ask" => Some(Self::AnnounceAsk),
             "post_show_ask" => Some(Self::PostShowAsk),
+            "listing_sweep" => Some(Self::ListingSweep),
             _ => None,
         }
     }
@@ -170,6 +218,7 @@ impl PlayStepKind {
         match self {
             Self::AnnounceAsk => "play.track_us.announce",
             Self::PostShowAsk => "play.track_us.post_show",
+            Self::ListingSweep => "play.listing.sweep",
         }
     }
 
@@ -185,6 +234,10 @@ impl PlayStepKind {
             Self::PostShowAsk => {
                 "the fan was at the show yesterday, the highest-intent moment the band gets and the \
                  one it currently does nothing with"
+            }
+            Self::ListingSweep => {
+                "a published show three weeks out is worth checking is listed completely, because \
+                 an incomplete listing cannot be found by the people already looking"
             }
         }
     }
@@ -202,6 +255,18 @@ impl PlayStepKind {
             // Both asks go to consented fans of this workspace. Free, and
             // irreversible only in the sense every sent message is.
             Self::AnnounceAsk | Self::PostShowAsk => ActionClass::OwnedAudience,
+            // Our own listings. Free, reaches nobody outside the workspace, and
+            // undone by doing the opposite.
+            Self::ListingSweep => ActionClass::FirstPartyReversible,
+        }
+    }
+
+    /// Who this step is sent to.
+    #[must_use]
+    pub const fn audience(self) -> StepAudience {
+        match self {
+            Self::AnnounceAsk | Self::PostShowAsk => StepAudience::Fans,
+            Self::ListingSweep => StepAudience::None,
         }
     }
 }
@@ -386,7 +451,14 @@ pub fn evaluate_play(
         return PlayDecision::Hold(PlayHold::NoStepDue);
     }
 
-    let ceiling = policy.max_recipients_per_step;
+    // A step with no audience runs once for its anchor. Measuring it against
+    // the recipient ceiling, or against an audience it does not have, would
+    // settle the one kind of work that needs nobody's consent as
+    // `no_eligible_recipients`.
+    let ceiling = match step.kind.audience() {
+        StepAudience::Fans => policy.max_recipients_per_step,
+        StepAudience::None => 1,
+    };
     if step.recipients_emitted >= ceiling {
         return PlayDecision::Hold(PlayHold::StepSaturated);
     }
@@ -394,7 +466,7 @@ pub fn evaluate_play(
     // An audience of nobody settles the step now rather than at expiry. Holding
     // a step open against an empty segment reads as work in progress for as long
     // as the window lasts, and it is not.
-    if snapshot.eligible_recipients == 0 {
+    if matches!(step.kind.audience(), StepAudience::Fans) && snapshot.eligible_recipients == 0 {
         return PlayDecision::SkipStep {
             index: step.index,
             kind: step.kind,
@@ -638,6 +710,63 @@ mod tests {
             b > Confidence::MIN,
             "a step still inside its window is still worth doing"
         );
+    }
+
+    #[test]
+    fn a_step_with_no_audience_runs_once_and_is_never_skipped_for_want_of_fans() {
+        // The listing sweep is work on the band's own surfaces. Running it
+        // through an audience check would settle the one kind of work that
+        // needs nobody's consent as "no eligible recipients".
+        let spec = PlayKind::ListingCompletenessSweep
+            .steps()
+            .first()
+            .copied()
+            .expect("the sweep has a step");
+        let (due_at, expires_at) = step_schedule(spec, anchor());
+        let mut snapshot = PlaySnapshot {
+            play_id: PlayId::new(),
+            kind: PlayKind::ListingCompletenessSweep,
+            anchor_at: anchor(),
+            anchor_active: true,
+            steps: vec![PlayStepState {
+                index: 0,
+                kind: spec.kind,
+                class: spec.class,
+                due_at,
+                expires_at,
+                settled: false,
+                recipients_emitted: 0,
+            }],
+            eligible_recipients: 0,
+        };
+        let due = due_at + Duration::hours(1);
+        assert!(matches!(
+            evaluate_play(&snapshot, PlayPolicy::default(), due),
+            PlayDecision::RunStep {
+                kind: PlayStepKind::ListingSweep,
+                class: ActionClass::FirstPartyReversible,
+                ..
+            }
+        ));
+        // And once is enough: a second sweep of the same listing is noise.
+        if let Some(step) = snapshot.steps.first_mut() {
+            step.recipients_emitted = 1;
+        }
+        assert_eq!(
+            evaluate_play(&snapshot, PlayPolicy::default(), due),
+            PlayDecision::Hold(PlayHold::StepSaturated)
+        );
+    }
+
+    #[test]
+    fn every_play_names_a_hypothesis_a_metric_and_at_least_one_step() {
+        for kind in PlayKind::all() {
+            assert!(!kind.hypothesis().is_empty());
+            assert!(!kind.steps().is_empty());
+            let (platform, metric_key) = kind.success_metric();
+            assert!(!platform.is_empty() && !metric_key.is_empty());
+            assert_eq!(PlayKind::parse(kind.as_str()), Some(kind));
+        }
     }
 
     #[test]

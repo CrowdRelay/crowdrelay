@@ -95,7 +95,7 @@ use crowdrelay_domain::{
     outreach::{OutreachPolicy, OutreachSnapshot},
     performance::{EffectAssessment, EffectResult},
     play_measurement::{PlayClaim, PlayOutcomeVerdict},
-    plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState},
+    plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepAudience},
     pricing::{TicketYieldPolicy, TicketYieldSnapshot},
     promotion::{PromotionBudgetPolicy, PromotionPerformanceSnapshot},
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},

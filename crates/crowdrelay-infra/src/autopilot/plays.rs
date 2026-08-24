@@ -361,11 +361,17 @@ impl PostgresAutopilotRepository {
                 // Only a play with an open step has an audience to read, and
                 // asking for one otherwise is a query per finished play per
                 // cycle for an answer the state machine will not look at.
-                let audience = if play_steps.iter().any(|step| !step.settled) {
-                    self.play_audience(workspace_id, play.id, play.anchor_id)
-                        .await?
-                } else {
-                    PlayAudience::Exhausted
+                let open = play_steps.iter().find(|step| !step.settled);
+                let audience = match open.map(|step| step.kind.audience()) {
+                    // A step that needs nobody must not be measured against an
+                    // audience: reading one would settle the only work in the
+                    // system that requires no consent as having no recipients.
+                    Some(StepAudience::None) => PlayAudience::NotRequired,
+                    Some(StepAudience::Fans) => {
+                        self.play_audience(workspace_id, play.id, play.anchor_id)
+                            .await?
+                    }
+                    None => PlayAudience::Exhausted,
                 };
                 snapshots.push(PlayRunSnapshot {
                     play_id: PlayId::from_uuid(play.id),
@@ -474,7 +480,11 @@ impl PostgresAutopilotRepository {
     }
 }
 
-/// One step of one play, for one fan, as the executing side reads it.
+/// One step of one play, as the executing side reads it.
+///
+/// `fan_id` is absent for a step that reaches nobody. A listing sweep is work
+/// on the band's own surfaces, and carrying a fan there would record a contact
+/// that never happened.
 #[derive(Clone, Copy)]
 pub(super) struct PlayStepDispatch<'a> {
     pub play_id: PlayId,
@@ -482,7 +492,7 @@ pub(super) struct PlayStepDispatch<'a> {
     pub step_index: u16,
     pub step_kind: PlayStepKind,
     pub event_id: EventId,
-    pub fan_id: FanId,
+    pub fan_id: Option<FanId>,
     pub template_key: &'a str,
 }
 
@@ -506,7 +516,12 @@ pub(super) async fn execute_play_step(
         fan_id,
         template_key,
     } = *dispatch;
-    ensure_marketing_eligible(transaction, workspace_id, fan_id).await?;
+    // Consent is only a question when somebody is being contacted. Checking it
+    // for a listing sweep would refuse the one kind of work nobody has to
+    // agree to.
+    if let Some(fan_id) = fan_id {
+        ensure_marketing_eligible(transaction, workspace_id, fan_id).await?;
+    }
     // The step must still be open and the show must still be on. Both can have
     // changed since the decision, and a cancelled show promoted by an action
     // queued before the cancellation is exactly the failure the anchor check
@@ -538,32 +553,38 @@ pub(super) async fn execute_play_step(
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
 
-    let fan = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-        "SELECT normalized_email, display_name, locale FROM fans WHERE workspace_id=$1 AND id=$2 AND status='active' FOR SHARE",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(fan_id.into_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?
-    .ok_or(RepositoryError::Conflict)?;
-
-    // Written before the intent is emitted and in the same transaction, so a
-    // dispatched send is never missing from the record of who was reached.
-    sqlx::query(
-        r#"
-        INSERT INTO viryaos_play_step_recipients (workspace_id, step_id, fan_id, action_id)
-        VALUES ($1,$2,$3,$4)
-        ON CONFLICT (workspace_id, step_id, fan_id) DO NOTHING
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(step.0)
-    .bind(fan_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
+    let fan = match fan_id {
+        Some(fan_id) => {
+            let fan = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT normalized_email, display_name, locale FROM fans WHERE workspace_id=$1 AND id=$2 AND status='active' FOR SHARE",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(fan_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?
+            .ok_or(RepositoryError::Conflict)?;
+            // Written before the intent is emitted and in the same transaction,
+            // so a dispatched send is never missing from the record of who was
+            // reached.
+            sqlx::query(
+                r#"
+                INSERT INTO viryaos_play_step_recipients (workspace_id, step_id, fan_id, action_id)
+                VALUES ($1,$2,$3,$4)
+                ON CONFLICT (workspace_id, step_id, fan_id) DO NOTHING
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(step.0)
+            .bind(fan_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .execute(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            Some(fan)
+        }
+        None => None,
+    };
 
     emit_external_action(
         transaction,
@@ -578,11 +599,13 @@ pub(super) async fn execute_play_step(
             "step_kind": step_kind.as_str(),
             "template_key": template_key,
             "fan_id": fan_id,
-            "fan": {
-                "email": fan.0,
-                "display_name": fan.1,
-                "locale": fan.2,
-            },
+            "fan": fan.map(|fan| {
+                json!({
+                    "email": fan.0,
+                    "display_name": fan.1,
+                    "locale": fan.2,
+                })
+            }),
             "event": {
                 "id": event_id,
                 "title": step.1,

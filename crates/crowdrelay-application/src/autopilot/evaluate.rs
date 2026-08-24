@@ -1,7 +1,7 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 
 use crowdrelay_domain::{
-    WorkspaceId,
+    FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
     audience_lifecycle::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
@@ -33,8 +33,8 @@ use crowdrelay_domain::{
     outreach::{OutreachDecision, OutreachSnapshot, evaluate_outreach},
     play_measurement::measurement_due_at,
     plays::{
-        PlayDecision, PlayKind, PlayPolicy, PlaySnapshot, evaluate_play, play_is_worth_starting,
-        step_schedule,
+        PlayDecision, PlayKind, PlayPolicy, PlaySnapshot, StepAudience, evaluate_play,
+        play_is_worth_starting, step_schedule,
     },
     pricing::{
         TicketAllocationDecision, TicketYieldDecision, TicketYieldSnapshot,

@@ -113,17 +113,23 @@ pub(super) fn play_step_candidate(
     else {
         return Ok(None);
     };
-    // The domain only reaches `RunStep` with a non-empty audience, so this is
-    // unreachable through the state machine. It is still a `let else` rather
-    // than an unwrap: a send with no recipient is the one mistake an
-    // owned-audience play must never make, and holding is always safe.
-    let Some(fan_id) = snapshot.audience.fan_id() else {
+    // A step that wants fans must have one. The domain only reaches `RunStep`
+    // with a non-empty audience, so this is unreachable through the state
+    // machine; it is still a check rather than an unwrap, because a send with
+    // no recipient is the one mistake an owned-audience play must never make
+    // and holding is always safe.
+    let fan_id = snapshot.audience.fan_id();
+    if matches!(step_kind.audience(), StepAudience::Fans) && fan_id.is_none() {
         return Ok(None);
-    };
+    }
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     Ok(Some(DecisionCandidate {
         context: policy.context,
-        subject: ActionSubject::Fan(fan_id),
+        // The fan when there is one, and otherwise the show. The subject is
+        // what the envelope's cooldown is keyed on, and a listing sweep must
+        // not spend a person's weekly contact budget on work that reaches
+        // nobody.
+        subject: fan_id.map_or(ActionSubject::Event(snapshot.event_id), ActionSubject::Fan),
         decision_kind: "run_play_step",
         confidence,
         disposition,
@@ -145,7 +151,10 @@ pub(super) fn play_step_candidate(
         },
         decision_key: format!(
             "decision:play-step:v{}:{}:{}:{}",
-            policy.version, snapshot.play_id, index, fan_id
+            policy.version,
+            snapshot.play_id,
+            index,
+            recipient_key(fan_id)
         ),
         // Permanently stable, unlike the detector keys that carry a cooldown
         // window. A fan receives a given step of a given play once and never
@@ -153,7 +162,18 @@ pub(super) fn play_step_candidate(
         // same show becomes a second, legitimate message.
         action_idempotency_key: format!(
             "action:play-step:{}:{}:{}",
-            snapshot.play_id, index, fan_id
+            snapshot.play_id,
+            index,
+            recipient_key(fan_id)
         ),
     }))
+}
+
+/// The recipient component of a play step's keys.
+///
+/// A step with no audience uses a fixed word rather than an empty string: an
+/// empty component would make two different keys collide the first time
+/// anything else was left out of one.
+fn recipient_key(fan_id: Option<FanId>) -> String {
+    fan_id.map_or_else(|| "anchor".to_owned(), |fan_id| fan_id.to_string())
 }

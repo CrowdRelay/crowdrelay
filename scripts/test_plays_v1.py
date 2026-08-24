@@ -143,6 +143,19 @@ class PlaysContract(unittest.TestCase):
 
     # --- what a play is -------------------------------------------------
 
+    def test_a_step_with_no_audience_runs_once_and_needs_nobody(self) -> None:
+        # A listing sweep is work on the band's own surfaces. Running it through
+        # an audience check would settle the one kind of work that needs
+        # nobody's consent as "no eligible recipients", and asking for consent
+        # to update our own listing would be asking the wrong question.
+        self.assertIn("pub enum StepAudience", self.domain)
+        rule = self.domain.split("pub fn evaluate_play", 1)[1].split("\n}", 1)[0]
+        self.assertIn("StepAudience::None => 1", rule)
+        self.assertIn("matches!(step.kind.audience(), StepAudience::Fans)", rule)
+        dispatch = self.infra.split("pub(super) async fn execute_play_step", 1)[1]
+        self.assertIn("if let Some(fan_id) = fan_id {", dispatch)
+        self.assertIn("ensure_marketing_eligible", dispatch)
+
     def test_a_step_takes_its_authority_from_what_it_is(self) -> None:
         # A play author who could choose the class could route a curator email
         # through a step the operator only approved for their own fans.

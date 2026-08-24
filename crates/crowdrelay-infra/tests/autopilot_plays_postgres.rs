@@ -240,7 +240,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
         step_index: 1,
         step_kind: PlayStepKind::PostShowAsk,
         event_id,
-        fan_id,
+        fan_id: Some(fan_id),
         template_key: PlayStepKind::PostShowAsk.template_key().to_owned(),
     };
     let payload = serde_json::to_value(&step_payload)?;
@@ -564,5 +564,178 @@ async fn insert_paid_ticket(
     .bind(now - time::Duration::hours(1))
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("sweep-e2e-{suffix}"))
+        .bind("Sweep E2E")
+        .execute(&pool)
+        .await?;
+    let now = OffsetDateTime::now_utc();
+    let anchor_at = now + time::Duration::days(30);
+    let event_id = EventId::new();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4,$5,'published',now())",
+    )
+    .bind(event_id.into_uuid())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("sweep-e2e-show-{suffix}"))
+    .bind("Sweep E2E show")
+    .bind(anchor_at)
+    .execute(&pool)
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let kind = PlayKind::ListingCompletenessSweep;
+    let start = PlayStart {
+        kind,
+        event_id,
+        anchor_at,
+        hypothesis: kind.hypothesis(),
+        success_metric_platform: kind.success_metric().0,
+        success_metric_key: kind.success_metric().1,
+        steps: kind
+            .steps()
+            .iter()
+            .map(|spec| {
+                let (due_at, expires_at) = step_schedule(*spec, anchor_at);
+                PlayStepPlan {
+                    index: spec.index,
+                    kind: spec.kind,
+                    class: spec.class,
+                    due_at,
+                    expires_at,
+                }
+            })
+            .collect(),
+        measurement_window_end: anchor_at + time::Duration::days(14),
+    };
+    assert!(repository.start_play(workspace_id, &start).await?);
+
+    let play = one_play(&repository, workspace_id, now, event_id).await?;
+    assert_eq!(play.kind, kind);
+    assert_eq!(
+        play.steps.first().map(|step| step.class),
+        Some(ActionClass::FirstPartyReversible),
+        "the sweep is first-party work and the class ceiling should treat it so"
+    );
+    assert_eq!(
+        play.audience,
+        PlayAudience::NotRequired,
+        "a step that needs nobody must not be measured against an audience it does not have"
+    );
+
+    // Dispatch it with no recipient at all.
+    let payload = AutopilotActionPayload::RunPlayStep {
+        play_id: play.play_id,
+        play_kind: kind,
+        step_index: 0,
+        step_kind: PlayStepKind::ListingSweep,
+        event_id,
+        fan_id: None,
+        template_key: PlayStepKind::ListingSweep.template_key().to_owned(),
+    };
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation
+        )
+        VALUES ($1,$2,$3,'plays','event',$4,'run_play_step',9000,'auto_execute',
+                'test','{}'::jsonb,'{}'::jsonb,$5)
+        "#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("decision:play-step:v1:{}:0:anchor", play.play_id))
+    .bind(event_id.into_uuid())
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_actions (
+            id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+            idempotency_key, payload, status, action_class, attempt_count, started_at
+        )
+        VALUES ($1,$2,$3,'plays','play.step.run','event',$4,$5,$6,'processing',
+                'first_party_reversible',1,now())
+        "#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(event_id.into_uuid())
+    .bind(format!("action:play-step:{}:0:anchor", play.play_id))
+    .bind(serde_json::to_value(&payload)?)
+    .execute(&pool)
+    .await?;
+
+    repository
+        .execute_action(
+            workspace_id,
+            &ClaimedAutopilotAction {
+                id: AutopilotActionId::from_uuid(action_id),
+                payload,
+                attempt_number: 1,
+            },
+            now,
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM outbox_events
+             WHERE workspace_id=$1 AND event_type='viryaos.play.step_requested'"
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM viryaos_play_step_recipients WHERE workspace_id=$1"
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0,
+        "a sweep reaches nobody, and recording a recipient would be a contact that never happened"
+    );
+    // No workspace cleanup: the emitted outbox event holds a RESTRICT
+    // reference, which is the delivery ledger refusing to lose a dispatched
+    // intent. The database is disposable; the ledger is not.
     Ok(())
 }
