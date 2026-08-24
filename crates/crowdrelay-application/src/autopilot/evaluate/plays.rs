@@ -55,7 +55,7 @@ pub(super) fn play_start(
     let AutopilotPolicyConfig::Plays(domain_policy) = policy.config else {
         return None;
     };
-    if !play_is_worth_starting(anchor.active, anchor.hours_until, domain_policy) {
+    if !play_is_worth_starting(kind, anchor.active, anchor.hours_until, domain_policy) {
         return None;
     }
     let (platform, metric_key) = kind.success_metric();
