@@ -1,6 +1,6 @@
 //! Split PostgreSQL Autopilot adapter implementation.
 
-use super::control::insert_operator_action;
+use super::operator_actions::insert_operator_action;
 use super::*;
 
 #[async_trait]

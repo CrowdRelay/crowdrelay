@@ -6,7 +6,7 @@ use crowdrelay_domain::{
     action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::AutonomyLevel,
-    beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
+    beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot},
     booking::{BookingTargetSnapshot, CityOpportunitySnapshot},
     campaign_lifecycle::EventCampaignSnapshot,
     content_supply::ContentSupplySnapshot,
@@ -35,10 +35,14 @@ use crowdrelay_domain::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
+
 use super::model::{
     AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, ClaimedPlayOutcome,
-    DecisionCandidate, PlayAnchor, PlayKindStanding, PlayOutcomeObservation, PlayRunSnapshot,
-    PlayStart, PlayStepSettlement,
+    DecisionCandidate, LiveTermsSnapshot, OutreachWaveAnchor, OutreachWaveSnapshot,
+    OutreachWaveStart, OutreachWaveTransition, PlacementSettlement, PlayAnchor, PlayKindStanding,
+    PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
+    PlaylistPlacementSnapshot, TermsSettlement,
 };
 use crate::RepositoryError;
 
@@ -139,6 +143,80 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<LiveOpportunitySnapshot>, RepositoryError>;
 
+    /// What this workspace's sending looks like from outside: how much it has
+    /// sent, how much of that bounced or was reported, and when it started.
+    async fn load_deliverability_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<DeliverabilitySnapshot, RepositoryError>;
+
+    /// Free-reach waves still being drafted or waiting on a human.
+    async fn load_outreach_waves(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<OutreachWaveSnapshot>, RepositoryError>;
+
+    /// Anchors — releases and shows — with no wave of a given kind yet.
+    async fn load_outreach_wave_anchors(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<OutreachWaveAnchor>, RepositoryError>;
+
+    /// Opens a wave. False when another cycle got there first, which is not a
+    /// failure: the unique constraint is what makes one wave per anchor true.
+    async fn open_outreach_wave(
+        &self,
+        workspace_id: WorkspaceId,
+        start: &OutreachWaveStart,
+    ) -> Result<bool, RepositoryError>;
+
+    /// Seals a wave for review, or ends it without approval.
+    async fn transition_outreach_wave(
+        &self,
+        workspace_id: WorkspaceId,
+        wave_id: uuid::Uuid,
+        transition: OutreachWaveTransition,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    /// Claimed placements that are not settled yet.
+    async fn load_playlist_placements(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PlaylistPlacementSnapshot>, RepositoryError>;
+
+    /// Ends a placement. A withdrawal also suppresses the curator behind it and
+    /// every other target sharing their identity, in the same transaction:
+    /// suppressing the playlist and leaving the operator pitchable is how the
+    /// same person is approached again next week through a different list.
+    async fn settle_playlist_placement(
+        &self,
+        workspace_id: WorkspaceId,
+        settlement: PlacementSettlement,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    /// Live negotiations, each with the show it is about.
+    async fn load_live_opportunity_terms(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<LiveTermsSnapshot>, RepositoryError>;
+
+    /// Ends a negotiation without an acceptance. Idempotent on the state
+    /// already being unsettled, so two cycles racing on the same expired window
+    /// leave one recorded reason.
+    async fn settle_live_opportunity_terms(
+        &self,
+        workspace_id: WorkspaceId,
+        settlement: &TermsSettlement,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
     async fn load_funding_opportunity_snapshots(
         &self,
         workspace_id: WorkspaceId,
@@ -156,6 +234,22 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<BeaconCampaignSnapshot>, RepositoryError>;
+
+    /// How many bookable targets the pipeline can contact, and when the agent
+    /// last asked for more supply. The booking analogue of outreach supply.
+    async fn load_booking_supply_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<crowdrelay_domain::booking_discovery::BookingSupplySnapshot, RepositoryError>;
+
+    /// Verified scene nodes with an upcoming show in their own city, and how
+    /// long since — or whether — they were last asked to run invite codes.
+    async fn load_beacon_invite_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconInviteSnapshot>, RepositoryError>;
 
     async fn load_show_growth_snapshots(
         &self,
@@ -496,4 +590,59 @@ pub fn assess_measurement_effect(
         measurement.kind.direction(),
         500,
     )
+}
+
+/// Venue/promoter discovery: the booking pipeline's supply, screened on write.
+#[async_trait]
+pub trait AutopilotBookingDiscoveryRepository: Send + Sync {
+    async fn ingest_booking_candidates(
+        &self,
+        workspace_id: WorkspaceId,
+        candidates: Vec<crowdrelay_domain::booking_discovery::BookingCandidateInput>,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<BookingCandidateIngestion, RepositoryError>;
+
+    /// Promotes one admitted email-route candidate into a real booking target.
+    /// The human confirmation is what turns a published route into somebody
+    /// the agent may approach.
+    async fn confirm_booking_candidate(
+        &self,
+        workspace_id: WorkspaceId,
+        candidate_id: crowdrelay_domain::OutreachOpportunityId,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<crate::autopilot::AutopilotControlMutation, RepositoryError>;
+
+    async fn list_booking_candidates(
+        &self,
+        workspace_id: WorkspaceId,
+        status: Option<String>,
+        limit: u32,
+    ) -> Result<Vec<BookingCandidateView>, RepositoryError>;
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BookingCandidateIngestion {
+    pub reported: u32,
+    pub admitted: u32,
+    pub refused: u32,
+    /// Found through a second source: contact identity dedupes, so the same
+    /// inbox is never two prospects.
+    pub duplicates: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BookingCandidateView {
+    pub candidate_id: uuid::Uuid,
+    pub target_kind: String,
+    pub display_name: String,
+    pub city_slug: Option<String>,
+    pub route_kind: String,
+    pub route_value: String,
+    pub source: String,
+    pub fit_basis_points: u16,
+    pub status: String,
+    pub refusal_reason: Option<String>,
+    pub booking_target_id: Option<uuid::Uuid>,
 }

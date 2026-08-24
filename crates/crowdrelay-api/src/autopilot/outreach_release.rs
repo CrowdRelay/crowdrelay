@@ -382,6 +382,7 @@ pub async fn upsert_team_opportunity(
         || request.fit_basis_points > 10_000
         || request.reputation_basis_points > 10_000
         || request.confidence_basis_points > 10_000
+        || request.strategic_value_basis_points > 10_000
         || !valid_currency(&request.currency)
         || request.expected_fee_minor < 0
         || request.estimated_cost_minor < 0
@@ -439,6 +440,7 @@ pub async fn upsert_team_opportunity(
         country_code: request.country_code,
         travel_band: request.travel_band,
         metadata: request.metadata,
+        strategic_value_basis_points: request.strategic_value_basis_points,
         expected_version: request.expected_version,
     };
     match state
@@ -480,6 +482,150 @@ pub async fn record_team_opportunity_progress(
     match state
         .autopilot
         .record_team_opportunity_progress(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Records what the promoter has said about one opportunity.
+///
+/// The only way a negotiation ever starts. Everything the agent does afterwards
+/// — the floor, the counter, the refusals — hangs off a number a human read in
+/// an email and wrote down here.
+pub async fn record_team_opportunity_terms(
+    State(state): State<AppState>,
+    Path(opportunity_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<TeamOpportunityTermsRequest>,
+) -> Response {
+    let Ok(opportunity_id) = Uuid::parse_str(&opportunity_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let position = match request.position {
+        PromoterPositionRequest::Offer => PromoterPosition::Offer {
+            fee_minor: request.offered_fee_minor,
+        },
+        PromoterPositionRequest::Withdrawn => PromoterPosition::Withdrawn,
+    };
+    // A window that has already closed would open a negotiation the next cycle
+    // immediately expires, which reads to an operator as the agent losing a
+    // show it never had a chance at.
+    let invalid = request.offered_fee_minor < 0
+        || !valid_currency(&request.currency)
+        || request.responds_by <= OffsetDateTime::now_utc();
+    if invalid {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = RecordTeamOpportunityTerms {
+        opportunity_id: TeamOpportunityId::from_uuid(opportunity_id),
+        position,
+        currency: request.currency,
+        responds_by: request.responds_by,
+    };
+    match state
+        .autopilot
+        .record_team_opportunity_terms(
+            state.ops.workspace_id(),
+            command,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Records that a human submitted the Spotify editorial pitch.
+///
+/// The form has no API, so this is the only thing that stops the chasing. The
+/// agent never sets it: it would be recording a submission it cannot see.
+pub async fn complete_editorial_pitch(
+    State(state): State<AppState>,
+    Path(release_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(release_id) = Uuid::parse_str(&release_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .complete_editorial_pitch(
+            state.ops.workspace_id(),
+            ReleasePlanId::from_uuid(release_id),
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Records a curator's placement claim, or what one public read of it found.
+///
+/// The only way a placement enters the system. A claim counts toward nothing
+/// until a read confirms it, and a confirmation that disappears inside the
+/// verification window suppresses the curator behind it.
+pub async fn record_playlist_placement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PlaylistPlacementRequest>,
+) -> Response {
+    let invalid = request.playlist_external_id.trim().is_empty()
+        || request.playlist_external_id.len() > 200
+        || request.track_external_id.trim().is_empty()
+        || request.track_external_id.len() > 200;
+    if invalid {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let observation = match request.report {
+        PlacementReportRequest::Claimed => None,
+        PlacementReportRequest::Present => Some(PlacementObservation::Present),
+        PlacementReportRequest::Absent => Some(PlacementObservation::Absent),
+        PlacementReportRequest::Unreadable => Some(PlacementObservation::Unreadable),
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    let command = RecordPlaylistPlacement {
+        opportunity_id: OutreachOpportunityId::from_uuid(request.opportunity_id),
+        playlist_external_id: request.playlist_external_id,
+        track_external_id: request.track_external_id,
+        observation,
+    };
+    match state
+        .autopilot
+        .record_playlist_placement(
             state.ops.workspace_id(),
             command,
             &idempotency_key,

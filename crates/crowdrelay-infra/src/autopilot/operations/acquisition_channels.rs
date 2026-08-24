@@ -129,6 +129,25 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
     let mut total_signups: u32 = 0;
     let mut total_activated: u32 = 0;
 
+    // The workspace-level funnel, from the derived view. One row by
+    // construction; a missing row means zero fans, which reads as zeros
+    // rather than as an error.
+    let kpi: Option<(i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT active_30d, reachable_consented
+        FROM viryaos_fan_activation_kpi
+        WHERE workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let (active_30d, reachable_consented) = match kpi {
+        Some((active, consented)) => (bounded_u32(active)?, bounded_u32(consented)?),
+        None => (0, 0),
+    };
+
     for row in rows {
         let signups = bounded_u32(row.signups)?;
         let activated = bounded_u32(row.activated_30d)?;
@@ -181,6 +200,8 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
         channels,
         total_signups,
         total_activated_30d: total_activated,
+        active_30d,
+        reachable_consented,
         unattributed,
     })
 }

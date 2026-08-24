@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{performance::EffectAssessment, plays::PlayPolicy};
+use crate::performance::EffectAssessment;
 
 /// What the measured record says about one kind of play.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -216,7 +216,7 @@ pub fn assess_play_standing(record: PlayRecord, policy: LearningPolicy) -> PlayS
 /// ceiling downward and can never raise it: a play with a perfect record still
 /// reaches exactly the number an operator configured.
 #[must_use]
-pub fn effective_recipient_ceiling(policy: PlayPolicy, standing: PlayStanding) -> u32 {
+pub fn effective_recipient_ceiling(max_recipients_per_step: u32, standing: PlayStanding) -> u32 {
     if standing.is_retired() {
         return 0;
     }
@@ -224,17 +224,17 @@ pub fn effective_recipient_ceiling(policy: PlayPolicy, standing: PlayStanding) -
     // a weight cannot become a silent retirement, not so a record can overrule a
     // deliberate zero — raising it here would be this module doing the one thing
     // it is not allowed to do.
-    if policy.max_recipients_per_step == 0 {
+    if max_recipients_per_step == 0 {
         return 0;
     }
-    let scaled = u64::from(policy.max_recipients_per_step)
+    let scaled = u64::from(max_recipients_per_step)
         .saturating_mul(u64::from(standing.weight_basis_points()))
         / 10_000;
     // A running play always reaches somebody. Nought recipients is retirement
     // wearing a weight's clothes, and it would hide from every read model that
     // reports why a play stopped.
     u32::try_from(scaled)
-        .unwrap_or(policy.max_recipients_per_step)
+        .unwrap_or(max_recipients_per_step)
         .max(1)
 }
 
@@ -260,10 +260,7 @@ mod tests {
         let standing = assess_play_standing(record(1, 0, 0), policy());
         assert!(matches!(standing, PlayStanding::Untested { measured: 1 }));
         assert_eq!(standing.weight_basis_points(), 10_000);
-        assert_eq!(
-            effective_recipient_ceiling(PlayPolicy::default(), standing),
-            PlayPolicy::default().max_recipients_per_step
-        );
+        assert_eq!(effective_recipient_ceiling(150, standing), 150);
     }
 
     #[test]
@@ -306,7 +303,7 @@ mod tests {
         );
         assert_eq!(
             effective_recipient_ceiling(
-                PlayPolicy::default(),
+                150,
                 PlayStanding::Retired {
                     reason: RetirementReason::RepeatedlyWorsened
                 }
@@ -330,8 +327,8 @@ mod tests {
         };
         assert!(basis_points < 10_000, "a mixed record is not a full record");
         assert!(basis_points >= policy().floor_basis_points);
-        let reach = effective_recipient_ceiling(PlayPolicy::default(), standing);
-        assert!(reach > 0 && reach < PlayPolicy::default().max_recipients_per_step);
+        let reach = effective_recipient_ceiling(150, standing);
+        assert!(reach > 0 && reach < 150);
     }
 
     #[test]
@@ -339,8 +336,8 @@ mod tests {
         let standing = assess_play_standing(record(20, 0, 0), policy());
         assert_eq!(standing.weight_basis_points(), 10_000);
         assert_eq!(
-            effective_recipient_ceiling(PlayPolicy::default(), standing),
-            PlayPolicy::default().max_recipients_per_step,
+            effective_recipient_ceiling(150, standing),
+            150,
             "however good the record, the operator's ceiling is the ceiling"
         );
     }
@@ -353,21 +350,14 @@ mod tests {
             record(0, 0, 2).observe(Some(EffectAssessment::Neutral)),
             policy(),
         );
-        let tiny = PlayPolicy {
-            max_recipients_per_step: 1,
-            ..PlayPolicy::default()
-        };
-        assert!(effective_recipient_ceiling(tiny, standing) >= 1);
+        assert!(effective_recipient_ceiling(1, standing) >= 1);
     }
 
     #[test]
     fn a_configured_zero_is_never_raised_to_one() {
         // The floor exists so a weight cannot become a silent retirement, not
         // so a record can overrule an operator who deliberately set nothing.
-        let silent = PlayPolicy {
-            max_recipients_per_step: 0,
-            ..PlayPolicy::default()
-        };
+        let silent = 0u32;
         for standing in [
             PlayStanding::Untested { measured: 0 },
             PlayStanding::Weighted {

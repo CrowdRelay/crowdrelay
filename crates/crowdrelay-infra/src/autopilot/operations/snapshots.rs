@@ -1,6 +1,8 @@
 //! Set-oriented bounded-context snapshot loaders.
 
 use super::*;
+use crate::autopilot::bounded_u32;
+use crowdrelay_domain::booking_discovery::BookingSupplySnapshot;
 
 #[derive(Debug, FromRow)]
 struct EventCampaignRow {
@@ -872,4 +874,144 @@ pub(super) fn parse_show_task(value: &str) -> Result<ShowTaskKind, RepositoryErr
         "post_show_report" => Ok(ShowTaskKind::PostShowReport),
         _ => Err(RepositoryError::Unexpected),
     }
+}
+
+#[derive(Debug, FromRow)]
+struct BeaconInviteRow {
+    beacon_id: Uuid,
+    beacon_version: i64,
+    event_id: Uuid,
+    beacon_kind: String,
+    active: bool,
+    verified: bool,
+    accepts_outreach: bool,
+    do_not_contact: bool,
+    relationship_score: i32,
+    hours_until_event: i64,
+    hours_since_last_invite_batch: Option<i64>,
+}
+
+/// Verified scene nodes with one upcoming show in their own city, and the
+/// cooldown clock for their last invite ask. The domain decides whether any
+/// of it is worth an action; this only reports the facts, bounded like every
+/// snapshot read.
+pub(in crate::autopilot) async fn load_beacon_invite_snapshots(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Vec<BeaconInviteSnapshot>, RepositoryError> {
+    let rows = sqlx::query_as::<_, BeaconInviteRow>(
+        r#"
+        SELECT DISTINCT ON (beacon.id, event.id)
+            beacon.id AS beacon_id,
+            beacon.version AS beacon_version,
+            event.id AS event_id,
+            beacon.beacon_kind,
+            beacon.active,
+            beacon.verified,
+            beacon.accepts_outreach,
+            beacon.do_not_contact,
+            beacon.relationship_score,
+            FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 3600)::bigint
+                AS hours_until_event,
+            GREATEST(
+                0,
+                FLOOR(EXTRACT(EPOCH FROM ($2 - last_ask.asked_at)) / 3600)
+            )::bigint AS hours_since_last_invite_batch
+        FROM viryaos_beacons AS beacon
+        JOIN events AS event
+          ON event.workspace_id = beacon.workspace_id
+         AND event.status = 'published'
+         AND event.starts_at BETWEEN $2 AND $2 + INTERVAL '60 days'
+         AND (beacon.city_id IS NULL OR beacon.city_id = event.city_id)
+        LEFT JOIN LATERAL (
+            SELECT max(action.created_at) AS asked_at
+            FROM viryaos_autopilot_actions AS action
+            WHERE action.workspace_id = beacon.workspace_id
+              AND action.context = 'beacon'
+              AND action.subject_id = beacon.id
+              AND action.action_kind = 'beacon.invite_batch.request'
+              AND action.status IN ('awaiting_approval', 'queued', 'processing', 'succeeded')
+        ) AS last_ask ON true
+        WHERE beacon.workspace_id = $1
+          AND beacon.active
+          AND beacon.verified
+          AND beacon.accepts_outreach
+          AND NOT beacon.do_not_contact
+          AND beacon.contact_email IS NOT NULL
+        ORDER BY beacon.id, event.id, event.starts_at
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(MAX_SNAPSHOTS_PER_CONTEXT)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(BeaconInviteSnapshot {
+                beacon_id: BeaconId::from_uuid(row.beacon_id),
+                beacon_version: row.beacon_version,
+                event_id: EventId::from_uuid(row.event_id),
+                kind: parse_beacon_kind(&row.beacon_kind)?,
+                active: row.active,
+                verified: row.verified,
+                accepts_outreach: row.accepts_outreach,
+                do_not_contact: row.do_not_contact,
+                relationship_score: u16::try_from(row.relationship_score)
+                    .map_err(|_| RepositoryError::Unexpected)?,
+                hours_until_event: row.hours_until_event,
+                hours_since_last_invite_batch: row
+                    .hours_since_last_invite_batch
+                    .map(|hours| u32::try_from(hours).unwrap_or(u32::MAX)),
+            })
+        })
+        .collect()
+}
+
+/// The booking pipeline's supply: contactable targets today, plus the cooldown
+/// clock on the last discovery request. Bounded like every snapshot read; the
+/// domain decides whether any of it is worth an action.
+pub(in crate::autopilot) async fn load_booking_supply_snapshot(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<BookingSupplySnapshot, RepositoryError> {
+    repo.bounded(async {
+        let row = sqlx::query_as::<_, (i64, Option<i64>)>(
+            r#"
+            SELECT
+                (
+                    SELECT count(*)::bigint
+                    FROM viryaos_booking_targets AS target
+                    WHERE target.workspace_id = $1
+                      AND target.active
+                      AND target.accepts_booking
+                ),
+                (
+                    SELECT GREATEST(
+                        0,
+                        FLOOR(EXTRACT(EPOCH FROM ($2 - max(d.evaluated_at))) / 3600)
+                    )::bigint
+                    FROM viryaos_autopilot_decisions AS d
+                    WHERE d.workspace_id = $1
+                      AND d.context = 'booking_opportunity'
+                      AND d.decision_kind = 'request_booking_target_discovery'
+                )
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(now)
+        .fetch_one(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(BookingSupplySnapshot {
+            active_eligible_targets: bounded_u32(row.0)?,
+            hours_since_last_request: row.1.and_then(|hours| u32::try_from(hours).ok()),
+        })
+    })
+    .await
 }

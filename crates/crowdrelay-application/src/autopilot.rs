@@ -7,10 +7,12 @@
 
 mod control;
 mod evaluate;
+mod growth_posture;
 mod model;
 mod ports;
 
 pub use control::*;
 pub use evaluate::*;
+pub use growth_posture::*;
 pub use model::*;
 pub use ports::*;

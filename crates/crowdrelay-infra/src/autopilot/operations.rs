@@ -6,7 +6,8 @@ use crowdrelay_domain::{
     BeaconId, ContentSourceId, EventId, ExperimentId, ExperimentVariantId, MerchProductId,
     OutreachOpportunityId, OutreachTargetId, WorkspaceId,
     beacons::{
-        BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconKind, BeaconReplyDisposition,
+        BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot, BeaconKind,
+        BeaconReplyDisposition,
     },
     booking::BookingReplyDisposition,
     campaign_lifecycle::{EventCampaignHistory, EventCampaignSnapshot},
@@ -21,7 +22,7 @@ use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::control::insert_operator_action;
+use super::operator_actions::insert_operator_action;
 use super::{
     MAX_SNAPSHOTS_PER_CONTEXT, PostgresAutopilotRepository, map_sqlx, parse_confidence,
     parse_context,

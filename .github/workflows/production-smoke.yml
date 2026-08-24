@@ -3,7 +3,7 @@ name: Production smoke
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7 */6 * * *"
+    - cron: "7 3 * * *"
 
 permissions:
   contents: read

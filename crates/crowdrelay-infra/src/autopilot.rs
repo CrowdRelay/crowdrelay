@@ -1,19 +1,26 @@
 //! PostgreSQL adapter for the deterministic ViryaOS Autopilot.
 
 mod actions;
+mod actions_execution;
 mod control;
+mod control_mutations;
 mod decisions;
+mod deliverability;
 mod growth;
 mod growth_metrics;
 mod measurement;
 mod objectives;
 mod operations;
+mod operator_actions;
+mod placements;
 mod play_outcomes;
 mod plays;
 mod runtime;
 mod show_cost;
 mod state;
 mod team;
+mod terms;
+mod waves;
 
 use std::{collections::HashMap, future::Future, time::Duration};
 
@@ -34,45 +41,53 @@ use crowdrelay_application::{
         AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
         CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, ClaimedPlayOutcome, DecisionCandidate, DeclareGrowthObjective,
-        ExecutionClaimMutation, ExecutionReportMutation, ExecutorHeartbeatMutation,
-        ExecutorReportStatus, FirstPartyGrowthMetricReport, FreezeShowCostPrediction,
-        GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress,
-        GrowthDeliveryTotals, GrowthMetricPointMutation, GrowthMetricSeriesMutation,
-        GrowthMetricSubject, GrowthMetricTrendView, GrowthObjectiveMutation, GrowthObjectiveView,
-        GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
-        MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
-        PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView, PlayKindStanding,
-        PlayLedger, PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot, PlayStart,
-        PlayStepSettlement, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
-        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
-        RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
-        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
-        ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
-        SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
+        DeliveryFaultSubject, EvidencePacket, ExecutionClaimMutation, ExecutionReportMutation,
+        ExecutorHeartbeatMutation, ExecutorReportStatus, FirstPartyGrowthMetricReport,
+        FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS,
+        GrowthCampaignProgress, GrowthDeliveryTotals, GrowthMetricPointMutation,
+        GrowthMetricSeriesMutation, GrowthMetricSubject, GrowthMetricTrendView,
+        GrowthObjectiveMutation, GrowthObjectiveView, GrowthOutreachSummary, GrowthPosture,
+        GrowthPostureView, LiveTermsSnapshot, ManagerBookingPolicySummary, ManagerConfigMutation,
+        MerchProductEconomicsMutation, NextBestAction, OutreachWaveAnchor, OutreachWaveSnapshot,
+        OutreachWaveStart, OutreachWaveTransition, PLAYLIST_TEMPLATE_KEY, PendingAutopilotAction,
+        PlacementSettlement, PlayAnchor, PlayAnchorRef, PlayAudience, PlayClaimView,
+        PlayKindStanding, PlayLedger, PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot,
+        PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot, PromotionBudgetGuardrailMutation,
+        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
+        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect, RecordDeliveryFault,
+        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint,
+        RecordPlaylistPlacement, RecordRumSample, ReleaseComponentMutation,
+        ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority,
+        SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy, SetTourEconomics,
         SettleShowCost, ShowCostLedgerEntry, ShowCostMutation, TeamAssigneeSummary,
-        TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertGrowthMetricSeries,
-        UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
+        TermsSettlement, TicketAllocationGuardrailMutation, TourEconomicsMutation,
+        TourEconomicsSummary, UpsertBookingTarget, UpsertCityMarketSignal,
+        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
     },
 };
+#[cfg(test)]
+use crowdrelay_domain::pricing::TicketYieldPolicy;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
     EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId, PlayId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
     action_class::ActionClass,
-    audience_lifecycle::{FanLifecyclePolicy, FanLifecycleSnapshot},
+    audience_lifecycle::FanLifecycleSnapshot,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
-    beacons::{BeaconCampaignPolicy, BeaconCampaignSnapshot, BeaconDiscoverySnapshot},
+    beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot},
     booking::{
-        BookingOpportunityPolicy, BookingOutreachPhase, BookingReplyDisposition, BookingTargetKind,
-        BookingTargetSnapshot, CityOpportunitySnapshot,
+        BookingOutreachPhase, BookingReplyDisposition, BookingTargetKind, BookingTargetSnapshot,
+        CityOpportunitySnapshot,
     },
-    campaign_lifecycle::{EventCampaignPolicy, EventCampaignSnapshot},
-    content_supply::{ContentSupplyPolicy, ContentSupplySnapshot},
-    experimentation::{ExperimentPolicy, ExperimentSnapshot},
-    funding::{FundingOpportunitySnapshot, FundingPolicy},
-    growth_debt::{GrowthDebtObservation, GrowthDebtPolicy},
+    booking_discovery::BookingSupplySnapshot,
+    campaign_lifecycle::EventCampaignSnapshot,
+    content_supply::ContentSupplySnapshot,
+    deliverability::DeliverabilitySnapshot,
+    experimentation::ExperimentSnapshot,
+    free_reach::{WaveAnchor, WaveSnapshot, WaveState},
+    funding::FundingOpportunitySnapshot,
+    growth_debt::GrowthDebtObservation,
     growth_envelope::{EnvelopeUsage, GrowthEnvelope},
     growth_metrics::{
         GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
@@ -87,25 +102,28 @@ use crowdrelay_domain::{
         LiveTravelBand,
     },
     market_intelligence::{CityMarketSignal, CityMarketSignalKind, aggregate_city_market_evidence},
-    merch_bundle::{MerchBundlePolicy, MerchBundleSnapshot},
-    merchandising::{
-        MerchInventorySnapshot, MerchPricePolicy, MerchPriceSnapshot, MerchReorderPolicy,
-    },
+    merch_bundle::MerchBundleSnapshot,
+    merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
+    negotiation::{TermsLadder, TermsRefusal, TermsSnapshot, TermsState},
     objectives::{GrowthObjective, ObjectivePolicy, ObjectiveScope, assess_objective},
-    outreach::{OutreachPolicy, OutreachSnapshot},
+    outreach::{OutreachSnapshot, OutreachTargetKind},
     performance::{EffectAssessment, EffectResult},
     play_measurement::{PlayClaim, PlayOutcomeVerdict},
-    plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepAudience},
-    pricing::{TicketYieldPolicy, TicketYieldSnapshot},
-    promotion::{PromotionBudgetPolicy, PromotionPerformanceSnapshot},
-    release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestoneHistory, ReleasePlanSnapshot},
-    show_growth::{ShowGrowthPolicy, ShowGrowthSnapshot},
-    show_operations::{ShowOperationsPolicy, ShowTaskSnapshot},
+    playlist_placement::{
+        PlacementObservation, PlacementSnapshot, PlacementState, apply_observation,
+        suppresses_identity,
+    },
+    plays::{PlayAnchorKind, PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepAudience},
+    pricing::TicketYieldSnapshot,
+    promotion::PromotionPerformanceSnapshot,
+    release_autopilot::{ReleaseMilestoneHistory, ReleasePlanSnapshot},
+    show_growth::ShowGrowthSnapshot,
+    show_operations::ShowTaskSnapshot,
     show_settlement::{
         CostLine, ModelAccuracy, SettlementGap, SettlementPolicy, assess_model_accuracy,
         implied_transport_rate_minor_per_100km,
     },
-    target_discovery::{OutreachSupplyPolicy, OutreachSupplySnapshot},
+    target_discovery::OutreachSupplySnapshot,
     tour_economics::{
         CostEvidence, ShowCost, ShowLogistics, TourEconomicsPolicy, TransportBasis, VehicleProfile,
         estimate_show_cost,
@@ -397,6 +415,9 @@ struct ReleaseSnapshotRow {
     countdown_sent: bool,
     release_day_sent: bool,
     sustain_sent: bool,
+    editorial_pitch_parked: bool,
+    editorial_pitch_done: bool,
+    editorial_pitch_escalated_at: Option<OffsetDateTime>,
     wrap_sent: bool,
 }
 
@@ -423,11 +444,13 @@ struct LiveOpportunityRow {
     distance_km: Option<i32>,
     nights_away: Option<i16>,
     committed_shows_year: i64,
+    pipeline_shows_year: i64,
     annual_target: i32,
     annual_stretch: i32,
     stretch_minimum_score_basis_points: i32,
     far_shot_minimum_score_basis_points: i32,
     prefer_weekend_one_shots: bool,
+    strategic_value_basis_points: i32,
 }
 
 #[derive(Debug, FromRow)]

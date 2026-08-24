@@ -25,6 +25,8 @@ const MAX_QUEUE_CANDIDATES: i64 = 200;
 
 #[derive(Debug, FromRow)]
 struct QueueRow {
+    decision_id: Uuid,
+    action_id: Option<Uuid>,
     context: String,
     decision_kind: String,
     subject_kind: String,
@@ -82,6 +84,8 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     let rows = sqlx::query_as::<_, QueueRow>(
         r#"
         SELECT
+            decision.id AS decision_id,
+            action.action_id,
             decision.context,
             decision.decision_kind,
             decision.subject_kind,
@@ -93,7 +97,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
             deadline.due_at
         FROM viryaos_autopilot_decisions AS decision
         LEFT JOIN LATERAL (
-            SELECT candidate.payload, candidate.approval_expires_at
+            SELECT candidate.id AS action_id, candidate.payload, candidate.approval_expires_at
             FROM viryaos_autopilot_actions AS candidate
             WHERE candidate.workspace_id = decision.workspace_id
               AND candidate.decision_id = decision.id
@@ -132,6 +136,17 @@ pub(in crate::autopilot) async fn load_next_best_actions(
           -- 'deny' is excluded: the gate refused it, and listing it as work to
           -- do would invite someone to override a policy from a list view.
           AND decision.disposition <> 'deny'
+          -- A finding a human says they handled themselves is done, not
+          -- pending. The ledger row is written by the handled-externally
+          -- endpoint; without this exclusion the queue would keep proposing
+          -- work somebody already did.
+          AND NOT EXISTS (
+              SELECT 1 FROM operator_actions AS handled
+              WHERE handled.workspace_id = decision.workspace_id
+                AND handled.action = 'handle_autopilot_decision_externally'
+                AND handled.target_type = 'autopilot_decision'
+                AND handled.target_id = decision.id
+          )
           -- Work that already finished is not next.
           AND NOT EXISTS (
               SELECT 1 FROM viryaos_autopilot_actions AS done
@@ -182,6 +197,8 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     .map_err(map_sqlx)?;
 
     let mut candidates = Vec::with_capacity(rows.len());
+    let mut identity: HashMap<(Uuid, String), (Uuid, Option<Uuid>)> =
+        HashMap::with_capacity(rows.len());
     for row in rows {
         let Some(authority) = AuthorityState::from_disposition(&row.disposition) else {
             continue;
@@ -189,6 +206,12 @@ pub(in crate::autopilot) async fn load_next_best_actions(
         let context = super::parse_context(&row.context)?;
         let (value_tier, deviation_basis_points, recommended_action) =
             payload_signals(row.payload.as_ref());
+        // The queue dedupes to one row per (subject, kind), so this key
+        // identifies the finding the operator is looking at.
+        identity.insert(
+            (row.subject_id, row.decision_kind.clone()),
+            (row.decision_id, row.action_id),
+        );
         candidates.push((
             row.due_at,
             QueueCandidate {
@@ -240,8 +263,20 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                     entry.candidate.decision_kind.clone(),
                 ))
                 .copied();
+            // Every surviving entry came from the identity map, so a miss
+            // here is impossible; falling back would misaddress an operator's
+            // "we did this ourselves" click, which is worse than failing.
+            let (decision_id, action_id) = identity
+                .get(&(
+                    entry.candidate.subject_id,
+                    entry.candidate.decision_kind.clone(),
+                ))
+                .copied()
+                .ok_or(RepositoryError::Unexpected)?;
             Ok(NextBestAction {
                 position: entry.position,
+                decision_id,
+                action_id,
                 context: super::parse_context(entry.candidate.context)?,
                 decision_kind: entry.candidate.decision_kind,
                 subject_kind: entry.candidate.subject_kind,

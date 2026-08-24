@@ -1,0 +1,276 @@
+{
+  "name": "CrowdRelay — Spotify follower feed (metric adapter)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "sf-trigger",
+      "name": "Hourly feed tick",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-620, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://accounts.spotify.com/api/token' }}",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "grant_type",
+              "value": "client_credentials"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Basic ' + Buffer.from(($env.SPOTIFY_CLIENT_ID || '') + ':' + ($env.SPOTIFY_CLIENT_SECRET || '')).toString('base64') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "sf-token",
+      "name": "Get Spotify app token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-400, 0],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.spotify.com/v1/artists/' + encodeURIComponent($env.SPOTIFY_ARTIST_ID || '') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.access_token }}"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "sf-read-artist",
+      "name": "Read Spotify artist state",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-180, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The seeing half of growing a number: post what Spotify actually\n// reports, or post nothing. An absent count is not zero — recording zero\n// would read as every follower leaving at once.\nconst artist = $input.first().json;\nif (!artist || !artist.followers) {\n  // A read that failed stays silent here; CrowdRelay's own expected-interval\n  // rule is what turns a stopped feed into a raised opportunity later.\n  return [];\n}\nconst followers = artist.followers.total;\nif (!Number.isInteger(followers) || followers < 0) {\n  throw new Error('Spotify returned no whole follower count');\n}\n// Bucket to the top of the hour. Polling more often than the declared\n// interval must not fabricate several observations of one number, and the\n// unique constraint on (series, captured_at) makes a re-run within the hour\n// a no-op replay rather than a data point.\nconst captured = new Date();\ncaptured.setUTCMinutes(0, 0, 0);\nreturn [{ json: {\n  metric_key: 'followers',\n  value: followers,\n  captured_at: captured.toISOString(),\n  // Deterministic per bucket, so a retried run deduplicates on our side too.\n  idempotency_key: 'spotify-feed:' + ($env.SPOTIFY_ARTIST_ID || '') + ':' + captured.toISOString(),\n  display_name: 'Spotify followers',\n}}];"
+      },
+      "id": "sf-normalize",
+      "name": "Normalize observation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [40, 0]
+    },
+    {
+      "parameters": {},
+      "id": "sf-gate",
+      "name": "No observation this hour?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [260, 0],
+      "conditions": {
+        "options": {
+          "caseSensitive": true,
+          "version": 2
+        },
+        "combinator": "and",
+        "conditions": [
+          {
+            "leftValue": "={{ $json.idempotency_key }}",
+            "rightValue": "",
+            "operator": {
+              "type": "string",
+              "operation": "notEmpty"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/autopilot/growth-metrics/series' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "=spotify-feed-series-declaration"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({platform:'spotify',metric_key:'followers',display_name:'Spotify followers',direction:'higher_is_better',value_tier:'vanity',expected_interval_hours:6,active:true}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "sf-declare",
+      "name": "Declare the series once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, -100],
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CROWDRELAY_ADMIN_BASE_URL + '/v1/admin/autopilot/growth-metrics/points' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_ADMIN_TOKEN }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({series_id:$('Declare the series once').first().json.series_id,captured_at:$json.captured_at,value:$json.value,source:'spotify_web_api'}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "sf-post-point",
+      "name": "Post absolute observation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, -100],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Documentation node — never executes.\n//\n// Why there is no monthly_listeners series from this workflow:\n// Spotify's documented Web API artist object carries followers.total,\n// popularity and genres. Monthly listeners live on the About surface and in\n// undocumented endpoints; fetching those is scraping under terms nobody here\n// has cleared, and a number whose semantics were never confirmed against a\n// real response gets no series — not a series full of guesses. If a source\n// appears, declare spotify/monthly_listeners on this same pattern.\n//\n// Why value_tier is vanity and not intermediate:\n// the contract says to be honest about tier. A follower asked for nothing is\n// weaker evidence of intent than a tracker who asked when we play nearby;\n// the ranking already treats vanity as never outranking downstream numbers.\n//\n// Why expected_interval_hours is 6 while this runs hourly:\n// the same slack the first-party sources use — an outage or a paused\n// workflow should not read as a dead feed until it really is one.\n//\n// Bandsintown needs nothing here: the event sync reads tracker_count\n// server-side on its existing poll and feeds bandsintown/trackers itself.\nreturn [];"
+      },
+      "id": "sf-notes",
+      "name": "Scope notes (documentation only)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 120]
+    }
+  ],
+  "connections": {
+    "Hourly feed tick": {
+      "main": [
+        [
+          {
+            "node": "Get Spotify app token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Spotify app token": {
+      "main": [
+        [
+          {
+            "node": "Read Spotify artist state",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Spotify artist state": {
+      "main": [
+        [
+          {
+            "node": "Normalize observation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize observation": {
+      "main": [
+        [
+          {
+            "node": "No observation this hour?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No observation this hour?": {
+      "main": [
+        [
+          {
+            "node": "Declare the series once",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Scope notes (documentation only)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Declare the series once": {
+      "main": [
+        [
+          {
+            "node": "Post absolute observation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "example"
+  },
+  "active": false
+}

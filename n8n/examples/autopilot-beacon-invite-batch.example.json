@@ -1,0 +1,263 @@
+{
+  "name": "CrowdRelay \u2014 VIRYA OS beacon invite batch executor",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "bi-trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -620,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// CrowdRelay decided WHO gets asked, about WHICH show, and HOW MANY\n// codes are on offer. This workflow delivers one ask to one verified scene\n// partner by the channel the workspace uses for them. It never issues\n// invite codes (CrowdRelay does, when the partner answers yes), never\n// broadens the recipient, and never re-asks on its own schedule.\nconst e = $json;\nif (!e || e.type !== 'viryaos.beacon.invite_batch_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nfor (const key of ['action_id', 'beacon_id', 'beacon_version', 'event_id', 'requested_count', 'beacon_name', 'contact_email']) {\n  if (!d[key]) throw new Error('invite batch request missing ' + key);\n}\nif (!d.contact_email.includes('@')) throw new Error('invalid contact_email');\nif (!Number.isInteger(d.requested_count) || d.requested_count < 1 || d.requested_count > 100) {\n  throw new Error('requested_count out of bounds');\n}\nreturn [{ json: {\n  action_id: String(d.action_id),\n  beacon_name: String(d.beacon_name),\n  contact_email: String(d.contact_email),\n  requested_count: d.requested_count,\n  event_title: String(d.event?.title || ''),\n  event_slug: String(d.event?.slug || ''),\n  starts_at: String(d.event?.starts_at || ''),\n}}];"
+      },
+      "id": "bi-validate",
+      "name": "Validate invite batch request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,version:'1',observed_at:new Date().toISOString(),expires_at:new Date(Date.now()+30*60*1000).toISOString(),capabilities:['beacon.invite_batch']}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "bi-claim",
+      "name": "Claim action once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -180,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fail closed. Only `claimed` may contact the partner; `already_succeeded`\n// is a no-op replay; `in_flight` and `ambiguous` require reconciliation\n// instead of a second ask.\nconst c = $input.first().json;\nconst plan = $('Validate invite batch request').first().json;\nif (c.status === 'already_succeeded') return [];\nif (c.status !== 'claimed') throw new Error('claim not granted: ' + c.status);\nreturn [{ json: { ...plan, claim_token: c.claim_token } }];"
+      },
+      "id": "bi-gate",
+      "name": "Fail-closed claim gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One concrete ask, one show, one number of codes. Identifies who is\n// asking, states where the address came from (their verified listing), and\n// carries an explicit opt-out. No fake urgency, no reciprocal-for-placement\n// language, nothing about money.\nconst p = $input.first().json;\nconst subject = 'VIRYA w ' + p.event_title + ' - zestaw zaproszen dla Twojej spolecznosci';\nconst text = [\n  'Czesc ' + p.beacon_name + ',',\n  '',\n  'Jestes zweryfikowanym partnerem scene na ' + p.event_title + ' i dlatego pisze najpierw do Ciebie.',\n  'Mozemy przygotowac dla Ciebie zestaw ' + p.requested_count + ' unikalnych kodow zaproszen dla osob, ktore chcesz przyciagnac na koncert.',\n  'Kody sa jednorazowe i pilnowane przez nasz system - kazde zgloszenie przez kod jest przypisane do Ciebie jako partnera.',\n  '',\n  'Odpowiedz krotko \"tak\" na tego maila, a zestaw przeslemy od razu.',\n  '',\n  '- Virya / CrowdRelay',\n  'Adres wzity z Waszej publicznie dostepnej, zweryfikowanej listy partnerow sceny.',\n  'Jesli nie chcesz otrzymywac takich prosb, odpowiedz \"rezygnuje\".'\n].join('\\n');\nreturn [{ json: { ...p, subject, text } }];"
+      },
+      "id": "bi-compose",
+      "name": "Compose the ask",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.contact_email }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "bi-send",
+      "name": "Send the ask (Gmail)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':succeeded:' + ($json.threadId || 'gmail'), executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'succeeded', claim_token: $('Fail-closed claim gate').first().json.claim_token, provider_reference: $json.threadId || null, metadata:{delivered_to:$('Fail-closed claim gate').first().json.contact_email}, observed_at:new Date().toISOString()}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "bi-receipt",
+      "name": "Report success receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':failed', executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'failed', claim_token: $('Fail-closed claim gate').first().json.claim_token, error_kind:'provider_reject', metadata:{error: $json.error || 'unknown'}, observed_at:new Date().toISOString()}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "bi-fail",
+      "name": "Report failure receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate invite batch request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate invite batch request": {
+      "main": [
+        [
+          {
+            "node": "Claim action once",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim action once": {
+      "main": [
+        [
+          {
+            "node": "Fail-closed claim gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail-closed claim gate": {
+      "main": [
+        [
+          {
+            "node": "Compose the ask",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose the ask": {
+      "main": [
+        [
+          {
+            "node": "Send the ask (Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the ask (Gmail)": {
+      "main": [
+        [
+          {
+            "node": "Report success receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report failure receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": false,
+    "saveDataSuccessExecution": false,
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "example"
+  },
+  "active": false
+}

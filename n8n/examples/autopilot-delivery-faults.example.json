@@ -1,0 +1,126 @@
+{
+  "name": "CrowdRelay — VIRYA OS delivery fault reporter",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "=viryao-os-delivery-faults",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "df-webhook",
+      "name": "Provider bounce/complaint webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-620, 0],
+      "webhookId": "viryao-os-delivery-faults"
+    },
+    {
+      "parameters": {
+        "jsCode": "// MAP YOUR PROVIDER HERE. Every sending provider names these fields\n// differently; this node is the single place that translates. The contract\n// downstream is fixed:\n//\n//   email              recipient address the provider could not deliver to\n//                      (or that complained)\n//   fault              'hard_bounce' | 'soft_bounce' | 'complaint'\n//   provider_reference provider's own message/bounce id — CrowdRelay\n//                      deduplicates retries on it, so a stable id here is\n//                      what keeps a retried webhook from being counted twice\n//   occurred_at        RFC 3339 timestamp of the event, not of this call\n//\n// Examples for common providers (uncomment and adapt):\n//\n// Postmark:  Type ('HardBounce'|'SoftBounce'|'SpamComplaint'), Email,\n//            MessageID, BouncedAt\n// Mailgun:   event ('bounced'|'complained'), recipient, Message-Id header,\n//            timestamp (unix seconds)\n// SendGrid:  event ('bounce'|'spamreport'), email, sg_message_id, timestamp\nconst b = $input.first().json.body ?? $input.first().json;\n\n// --- BEGIN provider mapping (Postmark shown as the default) --------------\nconst KIND = {\n  HardBounce: 'hard_bounce',\n  SoftBounce: 'soft_bounce',\n  SpamComplaint: 'complaint',\n  // Mailgun / SendGrid equivalents:\n  bounced: 'soft_bounce',\n  complained: 'complaint',\n  spamreport: 'complaint'\n};\nconst fault = KIND[b.Type || b.event];\nif (!fault) return []; // transient events we do not track (e.g. Delivered)\nconst out = {\n  contact_email: String(b.Email || b.recipient || '').trim().toLowerCase(),\n  fault,\n  provider_reference: String(b.MessageID || b['Message-Id'] || b.sg_message_id || ''),\n  occurred_at: new Date(\n    b.BouncedAt ? Date.parse(b.BouncedAt) : (b.timestamp ? b.timestamp * 1000 : Date.now())\n  ).toISOString()\n};\n// --- END provider mapping ------------------------------------------------\n\nif (!out.contact_email.includes('@')) return [];\nif (!out.provider_reference) {\n  // Without a reference a retried webhook would count twice; fall back to a\n  // deterministic hash of the event so at least identical replays collapse.\n  out.provider_reference = 'no-ref:' + JSON.stringify([out.contact_email, out.fault, out.occurred_at]);\n}\nreturn [{ json: out }];"
+      },
+      "id": "df-map",
+      "name": "Map provider payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 0]
+    },
+    {
+      "parameters": {},
+      "id": "df-gate",
+      "name": "Tracked event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-180, 0],
+      "conditions": {
+        "options": { "caseSensitive": true, "version": 2 },
+        "combinator": "and",
+        "conditions": [
+          {
+            "leftValue": "={{ $json.contact_email }}",
+            "rightValue": "",
+            "operator": { "type": "string", "operation": "notEmpty" }
+          }
+        ]
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "= {{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/outreach/delivery-faults' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ 'delivery-fault:' + $json.provider_reference }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({contact_email:$json.contact_email,fault:$json.fault,provider_reference:$json.provider_reference,occurred_at:$json.occurred_at}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "df-post",
+      "name": "Report delivery fault",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [40, 0],
+      "retryOnFail": true,
+      "maxTries": 3
+    }
+  ],
+  "connections": {
+    "Provider bounce/complaint webhook": {
+      "main": [
+        [
+          {
+            "node": "Map provider payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map provider payload": {
+      "main": [
+        [
+          {
+            "node": "Tracked event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tracked event?": {
+      "main": [
+        [
+          {
+            "node": "Report delivery fault",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "example"
+  },
+  "active": false
+}

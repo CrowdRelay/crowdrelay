@@ -9,7 +9,7 @@
 //! domain derives the movement, so the read model an operator sees and the
 //! evidence a decision is made from can never drift apart.
 
-use super::control::insert_operator_action;
+use super::operator_actions::insert_operator_action;
 use super::*;
 use crowdrelay_domain::growth_metrics::MetricTrend;
 

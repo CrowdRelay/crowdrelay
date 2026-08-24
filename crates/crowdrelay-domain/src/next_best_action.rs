@@ -25,7 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{autonomy::Confidence, growth_metrics::MetricValueTier};
+use crate::{autonomy::Confidence, value_tier::MetricValueTier};
 
 /// Hard cap on the queue. The point is the top handful an operator can
 /// actually work through, not a complete inventory of everything outstanding —

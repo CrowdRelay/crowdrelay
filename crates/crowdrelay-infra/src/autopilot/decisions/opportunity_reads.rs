@@ -316,7 +316,10 @@ macro_rules! decision_opportunity_reads {
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='countdown') countdown_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='release_day') release_day_sent,
                        EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='sustain') sustain_sent,
-                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='wrap') wrap_sent,
+                       EXISTS(SELECT 1 FROM viryaos_release_milestones m WHERE m.workspace_id=plan.workspace_id AND m.release_id=plan.id AND m.milestone='editorial_pitch') editorial_pitch_parked,
+                       plan.editorial_pitch_completed_at IS NOT NULL editorial_pitch_done,
+                       plan.editorial_pitch_escalated_at
                 FROM viryaos_release_plans plan
                 WHERE plan.workspace_id=$1 AND plan.active
                   AND plan.release_at BETWEEN $2 - INTERVAL '30 days' AND $2 + INTERVAL '180 days'
@@ -329,7 +332,10 @@ macro_rules! decision_opportunity_reads {
                 release_id: ReleasePlanId::from_uuid(row.release_id), title: row.title,
                 release_at: row.release_at, active: row.active, assets_ready: row.assets_ready,
                 communication_enabled: row.communication_enabled, press_enabled: row.press_enabled,
+                editorial_pitch_done: row.editorial_pitch_done,
+                editorial_pitch_escalated_at: row.editorial_pitch_escalated_at,
                 history: ReleaseMilestoneHistory {
+                    editorial_pitch_parked: row.editorial_pitch_parked,
                     calendar_seeded: row.calendar_seeded, announcement_sent: row.announcement_sent,
                     press_started: row.press_started, fan_warmup_sent: row.fan_warmup_sent,
                     countdown_sent: row.countdown_sent, release_day_sent: row.release_day_sent,
@@ -393,12 +399,32 @@ macro_rules! decision_opportunity_reads {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<LiveOpportunitySnapshot>, RepositoryError> {
+        // Only opportunities nobody has applied to yet. The negotiation read
+        // asks the same question of the other half of the pipeline, and the
+        // two lists are kept apart rather than merged so a batch of replied
+        // conversations cannot crowd actionable new offers out of the cap.
+        self.load_live_opportunity_snapshots_for(
+            workspace_id,
+            now,
+            &["new", "prepared", "awaiting_approval"],
+        )
+        .await
+    }
+
+    pub(in crate::autopilot) async fn load_live_opportunity_snapshots_for(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+        statuses: &[&str],
+    ) -> Result<Vec<LiveOpportunitySnapshot>, RepositoryError> {
+        let statuses: Vec<String> = statuses.iter().map(|value| (*value).to_owned()).collect();
         self.bounded(async {
             let rows=sqlx::query_as::<_,LiveOpportunityRow>(r#"
                 SELECT opportunity.id opportunity_id, opportunity.opportunity_kind,
                        opportunity.status NOT IN ('submitted','replied','won','lost','dismissed') active,
                        opportunity.verified_destination, opportunity.contact_email, opportunity.metadata,
                        opportunity.fit_basis_points, opportunity.reputation_basis_points,
+                       opportunity.strategic_value_basis_points,
                        opportunity.confidence_basis_points, opportunity.expected_fee_minor,
                        opportunity.estimated_cost_minor, opportunity.application_fee_minor,
                        opportunity.requires_contract, opportunity.exclusive, opportunity.deadline,
@@ -413,6 +439,39 @@ macro_rules! decision_opportunity_reads {
                                  YEAR FROM COALESCE(opportunity.event_starts_at,$2)
                              )
                        ) committed_shows_year,
+                       (
+                           -- Nothing on the calendar yet, but real capacity all
+                           -- the same: applications already `submitted` or
+                           -- `replied` for the same reference year, plus venue
+                           -- conversations whose newest reply was positive or
+                           -- booked. Undated venue conversations are not
+                           -- year-scoped -- they occupy near-term capacity
+                           -- whichever year they land in, so they count toward
+                           -- every opportunity's pipeline rather than none.
+                           (
+                               SELECT COUNT(*)
+                               FROM viryaos_team_opportunities pipeline
+                               WHERE pipeline.workspace_id=opportunity.workspace_id
+                                 AND pipeline.status IN ('submitted','replied')
+                                 AND EXTRACT(YEAR FROM COALESCE(pipeline.event_starts_at,$2))
+                                     =EXTRACT(YEAR FROM COALESCE(opportunity.event_starts_at,$2))
+                           )
+                           +
+                           (
+                               SELECT COUNT(*)
+                               FROM viryaos_booking_targets target
+                               WHERE target.workspace_id=opportunity.workspace_id
+                                 AND target.active
+                                 AND (
+                                     SELECT interaction.disposition
+                                     FROM viryaos_booking_interactions interaction
+                                     WHERE interaction.workspace_id=target.workspace_id
+                                       AND interaction.target_id=target.id
+                                     ORDER BY interaction.occurred_at DESC, interaction.id DESC
+                                     LIMIT 1
+                                 ) IN ('positive','booked')
+                           )
+                       ) pipeline_shows_year,
                        COALESCE((manager.value->>'annual_target')::integer,15) annual_target,
                        COALESCE((manager.value->>'annual_stretch')::integer,20) annual_stretch,
                        COALESCE((manager.value->>'stretch_minimum_score_basis_points')::integer,9000)
@@ -428,12 +487,19 @@ macro_rules! decision_opportunity_reads {
                 WHERE opportunity.workspace_id=$1
                   AND opportunity.opportunity_kind IN ('festival','showcase','review_contest','support_slot')
                   AND opportunity.eligible
-                  AND opportunity.status IN ('new','prepared','awaiting_approval')
-                  AND (opportunity.deadline IS NULL OR opportunity.deadline>$2)
+                  AND opportunity.status = ANY($4)
+                  -- The deadline is the *application* deadline. Once something
+                  -- has been sent it stops being a reason to drop the row, and
+                  -- a negotiation running past it is ordinary.
+                  AND (
+                      opportunity.deadline IS NULL
+                      OR opportunity.deadline>$2
+                      OR opportunity.status IN ('submitted','replied')
+                  )
                 ORDER BY opportunity.deadline NULLS LAST,
                          opportunity.fit_basis_points DESC, opportunity.id
                 LIMIT $3
-            "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT)
+            "#).bind(workspace_id.into_uuid()).bind(now).bind(MAX_SNAPSHOTS_PER_CONTEXT).bind(&statuses)
               .fetch_all(&self.pool).await.map_err(map_sqlx)?;
             // Read once for the whole batch: the band's vehicles and rates do
             // not change between two opportunities in the same cycle.
@@ -481,12 +547,14 @@ macro_rules! decision_opportunity_reads {
                     travel_band,
                     costed_from_logistics: costed.cost().is_some(),
                     committed_shows_year:u16::try_from(row.committed_shows_year).unwrap_or(u16::MAX),
+                    pipeline_shows_year:u16::try_from(row.pipeline_shows_year).unwrap_or(u16::MAX),
                     annual_target:u16::try_from(row.annual_target).map_err(|_|RepositoryError::Unexpected)?,
                     annual_stretch:u16::try_from(row.annual_stretch).map_err(|_|RepositoryError::Unexpected)?,
                     stretch_minimum_score_basis_points:u16::try_from(row.stretch_minimum_score_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     far_shot_minimum_score_basis_points:u16::try_from(row.far_shot_minimum_score_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                     prefer_weekend_one_shots:row.prefer_weekend_one_shots,
                     already_applied:matches!(row.status.as_str(),"submitted"|"replied"|"won"|"lost"),
+                    strategic_value_basis_points:u16::try_from(row.strategic_value_basis_points).map_err(|_|RepositoryError::Unexpected)?,
                 })
             }).collect()
         }).await
@@ -539,6 +607,32 @@ macro_rules! decision_opportunity_reads {
         now: OffsetDateTime,
     ) -> Result<Vec<BeaconCampaignSnapshot>, RepositoryError> {
         self.bounded(operations::load_beacon_campaign_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
+    async fn load_booking_supply_snapshot_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<BookingSupplySnapshot, RepositoryError> {
+        self.bounded(operations::load_booking_supply_snapshot(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
+
+    async fn load_beacon_invite_snapshots_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconInviteSnapshot>, RepositoryError> {
+        self.bounded(operations::load_beacon_invite_snapshots(
             self,
             workspace_id,
             now,

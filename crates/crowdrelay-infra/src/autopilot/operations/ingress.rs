@@ -8,18 +8,21 @@ use crowdrelay_application::autopilot::{
     AutopilotExperimentStateRepository, AutopilotOutreachStateRepository,
     AutopilotTeamStateRepository, BeaconMutation, ContentSourceMutation, CreateExperiment,
     ExperimentAssignmentSource, ExperimentAssignmentVariant, ExperimentMutation,
-    ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation, RecordBeaconReply,
-    RecordOutreachReply, RecordTeamOpportunityProgress, ReleasePlanMutation, TeamOpportunityKind,
-    TeamOpportunityMutation, TeamOpportunityProgress, UpsertBeacon, UpsertContentSource,
-    UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertReleasePlan, UpsertTeamOpportunity,
+    ExperimentObservation, OutreachOpportunityMutation, OutreachTargetMutation, PromoterPosition,
+    RecordBeaconReply, RecordDeliveryFault, RecordOutreachReply, RecordPlaylistPlacement,
+    RecordTeamOpportunityProgress, RecordTeamOpportunityTerms, ReleasePlanMutation,
+    TeamOpportunityKind, TeamOpportunityMutation, TeamOpportunityProgress, UpsertBeacon,
+    UpsertContentSource, UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertReleasePlan,
+    UpsertTeamOpportunity,
 };
 use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_domain::{
     BeaconId, CityId, ExperimentVariantId, ReleasePlanId, TeamOpportunityId,
-    experimentation::ExperimentAllocationSlot,
+    experimentation::ExperimentAllocationSlot, negotiation::terms_ladder,
 };
 
 mod beacons;
+mod booking_discovery;
 mod team;
 
 #[async_trait]

@@ -173,6 +173,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 || command.organization.trim().is_empty()
                 || command.fit_basis_points > 10_000
                 || command.reputation_basis_points > 10_000
+                || command.strategic_value_basis_points > 10_000
                 || !valid_opportunity_currency(&command.currency)
                 || command.expected_fee_minor < 0
                 || command.estimated_cost_minor < 0
@@ -282,11 +283,11 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                         currency, expected_fee_minor, estimated_cost_minor, application_fee_minor,
                         requires_contract, exclusive, eligible, funding_amount_minor,
                         own_contribution_minor, deadline, event_starts_at, country_code,
-                        travel_band, metadata
+                        travel_band, metadata, strategic_value_basis_points
                     ) VALUES(
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
                         $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
-                        $25,$26,$27
+                        $25,$26,$27,$28
                     )
                     RETURNING version
                     "#,
@@ -318,6 +319,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .bind(command.country_code.as_deref())
                 .bind(command.travel_band.map(|band| band.as_str()))
                 .bind(&command.metadata)
+                .bind(i32::from(command.strategic_value_basis_points))
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx)?
@@ -353,8 +355,9 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                         country_code=$23,
                         travel_band=$24,
                         metadata=$25,
+                        strategic_value_basis_points=$26,
                         version=version+1
-                    WHERE workspace_id=$1 AND id=$2 AND version=$26
+                    WHERE workspace_id=$1 AND id=$2 AND version=$27
                     RETURNING version
                     "#,
                 )
@@ -383,6 +386,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 .bind(command.country_code.as_deref())
                 .bind(command.travel_band.map(|band| band.as_str()))
                 .bind(&command.metadata)
+                .bind(i32::from(command.strategic_value_basis_points))
                 .bind(expected)
                 .fetch_optional(&mut *tx)
                 .await
@@ -395,6 +399,218 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 operation_id,
                 opportunity_id,
                 version,
+                replayed: false,
+            })
+        })
+        .await
+    }
+
+    async fn record_delivery_fault(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordDeliveryFault,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.record_delivery_fault_operator(workspace_id, command, idempotency_key, request_id)
+            .await
+    }
+
+    async fn complete_editorial_pitch(
+        &self,
+        workspace_id: WorkspaceId,
+        release_id: ReleasePlanId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.bounded(async {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            if let Some(existing) = super::insert_operator_action(
+                &mut tx,
+                workspace_id,
+                operation_id,
+                "complete_autopilot_editorial_pitch",
+                "release_plan",
+                release_id.into_uuid(),
+                idempotency_key,
+                request_id,
+                &json!({"release_id": release_id}),
+            )
+            .await?
+            {
+                tx.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: release_id.into_uuid(),
+                    status: "submitted".into(),
+                    replayed: true,
+                });
+            }
+            // Guarded on it not already being marked: the first person to say
+            // so is the record, and a second click is not a second submission.
+            let changed = sqlx::query(
+                "UPDATE viryaos_release_plans SET editorial_pitch_completed_at=now(), \
+                 version=version+1 \
+                 WHERE workspace_id=$1 AND id=$2 AND editorial_pitch_completed_at IS NULL",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(release_id.into_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+            if changed.rows_affected() != 1 {
+                return Err(RepositoryError::Conflict);
+            }
+            tx.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: release_id.into_uuid(),
+                status: "submitted".into(),
+                replayed: false,
+            })
+        })
+        .await
+    }
+
+    async fn record_playlist_placement(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordPlaylistPlacement,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.record_playlist_placement_operator(workspace_id, command, idempotency_key, request_id)
+            .await
+    }
+
+    async fn record_team_opportunity_terms(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordTeamOpportunityTerms,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        let offered_fee_minor = match command.position {
+            PromoterPosition::Offer { fee_minor } => fee_minor,
+            PromoterPosition::Withdrawn => 0,
+        };
+        if offered_fee_minor < 0 || !valid_opportunity_currency(&command.currency) {
+            return Err(RepositoryError::Conflict);
+        }
+        // The ladder needs the show as the agent sees it — costed trip, travel
+        // band, how full the year is — so it is read through the same statement
+        // the evaluator uses rather than rebuilt from the row. Two ways of
+        // costing the same trip is how a floor and a verdict come to disagree.
+        let policy = self.live_opportunity_policy(workspace_id).await?;
+        let snapshot = self
+            .load_live_opportunity_snapshots_for(
+                workspace_id,
+                OffsetDateTime::now_utc(),
+                &["submitted", "replied"],
+            )
+            .await?
+            .into_iter()
+            .find(|snapshot| snapshot.opportunity_id == command.opportunity_id)
+            .ok_or(RepositoryError::NotFound)?;
+        let ladder = terms_ladder(snapshot, policy, snapshot.estimated_cost_minor);
+
+        self.bounded(async {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+            let operation_id = Uuid::now_v7();
+            let position = match command.position {
+                PromoterPosition::Offer { .. } => "offer",
+                PromoterPosition::Withdrawn => "withdrawn",
+            };
+            let details = json!({
+                "opportunity_id": command.opportunity_id,
+                "position": position,
+                "offered_fee_minor": offered_fee_minor,
+                "currency": command.currency,
+                "responds_by": command.responds_by,
+            });
+            if let Some(existing) = super::insert_operator_action(
+                &mut tx,
+                workspace_id,
+                operation_id,
+                "record_autopilot_team_opportunity_terms",
+                "team_opportunity",
+                command.opportunity_id.into_uuid(),
+                idempotency_key,
+                request_id,
+                &details,
+            )
+            .await?
+            {
+                tx.commit().await.map_err(map_sqlx)?;
+                return Ok(AutopilotControlMutation {
+                    operation_id: existing,
+                    target_id: command.opportunity_id.into_uuid(),
+                    status: position.into(),
+                    replayed: true,
+                });
+            }
+
+            let changed = match command.position {
+                // A withdrawal settles whatever was live. Nothing is opened:
+                // recording that somebody walked away from a conversation that
+                // never started would be inventing the conversation.
+                PromoterPosition::Withdrawn => sqlx::query(
+                    "UPDATE viryaos_team_opportunity_terms \
+                     SET state='declined', settled_at=$3, settled_reason='promoter_withdrew', \
+                         version=version+1 \
+                     WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.opportunity_id.into_uuid())
+                .bind(OffsetDateTime::now_utc())
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx)?,
+                // The ladder is written on insert and left alone on update. An
+                // improved offer moves the state back to `proposed` so the
+                // agent looks again; it does not reset the numbers the last
+                // counter was argued from, and it does not reset the round
+                // count, which is what stops a promoter nudging their offer up
+                // by a złoty to buy another ask.
+                PromoterPosition::Offer { .. } => sqlx::query(
+                    r#"
+                    INSERT INTO viryaos_team_opportunity_terms (
+                        workspace_id, opportunity_id, state, currency, offered_fee_minor,
+                        walk_away_minor, target_minor, opening_ask_minor, responds_by
+                    ) VALUES ($1,$2,'proposed',$3,$4,$5,$6,$7,$8)
+                    ON CONFLICT (workspace_id, opportunity_id) DO UPDATE SET
+                        state='proposed',
+                        offered_fee_minor=EXCLUDED.offered_fee_minor,
+                        responds_by=EXCLUDED.responds_by,
+                        version=viryaos_team_opportunity_terms.version+1
+                    WHERE viryaos_team_opportunity_terms.settled_at IS NULL
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.opportunity_id.into_uuid())
+                .bind(&command.currency)
+                .bind(offered_fee_minor)
+                .bind(ladder.walk_away_minor)
+                .bind(ladder.target_minor)
+                .bind(ladder.opening_ask_minor)
+                .bind(command.responds_by)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx)?,
+            };
+            if changed.rows_affected() != 1 {
+                // A settled negotiation is not reopened by another offer. That
+                // is an operator deliberately starting a new conversation, and
+                // it is theirs to say so.
+                return Err(RepositoryError::Conflict);
+            }
+
+            tx.commit().await.map_err(map_sqlx)?;
+            Ok(AutopilotControlMutation {
+                operation_id,
+                target_id: command.opportunity_id.into_uuid(),
+                status: position.into(),
                 replayed: false,
             })
         })

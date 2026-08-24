@@ -91,6 +91,23 @@ pub trait AutopilotControlRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<TourEconomicsSummary, RepositoryError>;
 
+    /// Which posture is live. `None` posture means never applied: every
+    /// surface still holds its provisioned defaults.
+    async fn load_growth_posture(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<GrowthPostureView, RepositoryError>;
+
+    /// Applies a posture atomically: every context level, all four class
+    /// ceilings and the envelope switches, one transaction, one ledger entry.
+    async fn set_growth_posture(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetGrowthPosture,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
     async fn set_tour_economics(
         &self,
         workspace_id: WorkspaceId,
@@ -153,6 +170,33 @@ pub trait AutopilotControlRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         action_id: AutopilotActionId,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Records that a human handled this finding outside the system.
+    ///
+    /// A first-class outcome rather than a dismissal: an opportunity a human
+    /// took is a success, and recording it as ignored would teach the ranker
+    /// the wrong thing. The decision leaves every read model, and any action
+    /// of it still parked is withdrawn so it cannot later go out anyway.
+    async fn mark_decision_handled_externally(
+        &self,
+        workspace_id: WorkspaceId,
+        decision_id: AutopilotDecisionId,
+        idempotency_key: &crate::IdempotencyKey,
+        request_id: Option<&crate::RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Approves a whole free-reach wave at once.
+    ///
+    /// The point of a wave: forty individual approvals is how a human stops
+    /// approving. Only a sealed wave may be approved — one still being drafted
+    /// would grow after somebody read it.
+    async fn approve_outreach_wave(
+        &self,
+        workspace_id: WorkspaceId,
+        wave_id: uuid::Uuid,
         idempotency_key: &crate::IdempotencyKey,
         request_id: Option<&crate::RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

@@ -46,7 +46,9 @@ mod plays_tests {
         PlayRunSnapshot {
             play_id: PlayId::new(),
             kind: PlayKind::TrackUsAsk,
-            event_id: EventId::new(),
+            anchor: PlayAnchorRef::Event {
+                event_id: EventId::new(),
+            },
             anchor_at: anchor_at(),
             anchor_active: true,
             steps,
@@ -65,7 +67,9 @@ mod plays_tests {
     fn a_show_too_close_to_run_its_first_step_never_starts_a_play() {
         let policy = policy(AutonomyLevel::BoundedAuto);
         let near = PlayAnchor {
-            event_id: EventId::new(),
+            anchor: PlayAnchorRef::Event {
+                event_id: EventId::new(),
+            },
             anchor_at: anchor_at(),
             active: true,
             hours_until: 24,
@@ -90,7 +94,9 @@ mod plays_tests {
     #[test]
     fn a_cancelled_show_is_never_a_reason_to_start_a_play() {
         let anchor = PlayAnchor {
-            event_id: EventId::new(),
+            anchor: PlayAnchorRef::Event {
+                event_id: EventId::new(),
+            },
             anchor_at: anchor_at(),
             active: false,
             hours_until: 30 * 24,
@@ -101,7 +107,9 @@ mod plays_tests {
     #[test]
     fn every_step_of_a_started_play_has_a_window_derived_from_the_anchor() {
         let anchor = PlayAnchor {
-            event_id: EventId::new(),
+            anchor: PlayAnchorRef::Event {
+                event_id: EventId::new(),
+            },
             anchor_at: anchor_at(),
             active: true,
             hours_until: 30 * 24,

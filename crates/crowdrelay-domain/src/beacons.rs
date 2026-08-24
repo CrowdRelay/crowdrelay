@@ -281,6 +281,8 @@ pub struct BeaconCampaignPolicy {
     pub minimum_confidence_basis_points: u16,
     pub maximum_pre_show_touches: u16,
     pub minimum_contact_gap_days: u32,
+    /// Scene-node invite batches, one per beacon per show.
+    pub invite: BeaconInvitePolicy,
 }
 
 impl Default for BeaconCampaignPolicy {
@@ -301,6 +303,7 @@ impl Default for BeaconCampaignPolicy {
             minimum_confidence_basis_points: 7_000,
             maximum_pre_show_touches: 3,
             minimum_contact_gap_days: 7,
+            invite: BeaconInvitePolicy::default(),
         }
     }
 }
@@ -802,5 +805,220 @@ mod tests {
             panic!("expected a scouting request");
         };
         assert_eq!(target_count, 3);
+    }
+}
+
+/// One verified scene node, one of their city's upcoming shows, and how warm
+/// the relationship is. Everything the invite rule needs and nothing it does
+/// not: the adapter reports facts, the policy owns every threshold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct BeaconInviteSnapshot {
+    pub beacon_id: BeaconId,
+    pub beacon_version: i64,
+    pub event_id: EventId,
+    pub kind: BeaconKind,
+    pub active: bool,
+    pub verified: bool,
+    pub accepts_outreach: bool,
+    pub do_not_contact: bool,
+    pub relationship_score: u16,
+    /// Hours until their city's show. Negative once it has played.
+    pub hours_until_event: i64,
+    /// Hours since this beacon was last asked to run an invite batch.
+    /// `None` when they never have been.
+    pub hours_since_last_invite_batch: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct BeaconInvitePolicy {
+    /// Ask inside this window before the show. Earlier is noise — plans move;
+    /// later is useless — codes take days to turn into people.
+    pub invite_lead_days: u32,
+    /// One ask per show per beacon past this gap. Scene nodes are finite
+    /// relationships; the band gets one first approach to each of them.
+    pub invite_cooldown_days: u32,
+    /// Below this warmth a scene node is a name on a list, not a partner.
+    pub minimum_relationship_score: u16,
+    pub max_invites_per_batch: u16,
+}
+
+impl Default for BeaconInvitePolicy {
+    fn default() -> Self {
+        Self {
+            invite_lead_days: 21,
+            invite_cooldown_days: 30,
+            minimum_relationship_score: 60,
+            max_invites_per_batch: 25,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BeaconInviteDecision {
+    Hold(BeaconInviteHoldReason),
+    Request {
+        requested_count: u16,
+        confidence: Confidence,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BeaconInviteHoldReason {
+    InvalidPolicy,
+    Ineligible,
+    LowWarmth,
+    NotDue,
+    WindowClosed,
+    OnCooldown,
+}
+
+/// Decides whether one scene node should be asked to run invites for one show.
+///
+/// This is the acquisition half the system was missing: beacons exist to reach
+/// rooms the band cannot, the invite machinery already works, and nothing ever
+/// connected them. The ask rides an existing relationship (warmth gate), is
+/// scoped to their own city's show (relevance), and is bounded (one batch,
+/// cooled down) so a helpful partner is never worked like a mailing list.
+///
+/// Invite codes are first-party by construction — every signup they produce
+/// arrives attributed and consented — but the *ask* is still third-party
+/// contact, and its class says so.
+#[must_use]
+pub fn evaluate_beacon_invite_batch(
+    snapshot: BeaconInviteSnapshot,
+    policy: BeaconInvitePolicy,
+) -> BeaconInviteDecision {
+    if policy.invite_lead_days == 0 || policy.max_invites_per_batch == 0 {
+        return BeaconInviteDecision::Hold(BeaconInviteHoldReason::InvalidPolicy);
+    }
+    if !snapshot.active
+        || !snapshot.verified
+        || !snapshot.accepts_outreach
+        || snapshot.do_not_contact
+    {
+        return BeaconInviteDecision::Hold(BeaconInviteHoldReason::Ineligible);
+    }
+    if snapshot.relationship_score < policy.minimum_relationship_score {
+        return BeaconInviteDecision::Hold(BeaconInviteHoldReason::LowWarmth);
+    }
+    if snapshot
+        .hours_since_last_invite_batch
+        .is_some_and(|hours| hours < u32::saturating_mul(policy.invite_cooldown_days, 24))
+    {
+        return BeaconInviteDecision::Hold(BeaconInviteHoldReason::OnCooldown);
+    }
+    // The window: after the lead time opens, before the show plays. A code
+    // handed out for a show that already happened is a reminder about nothing.
+    let window_hours = i64::from(policy.invite_lead_days) * 24;
+    if snapshot.hours_until_event <= 0 {
+        return BeaconInviteDecision::Hold(BeaconInviteHoldReason::WindowClosed);
+    }
+    if snapshot.hours_until_event > window_hours {
+        return BeaconInviteDecision::Hold(BeaconInviteHoldReason::NotDue);
+    }
+    // Warmth is the confidence: a long-standing partner's yes means more than
+    // a fresh contact's, and the authority ladder reads it as such.
+    let confidence = Confidence::saturating_from_basis_points(
+        u16::try_from(u32::from(snapshot.relationship_score).saturating_mul(100))
+            .unwrap_or(u16::MAX),
+    );
+    BeaconInviteDecision::Request {
+        requested_count: policy.max_invites_per_batch,
+        confidence,
+    }
+}
+
+#[cfg(test)]
+mod beacon_invite_tests {
+    use super::*;
+
+    fn snapshot(relationship_score: u16, hours_until_event: i64) -> BeaconInviteSnapshot {
+        BeaconInviteSnapshot {
+            beacon_id: BeaconId::new(),
+            beacon_version: 1,
+            event_id: EventId::new(),
+            kind: BeaconKind::Venue,
+            active: true,
+            verified: true,
+            accepts_outreach: true,
+            do_not_contact: false,
+            relationship_score,
+            hours_until_event,
+            hours_since_last_invite_batch: None,
+        }
+    }
+
+    #[test]
+    fn a_warm_partner_inside_the_window_is_asked() {
+        let decision =
+            evaluate_beacon_invite_batch(snapshot(80, 24 * 14), BeaconInvitePolicy::default());
+        let BeaconInviteDecision::Request {
+            requested_count,
+            confidence,
+        } = decision
+        else {
+            panic!("expected a request, got {decision:?}");
+        };
+        assert_eq!(
+            requested_count,
+            BeaconInvitePolicy::default().max_invites_per_batch
+        );
+        assert!(confidence.basis_points() >= 7_000);
+    }
+
+    #[test]
+    fn the_ask_is_never_made_to_a_stranger_or_a_refusal() {
+        let policy = BeaconInvitePolicy::default();
+        for mut cold in [snapshot(30, 24 * 10), snapshot(80, 24 * 10)] {
+            if cold.relationship_score >= policy.minimum_relationship_score {
+                continue;
+            }
+            assert_eq!(
+                evaluate_beacon_invite_batch(cold, policy),
+                BeaconInviteDecision::Hold(BeaconInviteHoldReason::LowWarmth)
+            );
+            let _ = &mut cold;
+            break;
+        }
+        let mut refused = snapshot(80, 24 * 10);
+        refused.do_not_contact = true;
+        assert_eq!(
+            evaluate_beacon_invite_batch(refused, policy),
+            BeaconInviteDecision::Hold(BeaconInviteHoldReason::Ineligible)
+        );
+    }
+
+    #[test]
+    fn the_window_has_both_edges() {
+        let policy = BeaconInvitePolicy::default();
+        // Too far out: plans move.
+        assert_eq!(
+            evaluate_beacon_invite_batch(snapshot(80, 24 * 40), policy),
+            BeaconInviteDecision::Hold(BeaconInviteHoldReason::NotDue)
+        );
+        // Already played: a reminder about nothing.
+        assert_eq!(
+            evaluate_beacon_invite_batch(snapshot(80, -4), policy),
+            BeaconInviteDecision::Hold(BeaconInviteHoldReason::WindowClosed)
+        );
+    }
+
+    #[test]
+    fn one_batch_per_cooldown_even_for_the_best_partner() {
+        let policy = BeaconInvitePolicy::default();
+        let mut recent = snapshot(90, 24 * 10);
+        recent.hours_since_last_invite_batch = Some(policy.invite_cooldown_days * 24 - 12);
+        assert_eq!(
+            evaluate_beacon_invite_batch(recent, policy),
+            BeaconInviteDecision::Hold(BeaconInviteHoldReason::OnCooldown)
+        );
+        // And exactly past it, the same partner may be asked again.
+        let mut aged = snapshot(90, 24 * 10);
+        aged.hours_since_last_invite_batch = Some(policy.invite_cooldown_days * 24 + 1);
+        assert!(matches!(
+            evaluate_beacon_invite_batch(aged, policy),
+            BeaconInviteDecision::Request { .. }
+        ));
     }
 }

@@ -25,9 +25,13 @@ pub struct CityOpportunitySnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct BookingOpportunityPolicy {
     pub minimum_score: u16,
     pub outreach_cooldown_days: u32,
+    /// Venue/promoter discovery supply knobs. Serde-defaulted so stored
+    /// policy rows written before discovery existed keep parsing.
+    pub supply: crate::booking_discovery::BookingSupplyPolicy,
 }
 
 impl Default for BookingOpportunityPolicy {
@@ -35,6 +39,7 @@ impl Default for BookingOpportunityPolicy {
         Self {
             minimum_score: 65,
             outreach_cooldown_days: 30,
+            supply: crate::booking_discovery::BookingSupplyPolicy::default(),
         }
     }
 }

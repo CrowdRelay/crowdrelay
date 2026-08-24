@@ -279,6 +279,25 @@ pub(in crate::autopilot) async fn execute_release_milestone(
             seed_release_calendar(tx, workspace_id, action_id, release_id, title, release_at)
                 .await?
         }
+        // Assembling the pitch and putting it in front of somebody. The form
+        // itself has no API, so the milestone records that the task exists and
+        // stops there; claiming a submission would be claiming a fiction.
+        EditorialPitch => {
+            crate::autopilot::emit_external_action(
+                tx,
+                workspace_id,
+                action_id,
+                "viryaos.release.editorial_pitch_parked",
+                json!({
+                    "action_id": action_id,
+                    "release_id": release_id,
+                    "title": title,
+                    "release_at": release_at,
+                    "submitted_by_agent": false,
+                }),
+            )
+            .await?;
+        }
         StartPress => {
             if !locked.4 {
                 return Err(RepositoryError::Conflict);
@@ -601,6 +620,131 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
     Ok(())
 }
 
+/// Sends one negotiation move to whoever actually talks to the promoter.
+///
+/// The row is locked and re-read rather than trusted from the payload. Time
+/// passes between a decision and its execution, and in that gap an operator may
+/// have recorded a better offer, the promoter may have withdrawn, or the window
+/// may have closed — all of which make the drafted move the wrong one to send.
+///
+/// `accepted` is the only state this writes that ends the negotiation. A
+/// counter leaves it `countered`, which is the agent waiting rather than the
+/// agent finished.
+pub(in crate::autopilot) struct TermsMove<'a> {
+    pub opportunity_id: crowdrelay_domain::TeamOpportunityId,
+    /// True for an acceptance, false for a counter. Two booleans' worth of
+    /// behaviour hangs off this, and both are stated at the call site.
+    pub accept: bool,
+    pub amount_minor: i64,
+    pub currency: &'a str,
+    pub round: u8,
+}
+
+pub(in crate::autopilot) async fn execute_live_opportunity_terms(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    request: &TermsMove<'_>,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let TermsMove {
+        opportunity_id,
+        accept,
+        amount_minor,
+        currency,
+        round,
+    } = *request;
+    let row = sqlx::query_as::<_, (String, String, Option<String>, i64, i64, String, i32)>(
+        r#"
+        SELECT opportunity.title, opportunity.organization, opportunity.contact_email,
+               terms.offered_fee_minor, terms.walk_away_minor, terms.currency,
+               terms.counter_rounds
+        FROM viryaos_team_opportunity_terms AS terms
+        JOIN viryaos_team_opportunities AS opportunity
+          ON opportunity.workspace_id = terms.workspace_id
+         AND opportunity.id = terms.opportunity_id
+        WHERE terms.workspace_id = $1
+          AND terms.opportunity_id = $2
+          AND terms.settled_at IS NULL
+          AND terms.responds_by > $3
+        FOR UPDATE OF terms
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(opportunity_id.into_uuid())
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(RepositoryError::Conflict)?;
+    // A move quoted in a currency the negotiation is not conducted in is a
+    // different offer, not a rounding difference.
+    if row.5 != currency {
+        return Err(RepositoryError::Conflict);
+    }
+    // The floor is the one number that must hold at execution as well as at
+    // decision. Everything else here can change harmlessly; accepting below
+    // cost cannot.
+    if accept && amount_minor < row.4 {
+        return Err(RepositoryError::Conflict);
+    }
+
+    crate::autopilot::emit_external_action(
+        tx,
+        workspace_id,
+        action_id,
+        if accept {
+            "viryaos.opportunity.terms_accepted"
+        } else {
+            "viryaos.opportunity.terms_countered"
+        },
+        json!({
+            "action_id": action_id,
+            "opportunity_id": opportunity_id,
+            "title": row.0,
+            "organization": row.1,
+            "contact_email": row.2,
+            "currency": currency,
+            "offered_fee_minor": row.3,
+            "walk_away_minor": row.4,
+            "amount_minor": amount_minor,
+            "round": round,
+            "payment_execution_allowed": false,
+        }),
+    )
+    .await?;
+
+    if accept {
+        sqlx::query(
+            "UPDATE viryaos_team_opportunity_terms \
+             SET state='accepted', settled_at=$3, version=version+1 \
+             WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(opportunity_id.into_uuid())
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
+    } else {
+        // `counter_rounds + 1` from the row rather than from the payload: two
+        // executions of the same drafted counter must not count as two asks.
+        sqlx::query(
+            "UPDATE viryaos_team_opportunity_terms \
+             SET state='countered', countered_fee_minor=$3, counter_rounds=counter_rounds+1, \
+                 version=version+1 \
+             WHERE workspace_id=$1 AND opportunity_id=$2 AND settled_at IS NULL",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(opportunity_id.into_uuid())
+        .bind(amount_minor)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
+    }
+    Ok(())
+}
+
 pub(in crate::autopilot) async fn prepare_funding_package(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
@@ -740,12 +884,55 @@ pub(in crate::autopilot) async fn submit_funding_application(
     Ok(())
 }
 
+/// Chases an editorial pitch nobody has submitted yet.
+///
+/// The reminder and the timestamp that keeps the next one a cooldown away are
+/// written together, so a chase that went out is always one the schedule knows
+/// about. Guarded on the pitch still being open: a reminder about something
+/// somebody has already done is how an operator learns to ignore them.
+pub(in crate::autopilot) async fn escalate_editorial_pitch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    release_id: crowdrelay_domain::ReleasePlanId,
+    title: &str,
+    due_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    crate::autopilot::emit_external_action(
+        tx,
+        workspace_id,
+        action_id,
+        "viryaos.release.editorial_pitch_escalated",
+        json!({
+            "action_id": action_id,
+            "release_id": release_id,
+            "title": title,
+            "due_at": due_at,
+            "submitted_by_agent": false,
+        }),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE viryaos_release_plans SET editorial_pitch_escalated_at=$3 \
+         WHERE workspace_id=$1 AND id=$2 AND editorial_pitch_completed_at IS NULL",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(release_id.into_uuid())
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
 pub(in crate::autopilot) const fn release_milestone_str(
     milestone: crowdrelay_domain::release_autopilot::ReleaseMilestone,
 ) -> &'static str {
     use crowdrelay_domain::release_autopilot::ReleaseMilestone::*;
     match milestone {
         SeedCalendar => "seed_calendar",
+        EditorialPitch => "editorial_pitch",
         Announcement => "announcement",
         StartPress => "start_press",
         FanWarmup => "fan_warmup",

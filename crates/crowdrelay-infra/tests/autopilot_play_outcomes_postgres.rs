@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crowdrelay_application::autopilot::{
     AutopilotControlRepository, AutopilotDecisionRepository, AutopilotPlayLedgerRepository,
-    AutopilotPlayOutcomeRepository, PlayStart, PlayStepPlan, assess_play_claim,
+    AutopilotPlayOutcomeRepository, PlayAnchorRef, PlayStart, PlayStepPlan, assess_play_claim,
 };
 use crowdrelay_domain::{
     EventId, WorkspaceId,
@@ -127,7 +127,9 @@ fn play_start(fixture: &Fixture, window_days: i64) -> PlayStart {
     let anchor_at = fixture.now + time::Duration::days(30);
     PlayStart {
         kind: PlayKind::TrackUsAsk,
-        event_id: fixture.event_id,
+        anchor: PlayAnchorRef::Event {
+            event_id: fixture.event_id,
+        },
         anchor_at,
         hypothesis: PlayKind::TrackUsAsk.hypothesis(),
         success_metric_platform: PlayKind::TrackUsAsk.success_metric().0,
@@ -586,5 +588,98 @@ async fn the_brief_reports_what_moved_and_what_could_not_be_measured()
             .any(|movement| movement.assessment.is_empty()),
         "nothing reaches the moved section without a verdict"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_workspace_level_series_wins_over_its_own_breakdown()
+-> Result<(), Box<dyn std::error::Error>> {
+    // `signal/activated_fans_30d` is declared workspace-wide *and* per city.
+    // Read as two answers to one question the play is permanently unmeasurable
+    // while reporting that it looked, which is the worst of both.
+    //
+    // The fallback in the other direction is load-bearing too:
+    // `bandsintown/trackers` exists only per event source, deliberately,
+    // because a workspace may sync two artists. One source has to resolve.
+    let fixture = fixture("series-scope-e2e").await?;
+
+    let workspace_series = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+         VALUES ($1,$2,'signal','activated_fans_30d','Fans active in the last 30 days')",
+    )
+    .bind(workspace_series)
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let city_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO cities (id, slug, name, country_code) VALUES ($1,$2,$3,'PL')")
+        .bind(city_id)
+        .bind(format!("city-{}", city_id.simple()))
+        .bind("Somewhere")
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO viryaos_growth_metric_series (
+             id, workspace_id, platform, metric_key, subject_kind, subject_id, display_name
+         ) VALUES ($1,$2,'signal','activated_fans_30d','city',$3,'Active fans · Somewhere')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(city_id)
+    .execute(&fixture.pool)
+    .await?;
+    seed_series(&fixture, workspace_series, -14, 0, 500, 1).await?;
+
+    let start = PlayStart {
+        kind: PlayKind::DormantRevival,
+        anchor: PlayAnchorRef::Fan {
+            fan_id: crowdrelay_domain::FanId::new(),
+        },
+        anchor_at: fixture.now,
+        hypothesis: PlayKind::DormantRevival.hypothesis(),
+        success_metric_platform: PlayKind::DormantRevival.success_metric().0,
+        success_metric_key: PlayKind::DormantRevival.success_metric().1,
+        steps: PlayKind::DormantRevival
+            .steps()
+            .iter()
+            .map(|spec| {
+                let (due_at, expires_at) =
+                    crowdrelay_domain::plays::step_schedule(*spec, fixture.now);
+                PlayStepPlan {
+                    index: spec.index,
+                    kind: spec.kind,
+                    class: spec.class,
+                    due_at,
+                    expires_at,
+                }
+            })
+            .collect(),
+        measurement_window_end: fixture.now + time::Duration::days(90),
+    };
+    assert!(
+        fixture
+            .repository
+            .start_play(fixture.workspace_id, &start)
+            .await?
+    );
+
+    let baselines = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "SELECT baseline_value, baseline_milli_per_day
+         FROM viryaos_play_outcomes WHERE workspace_id=$1",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert!(!baselines.is_empty());
+    for baseline in baselines {
+        assert_eq!(
+            baseline.0,
+            Some(514),
+            "the workspace-level series is the play's series, not one of its city breakdowns"
+        );
+        assert_eq!(baseline.1, Some(1_000));
+    }
     Ok(())
 }

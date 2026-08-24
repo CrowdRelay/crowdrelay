@@ -6,10 +6,11 @@ use crowdrelay_domain::{
     audience_lifecycle::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
     },
-    autonomy::{AutonomyLevel, PolicyDisposition, disposition},
+    autonomy::{AutonomyLevel, Confidence, PolicyDisposition, disposition},
     beacons::{
         BeaconCampaignSnapshot, BeaconDecision, BeaconDiscoveryDecision, BeaconDiscoverySnapshot,
-        BeaconOutreachPhase, evaluate_beacon_campaign, evaluate_beacon_discovery,
+        BeaconInviteDecision, BeaconInviteSnapshot, BeaconOutreachPhase, evaluate_beacon_campaign,
+        evaluate_beacon_discovery, evaluate_beacon_invite_batch,
     },
     booking::{
         BookingFollowUpDecision, BookingFollowUpPolicy, BookingOpportunityDecision,
@@ -19,19 +20,27 @@ use crowdrelay_domain::{
     },
     campaign_lifecycle::{EventCampaignDecision, EventCampaignSnapshot, evaluate_event_campaign},
     content_supply::{ContentSupplyDecision, ContentSupplySnapshot, evaluate_content_supply},
+    deliverability::{DeliverabilityPolicy, ramped_ceiling},
     experimentation::{ExperimentDecision, ExperimentSnapshot, evaluate_experiment},
+    free_reach::{
+        FreeReachPolicy, WaveDecision, WaveSnapshot, WaveState, evaluate_wave, wave_capacity,
+        wave_is_worth_opening,
+    },
     funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
     growth_envelope::{EnvelopeUsage, EnvelopeVerdict, GrowthEnvelope, check_envelope},
     live_opportunities::{
         LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
+        live_opportunity_score,
     },
     merch_bundle::{MerchBundleDecision, MerchBundleSnapshot, evaluate_merch_bundle},
     merchandising::{
         MerchInventorySnapshot, MerchPriceDecision, MerchPriceDirection, MerchPriceSnapshot,
         MerchReorderDecision, evaluate_merch_price, evaluate_reorder,
     },
+    negotiation::{TermsDecision, TermsState, evaluate_terms},
     outreach::{OutreachDecision, OutreachSnapshot, evaluate_outreach},
     play_measurement::measurement_due_at,
+    playlist_placement::{PlacementDecision, PlacementPolicy, evaluate_placement},
     plays::{
         PlayDecision, PlayKind, PlayPolicy, PlaySnapshot, StepAudience, evaluate_play,
         play_is_worth_starting, step_schedule,
@@ -41,7 +50,10 @@ use crowdrelay_domain::{
         evaluate_ticket_allocation, evaluate_ticket_yield,
     },
     promotion::{PromotionBudgetDecision, PromotionPerformanceSnapshot, evaluate_promotion_budget},
-    release_autopilot::{ReleaseDecision, ReleaseMilestone, ReleasePlanSnapshot, evaluate_release},
+    release_autopilot::{
+        ReleaseAutopilotPolicy, ReleaseDecision, ReleaseMilestone, ReleasePlanSnapshot,
+        evaluate_release,
+    },
     show_operations::{ShowOperationsDecision, ShowTaskSnapshot, evaluate_show_task},
     target_discovery::{OutreachSupplyDecision, OutreachSupplySnapshot, evaluate_outreach_supply},
 };
@@ -51,14 +63,17 @@ use time::OffsetDateTime;
 
 use super::{model::*, ports::AutopilotDecisionRepository};
 mod beacons;
+mod booking_supply;
 mod commercial;
 mod growth_debt;
 mod growth_metrics;
 mod outreach_supply;
+mod placements;
 mod plays;
 mod show_growth;
 
-use beacons::{beacon_candidate, beacon_discovery_candidate};
+use beacons::{beacon_candidate, beacon_discovery_candidate, beacon_invite_candidate};
+use booking_supply::booking_supply_candidate;
 use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
     merch_candidate, merch_price_candidate,
@@ -66,6 +81,7 @@ use commercial::{
 use growth_debt::growth_debt_candidate;
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
+use placements::placement_candidate;
 use plays::{play_decision, play_start, play_step_candidate};
 use show_growth::show_growth_candidate;
 
@@ -220,17 +236,61 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    let supply = self
+                        .repository
+                        .load_booking_supply_snapshot(self.workspace_id, now)
+                        .await?;
+                    if let Some(candidate) =
+                        booking_supply_candidate(&supply, &policy, self.workspace_id, now)?
+                    {
+                        self.persist(&candidate, &mut limits, &mut report).await?;
+                    }
                 }
                 AutopilotContext::Outreach => {
+                    // Opening comes first, so a wave created this cycle can
+                    // take the pitches the same cycle would otherwise have sent
+                    // one at a time.
+                    let wave_policy = match policy.config {
+                        AutopilotPolicyConfig::Outreach(outreach) => outreach.waves,
+                        _ => FreeReachPolicy::default(),
+                    };
+                    self.open_outreach_waves(&policy, &mut report, now).await?;
+                    let mut waves = self
+                        .repository
+                        .load_outreach_waves(self.workspace_id, now)
+                        .await?;
                     let snapshots = self
                         .repository
                         .load_outreach_snapshots(self.workspace_id, now)
                         .await?;
                     for snapshot in snapshots {
-                        if let Some(candidate) = outreach_candidate(snapshot, &policy, now)? {
+                        // At most one open wave takes each pitch, and only
+                        // while it still has room under the budget it was sized
+                        // against. Everything else pitches exactly as before.
+                        let wave_id = waves
+                            .iter_mut()
+                            .find(|wave| {
+                                wave.snapshot.target_kind == snapshot.target_kind
+                                    && matches!(wave.snapshot.state, WaveState::Drafting)
+                                    && matches!(
+                                        evaluate_wave(wave.snapshot, wave_policy, now),
+                                        WaveDecision::AddPitch
+                                    )
+                            })
+                            .map(|wave| {
+                                wave.snapshot.pitches = wave.snapshot.pitches.saturating_add(1);
+                                wave.wave_id
+                            });
+                        if let Some(candidate) =
+                            outreach_candidate(snapshot, &policy, wave_id, now)?
+                        {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    self.settle_outreach_waves(&waves, wave_policy, &mut report, now)
+                        .await?;
+                    self.follow_through_placements(&policy, &mut limits, &mut report, now)
+                        .await?;
                 }
                 AutopilotContext::ContentSupply => {
                     let snapshots = self
@@ -299,6 +359,8 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    self.advance_live_terms(&policy, &mut limits, &mut report, now)
+                        .await?;
                 }
                 AutopilotContext::Funding => {
                     let snapshots = self
@@ -328,6 +390,15 @@ where
                         .await?;
                     for snapshot in snapshots {
                         if let Some(candidate) = beacon_candidate(snapshot, &policy, now)? {
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                        }
+                    }
+                    let invites = self
+                        .repository
+                        .load_beacon_invite_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in invites {
+                        if let Some(candidate) = beacon_invite_candidate(snapshot, &policy, now)? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
@@ -452,6 +523,149 @@ where
         }
 
         Ok(report)
+    }
+
+    /// Carries every claimed placement through to something that can be
+    /// counted, or to something that cannot.
+    ///
+    /// This is the anti-scam core. Nothing here takes a curator's word: a claim
+    /// counts toward no report until a public read confirms it, and a
+    /// confirmation that disappears inside the window suppresses the operator
+    /// behind it rather than the playlist it happened in.
+    async fn follow_through_placements(
+        &self,
+        policy: &AutopilotPolicy,
+        limits: &mut CycleLimits<'_>,
+        report: &mut AutopilotCycleReport,
+        now: OffsetDateTime,
+    ) -> Result<(), AutopilotError> {
+        // The verification schedule is not an operator setting: a re-check
+        // window somebody could widen is a window a scammer could wait out.
+        let placement_policy = PlacementPolicy::default();
+        for entry in self
+            .repository
+            .load_playlist_placements(self.workspace_id, now)
+            .await?
+        {
+            match evaluate_placement(entry.placement, placement_policy, now) {
+                PlacementDecision::Hold => {}
+                PlacementDecision::Settle { state } => {
+                    self.repository
+                        .settle_playlist_placement(
+                            self.workspace_id,
+                            PlacementSettlement {
+                                opportunity_id: entry.placement.opportunity_id,
+                                state,
+                            },
+                            now,
+                        )
+                        .await?;
+                    report.placements_settled = report.placements_settled.saturating_add(1);
+                }
+                PlacementDecision::Verify { checkpoint } => {
+                    let candidate =
+                        placement_candidate(&entry, policy, placement_policy, checkpoint)?;
+                    self.persist(&candidate, limits, report).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn settle_outreach_waves(
+        &self,
+        waves: &[OutreachWaveSnapshot],
+        policy: FreeReachPolicy,
+        report: &mut AutopilotCycleReport,
+        now: OffsetDateTime,
+    ) -> Result<(), AutopilotError> {
+        for wave in waves {
+            let transition = match evaluate_wave(wave.snapshot, policy, now) {
+                WaveDecision::Seal => OutreachWaveTransition::Seal,
+                WaveDecision::Expire { reason } => OutreachWaveTransition::Expire { reason },
+                WaveDecision::AddPitch | WaveDecision::Hold(_) => continue,
+            };
+            self.repository
+                .transition_outreach_wave(self.workspace_id, wave.wave_id, transition, now)
+                .await?;
+            match transition {
+                OutreachWaveTransition::Seal => {
+                    report.waves_sealed = report.waves_sealed.saturating_add(1);
+                }
+                OutreachWaveTransition::Expire { .. } => {
+                    report.waves_expired = report.waves_expired.saturating_add(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves every live negotiation on by at most one step.
+    ///
+    /// Settlements are written straight to the row rather than queued as
+    /// actions. A decline is the agent recording that it will not take these
+    /// terms, and an unrecorded refusal reads to an operator exactly like the
+    /// agent never looking.
+    async fn advance_live_terms(
+        &self,
+        policy: &AutopilotPolicy,
+        limits: &mut CycleLimits<'_>,
+        report: &mut AutopilotCycleReport,
+        now: OffsetDateTime,
+    ) -> Result<(), AutopilotError> {
+        let AutopilotPolicyConfig::LiveOpportunity(domain_policy) = policy.config else {
+            return Ok(());
+        };
+        for snapshot in self
+            .repository
+            .load_live_opportunity_terms(self.workspace_id, now)
+            .await?
+        {
+            let score = live_opportunity_score(snapshot.opportunity);
+            match evaluate_terms(
+                snapshot.terms,
+                snapshot.opportunity,
+                domain_policy,
+                score,
+                now,
+            ) {
+                TermsDecision::Hold => {}
+                TermsDecision::Decline { reason } => {
+                    self.repository
+                        .settle_live_opportunity_terms(
+                            self.workspace_id,
+                            &TermsSettlement {
+                                opportunity_id: snapshot.terms.opportunity_id,
+                                state: TermsState::Declined,
+                                reason: Some(reason),
+                            },
+                            now,
+                        )
+                        .await?;
+                    report.terms_settled = report.terms_settled.saturating_add(1);
+                }
+                TermsDecision::Expire => {
+                    self.repository
+                        .settle_live_opportunity_terms(
+                            self.workspace_id,
+                            &TermsSettlement {
+                                opportunity_id: snapshot.terms.opportunity_id,
+                                state: TermsState::Expired,
+                                reason: None,
+                            },
+                            now,
+                        )
+                        .await?;
+                    report.terms_settled = report.terms_settled.saturating_add(1);
+                }
+                TermsDecision::Counter { .. } | TermsDecision::Accept { .. } => {
+                    if let Some(candidate) = live_terms_candidate(&snapshot, policy, now)? {
+                        self.persist(&candidate, limits, report).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Walks one running play as far as it will go this cycle.
@@ -659,6 +873,20 @@ pub struct AutopilotCycleReport {
     /// every other counter here would otherwise hide.
     pub play_steps_skipped: u32,
     pub plays_completed: u32,
+    /// Claimed placements that reached an answer — confirmed and gone, or never
+    /// confirmed at all. Counted apart from anything else because a placement
+    /// that cannot be verified must never reach a result.
+    pub placements_settled: u32,
+    /// Free-reach waves opened, closed for review, and ended without ever
+    /// reaching a human. The last is the one worth watching: it is the agent
+    /// saying it drafted work nobody got to.
+    pub waves_opened: u32,
+    pub waves_sealed: u32,
+    pub waves_expired: u32,
+    /// Negotiations ended without an acceptance — declined for a stated reason,
+    /// or expired because the promoter stopped waiting. Settlements rather than
+    /// actions, so nothing else on this report would show them.
+    pub terms_settled: u32,
     /// Decisions the volume envelope held back — the agent was switched off,
     /// rehearsing, out of budget, or inside a subject's cooldown.
     pub actions_held: u32,

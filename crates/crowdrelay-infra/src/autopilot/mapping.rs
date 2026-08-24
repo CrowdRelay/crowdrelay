@@ -28,84 +28,8 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         .ok()
         .and_then(|value| Confidence::from_basis_points(value).ok())
         .ok_or(RepositoryError::Unexpected)?;
-    let config =
-        match context {
-            AutopilotContext::TicketYield => AutopilotPolicyConfig::TicketYield(parse_config(
-                row.config,
-                TicketYieldPolicy::default(),
-            )?),
-            AutopilotContext::FanLifecycle => AutopilotPolicyConfig::FanLifecycle(parse_config(
-                row.config,
-                FanLifecyclePolicy::default(),
-            )?),
-            AutopilotContext::CampaignLifecycle => AutopilotPolicyConfig::CampaignLifecycle(
-                parse_config(row.config, EventCampaignPolicy::default())?,
-            ),
-            AutopilotContext::Merchandising => AutopilotPolicyConfig::Merchandising(parse_config(
-                row.config,
-                MerchReorderPolicy::default(),
-            )?),
-            AutopilotContext::MerchPricing => AutopilotPolicyConfig::MerchPricing(parse_config(
-                row.config,
-                MerchPricePolicy::default(),
-            )?),
-            AutopilotContext::MerchBundle => AutopilotPolicyConfig::MerchBundle(parse_config(
-                row.config,
-                MerchBundlePolicy::default(),
-            )?),
-            AutopilotContext::BookingOpportunity => AutopilotPolicyConfig::BookingOpportunity(
-                parse_config(row.config, BookingOpportunityPolicy::default())?,
-            ),
-            AutopilotContext::Outreach => AutopilotPolicyConfig::Outreach(parse_config(
-                row.config,
-                OutreachPolicy::default(),
-            )?),
-            AutopilotContext::ContentSupply => AutopilotPolicyConfig::ContentSupply(parse_config(
-                row.config,
-                ContentSupplyPolicy::default(),
-            )?),
-            AutopilotContext::PromotionBudget => AutopilotPolicyConfig::PromotionBudget(
-                parse_config(row.config, PromotionBudgetPolicy::default())?,
-            ),
-            AutopilotContext::Experimentation => AutopilotPolicyConfig::Experimentation(
-                parse_config(row.config, ExperimentPolicy::default())?,
-            ),
-            AutopilotContext::ShowOperations => AutopilotPolicyConfig::ShowOperations(
-                parse_config(row.config, ShowOperationsPolicy::default())?,
-            ),
-            AutopilotContext::Release => AutopilotPolicyConfig::Release(parse_config(
-                row.config,
-                ReleaseAutopilotPolicy::default(),
-            )?),
-            AutopilotContext::LiveOpportunity => AutopilotPolicyConfig::LiveOpportunity(
-                parse_config(row.config, LiveOpportunityPolicy::default())?,
-            ),
-            AutopilotContext::Funding => {
-                AutopilotPolicyConfig::Funding(parse_config(row.config, FundingPolicy::default())?)
-            }
-            AutopilotContext::Beacon => AutopilotPolicyConfig::Beacon(parse_config(
-                row.config,
-                BeaconCampaignPolicy::default(),
-            )?),
-            AutopilotContext::GrowthMetrics => AutopilotPolicyConfig::GrowthMetrics(parse_config(
-                row.config,
-                GrowthMetricPolicy::default(),
-            )?),
-            AutopilotContext::GrowthDebt => AutopilotPolicyConfig::GrowthDebt(parse_config(
-                row.config,
-                GrowthDebtPolicy::default(),
-            )?),
-            AutopilotContext::ShowGrowth => AutopilotPolicyConfig::ShowGrowth(parse_config(
-                row.config,
-                ShowGrowthPolicy::default(),
-            )?),
-            AutopilotContext::OutreachSupply => AutopilotPolicyConfig::OutreachSupply(
-                parse_config(row.config, OutreachSupplyPolicy::default())?,
-            ),
-            AutopilotContext::Plays => {
-                AutopilotPolicyConfig::Plays(parse_config(row.config, PlayPolicy::default())?)
-            }
-        };
+    let config = AutopilotPolicyConfig::parse_for(context, row.config)
+        .map_err(|_| RepositoryError::Unexpected)?;
     let max_actions_24h = u32::try_from(row.max_actions_24h)
         .ok()
         .filter(|value| *value > 0)
@@ -123,16 +47,6 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
     })
 }
 
-fn parse_config<T>(value: Value, default: T) -> Result<T, RepositoryError>
-where
-    T: serde::de::DeserializeOwned,
-{
-    if value.as_object().is_some_and(serde_json::Map::is_empty) {
-        Ok(default)
-    } else {
-        serde_json::from_value(value).map_err(|_| RepositoryError::Unexpected)
-    }
-}
 
 fn ticket_snapshot(row: TicketSnapshotRow) -> Result<TicketYieldSnapshot, RepositoryError> {
     Ok(TicketYieldSnapshot {
