@@ -2376,7 +2376,9 @@ paths:
       summary: Read the play ledger and what each number is allowed to prove
       description: >
         Returns every play the agent has committed to, what it claimed in advance, how many of its
-        steps were delivered and how many were skipped, and one entry per claim about its effect.
+        steps were delivered and how many were skipped, one entry per claim about its effect, and
+        the standing of each play kind so a kind that stopped appearing can be told from one that
+        retired itself.
         Two claims exist and are never merged: `attributed` is joined to the play through
         first-party rows, `correlational` is the success metric moving over the play's window with
         nothing joining the two. Every claim carries `claim_means` so the strength travels with the
@@ -8178,15 +8180,57 @@ components:
           type: array
           maxItems: 2
           items: { $ref: '#/components/schemas/PlayClaimView' }
+    PlayRecordCounts:
+      type: object
+      additionalProperties: false
+      required: [improved, neutral, worsened, insufficient, consecutive_worsened, operator_retired]
+      description: >
+        The measured record, as counts rather than a score, so a standing can be argued with.
+        `insufficient` is reported and deliberately excluded from every calculation: an outcome
+        nobody could measure is not an outcome that failed.
+      properties:
+        improved: { type: integer, minimum: 0 }
+        neutral: { type: integer, minimum: 0 }
+        worsened: { type: integer, minimum: 0 }
+        insufficient: { type: integer, minimum: 0 }
+        consecutive_worsened: { type: integer, minimum: 0 }
+        operator_retired: { type: boolean }
+    PlayStanding:
+      type: object
+      additionalProperties: true
+      required: [standing]
+      description: >
+        `untested` runs at full reach; `weighted` narrows the play's recipient ceiling in
+        proportion to its record and never widens it; `retired` is proposed no longer, with the
+        reason stated. Nothing here touches authority — the context ladder, the class ceiling and
+        the growth envelope move only when a human moves them.
+      properties:
+        standing: { type: string, enum: [untested, weighted, retired] }
+        measured: { type: integer, minimum: 0 }
+        basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        reason: { type: string, enum: [repeatedly_worsened, operator_retired] }
+    PlayKindStanding:
+      type: object
+      additionalProperties: false
+      required: [kind, record, standing, effective_max_recipients_per_step]
+      properties:
+        kind: { type: string, enum: [track_us_ask] }
+        record: { $ref: '#/components/schemas/PlayRecordCounts' }
+        standing: { $ref: '#/components/schemas/PlayStanding' }
+        effective_max_recipients_per_step: { type: integer, minimum: 0 }
     PlayLedgerResponse:
       type: object
       additionalProperties: false
-      required: [plays]
+      required: [plays, standings]
       properties:
         plays:
           type: array
           maxItems: 500
           items: { $ref: '#/components/schemas/PlayLedgerEntry' }
+        standings:
+          type: array
+          maxItems: 32
+          items: { $ref: '#/components/schemas/PlayKindStanding' }
     AutopilotOverview:
       type: object
       additionalProperties: false

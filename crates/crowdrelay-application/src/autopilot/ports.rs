@@ -24,7 +24,7 @@ use crowdrelay_domain::{
         PlayMeasurementPolicy, PlayOutcomeInput, PlayOutcomeVerdict, assess_play_outcome,
         window_velocity_milli_per_day,
     },
-    plays::PlayKind,
+    plays::{PlayKind, PlayPolicy},
     pricing::TicketYieldSnapshot,
     promotion::PromotionPerformanceSnapshot,
     release_autopilot::ReleasePlanSnapshot,
@@ -37,8 +37,8 @@ use time::OffsetDateTime;
 
 use super::model::{
     AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, ClaimedPlayOutcome,
-    DecisionCandidate, PlayAnchor, PlayOutcomeObservation, PlayRunSnapshot, PlayStart,
-    PlayStepSettlement,
+    DecisionCandidate, PlayAnchor, PlayKindStanding, PlayOutcomeObservation, PlayRunSnapshot,
+    PlayStart, PlayStepSettlement,
 };
 use crate::RepositoryError;
 
@@ -206,6 +206,17 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         kind: PlayKind,
         now: OffsetDateTime,
     ) -> Result<Vec<PlayAnchor>, RepositoryError>;
+
+    /// What the measured record says about each kind of play.
+    ///
+    /// Read once per cycle rather than per anchor: a standing is a property of
+    /// the play kind, and re-reading it for every show would be a query per
+    /// candidate for an answer that cannot change mid-cycle.
+    async fn load_play_standings(
+        &self,
+        workspace_id: WorkspaceId,
+        policy: PlayPolicy,
+    ) -> Result<Vec<PlayKindStanding>, RepositoryError>;
 
     /// Creates the play and its whole step schedule in one transaction.
     ///

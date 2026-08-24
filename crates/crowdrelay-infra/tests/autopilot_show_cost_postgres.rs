@@ -62,9 +62,9 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
         "INSERT INTO viryaos_tour_economics (workspace_id) VALUES ($1)
          ON CONFLICT (workspace_id) DO NOTHING",
     )
-        .bind(workspace_id.into_uuid())
-        .execute(&pool)
-        .await?;
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
 
     let database = DatabaseConfig {
         url: database_url,
@@ -151,7 +151,10 @@ async fn a_prediction_is_frozen_once_and_a_settlement_scores_the_model_against_i
         )
         .await?;
     assert!(!settled.replayed);
-    assert!(settled.accuracy.is_some(), "a settlement always yields a verdict");
+    assert!(
+        settled.accuracy.is_some(),
+        "a settlement always yields a verdict"
+    );
 
     let row = sqlx::query_as::<_, (String, Option<String>, Option<i64>, Option<i64>)>(
         "SELECT accuracy, worst_line, settled_total_cost_minor, implied_transport_rate_minor_per_100km

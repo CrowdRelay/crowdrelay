@@ -307,7 +307,7 @@ async fn a_play_settles_one_correlational_verdict_and_refuses_the_attributed_cla
         .repository
         .load_play_ledger(fixture.workspace_id, after)
         .await?;
-    let entry = ledger.first().ok_or("the play is in the ledger")?;
+    let entry = ledger.plays.first().ok_or("the play is in the ledger")?;
     assert_eq!(entry.recipients_reached, 1);
     assert_eq!(entry.claims.len(), 2);
     assert!(
@@ -317,6 +317,9 @@ async fn a_play_settles_one_correlational_verdict_and_refuses_the_attributed_cla
             .all(|claim| !claim.claim_means.is_empty()),
         "no number leaves without saying what it proves"
     );
+    // The standings travel with the ledger, so a kind that stopped appearing
+    // can be told from one that retired itself.
+    assert!(!ledger.standings.is_empty());
     Ok(())
 }
 
@@ -420,5 +423,102 @@ async fn the_schema_refuses_a_verdict_without_evidence() -> Result<(), Box<dyn s
         settled_blank.is_err(),
         "a succeeded measurement that recorded nothing is not a measurement"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_settled_outcome_is_folded_into_the_record_for_its_kind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("outcome-learning").await?;
+    let series_id = create_series(&fixture).await?;
+    seed_series(&fixture, series_id, -14, 0, 500, 1).await?;
+
+    let start = play_start(&fixture, 10);
+    assert!(
+        fixture
+            .repository
+            .start_play(fixture.workspace_id, &start)
+            .await?
+    );
+    record_reach(&fixture).await?;
+    seed_series(&fixture, series_id, 1, 10, 519, 5).await?;
+
+    let after = fixture.now + time::Duration::days(11);
+    for outcome in fixture
+        .repository
+        .claim_due_play_outcomes(fixture.workspace_id, 8, after)
+        .await?
+    {
+        let observation = fixture
+            .repository
+            .observe_play_outcome(fixture.workspace_id, &outcome, after)
+            .await?;
+        let verdict = assess_play_claim(&outcome, &observation, PlayMeasurementPolicy::default());
+        fixture
+            .repository
+            .complete_play_outcome(fixture.workspace_id, &outcome, &observation, verdict, after)
+            .await?;
+    }
+
+    let record = sqlx::query_as::<_, (i32, i32, i32, i32, i32, Option<String>)>(
+        "SELECT improved_count, neutral_count, worsened_count, insufficient_count,
+                consecutive_worsened, retired_reason
+         FROM viryaos_play_learning WHERE workspace_id=$1 AND play_kind='track_us_ask'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(record.0, 1, "the correlational verdict is the play's verdict");
+    assert_eq!(
+        record.3, 0,
+        "the attributed claim settled insufficient and must not count"
+    );
+    assert_eq!(record.4, 0);
+    assert_eq!(record.5, None);
+
+    // The standings travel with the ledger, and a single good result leaves the
+    // play untested rather than promoted.
+    let ledger = fixture
+        .repository
+        .load_play_ledger(fixture.workspace_id, after)
+        .await?;
+    let standing = ledger
+        .standings
+        .first()
+        .ok_or("every kind is reported, even without a record")?;
+    assert_eq!(standing.record.improved, 1);
+    assert_eq!(
+        standing.effective_max_recipients_per_step,
+        crowdrelay_domain::plays::PlayPolicy::default().max_recipients_per_step,
+        "one result changes nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_schema_refuses_a_silent_stop() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("learning-schema").await?;
+    // A zero weight with no retirement behind it would stop a play in a way no
+    // read model could explain.
+    let silent = sqlx::query(
+        "INSERT INTO viryaos_play_learning (workspace_id, play_kind, weight_basis_points)
+         VALUES ($1,'track_us_ask',0)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await;
+    assert!(silent.is_err());
+
+    // And a retirement without a reason is not a retirement.
+    let unexplained = sqlx::query(
+        "INSERT INTO viryaos_play_learning (workspace_id, play_kind, weight_basis_points, retired_at)
+         VALUES ($1,'track_us_ask',0,now())",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await;
+    assert!(unexplained.is_err());
     Ok(())
 }

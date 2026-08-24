@@ -231,6 +231,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.load_play_anchors_impl(workspace_id, kind, now).await
     }
 
+    async fn load_play_standings(
+        &self,
+        workspace_id: WorkspaceId,
+        policy: PlayPolicy,
+    ) -> Result<Vec<PlayKindStanding>, RepositoryError> {
+        self.load_play_standings_impl(workspace_id, policy).await
+    }
+
     async fn start_play(
         &self,
         workspace_id: WorkspaceId,

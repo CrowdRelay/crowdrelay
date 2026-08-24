@@ -51,6 +51,7 @@ pub mod growth_debt;
 pub mod growth_envelope;
 pub mod growth_metrics;
 pub mod ids;
+pub mod learning;
 pub mod live_opportunities;
 pub mod market_intelligence;
 pub mod merch_bundle;
