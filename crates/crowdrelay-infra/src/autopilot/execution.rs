@@ -787,6 +787,8 @@ pub(in crate::autopilot) async fn executor_registry_is_active(
     .map_err(map_sqlx)
 }
 
+/// Non-failing probe for callers that treat a missing executor as a soft
+/// skip (best-effort notifications) instead of refusing the operation.
 pub(in crate::autopilot) async fn executor_capability_available(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -816,53 +818,6 @@ pub(in crate::autopilot) async fn executor_capability_available(
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_sqlx)
-}
-
-pub(in crate::autopilot) async fn ensure_executor_capability_strict(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    capability: &str,
-) -> Result<(), RepositoryError> {
-    let available = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM viryaos_executor_capabilities capability
-            JOIN viryaos_executor_instances executor
-              ON executor.workspace_id=capability.workspace_id
-             AND executor.executor_id=capability.executor_id
-            LEFT JOIN viryaos_executor_circuit_breakers breaker
-              ON breaker.workspace_id=executor.workspace_id
-             AND breaker.executor_id=executor.executor_id
-            WHERE capability.workspace_id=$1
-              AND capability.capability=$2
-              AND capability.expires_at>now()
-              AND executor.expires_at>now()
-              AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
-        )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(capability)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    if available {
-        return Ok(());
-    }
-    // A missing, expired or breaker-guarded capability returns the same
-    // RepositoryError::Unavailable that a bounded() timeout produces, and the
-    // caller only logs the error's Display. From "acquisition repository is
-    // temporarily unavailable" alone an operator cannot tell a slow database
-    // from "nothing currently advertises this capability" — the second fails
-    // identically on every tick and never recovers on its own. Name the gate.
-    tracing::warn!(
-        workspace_id = %workspace_id.into_uuid(),
-        capability,
-        "autopilot executor capability unavailable: no unexpired executor \
-         advertises it, or its circuit breaker is still guarding"
-    );
-    Err(RepositoryError::Unavailable)
 }
 
 pub(in crate::autopilot) async fn reserve_contact_window(
