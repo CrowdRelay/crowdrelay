@@ -540,4 +540,99 @@ mod tests {
         assert!(!output.contains(DATABASE_URL));
         Ok(())
     }
+
+    #[test]
+    fn rate_limit_defaults_are_enabled_with_safe_budgets() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let config = config_with(&[])?;
+
+        assert!(config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.public_auth_per_minute, 30);
+        assert_eq!(config.rate_limit.privileged_per_minute, 120);
+        assert_eq!(config.rate_limit.general_per_minute, 600);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_rate_limit_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let config = config_with(&[
+            (RATE_LIMIT_ENABLED_KEY, "false"),
+            (RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY, "5"),
+            (RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY, "42"),
+            (RATE_LIMIT_GENERAL_PER_MINUTE_KEY, "1000"),
+        ])?;
+
+        assert!(!config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.public_auth_per_minute, 5);
+        assert_eq!(config.rate_limit.privileged_per_minute, 42);
+        assert_eq!(config.rate_limit.general_per_minute, 1000);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_rate_limit_values() {
+        for (key, value) in [
+            (RATE_LIMIT_ENABLED_KEY, "maybe"),
+            (RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY, "abc"),
+            (RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY, "100001"),
+            (
+                RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY,
+                &MAX_RATE_LIMIT_PER_MINUTE.checked_add(1).unwrap().to_string()[..],
+            ),
+        ] {
+            assert!(
+                config_with(&[(key, value)]).is_err(),
+                "expected {key}={value} to be rejected"
+            );
+        }
+        assert!(
+            config_with(&[(RATE_LIMIT_GENERAL_PER_MINUTE_KEY, "0")]).is_err(),
+            "the general class must keep a nonzero flood damper"
+        );
+    }
+
+    #[test]
+    fn accepts_previous_api_keys_for_rotation() -> Result<(), Box<dyn std::error::Error>> {
+        let admin = "rotating-admin-key-1234567890abcdef";
+        let staff = "rotating-staff-key-1234567890abcdef";
+        let commerce = "rotating-commerce-key-1234567890abcd";
+        let config = config_with(&[
+            (ADMIN_API_KEY_KEY, admin),
+            (STAFF_API_KEY_KEY, staff),
+            (COMMERCE_API_KEY, commerce),
+            (PREVIOUS_ADMIN_API_KEY_KEY, "old-admin-key-1234567890abcdefghij"),
+            (PREVIOUS_STAFF_API_KEY_KEY, "old-staff-key-1234567890abcdefghij"),
+            (PREVIOUS_COMMERCE_API_KEY, "old-commerce-key-1234567890abcdefgh"),
+        ])?;
+
+        assert_eq!(
+            config.admission_security.previous_admin_api_key_sha256,
+            Some(Sha256::digest(b"old-admin-key-1234567890abcdefghij").into())
+        );
+        assert_eq!(
+            config.previous_commerce_api_key_sha256,
+            Some(Sha256::digest(b"old-commerce-key-1234567890abcdefgh").into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_previous_keys_equal_to_current_keys() {
+        let shared = "same-key-value-123456789012345678";
+        for pair in [
+            (ADMIN_API_KEY_KEY, PREVIOUS_ADMIN_API_KEY_KEY),
+            (STAFF_API_KEY_KEY, PREVIOUS_STAFF_API_KEY_KEY),
+            (COMMERCE_API_KEY, PREVIOUS_COMMERCE_API_KEY),
+            (CONTROL_PLANE_API_KEY, PREVIOUS_CONTROL_PLANE_API_KEY),
+            (
+                CONTROL_PLANE_AREA_API_KEY,
+                PREVIOUS_CONTROL_PLANE_AREA_API_KEY,
+            ),
+        ] {
+            assert!(
+                config_with(&[(pair.0, shared), (pair.1, shared)]).is_err(),
+                "expected {pair:?} to be rejected when identical"
+            );
+        }
+    }
 }

@@ -354,7 +354,10 @@ mod tests {
             Duration::from_millis(50),
             Some(sha2::Sha256::digest(b"test-admin-api-key-123456789012").into()),
             Some(sha2::Sha256::digest(b"test-staff-api-key-123456789012").into()),
+            Some(sha2::Sha256::digest(b"test-previous-admin-key-1234567890").into()),
+            Some(sha2::Sha256::digest(b"test-previous-staff-key-1234567890").into()),
             Some(sha2::Sha256::digest(b"test-commerce-api-key-1234567890").into()),
+            None,
             Some([7_u8; 32]),
         );
         let ops = OpsState::new(workspace_id, database.clone(), Duration::from_millis(50));
@@ -374,6 +377,8 @@ mod tests {
             ticketing,
             Some(sha2::Sha256::digest(b"test-area-management-key-1234567890").into()),
             Some(sha2::Sha256::digest(b"test-control-plane-key-123456789012").into()),
+            None,
+            None,
             ops,
             autopilot,
             false,
@@ -1001,6 +1006,95 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rate_limited_public_auth_requests_receive_429_with_retry_after()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limiter = Arc::new(crate::RateLimiter::new(crate::RateLimitPolicy {
+            enabled: true,
+            public_auth_per_minute: 1,
+            privileged_per_minute: 1000,
+            general_per_minute: 1000,
+        }));
+        let http_config = HttpConfig::new(["http://localhost:4321".to_owned()])?
+            .with_rate_limit(Some(limiter));
+        let app = router(unavailable_state()?, http_config);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/fans/access")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", "203.0.113.50")
+                    .body(Body::from(r#"{"email":"fan@example.com"}"#))?,
+            )
+            .await?;
+        assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/fans/access")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", "203.0.113.50")
+                    .body(Body::from(r#"{"email":"fan@example.com"}"#))?,
+            )
+            .await?;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(second.headers().contains_key("retry-after"));
+        assert_eq!(
+            second.headers()["cache-control"],
+            "no-store"
+        );
+        let body = to_bytes(second.into_body(), 2048).await?;
+        assert!(String::from_utf8_lossy(&body).contains("rate-limited"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_is_isolated_per_identity_and_skips_health()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limiter = Arc::new(crate::RateLimiter::new(crate::RateLimitPolicy {
+            enabled: true,
+            public_auth_per_minute: 1,
+            privileged_per_minute: 1000,
+            general_per_minute: 1000,
+        }));
+        let http_config = HttpConfig::new(["http://localhost:4321".to_owned()])?
+            .with_rate_limit(Some(limiter));
+        let app = router(unavailable_state()?, http_config);
+
+        async fn post_from(
+            app: axum::Router,
+            ip: &'static str,
+        ) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+            Ok(app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/fans/access")
+                        .header("x-forwarded-for", ip)
+                        .body(Body::empty())?,
+                )
+                .await?)
+        }
+        let first = post_from(app.clone(), "198.51.100.10").await?;
+        assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+        let other = post_from(app.clone(), "198.51.100.11").await?;
+        assert_ne!(other.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let repeat = post_from(app.clone(), "198.51.100.10").await?;
+        assert_eq!(repeat.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let health = app
+            .oneshot(Request::builder().uri("/health/live").body(Body::empty())?)
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
         Ok(())
     }
 }

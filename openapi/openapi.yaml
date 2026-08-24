@@ -69,6 +69,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/StaffDeviceSessionCredential' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
+        '429': {{ $ref: '#/components/responses/PrivateProblem' }}
   /admin/staff/sessions:
     get:
       operationId: listStaffDeviceSessions
@@ -545,6 +546,8 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '413':
           $ref: '#/components/responses/PrivateProblem'
+        '429':
+          $ref: '#/components/responses/PrivateProblem'
         '422':
           $ref: '#/components/responses/PrivateProblem'
         '503':
@@ -583,6 +586,8 @@ paths:
         '409':
           $ref: '#/components/responses/PrivateProblem'
         '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '429':
           $ref: '#/components/responses/PrivateProblem'
         '422':
           $ref: '#/components/responses/PrivateProblem'
@@ -654,6 +659,7 @@ paths:
         '201': { description: Latarnik session created; bearer token is returned once. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
+        '429': {{ $ref: '#/components/responses/PrivateProblem' }}
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /beacon/me:
     get:
@@ -4864,6 +4870,8 @@ paths:
         '409':
           $ref: '#/components/responses/PrivateProblem'
         '413':
+          $ref: '#/components/responses/PrivateProblem'
+        '429':
           $ref: '#/components/responses/PrivateProblem'
         '422':
           $ref: '#/components/responses/PrivateProblem'

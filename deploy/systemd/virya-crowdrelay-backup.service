@@ -1,0 +1,16 @@
+[Unit]
+Description=CrowdRelay authoritative PostgreSQL backup
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Fails the unit (and alerts) when the dump, checksum, or rehearsal fails.
+EnvironmentFile=-/etc/virya/backup.env
+ExecStart=/opt/crowdrelay/scripts/backup.sh
+User=virya
+Group=virya
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=1800

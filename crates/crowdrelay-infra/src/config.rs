@@ -54,6 +54,11 @@ const CLICK_FLUSH_INTERVAL_MS_KEY: &str = "CROWDRELAY_CLICK_FLUSH_INTERVAL_MS";
 const COMMERCE_API_KEY: &str = "CROWDRELAY_COMMERCE_API_KEY";
 const CONTROL_PLANE_AREA_API_KEY: &str = "CROWDRELAY_CONTROL_PLANE_AREA_API_KEY";
 const CONTROL_PLANE_API_KEY: &str = "CROWDRELAY_CONTROL_PLANE_API_KEY";
+const PREVIOUS_ADMIN_API_KEY_KEY: &str = "CROWDRELAY_PREVIOUS_ADMIN_API_KEY";
+const PREVIOUS_STAFF_API_KEY_KEY: &str = "CROWDRELAY_PREVIOUS_STAFF_API_KEY";
+const PREVIOUS_COMMERCE_API_KEY: &str = "CROWDRELAY_PREVIOUS_COMMERCE_API_KEY";
+const PREVIOUS_CONTROL_PLANE_AREA_API_KEY: &str = "CROWDRELAY_PREVIOUS_CONTROL_PLANE_AREA_API_KEY";
+const PREVIOUS_CONTROL_PLANE_API_KEY: &str = "CROWDRELAY_PREVIOUS_CONTROL_PLANE_API_KEY";
 const EVENT_REMINDER_OFFSETS_MINUTES_KEY: &str = "CROWDRELAY_EVENT_REMINDER_OFFSETS_MINUTES";
 const EVENT_REMINDER_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_EVENT_REMINDER_POLL_INTERVAL_MS";
 const AUTOPILOT_ENABLED_KEY: &str = "CROWDRELAY_AUTOPILOT_ENABLED";
@@ -68,6 +73,15 @@ const REQUIRE_DOUBLE_OPT_IN_KEY: &str = "CROWDRELAY_REQUIRE_DOUBLE_OPT_IN";
 const RESPONSE_ENCRYPTION_SECRET_KEY: &str = "CROWDRELAY_RESPONSE_ENCRYPTION_SECRET";
 const PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY: &str =
     "CROWDRELAY_PREVIOUS_RESPONSE_ENCRYPTION_SECRET";
+const RATE_LIMIT_ENABLED_KEY: &str = "CROWDRELAY_RATE_LIMIT_ENABLED";
+const RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE";
+const RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_PRIVILEGED_PER_MINUTE";
+const RATE_LIMIT_GENERAL_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_GENERAL_PER_MINUTE";
+
+const DEFAULT_RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE: u32 = 30;
+const DEFAULT_RATE_LIMIT_PRIVILEGED_PER_MINUTE: u32 = 120;
+const DEFAULT_RATE_LIMIT_GENERAL_PER_MINUTE: u32 = 600;
+const MAX_RATE_LIMIT_PER_MINUTE: u32 = 100_000;
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 10;
@@ -127,6 +141,11 @@ const KNOWN_KEYS: &[&str] = &[
     COMMERCE_API_KEY,
     CONTROL_PLANE_AREA_API_KEY,
     CONTROL_PLANE_API_KEY,
+    PREVIOUS_ADMIN_API_KEY_KEY,
+    PREVIOUS_STAFF_API_KEY_KEY,
+    PREVIOUS_COMMERCE_API_KEY,
+    PREVIOUS_CONTROL_PLANE_AREA_API_KEY,
+    PREVIOUS_CONTROL_PLANE_API_KEY,
     EVENT_REMINDER_OFFSETS_MINUTES_KEY,
     EVENT_REMINDER_POLL_INTERVAL_MS_KEY,
     AUTOPILOT_ENABLED_KEY,
@@ -145,6 +164,10 @@ const KNOWN_KEYS: &[&str] = &[
     REQUIRE_DOUBLE_OPT_IN_KEY,
     RESPONSE_ENCRYPTION_SECRET_KEY,
     PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY,
+    RATE_LIMIT_ENABLED_KEY,
+    RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY,
+    RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY,
+    RATE_LIMIT_GENERAL_PER_MINUTE_KEY,
     push::PUSH_DELIVERY_ENABLED_KEY,
     push::WEB_PUSH_VAPID_PUBLIC_KEY,
     push::FCM_PROJECT_ID_KEY,
@@ -164,10 +187,16 @@ pub struct Config {
     pub redirect_refresh_interval: Duration,
     pub click_buffer: ClickBufferConfig,
     pub commerce_api_key_sha256: Option<[u8; 32]>,
+    /// Optional immediately preceding commerce credential accepted during rotation.
+    pub previous_commerce_api_key_sha256: Option<[u8; 32]>,
     /// Narrow Control Plane credential accepted only by the AREA management namespace.
     pub control_plane_area_api_key_sha256: Option<[u8; 32]>,
+    /// Optional immediately preceding AREA management credential accepted during rotation.
+    pub previous_control_plane_area_api_key_sha256: Option<[u8; 32]>,
     /// Separate narrow credential for operational visibility and bounded controls.
     pub control_plane_api_key_sha256: Option<[u8; 32]>,
+    /// Optional immediately preceding control-plane credential accepted during rotation.
+    pub previous_control_plane_api_key_sha256: Option<[u8; 32]>,
     pub event_reminder_offsets_minutes: Vec<u32>,
     pub event_reminder_poll_interval: Duration,
     pub autopilot_enabled: bool,
@@ -183,6 +212,21 @@ pub struct Config {
     pub require_double_opt_in: bool,
     /// Public/runtime push-delivery controls. Provider secrets remain worker-only.
     pub push_delivery: PushPublicConfig,
+    /// Edge rate limiting policy applied by the HTTP layer.
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Per-identity fixed-window limits enforced at the API edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    /// Master switch; when false the limiter passes every request.
+    pub enabled: bool,
+    /// Token issuance and redemption endpoints (magic links, pairing codes).
+    pub public_auth_per_minute: u32,
+    /// Privileged namespaces guarded by static bearer credentials.
+    pub privileged_per_minute: u32,
+    /// Everything else, as a coarse flood damper.
+    pub general_per_minute: u32,
 }
 
 impl Config {
@@ -247,14 +291,47 @@ impl Config {
         )?;
         let click_buffer = parse_click_buffer_config(&values)?;
         let commerce_api_key_sha256 = parse_commerce_api_key(values.get(COMMERCE_API_KEY))?;
+        let previous_commerce_api_key_sha256 =
+            parse_commerce_api_key(values.get(PREVIOUS_COMMERCE_API_KEY))?;
+        if previous_commerce_api_key_sha256.is_some()
+            && previous_commerce_api_key_sha256 == commerce_api_key_sha256
+        {
+            return Err(ConfigError::InvalidSecret {
+                name: PREVIOUS_COMMERCE_API_KEY,
+            });
+        }
         // config/parsing.rs is include!d into this module rather than being a
         // submodule, so its helpers are already in scope unqualified.
         let control_plane_area_api_key_sha256 = parse_optional_secret_hash(
             values.get(CONTROL_PLANE_AREA_API_KEY),
             CONTROL_PLANE_AREA_API_KEY,
         )?;
+        let previous_control_plane_area_api_key_sha256 = parse_optional_secret_hash(
+            values.get(PREVIOUS_CONTROL_PLANE_AREA_API_KEY),
+            PREVIOUS_CONTROL_PLANE_AREA_API_KEY,
+        )?;
         let control_plane_api_key_sha256 =
             parse_optional_secret_hash(values.get(CONTROL_PLANE_API_KEY), CONTROL_PLANE_API_KEY)?;
+        let previous_control_plane_api_key_sha256 = parse_optional_secret_hash(
+            values.get(PREVIOUS_CONTROL_PLANE_API_KEY),
+            PREVIOUS_CONTROL_PLANE_API_KEY,
+        )?;
+        for (previous, current, name) in [
+            (
+                previous_control_plane_area_api_key_sha256,
+                control_plane_area_api_key_sha256,
+                PREVIOUS_CONTROL_PLANE_AREA_API_KEY,
+            ),
+            (
+                previous_control_plane_api_key_sha256,
+                control_plane_api_key_sha256,
+                PREVIOUS_CONTROL_PLANE_API_KEY,
+            ),
+        ] {
+            if previous.is_some() && previous == current {
+                return Err(ConfigError::InvalidSecret { name });
+            }
+        }
         let event_reminder_offsets_minutes =
             parse_event_reminder_offsets(values.get(EVENT_REMINDER_OFFSETS_MINUTES_KEY))?;
         let event_reminder_poll_interval = parse_bounded_duration(
@@ -301,6 +378,7 @@ impl Config {
             REQUIRE_DOUBLE_OPT_IN_KEY,
             DEFAULT_REQUIRE_DOUBLE_OPT_IN,
         )?;
+        let rate_limit = parse_rate_limit(&values)?;
 
         Ok(Self {
             environment,
@@ -314,8 +392,11 @@ impl Config {
             redirect_refresh_interval,
             click_buffer,
             commerce_api_key_sha256,
+            previous_commerce_api_key_sha256,
             control_plane_area_api_key_sha256,
+            previous_control_plane_area_api_key_sha256,
             control_plane_api_key_sha256,
+            previous_control_plane_api_key_sha256,
             event_reminder_offsets_minutes,
             event_reminder_poll_interval,
             autopilot_enabled,
@@ -326,6 +407,7 @@ impl Config {
             previous_response_encryption_key,
             require_double_opt_in,
             push_delivery: PushPublicConfig::parse(&values)?,
+            rate_limit,
         })
     }
 }
@@ -396,6 +478,10 @@ pub struct AdmissionSecurityConfig {
     pub admin_api_key_sha256: Option<[u8; 32]>,
     /// SHA-256 hash of the gate staff API key, if configured.
     pub staff_api_key_sha256: Option<[u8; 32]>,
+    /// Optional preceding admin credential accepted during bounded rotation.
+    pub previous_admin_api_key_sha256: Option<[u8; 32]>,
+    /// Optional preceding staff credential accepted during bounded rotation.
+    pub previous_staff_api_key_sha256: Option<[u8; 32]>,
     /// HMAC key for signing rotating admission QR payloads, if configured.
     pub qr_signing_key: Option<[u8; 32]>,
     /// Normalized email of the default admin member.
@@ -417,6 +503,14 @@ impl fmt::Debug for AdmissionSecurityConfig {
             .field(
                 "staff_api_key_sha256",
                 &self.staff_api_key_sha256.map(|_| "[REDACTED]"),
+            )
+            .field(
+                "previous_admin_api_key_sha256",
+                &self.previous_admin_api_key_sha256.map(|_| "[REDACTED]"),
+            )
+            .field(
+                "previous_staff_api_key_sha256",
+                &self.previous_staff_api_key_sha256.map(|_| "[REDACTED]"),
             )
             .field("qr_signing_key", &self.qr_signing_key.map(|_| "[REDACTED]"))
             .field("admin_member_email", &"[REDACTED]")

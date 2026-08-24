@@ -1,0 +1,75 @@
+groups:
+  - name: crowdrelay-delivery
+    rules:
+      - alert: CrowdRelayApiDown
+        expr: up{job="crowdrelay-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: CrowdRelay API is unreachable from Prometheus
+      - alert: CrowdRelayOpsSnapshotUnavailable
+        expr: crowdrelay_ops_metrics_snapshot_available == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: API cannot read database-backed operational metrics
+      - alert: CrowdRelayOutboxDeadLetters
+        expr: crowdrelay_outbox_dead > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} outbox events are dead; delivery intent exists but provider delivery gave up"
+      - alert: CrowdRelayWebhookDeliveriesDead
+        expr: crowdrelay_webhook_delivery_dead > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} signed webhook deliveries are dead"
+      - alert: CrowdRelayPushDeliveriesDead
+        expr: crowdrelay_push_delivery_dead > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} push deliveries failed or are ambiguous"
+      - alert: CrowdRelayOutboxStalled
+        expr: crowdrelay_outbox_oldest_pending_seconds > 600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Oldest pending outbox event has waited {{ $value | humanizeDuration }}
+      - alert: CrowdRelayDeliveryBacklog
+        expr: crowdrelay_webhook_delivery_oldest_pending_seconds > 600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Oldest pending webhook delivery has waited {{ $value | humanizeDuration }}
+  - name: crowdrelay-edge
+    rules:
+      - alert: CrowdRelayServerErrorRate
+        expr: sum(rate(crowdrelay_http_requests_5xx_total[5m])) / clamp_min(sum(rate(crowdrelay_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: HTTP 5xx ratio above 5% for five minutes
+      - alert: CrowdRelayPoolSaturation
+        expr: crowdrelay_db_pool_utilization_ratio > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: PostgreSQL connection pool above 90% utilization
+      - alert: CrowdRelayRateLimitStorm
+        expr: sum(rate(crowdrelay_http_rate_limited_total[5m])) > 5
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: Edge rate limiter rejecting more than 5 requests per second

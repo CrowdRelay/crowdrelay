@@ -38,7 +38,11 @@ pub async fn configure_sale(
     payload: Result<Json<ConfigureTicketSaleRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !bearer_sha256_matches(&headers, state.ticketing.admin_api_key_sha256) {
+    if !bearer_sha256_matches_either(
+        &headers,
+        state.ticketing.admin_api_key_sha256,
+        state.ticketing.previous_admin_api_key_sha256,
+    ) {
         return Problem::unauthorized(request_id_value)
             .private()
             .into_response();

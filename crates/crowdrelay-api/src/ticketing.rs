@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id,
-    security::{bearer_sha256, bearer_sha256_matches},
+    security::{bearer_sha256, bearer_sha256_matches, bearer_sha256_matches_either},
     ticket_qr::encode_ticket_qr,
 };
 
@@ -53,7 +53,10 @@ pub struct TicketingState {
     operation_timeout: Duration,
     admin_api_key_sha256: Option<[u8; 32]>,
     staff_api_key_sha256: Option<[u8; 32]>,
+    previous_admin_api_key_sha256: Option<[u8; 32]>,
+    previous_staff_api_key_sha256: Option<[u8; 32]>,
     commerce_api_key_sha256: Option<[u8; 32]>,
+    previous_commerce_api_key_sha256: Option<[u8; 32]>,
     checkout_token_key: Option<[u8; 32]>,
 }
 
@@ -67,7 +70,10 @@ impl TicketingState {
         operation_timeout: Duration,
         admin_api_key_sha256: Option<[u8; 32]>,
         staff_api_key_sha256: Option<[u8; 32]>,
+        previous_admin_api_key_sha256: Option<[u8; 32]>,
+        previous_staff_api_key_sha256: Option<[u8; 32]>,
         commerce_api_key_sha256: Option<[u8; 32]>,
+        previous_commerce_api_key_sha256: Option<[u8; 32]>,
         checkout_token_key: Option<[u8; 32]>,
     ) -> Self {
         Self {
@@ -76,7 +82,10 @@ impl TicketingState {
             operation_timeout,
             admin_api_key_sha256,
             staff_api_key_sha256,
+            previous_admin_api_key_sha256,
+            previous_staff_api_key_sha256,
             commerce_api_key_sha256,
+            previous_commerce_api_key_sha256,
             checkout_token_key,
         }
     }
@@ -98,18 +107,30 @@ impl TicketingState {
     }
 
     pub(crate) fn commerce_authorized(&self, headers: &HeaderMap) -> bool {
-        bearer_sha256_matches(headers, self.commerce_api_key_sha256)
+        bearer_sha256_matches_either(
+            headers,
+            self.commerce_api_key_sha256,
+            self.previous_commerce_api_key_sha256,
+        )
     }
 
     pub(crate) fn admin_authorized(&self, headers: &HeaderMap) -> bool {
-        bearer_sha256_matches(headers, self.admin_api_key_sha256)
+        bearer_sha256_matches_either(
+            headers,
+            self.admin_api_key_sha256,
+            self.previous_admin_api_key_sha256,
+        )
     }
 
     pub(crate) async fn operator_authorized(&self, headers: &HeaderMap) -> bool {
         if self.admin_authorized(headers) {
             return true;
         }
-        if bearer_sha256_matches(headers, self.staff_api_key_sha256) {
+        if bearer_sha256_matches_either(
+            headers,
+            self.staff_api_key_sha256,
+            self.previous_staff_api_key_sha256,
+        ) {
             crate::http_metrics().record_legacy_static_staff_auth();
             return true;
         }
