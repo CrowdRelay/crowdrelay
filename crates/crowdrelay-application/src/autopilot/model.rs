@@ -459,7 +459,10 @@ pub enum AutopilotActionPayload {
         /// The show the step is anchored to. Carried so the executor renders
         /// the ask about a specific date rather than about the band in general.
         event_id: EventId,
-        fan_id: FanId,
+        /// Absent for a step with no audience. A listing sweep is work on our
+        /// own surfaces and has no recipient; carrying a fan there would be a
+        /// contact nobody made.
+        fan_id: Option<FanId>,
         template_key: String,
     },
     SendTeamAssignmentEmail {
@@ -695,6 +698,10 @@ pub struct PlayStart {
 pub enum PlayAudience {
     /// Nobody eligible is left. The step has done all it can.
     Exhausted,
+    /// The step needs nobody. Distinct from `Exhausted`, which means the step
+    /// wanted an audience and ran out of one — and settles the play, where this
+    /// lets it run.
+    NotRequired,
     /// The next fan to reach, and how many remain including them.
     Next { fan_id: FanId, remaining: u32 },
 }
@@ -704,6 +711,9 @@ impl PlayAudience {
     pub const fn remaining(self) -> u32 {
         match self {
             Self::Exhausted => 0,
+            // One, so the state machine sees work rather than an empty segment.
+            // The step's own ceiling of one is what stops it running twice.
+            Self::NotRequired => 1,
             Self::Next { remaining, .. } => remaining,
         }
     }
@@ -711,7 +721,7 @@ impl PlayAudience {
     #[must_use]
     pub const fn fan_id(self) -> Option<FanId> {
         match self {
-            Self::Exhausted => None,
+            Self::Exhausted | Self::NotRequired => None,
             Self::Next { fan_id, .. } => Some(fan_id),
         }
     }

@@ -8324,7 +8324,7 @@ components:
       required: [play_id, kind, event_id, anchor_at, hypothesis, state, started_at, steps_total, steps_settled, steps_skipped, recipients_reached, claims]
       properties:
         play_id: { type: string, format: uuid }
-        kind: { type: string, enum: [track_us_ask] }
+        kind: { type: string, enum: [track_us_ask, listing_completeness_sweep] }
         event_id: { type: string, format: uuid }
         anchor_at: { type: string, format: date-time }
         hypothesis: { type: string, maxLength: 400 }
@@ -8373,7 +8373,7 @@ components:
       additionalProperties: false
       required: [kind, record, standing, effective_max_recipients_per_step]
       properties:
-        kind: { type: string, enum: [track_us_ask] }
+        kind: { type: string, enum: [track_us_ask, listing_completeness_sweep] }
         record: { $ref: '#/components/schemas/PlayRecordCounts' }
         standing: { $ref: '#/components/schemas/PlayStanding' }
         effective_max_recipients_per_step: { type: integer, minimum: 0 }
