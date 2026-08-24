@@ -5,7 +5,11 @@ pub async fn bind_stripe_checkout(
     payload: Result<Json<BindStripeCheckoutRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !bearer_sha256_matches(&headers, state.ticketing.commerce_api_key_sha256) {
+    if !bearer_sha256_matches_either(
+        &headers,
+        state.ticketing.commerce_api_key_sha256,
+        state.ticketing.previous_commerce_api_key_sha256,
+    ) {
         return Problem::unauthorized(request_id_value)
             .private()
             .into_response();
@@ -54,7 +58,11 @@ pub async fn cancel_order(
     payload: Result<Json<CancelTicketOrderRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !bearer_sha256_matches(&headers, state.ticketing.commerce_api_key_sha256) {
+    if !bearer_sha256_matches_either(
+        &headers,
+        state.ticketing.commerce_api_key_sha256,
+        state.ticketing.previous_commerce_api_key_sha256,
+    ) {
         return Problem::unauthorized(request_id_value)
             .private()
             .into_response();
@@ -102,7 +110,11 @@ pub async fn stripe_event(
     payload: Result<Json<StripeTicketEventRequest>, JsonRejection>,
 ) -> Response {
     let request_id_value = request_id(&headers);
-    if !bearer_sha256_matches(&headers, state.ticketing.commerce_api_key_sha256) {
+    if !bearer_sha256_matches_either(
+        &headers,
+        state.ticketing.commerce_api_key_sha256,
+        state.ticketing.previous_commerce_api_key_sha256,
+    ) {
         return Problem::unauthorized(request_id_value)
             .private()
             .into_response();

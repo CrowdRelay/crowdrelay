@@ -1,6 +1,6 @@
 # Server timers
 
-Two independent units live here. Both name `/opt/crowdrelay`, which is where
+Three independent units live here. All name `/opt/crowdrelay`, which is where
 production is installed; check `WorkingDirectory`/`ExecStart` against the real
 install before enabling one anywhere else.
 
@@ -27,6 +27,19 @@ Enable with `systemctl enable --now virya-crowdrelay-heartbeat.timer`.
 The recurring 15-minute smoke check runs on the server instead of consuming GitHub Actions minutes. GitHub keeps a manual `Production smoke` workflow for operator/post-deploy verification.
 
 Install the service/timer under `/etc/systemd/system`, deploy this repository/package at `/opt/crowdrelay`, and define `CROWDRELAY_BASE_URL`, `VIRYA_BASE_URL`, optional `SYNESTHESIA_BASE_URL`, and optional `N8N_INGRESS_URL` in `/etc/virya/production-smoke.env`. Enable with `systemctl enable --now virya-production-smoke.timer`.
+
+## Backup timer
+
+`virya-crowdrelay-backup.timer` runs `ops/backup/backup.sh` nightly at 03:17
+(local time). Each run dumps the authoritative PostgreSQL container in custom
+format, writes a SHA-256 sidecar, prunes past `CROWDRELAY_BACKUP_RETAIN_DAYS`
+(default 14), then verifies the fresh dump through the isolated restore
+rehearsal. Any failure fails the unit and posts one rate-limited alert to
+`ALERT_WEBHOOK_URL`. Configure paths, retention, and the alert webhook in
+`/etc/virya/backup.env`; copy dumps off-host after each run. Targets,
+restore steps, and the WAL-archiving upgrade path live in
+`docs/DISASTER_RECOVERY.md`. Enable with
+`systemctl enable --now virya-crowdrelay-backup.timer`.
 
 ## Optional alerts
 

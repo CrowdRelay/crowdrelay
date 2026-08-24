@@ -53,6 +53,12 @@ def fetch(url: str, path: str, timeout: float) -> Sample:
     return Sample(path=path, elapsed_ms=(time.perf_counter() - started) * 1000.0, status=status)
 
 
+def run_shard(shard: list[tuple[str, str]], timeout: float) -> list[Sample]:
+    # Runs in a worker process: sequential requests here, parallelism across
+    # processes, so the interpreter GIL cannot serialize the load.
+    return [fetch(url, path, timeout) for url, path in shard]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
@@ -75,9 +81,12 @@ def main() -> int:
 
     scheduled = [paths[index % len(paths)] for index in range(args.requests)]
     wall_started = time.perf_counter()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = [executor.submit(fetch, args.base_url, path, args.timeout_seconds) for path in scheduled]
-        samples = [future.result() for future in futures]
+    shards: list[list[tuple[str, str]]] = [[] for _ in range(args.concurrency)]
+    for index, path in enumerate(scheduled):
+        shards[index % args.concurrency].append((args.base_url, path))
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.concurrency) as executor:
+        futures = [executor.submit(run_shard, shard, args.timeout_seconds) for shard in shards]
+        samples = [sample for future in futures for sample in future.result()]
     wall_seconds = time.perf_counter() - wall_started
 
     latencies = [sample.elapsed_ms for sample in samples]

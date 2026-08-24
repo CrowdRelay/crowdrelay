@@ -112,9 +112,10 @@ async fn require_control_plane(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !crate::security::bearer_sha256_matches(
+    if !crate::security::bearer_sha256_matches_either(
         request.headers(),
         state.control_plane_api_key_sha256,
+        state.previous_control_plane_api_key_sha256,
     ) {
         return crate::Problem::unauthorized(crate::request_id(request.headers()))
             .private()

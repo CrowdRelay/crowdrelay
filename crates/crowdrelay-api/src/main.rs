@@ -21,8 +21,8 @@ use crowdrelay_api::{
     AcquisitionState, AcquisitionStateArgs, AdmissionState, AdmissionStateArgs, AppState,
     ClickMetricsReader, ClickMetricsSnapshot, ClickSubmitter, ConcertQrState,
     EventActionMetricsReader, EventActionMetricsSnapshot, EventActionSubmitter, EventState,
-    FanLifecycleState, HttpConfig, OpsState, PushPublicState, ReferralState, TicketingState,
-    tenant::TenantProfile,
+    FanLifecycleState, HttpConfig, OpsState, PushPublicState, RateLimitPolicy, RateLimiter,
+    ReferralState, TicketingState, tenant::TenantProfile,
 };
 use crowdrelay_application::{
     AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan, EventCache,
@@ -219,7 +219,10 @@ async fn main() -> Result<()> {
         config.database.operation_timeout,
         config.admission_security.admin_api_key_sha256,
         config.admission_security.staff_api_key_sha256,
+        config.admission_security.previous_admin_api_key_sha256,
+        config.admission_security.previous_staff_api_key_sha256,
         config.commerce_api_key_sha256,
+        config.previous_commerce_api_key_sha256,
         config.admission_security.qr_signing_key,
     );
     let fan_lifecycle = FanLifecycleState::new(
@@ -235,8 +238,17 @@ async fn main() -> Result<()> {
         config.database.operation_timeout,
     );
     let autopilot = PostgresAutopilotRepository::new(database.clone(), &config.database);
+    let rate_limiter = config.rate_limit.enabled.then(|| {
+        Arc::new(RateLimiter::new(RateLimitPolicy {
+            enabled: true,
+            public_auth_per_minute: config.rate_limit.public_auth_per_minute,
+            privileged_per_minute: config.rate_limit.privileged_per_minute,
+            general_per_minute: config.rate_limit.general_per_minute,
+        }))
+    });
     let http_config = HttpConfig::new(config.allowed_origins.clone())
-        .context("configured CORS origin is not a valid HTTP header value")?;
+        .context("configured CORS origin is not a valid HTTP header value")?
+        .with_rate_limit(rate_limiter);
     let app = crowdrelay_api::router(
         AppState::new(
             database.clone(),
@@ -250,6 +262,8 @@ async fn main() -> Result<()> {
             ticketing,
             config.control_plane_area_api_key_sha256,
             config.control_plane_api_key_sha256,
+            config.previous_control_plane_area_api_key_sha256,
+            config.previous_control_plane_api_key_sha256,
             ops,
             autopilot,
             config.autopilot_enabled,

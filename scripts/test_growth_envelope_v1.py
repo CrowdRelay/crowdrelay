@@ -186,8 +186,12 @@ class GrowthEnvelopeContract(unittest.TestCase):
             "\n}", 1
         )[0]
         self.assertNotIn("tracing::warn", available)
-        # The strict gate stays for the moment an action actually needs it.
-        self.assertIn("ensure_executor_capability_strict", execution)
+        # Assignment is internal routing: the reminder e-mail is skipped when
+        # the executor is down instead of refusing the operator's decision,
+        # so no hard capability gate may remain anywhere.
+        control = read(ROOT / "crates/crowdrelay-infra/src/autopilot/control.rs")
+        self.assertIn("team_email_live", control)
+        self.assertNotIn("ensure_executor_capability_strict", execution + control)
 
     def test_gated_work_is_parked_before_it_is_claimed(self) -> None:
         # Claiming an action spends one of its five attempts. Spending them on a

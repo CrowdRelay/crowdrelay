@@ -58,6 +58,10 @@ jobs:
       CROWDRELAY_TENANT_DATA_REGION: eu
       CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
       CROWDRELAY_REQUIRE_DOUBLE_OPT_IN: "false"
+      # The benchmark drives hundreds of requests per second from one
+      # identity; the protective edge defaults would 429 it mid-run.
+      CROWDRELAY_RATE_LIMIT_GENERAL_PER_MINUTE: "100000"
+      CROWDRELAY_RATE_LIMIT_PRIVILEGED_PER_MINUTE: "100000"
       CROWDRELAY_BOOTSTRAP_JSON: >-
         {"workspace_name":"CrowdRelay Performance","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"Performance","active":true,"smart_links":[{"slug":"perf","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
       RUST_LOG: warn

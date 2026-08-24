@@ -33,6 +33,7 @@ use crowdrelay_worker::{
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     push_delivery::PushDeliveryWorker,
     reminders::EventReminderScheduler,
+    replay::{ReplayOptions, parse_replay_options, run_replay},
     retention::{RetentionWorker, RetentionWorkerConfig},
 };
 use sqlx::PgPool;
@@ -57,12 +58,17 @@ const MAX_BOOTSTRAP_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_WEBHOOK_SECRETS_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_WEBHOOK_SECRET_REFERENCES: usize = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Run,
     Migrate,
     Bootstrap,
     Setup,
+    Replay(ReplayOptions),
+}
+
+impl Command {
+    const KNOWN: &'static str = "`run`, `migrate`, `bootstrap`, `setup`, or `replay`";
 }
 
 #[tokio::main]
@@ -87,6 +93,16 @@ async fn main() -> Result<()> {
             run_migrations(&database).await?;
             run_bootstrap(&database, &config).await?;
         }
+        Command::Replay(options) => {
+            let workspace = trusted_workspace_id(&database, &config).await?;
+            run_replay(
+                &database,
+                workspace,
+                config.workspace_slug.as_str(),
+                options,
+            )
+            .await?;
+        }
         Command::Run => {
             tracing::info!(environment = %config.environment, "CrowdRelay worker started");
             run(database.clone(), &config).await?;
@@ -101,21 +117,40 @@ async fn main() -> Result<()> {
 
 fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command> {
     let mut args = args.into_iter();
-    let command = match args.next().as_deref() {
-        None | Some("run") => Command::Run,
-        Some("migrate") => Command::Migrate,
-        Some("bootstrap") => Command::Bootstrap,
-        Some("setup") => Command::Setup,
+    let head = args.next();
+    let rest: Vec<String> = args.collect();
+    let command = match head.as_deref() {
+        None | Some("run") => {
+            reject_extras(&rest)?;
+            Command::Run
+        }
+        Some("migrate") => {
+            reject_extras(&rest)?;
+            Command::Migrate
+        }
+        Some("bootstrap") => {
+            reject_extras(&rest)?;
+            Command::Bootstrap
+        }
+        Some("setup") => {
+            reject_extras(&rest)?;
+            Command::Setup
+        }
+        Some("replay") => Command::Replay(parse_replay_options(rest)?),
         Some(other) => bail!(
-            "unknown worker command `{other}`; expected `run`, `migrate`, `bootstrap`, or `setup`"
+            "unknown worker command `{other}`; expected {}",
+            Command::KNOWN
         ),
     };
 
-    if let Some(extra) = args.next() {
+    Ok(command)
+}
+
+fn reject_extras(rest: &[String]) -> Result<()> {
+    if let Some(extra) = rest.first() {
         bail!("unexpected worker argument `{extra}`");
     }
-
-    Ok(command)
+    Ok(())
 }
 
 async fn run_migrations(database_pool: &PgPool) -> Result<()> {
@@ -594,7 +629,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse_command};
+    use super::{Command, ReplayOptions, parse_command};
 
     #[test]
     fn defaults_to_run() -> Result<(), Box<dyn std::error::Error>> {
@@ -618,5 +653,32 @@ mod tests {
     #[test]
     fn rejects_unknown_command() {
         assert!(parse_command(["raffle".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn accepts_replay_with_options() -> Result<(), Box<dyn std::error::Error>> {
+        let default = parse_command(["replay".to_owned()])?;
+        assert_eq!(
+            default,
+            Command::Replay(ReplayOptions {
+                since_days: 30,
+                json: false
+            })
+        );
+        let tuned = parse_command([
+            "replay".to_owned(),
+            "--since-days".to_owned(),
+            "90".to_owned(),
+            "--json".to_owned(),
+        ])?;
+        assert_eq!(
+            tuned,
+            Command::Replay(ReplayOptions {
+                since_days: 90,
+                json: true
+            })
+        );
+        assert!(parse_command(["replay".to_owned(), "--bogus".to_owned()]).is_err());
+        Ok(())
     }
 }

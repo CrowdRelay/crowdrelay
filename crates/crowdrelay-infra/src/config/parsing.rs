@@ -348,12 +348,36 @@ fn parse_admission_security(
         parse_optional_secret_hash(values.get(ADMIN_API_KEY_KEY), ADMIN_API_KEY_KEY)?;
     let staff_api_key_sha256 =
         parse_optional_secret_hash(values.get(STAFF_API_KEY_KEY), STAFF_API_KEY_KEY)?;
+    let previous_admin_api_key_sha256 = parse_optional_secret_hash(
+        values.get(PREVIOUS_ADMIN_API_KEY_KEY),
+        PREVIOUS_ADMIN_API_KEY_KEY,
+    )?;
+    let previous_staff_api_key_sha256 = parse_optional_secret_hash(
+        values.get(PREVIOUS_STAFF_API_KEY_KEY),
+        PREVIOUS_STAFF_API_KEY_KEY,
+    )?;
     let qr_signing_key =
         parse_optional_secret_hash(values.get(QR_SIGNING_SECRET_KEY), QR_SIGNING_SECRET_KEY)?;
     if admin_api_key_sha256.is_some() && admin_api_key_sha256 == staff_api_key_sha256 {
         return Err(ConfigError::InvalidSecret {
             name: STAFF_API_KEY_KEY,
         });
+    }
+    for (previous, name) in [
+        (
+            previous_admin_api_key_sha256 == admin_api_key_sha256
+                && previous_admin_api_key_sha256.is_some(),
+            PREVIOUS_ADMIN_API_KEY_KEY,
+        ),
+        (
+            previous_staff_api_key_sha256 == staff_api_key_sha256
+                && previous_staff_api_key_sha256.is_some(),
+            PREVIOUS_STAFF_API_KEY_KEY,
+        ),
+    ] {
+        if previous {
+            return Err(ConfigError::InvalidSecret { name });
+        }
     }
     if production {
         for (name, value) in [
@@ -391,6 +415,8 @@ fn parse_admission_security(
     Ok(AdmissionSecurityConfig {
         admin_api_key_sha256,
         staff_api_key_sha256,
+        previous_admin_api_key_sha256,
+        previous_staff_api_key_sha256,
         qr_signing_key,
         admin_member_email,
         staff_member_email,
@@ -477,4 +503,35 @@ fn parse_member_email(
     NormalizedEmail::parse(value.map(String::as_str).unwrap_or(default))
         .map(NormalizedEmail::into_inner)
         .map_err(|_| ConfigError::InvalidMemberEmail { name })
+}
+
+fn parse_rate_limit(values: &HashMap<String, String>) -> Result<RateLimitConfig, ConfigError> {
+    Ok(RateLimitConfig {
+        enabled: parse_bool(
+            values.get(RATE_LIMIT_ENABLED_KEY),
+            RATE_LIMIT_ENABLED_KEY,
+            true,
+        )?,
+        public_auth_per_minute: parse_bounded_u32(
+            values.get(RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY),
+            RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY,
+            DEFAULT_RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE,
+            0,
+            MAX_RATE_LIMIT_PER_MINUTE,
+        )?,
+        privileged_per_minute: parse_bounded_u32(
+            values.get(RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY),
+            RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY,
+            DEFAULT_RATE_LIMIT_PRIVILEGED_PER_MINUTE,
+            0,
+            MAX_RATE_LIMIT_PER_MINUTE,
+        )?,
+        general_per_minute: parse_bounded_u32(
+            values.get(RATE_LIMIT_GENERAL_PER_MINUTE_KEY),
+            RATE_LIMIT_GENERAL_PER_MINUTE_KEY,
+            DEFAULT_RATE_LIMIT_GENERAL_PER_MINUTE,
+            1,
+            MAX_RATE_LIMIT_PER_MINUTE,
+        )?,
+    })
 }

@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: discord
+
+receivers:
+  - name: discord
+    webhook_configs:
+      - url: http://discord-alert-bridge:9880/alert
+        send_resolved: true

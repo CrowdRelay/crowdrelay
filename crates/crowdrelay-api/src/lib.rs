@@ -27,7 +27,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, MatchedPath, State},
+    extract::{DefaultBodyLimit, Extension, MatchedPath, State},
     http::{
         HeaderMap, HeaderValue, Method, Request, StatusCode,
         header::{
@@ -78,10 +78,12 @@ mod ops_routes;
 mod ops_summary;
 mod proofs;
 mod push;
+mod rate_limit;
 mod referrals;
 mod releases;
 mod routing;
 mod security;
+pub use rate_limit::{RateLimitPolicy, RateLimiter};
 mod staff_sessions;
 mod synesthesia;
 pub mod tenant;
@@ -109,6 +111,7 @@ const X_CROWDRELAY_CORRELATION_ID: HeaderName =
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 const SERVER_TIMING: HeaderName = HeaderName::from_static("server-timing");
 const X_CROWDRELAY_RELEASE: HeaderName = HeaderName::from_static("x-crowdrelay-release");
+const RETRY_AFTER: HeaderName = HeaderName::from_static("retry-after");
 static HTTP_METRICS: OnceLock<Arc<http_metrics::HttpMetrics>> = OnceLock::new();
 
 fn http_metrics() -> &'static Arc<http_metrics::HttpMetrics> {
@@ -140,6 +143,8 @@ pub struct AppState {
     pub(crate) area_admin: crowdrelay_application::AreaAdminService,
     area_management_api_key_sha256: Option<[u8; 32]>,
     control_plane_api_key_sha256: Option<[u8; 32]>,
+    previous_area_management_api_key_sha256: Option<[u8; 32]>,
+    previous_control_plane_api_key_sha256: Option<[u8; 32]>,
     pub(crate) ops: OpsState,
     pub(crate) autopilot: PostgresAutopilotRepository,
     pub(crate) autopilot_runtime_enabled: bool,
@@ -166,6 +171,8 @@ impl AppState {
         ticketing: TicketingState,
         area_management_api_key_sha256: Option<[u8; 32]>,
         control_plane_api_key_sha256: Option<[u8; 32]>,
+        previous_area_management_api_key_sha256: Option<[u8; 32]>,
+        previous_control_plane_api_key_sha256: Option<[u8; 32]>,
         ops: OpsState,
         autopilot: PostgresAutopilotRepository,
         autopilot_runtime_enabled: bool,
@@ -189,6 +196,8 @@ impl AppState {
             area_admin,
             area_management_api_key_sha256,
             control_plane_api_key_sha256,
+            previous_area_management_api_key_sha256,
+            previous_control_plane_api_key_sha256,
             ops,
             autopilot,
             autopilot_runtime_enabled,
@@ -204,6 +213,8 @@ impl AppState {
 pub struct HttpConfig {
     /// CORS origins allowed to make credentialed requests.
     pub allowed_origins: Vec<HeaderValue>,
+    /// Edge rate limiting policy; `None` disables the limiter entirely.
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl HttpConfig {
@@ -216,7 +227,17 @@ impl HttpConfig {
             .map(|origin| HeaderValue::from_str(&origin))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self { allowed_origins })
+        Ok(Self {
+            allowed_origins,
+            rate_limiter: None,
+        })
+    }
+
+    /// Attaches an edge rate limiter built from validated policy.
+    #[must_use]
+    pub fn with_rate_limit(mut self, limiter: Option<Arc<RateLimiter>>) -> Self {
+        self.rate_limiter = limiter;
+        self
     }
 }
 
@@ -270,7 +291,9 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .layer(PropagateRequestIdLayer::new(X_REQUEST_ID.clone()))
-        .layer(cors);
+        .layer(cors)
+        .layer(Extension(config.rate_limiter.clone()))
+        .layer(from_fn(rate_limit::enforce_rate_limits));
 
     routing::application_routes(state.clone())
         .merge(area_admin::router(state.clone()))
@@ -385,29 +408,36 @@ async fn normalize_request_id(
         || path.starts_with("/v1/commerce/")
         || is_area_management_path(path)
         || is_control_plane_management_path(path);
-    let authorization = if path.starts_with("/v1/admin/")
-        && state.ticketing.admin_authorized(request.headers())
-    {
-        Some(PrivilegedAuthorization::Admin)
-    } else if path.starts_with("/v1/staff/")
-        && state.ticketing.operator_authorized(request.headers()).await
-    {
-        Some(PrivilegedAuthorization::Operator)
-    } else if (path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/"))
-        && state.ticketing.commerce_authorized(request.headers())
-    {
-        Some(PrivilegedAuthorization::Commerce)
-    } else if is_area_management_path(path)
-        && security::bearer_sha256_matches(request.headers(), state.area_management_api_key_sha256)
-    {
-        Some(PrivilegedAuthorization::AreaManagement)
-    } else if is_control_plane_management_path(path)
-        && security::bearer_sha256_matches(request.headers(), state.control_plane_api_key_sha256)
-    {
-        Some(PrivilegedAuthorization::ControlPlane)
-    } else {
-        None
-    };
+    let authorization =
+        if path.starts_with("/v1/admin/") && state.ticketing.admin_authorized(request.headers()) {
+            Some(PrivilegedAuthorization::Admin)
+        } else if path.starts_with("/v1/staff/")
+            && state.ticketing.operator_authorized(request.headers()).await
+        {
+            Some(PrivilegedAuthorization::Operator)
+        } else if (path.starts_with("/v1/internal/") || path.starts_with("/v1/commerce/"))
+            && state.ticketing.commerce_authorized(request.headers())
+        {
+            Some(PrivilegedAuthorization::Commerce)
+        } else if is_area_management_path(path)
+            && security::bearer_sha256_matches_either(
+                request.headers(),
+                state.area_management_api_key_sha256,
+                state.previous_area_management_api_key_sha256,
+            )
+        {
+            Some(PrivilegedAuthorization::AreaManagement)
+        } else if is_control_plane_management_path(path)
+            && security::bearer_sha256_matches_either(
+                request.headers(),
+                state.control_plane_api_key_sha256,
+                state.previous_control_plane_api_key_sha256,
+            )
+        {
+            Some(PrivilegedAuthorization::ControlPlane)
+        } else {
+            None
+        };
     if let Some(authorization) = authorization {
         request.extensions_mut().insert(authorization);
     }
@@ -540,6 +570,11 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_legacy_static_staff_auth_total Requests authenticated with the deprecated global staff bearer instead of a device session.\n",
             "# TYPE crowdrelay_legacy_static_staff_auth_total counter\n",
             "crowdrelay_legacy_static_staff_auth_total {}\n",
+            "# HELP crowdrelay_http_rate_limited_total Requests rejected by the edge rate limiter, by limit class.\n",
+            "# TYPE crowdrelay_http_rate_limited_total counter\n",
+            "crowdrelay_http_rate_limited_total{{class=\"public_auth\"}} {}\n",
+            "crowdrelay_http_rate_limited_total{{class=\"privileged\"}} {}\n",
+            "crowdrelay_http_rate_limited_total{{class=\"general\"}} {}\n",
             "# HELP crowdrelay_outbox_pending Current pending outbox events.\n",
             "# TYPE crowdrelay_outbox_pending gauge\n",
             "crowdrelay_outbox_pending {}\n",
@@ -609,6 +644,9 @@ async fn metrics(State(state): State<AppState>) -> Response {
         http_snapshot.legacy_area_claim_imports,
         http_snapshot.legacy_area_wallet_imports,
         http_snapshot.legacy_static_staff_auth,
+        http_snapshot.rate_limited_public_auth,
+        http_snapshot.rate_limited_privileged,
+        http_snapshot.rate_limited_general,
         ops_snapshot.outbox_pending,
         ops_snapshot.outbox_processing,
         ops_snapshot.outbox_dead,
@@ -673,11 +711,15 @@ where
     (status, [(CACHE_CONTROL, "no-store")], Json(body))
 }
 
-fn request_id(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn request_id(headers: &HeaderMap) -> Option<String> {
     headers
         .get(&X_REQUEST_ID)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+pub(crate) fn record_rate_limited(class: &'static str) {
+    http_metrics().record_rate_limited(class);
 }
 
 #[derive(Debug, Serialize)]
@@ -688,6 +730,8 @@ struct Problem {
     detail: &'static str,
     #[serde(skip)]
     cache_control: &'static str,
+    #[serde(skip)]
+    retry_after_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
 }
@@ -700,6 +744,7 @@ impl Problem {
             status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
             detail: "A required dependency is unavailable. Retry later.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -711,6 +756,7 @@ impl Problem {
             status: StatusCode::BAD_REQUEST.as_u16(),
             detail: "The request could not be parsed or validated.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -722,6 +768,7 @@ impl Problem {
             status: StatusCode::UNAUTHORIZED.as_u16(),
             detail: "Valid authentication is required for this operation.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -733,6 +780,7 @@ impl Problem {
             status: StatusCode::NOT_FOUND.as_u16(),
             detail: "The requested resource does not exist or is inactive.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -744,6 +792,7 @@ impl Problem {
             status: StatusCode::CONFLICT.as_u16(),
             detail: "The request cannot be applied to the current durable state.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -755,6 +804,7 @@ impl Problem {
             status: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
             detail: "The supplied values do not satisfy the signup policy.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -766,6 +816,19 @@ impl Problem {
             status: StatusCode::PAYLOAD_TOO_LARGE.as_u16(),
             detail: "The request body exceeds the permitted size.",
             cache_control: "no-store",
+            retry_after_seconds: None,
+            request_id,
+        }
+    }
+
+    fn too_many_requests(request_id: Option<String>) -> Self {
+        Self {
+            r#type: "https://crowdrelay.dev/problems/rate-limited",
+            title: "Too many requests",
+            status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            detail: "The request exceeded the permitted rate. Retry after the indicated interval.",
+            cache_control: "no-store",
+            retry_after_seconds: Some(1),
             request_id,
         }
     }
@@ -777,6 +840,7 @@ impl Problem {
             status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             detail: "The request could not be completed.",
             cache_control: "no-store",
+            retry_after_seconds: None,
             request_id,
         }
     }
@@ -790,7 +854,8 @@ impl Problem {
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
         let cache_control = self.cache_control;
-        (
+        let retry_after = self.retry_after_seconds;
+        let mut response = (
             StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             [
                 (CONTENT_TYPE, "application/problem+json"),
@@ -798,7 +863,13 @@ impl IntoResponse for Problem {
             ],
             Json(self),
         )
-            .into_response()
+            .into_response();
+        if let Some(seconds) = retry_after
+            && let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string())
+        {
+            response.headers_mut().insert(RETRY_AFTER, value);
+        }
+        response
     }
 }
 

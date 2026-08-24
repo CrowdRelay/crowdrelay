@@ -1,0 +1,108 @@
+# CrowdRelay observability stack
+#
+# Scrapes the API's /metrics endpoint, evaluates delivery and edge alerts,
+# routes them through Alertmanager into the same Discord-style webhook that
+# production smoke already uses. Attach with:
+#
+#   CROWDRELAY_DOCKER_NETWORK=crowdrelay_runtime \
+#     docker compose -f compose.observability.yaml up -d
+#
+# Dashboards are opt-in via `--profile dashboards` (Grafana).
+
+name: crowdrelay-observability
+
+services:
+  prometheus:
+    image: ${CROWDRELAY_PROMETHEUS_IMAGE:-prom/prometheus:v3.9.1}
+    command:
+      - --config.file=/etc/crowdrelay/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/crowdrelay/prometheus.yml:ro
+      - ./deploy/observability/alerts.yml:/etc/crowdrelay/alerts.yml:ro
+      - crowdrelay_prometheus:/prometheus
+    expose: ["9090"]
+    init: true
+    read_only: true
+    tmpfs: [/prometheus:size=2g]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: ${CROWDRELAY_PROMETHEUS_MEMORY:-512m}
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+    networks: [runtime]
+
+  alertmanager:
+    image: ${CROWDRELAY_ALERTMANAGER_IMAGE:-prom/alertmanager:v0.28.1}
+    command:
+      - --config.file=/etc/crowdrelay/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./deploy/observability/alertmanager.yml:/etc/crowdrelay/alertmanager.yml:ro
+    expose: ["9093"]
+    init: true
+    read_only: true
+    tmpfs: [/alertmanager:size=64m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: ${CROWDRELAY_ALERTMANAGER_MEMORY:-128m}
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+    networks: [runtime]
+
+  discord-alert-bridge:
+    build:
+      context: .
+      dockerfile: deploy/observability/bridge.Dockerfile
+    image: crowdrelay-alert-bridge:local
+    environment:
+      DISCORD_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:?Set ALERT_WEBHOOK_URL to the shared Discord webhook}
+    expose: ["9880"]
+    init: true
+    read_only: true
+    tmpfs: [/tmp:size=16m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: ${CROWDRELAY_BRIDGE_MEMORY:-64m}
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+    networks: [runtime]
+
+  grafana:
+    image: ${CROWDRELAY_GRAFANA_IMAGE:-grafana/grafana:12.2.1}
+    profiles: [dashboards]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: ""
+    expose: ["3000"]
+    init: true
+    read_only: true
+    tmpfs: [/tmp:size=64m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: ${CROWDRELAY_GRAFANA_MEMORY:-256m}
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+    networks: [runtime]
+
+networks:
+  runtime:
+    external: true
+    name: ${CROWDRELAY_DOCKER_NETWORK:?Set CROWDRELAY_DOCKER_NETWORK}
+
+volumes:
+  crowdrelay_prometheus:
