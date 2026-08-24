@@ -35,6 +35,11 @@ pub struct AuthorityRequest {
     minimum_confidence_basis_points: u16,
     max_actions_24h: u32,
     expected_version: i64,
+    /// Optional domain-policy knobs for this context, validated against the
+    /// same typed config the decision reader parses. Absent means "leave the
+    /// stored knobs alone"; `{}` means reset to defaults.
+    #[serde(default)]
+    config: Option<serde_json::Value>,
 }
 
 /// Whole-envelope write. Every field required: a partial update of a limit set
@@ -49,6 +54,15 @@ pub struct GrowthEnvelopeRequest {
     pub(super) subject_cooldown_hours: u32,
     pub(super) max_recipients_per_step: u32,
     pub(super) expected_version: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrowthPostureRequest {
+    /// One of `grounded`, `working`, `full_send`. Anything else is refused
+    /// here rather than silently mapped to the nearest safe posture.
+    posture: String,
+    expected_version: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +280,11 @@ pub struct TeamOpportunityRequest {
     travel_band: Option<LiveTravelBand>,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// Operator-confirmed, `0..=10_000`. Absent on existing callers defaults to
+    /// Standard tier, so a discovery-posted opportunity is never granted
+    /// prestige by omission.
+    #[serde(default)]
+    strategic_value_basis_points: u16,
     expected_version: i64,
 }
 
@@ -275,6 +294,50 @@ pub struct TeamOpportunityProgressRequest {
     progress: TeamOpportunityProgress,
     #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
+}
+
+/// Where the promoter stands. The agent never invents this: somebody read an
+/// email and wrote down what it said.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromoterPositionRequest {
+    Offer,
+    Withdrawn,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamOpportunityTermsRequest {
+    position: PromoterPositionRequest,
+    /// Ignored on a withdrawal, because there is no longer an offer.
+    #[serde(default)]
+    offered_fee_minor: i64,
+    currency: String,
+    #[serde(with = "time::serde::rfc3339")]
+    responds_by: OffsetDateTime,
+}
+
+/// What one report about a placement says.
+///
+/// `claimed` is the curator's word and counts toward nothing. The other three
+/// are what a public read found — and `unreadable` is deliberately its own
+/// value, because a dead credential is not evidence that a track is gone.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementReportRequest {
+    Claimed,
+    Present,
+    Absent,
+    Unreadable,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistPlacementRequest {
+    opportunity_id: Uuid,
+    playlist_external_id: String,
+    track_external_id: String,
+    report: PlacementReportRequest,
 }
 
 #[derive(Debug, Deserialize)]

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BeaconId, BookingTargetId, EventId, OutreachTargetId, ReleasePlanId, autonomy::Confidence,
-    growth_metrics::MetricValueTier,
+    value_tier::MetricValueTier,
 };
 
 /// The kind of neglect observed. Each kind carries its own horizon, its own
@@ -42,6 +42,11 @@ pub enum GrowthDebtKind {
     /// An active release plan whose milestones stopped being recorded while the
     /// release date kept approaching.
     ReleaseMilestonesMissed,
+    /// An active release plan whose own declaration says its assets are not
+    /// there: no listen URL, or its `assets_ready` flag still false, while the
+    /// release date keeps approaching. The facts are the operator's own
+    /// declarations, so nothing here guesses why they are unmet.
+    ReleaseAssetsMissing,
     /// Contact data nobody has re-verified inside the policy horizon. Hygiene:
     /// no outcome is at stake yet, but every other debt rule depends on it.
     ///
@@ -60,6 +65,7 @@ impl GrowthDebtKind {
             Self::RelationshipQuiet => "relationship_quiet",
             Self::EventLeversSkipped => "event_levers_skipped",
             Self::ReleaseMilestonesMissed => "release_milestones_missed",
+            Self::ReleaseAssetsMissing => "release_assets_missing",
             Self::StaleContactData => "stale_contact_data",
         }
     }
@@ -70,6 +76,7 @@ impl GrowthDebtKind {
             "relationship_quiet" => Some(Self::RelationshipQuiet),
             "event_levers_skipped" => Some(Self::EventLeversSkipped),
             "release_milestones_missed" => Some(Self::ReleaseMilestonesMissed),
+            "release_assets_missing" => Some(Self::ReleaseAssetsMissing),
             "stale_contact_data" => Some(Self::StaleContactData),
             _ => None,
         }
@@ -89,6 +96,9 @@ impl GrowthDebtKind {
             Self::ReleaseMilestonesMissed => {
                 "an active release plan has milestones still unrecorded past their grace period"
             }
+            Self::ReleaseAssetsMissing => {
+                "an active release plan is missing assets it declares: a listen URL or its assets-ready flag"
+            }
             Self::StaleContactData => {
                 "a contact record has not been re-verified inside the policy horizon"
             }
@@ -103,6 +113,7 @@ impl GrowthDebtKind {
             Self::RelationshipQuiet => "revive_quiet_relationship",
             Self::EventLeversSkipped => "complete_event_growth_surfaces",
             Self::ReleaseMilestonesMissed => "resume_release_plan",
+            Self::ReleaseAssetsMissing => "complete_release_assets",
             Self::StaleContactData => "reverify_contact_data",
         }
     }
@@ -119,6 +130,7 @@ impl GrowthDebtKind {
             Self::RelationshipQuiet => "raise_growth_debt_relationship_quiet",
             Self::EventLeversSkipped => "raise_growth_debt_event_levers_skipped",
             Self::ReleaseMilestonesMissed => "raise_growth_debt_release_milestones_missed",
+            Self::ReleaseAssetsMissing => "raise_growth_debt_release_assets_missing",
             Self::StaleContactData => "raise_growth_debt_stale_contact_data",
         }
     }
@@ -129,6 +141,7 @@ impl GrowthDebtKind {
             Self::RelationshipQuiet => "growth_debt_relationship_quiet",
             Self::EventLeversSkipped => "growth_debt_event_levers",
             Self::ReleaseMilestonesMissed => "growth_debt_release_milestones",
+            Self::ReleaseAssetsMissing => "growth_debt_release_assets",
             Self::StaleContactData => "growth_debt_contact_data",
         }
     }
@@ -140,7 +153,9 @@ impl GrowthDebtKind {
     #[must_use]
     pub const fn value_tier(self) -> MetricValueTier {
         match self {
-            Self::EventLeversSkipped | Self::ReleaseMilestonesMissed => MetricValueTier::Downstream,
+            Self::EventLeversSkipped
+            | Self::ReleaseMilestonesMissed
+            | Self::ReleaseAssetsMissing => MetricValueTier::Downstream,
             Self::RelationshipQuiet => MetricValueTier::Intermediate,
             Self::StaleContactData => MetricValueTier::Vanity,
         }
@@ -152,7 +167,7 @@ impl GrowthDebtKind {
     pub const fn is_deadline_bound(self) -> bool {
         matches!(
             self,
-            Self::EventLeversSkipped | Self::ReleaseMilestonesMissed
+            Self::EventLeversSkipped | Self::ReleaseMilestonesMissed | Self::ReleaseAssetsMissing
         )
     }
 
@@ -167,6 +182,7 @@ impl GrowthDebtKind {
     const fn base_priority(self) -> u16 {
         match self {
             Self::EventLeversSkipped => 75,
+            Self::ReleaseAssetsMissing => 70,
             Self::ReleaseMilestonesMissed => 65,
             Self::RelationshipQuiet => 50,
             Self::StaleContactData => 30,
@@ -244,6 +260,9 @@ pub struct GrowthDebtPolicy {
     pub event_lever_lead_time_hours: u32,
     /// Release milestones get this much grace before counting as missed.
     pub release_milestone_grace_hours: u32,
+    /// Declared release assets must be in place this long before the release.
+    /// A listen URL that appears on release morning reaches nobody.
+    pub release_assets_ready_before_hours: u32,
     /// Aggregate kinds need at least this share of their tracked items still
     /// outstanding. Protects a nearly finished plan from being called debt.
     pub minimum_outstanding_basis_points: u32,
@@ -267,6 +286,9 @@ impl Default for GrowthDebtPolicy {
             // distribution still has time to compound.
             event_lever_lead_time_hours: 336,
             release_milestone_grace_hours: 72,
+            // One week: the point past which a missing listen URL stops being
+            // "not uploaded yet" and starts costing every downstream number.
+            release_assets_ready_before_hours: 168,
             minimum_outstanding_basis_points: 2_500,
             cooldown_hours: 336,
             deadline_urgency_hours: 168,
@@ -305,6 +327,7 @@ pub const fn horizon_hours(kind: GrowthDebtKind, policy: GrowthDebtPolicy) -> u3
         GrowthDebtKind::RelationshipQuiet => policy.relationship_quiet_after_hours,
         GrowthDebtKind::EventLeversSkipped => policy.event_lever_lead_time_hours,
         GrowthDebtKind::ReleaseMilestonesMissed => policy.release_milestone_grace_hours,
+        GrowthDebtKind::ReleaseAssetsMissing => policy.release_assets_ready_before_hours,
         GrowthDebtKind::StaleContactData => policy.contact_data_stale_after_hours,
     }
 }
@@ -702,6 +725,7 @@ mod tests {
             GrowthDebtKind::RelationshipQuiet,
             GrowthDebtKind::EventLeversSkipped,
             GrowthDebtKind::ReleaseMilestonesMissed,
+            GrowthDebtKind::ReleaseAssetsMissing,
             GrowthDebtKind::StaleContactData,
         ] {
             assert_eq!(GrowthDebtKind::parse(kind.as_str()), Some(kind));
@@ -720,6 +744,60 @@ mod tests {
         };
         assert_eq!(
             evaluate_growth_debt(&quiet_relationship(), policy),
+            GrowthDebtDecision::Hold
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_assets_tests {
+    use super::*;
+
+    fn observation(idle_hours: u32, hours_until_deadline: i64) -> GrowthDebtObservation {
+        GrowthDebtObservation {
+            kind: GrowthDebtKind::ReleaseAssetsMissing,
+            subject: GrowthDebtSubject::ReleasePlan(ReleasePlanId::from_uuid(uuid::Uuid::now_v7())),
+            idle_hours,
+            outstanding_items: 1,
+            tracked_items: 2,
+            relationship_score: None,
+            hours_until_deadline: Some(hours_until_deadline),
+            hours_since_last_signal: None,
+        }
+    }
+
+    #[test]
+    fn declared_incomplete_and_left_alone_past_the_lead_time_is_debt() {
+        // A week of silence with the operator's own flag saying not ready and
+        // no listen URL anywhere.
+        let decision =
+            evaluate_growth_debt(&observation(24 * 8, 24 * 30), GrowthDebtPolicy::default());
+        let GrowthDebtDecision::Raise(item) = decision else {
+            panic!("expected a raise, got {decision:?}");
+        };
+        assert_eq!(item.kind.value_tier(), MetricValueTier::Downstream);
+        assert_eq!(
+            item.kind.decision_kind(),
+            "raise_growth_debt_release_assets_missing"
+        );
+        assert_eq!(item.kind.recommended_action(), "complete_release_assets");
+    }
+
+    #[test]
+    fn an_operator_still_touching_the_plan_is_not_neglect() {
+        // Edited an hour ago: whatever the flags say, somebody is on it.
+        assert_eq!(
+            evaluate_growth_debt(&observation(1, 24 * 30), GrowthDebtPolicy::default()),
+            GrowthDebtDecision::Hold
+        );
+    }
+
+    #[test]
+    fn the_debt_dies_with_the_release() {
+        // A missing listen URL for a show that already played is a reminder
+        // about nothing.
+        assert_eq!(
+            evaluate_growth_debt(&observation(24 * 60, -5), GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }

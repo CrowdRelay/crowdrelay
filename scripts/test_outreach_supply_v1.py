@@ -32,7 +32,7 @@ MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 VALIDATION = ROOT / "crates/crowdrelay-api/src/autopilot/validation.rs"
 MAPPING = ROOT / "crates/crowdrelay-infra/src/autopilot/mapping.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
-ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs"
+ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/discovery.rs"
 CANDIDATE = (
     ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/outreach_supply.rs"

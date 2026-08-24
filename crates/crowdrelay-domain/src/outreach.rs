@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-use crate::{OutreachOpportunityId, OutreachTargetId, autonomy::Confidence};
+use crate::{
+    OutreachOpportunityId, OutreachTargetId, autonomy::Confidence, free_reach::FreeReachPolicy,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +58,9 @@ pub struct OutreachSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+// Stored configs predate the wave knobs, and a policy row that fails to parse
+// takes the whole context down rather than one field.
+#[serde(default)]
 pub struct OutreachPolicy {
     pub minimum_relevance_basis_points: u16,
     pub minimum_relationship_confidence_basis_points: u16,
@@ -63,6 +68,11 @@ pub struct OutreachPolicy {
     pub followup_after_days: u32,
     pub declined_cooldown_days: u32,
     pub maximum_followups: u16,
+    /// How free-reach pitches are batched for approval. Nested here rather than
+    /// given a context of its own because it is the same operator setting: how
+    /// this workspace approaches people it does not know, and how much of that
+    /// a human is asked to read at once.
+    pub waves: FreeReachPolicy,
 }
 
 impl Default for OutreachPolicy {
@@ -74,6 +84,7 @@ impl Default for OutreachPolicy {
             followup_after_days: 5,
             declined_cooldown_days: 180,
             maximum_followups: 1,
+            waves: FreeReachPolicy::default(),
         }
     }
 }

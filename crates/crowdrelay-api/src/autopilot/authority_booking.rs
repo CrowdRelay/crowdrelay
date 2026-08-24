@@ -67,6 +67,18 @@ pub async fn set_authority(
                     .into_response();
             }
         };
+    // Validate the knobs against the same typed config the decision reader
+    // parses, so an unknown key is a 400 here rather than knobs that are
+    // stored and then silently ignored at read time.
+    if request
+        .config
+        .as_ref()
+        .is_some_and(|raw| AutopilotPolicyConfig::parse_for(context, raw.clone()).is_err())
+    {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
     let idempotency_key = match parse_idempotency_key(&headers) {
         Ok(value) => value,
         Err(response) => return response,
@@ -83,6 +95,7 @@ pub async fn set_authority(
                 minimum_confidence,
                 max_actions_24h: request.max_actions_24h,
                 expected_version: request.expected_version,
+                config: request.config,
             },
             &idempotency_key,
             request_id_value.as_ref(),
@@ -378,6 +391,65 @@ pub async fn acquisition_channels(State(state): State<AppState>, headers: Header
         .await
     {
         Ok(channels) => private_json(StatusCode::OK, channels),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Reads which posture is live. `null` posture means never applied: every
+/// authority surface still holds its provisioned defaults, which is worth
+/// saying explicitly rather than letting a reader assume otherwise.
+pub async fn growth_posture(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_growth_posture(state.ops.workspace_id())
+        .await
+    {
+        Ok(view) => private_json(StatusCode::OK, view),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Applies one of the three named postures atomically.
+///
+/// The whole point of the dial: one call sets every context level, all four
+/// class ceilings and the envelope switches from a reviewed template, instead
+/// of twenty-six edits where the last one is forgotten. Budgets are untouched
+/// on purpose — tune those whenever you like; the posture only ever moves
+/// authority.
+pub async fn set_growth_posture(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GrowthPostureRequest>,
+) -> Response {
+    if request.expected_version <= 0 {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let Some(posture) = GrowthPosture::parse(&request.posture) else {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .set_growth_posture(
+            state.ops.workspace_id(),
+            SetGrowthPosture {
+                posture,
+                expected_version: request.expected_version,
+            },
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }

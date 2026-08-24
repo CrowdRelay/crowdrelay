@@ -13,35 +13,40 @@ use axum::{
 use crowdrelay_application::{
     IdempotencyKey, ListCitiesError, RepositoryError, RequestId,
     autopilot::{
-        AutopilotBeaconStateRepository, AutopilotBookingStateRepository,
-        AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
-        AutopilotExperimentStateRepository, AutopilotGrowthMetricRepository,
-        AutopilotMarketStateRepository, AutopilotMerchStateRepository,
-        AutopilotObjectiveRepository, AutopilotOutreachStateRepository,
-        AutopilotPlayLedgerRepository, AutopilotShowCostRepository,
-        AutopilotTargetDiscoveryRepository, AutopilotTeamStateRepository,
-        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
-        DeclareGrowthObjective, ExperimentObservation, FreezeShowCostPrediction,
-        GrowthMetricSubject, GrowthMetricTrendView, GrowthObjectiveView, IngestOutreachCandidate,
-        ManagerConfigSource, OutreachSweepReport, RecordBeaconReply, RecordBookingReply,
-        RecordGrowthMetricPoint, RecordOutreachReply, RecordTeamOpportunityProgress,
-        SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
-        SettleShowCost, ShowCostLedgerEntry, TeamOpportunityKind, TeamOpportunityProgress,
-        UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource,
-        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
-        UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
-        UpsertReleasePlan, UpsertSubmissionChannel, UpsertTeamOpportunity,
-        UpsertTicketAllocationGuardrail, assign_experiment_variant,
+        AutopilotBeaconStateRepository, AutopilotBookingDiscoveryRepository,
+        AutopilotBookingStateRepository, AutopilotContentStateRepository, AutopilotContext,
+        AutopilotControlRepository, AutopilotExperimentStateRepository,
+        AutopilotGrowthMetricRepository, AutopilotMarketStateRepository,
+        AutopilotMerchStateRepository, AutopilotObjectiveRepository,
+        AutopilotOutreachStateRepository, AutopilotPlayLedgerRepository, AutopilotPolicyConfig,
+        AutopilotShowCostRepository, AutopilotTargetDiscoveryRepository,
+        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
+        CreateExperimentVariant, DeclareGrowthObjective, DeliveryFaultSubject,
+        ExperimentObservation, FreezeShowCostPrediction, GrowthMetricSubject,
+        GrowthMetricTrendView, GrowthObjectiveView, GrowthPosture, IngestOutreachCandidate,
+        ManagerConfigSource, OutreachSweepReport, PromoterPosition, RecordBeaconReply,
+        RecordBookingReply, RecordDeliveryFault, RecordGrowthMetricPoint, RecordOutreachReply,
+        RecordPlaylistPlacement, RecordTeamOpportunityProgress, RecordTeamOpportunityTerms,
+        SetAutopilotAuthority, SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy,
+        SetTourEconomics, SettleShowCost, ShowCostLedgerEntry, TeamOpportunityKind,
+        TeamOpportunityProgress, UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal,
+        UpsertContentSource, UpsertGrowthMetricSeries, UpsertMerchProductEconomics,
+        UpsertOutreachOpportunity, UpsertOutreachTarget, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleasePlan, UpsertSubmissionChannel,
+        UpsertTeamOpportunity, UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
-    AutopilotActionId, BeaconId, BookingTargetId, CityId, CitySlug, ContentSourceId, EventId,
-    ExperimentId, ExperimentVariantId, GrowthMetricSeriesId, MerchProductId, OutreachOpportunityId,
-    OutreachTargetId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
+    AutopilotActionId, AutopilotDecisionId, BeaconId, BookingTargetId, CityId, CitySlug,
+    ContentSourceId, EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId,
+    MerchProductId, OutreachOpportunityId, OutreachTargetId, ReleasePlanId, TeamOpportunityId,
+    TicketTypeId,
     autonomy::{AutonomyLevel, Confidence},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
+    booking_discovery::BookingCandidateInput,
     content_supply::ContentSourceKind,
+    deliverability::DeliveryFault,
     experimentation::ExperimentMetric,
     growth_metrics::{
         FeedCoverage, MetricDirection, MetricPlatform, MetricValueTier, off_platform_coverage,
@@ -50,6 +55,7 @@ use crowdrelay_domain::{
     market_intelligence::CityMarketSignalKind,
     objectives::ObjectiveScope,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
+    playlist_placement::PlacementObservation,
     show_settlement::SettledShowCost,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
     tour_economics::TourEconomicsPolicy,
@@ -148,9 +154,11 @@ pub async fn manager_booking_policy(State(state): State<AppState>, headers: Head
 include!("autopilot/authority_booking.rs");
 include!("autopilot/promotion_market.rs");
 include!("autopilot/outreach_release.rs");
+include!("autopilot/deliverability.rs");
 include!("autopilot/experiments_actions.rs");
 include!("autopilot/growth_metrics.rs");
 include!("autopilot/show_cost.rs");
 include!("autopilot/objectives.rs");
 include!("autopilot/target_discovery.rs");
+include!("autopilot/booking_discovery.rs");
 include!("autopilot/validation.rs");

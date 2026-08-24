@@ -4,7 +4,7 @@
 
 ## Verification
 
-- [ ] `make check`
+- [ ] `just check`
 - [ ] contract assets updated when the API changed
 - [ ] PostgreSQL integration test added or updated for transactional behaviour
 - [ ] migration and rollback implications described

@@ -203,12 +203,45 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
             WHERE plan.workspace_id = $1
               AND plan.active
               AND plan.release_at > $2
+        ),
+        missing_assets AS (
+            SELECT
+                'release_assets_missing' AS debt_kind,
+                'release_plan' AS subject_kind,
+                plan.id AS subject_id,
+                -- The idle clock is the plan's own edit time: an operator who
+                -- keeps touching the plan is on it, whatever the flags say,
+                -- and one who declared it incomplete and walked away is not.
+                GREATEST(
+                    0,
+                    FLOOR(EXTRACT(EPOCH FROM (
+                        $2 - plan.updated_at
+                    )) / 3600)
+                )::bigint AS idle_hours,
+                -- The two declarations the operator controls themselves, so
+                -- both are facts about our records rather than guesses about
+                -- the world.
+                (
+                    CASE WHEN plan.listen_url IS NULL THEN 1 ELSE 0 END
+                    + CASE WHEN NOT plan.assets_ready THEN 1 ELSE 0 END
+                )::bigint AS outstanding_items,
+                2::bigint AS tracked_items,
+                NULL::integer AS relationship_score,
+                FLOOR(EXTRACT(EPOCH FROM (plan.release_at - $2)) / 3600)::bigint
+                    AS hours_until_deadline
+            FROM viryaos_release_plans AS plan
+            WHERE plan.workspace_id = $1
+              AND plan.active
+              AND plan.release_at > $2
+              AND (plan.listen_url IS NULL OR NOT plan.assets_ready)
         )
         SELECT * FROM quiet_relationships
         UNION ALL
         SELECT * FROM skipped_levers
         UNION ALL
         SELECT * FROM missed_milestones
+        UNION ALL
+        SELECT * FROM missing_assets
         ORDER BY idle_hours DESC, subject_id
         LIMIT $4
         "#,

@@ -123,7 +123,9 @@ class TeamAutopilotsContract(unittest.TestCase):
         self.assertIn("contact_email", decisions)
 
     def test_fan_message_intent_contains_verified_delivery_identity(self):
-        actions = text("crates/crowdrelay-infra/src/autopilot/actions.rs")
+        actions = text(
+            "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
+        )
         self.assertIn("viryaos.fan_lifecycle.message_requested", actions)
         self.assertIn('"email": fan.0', actions)
         self.assertIn('"display_name": fan.1', actions)
@@ -190,7 +192,9 @@ class TeamAutopilotsContract(unittest.TestCase):
     def test_beacon_identity_dedup_keeps_distinct_email_less_scene_partners(self):
         migration = text("migrations/0053_beacon_identity_dedup.sql")
         ingress = text("crates/crowdrelay-infra/src/autopilot/operations/ingress/beacons.rs")
-        actions = text("crates/crowdrelay-infra/src/autopilot/actions.rs")
+        actions = text(
+            "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
+        )
         self.assertIn("pg_get_constraintdef(con.oid)", migration)
         self.assertIn("UNIQUE NULLS NOT DISTINCT (workspace_id, beacon_kind, city_id, contact_email)", migration)
         self.assertIn("viryaos_beacons_email_identity_uq", migration)

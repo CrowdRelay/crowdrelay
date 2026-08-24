@@ -1970,6 +1970,149 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/outreach/delivery-faults:
+    post:
+      operationId: recordAutopilotDeliveryFault
+      summary: Record one delivery fault reported by the sending provider
+      description: >-
+        The ear half of deliverability. Bounces and spam complaints are the one
+        number that should stop a wave, and they were invisible until now: a
+        rate nothing records cannot halt anything.
+
+
+        One row per fault, deduplicated on `provider_reference`, so a retried
+        webhook is a replay rather than a second count. A hard bounce also
+        finishes the address through the suppression that already exists —
+        retrying an address that does not exist is how a sender comes to look
+        like somebody working from a bought list.
+
+
+        The ceiling these rates close lives in `crowdrelay_domain::
+        deliverability` and bites before the next send, not in a digest
+        afterwards.
+      security:
+      - commerceBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeliveryFaultRequest' }
+      responses:
+        '200':
+          description: Fault recorded or idempotently replayed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/booking-discovery/candidates:
+    post:
+      operationId: ingestAutopilotBookingCandidates
+      summary: Ingest discovered venue/promoter prospects, screened on write
+      description: >-
+        The booking pipeline's supply. Candidates arrive from an adapter sweep
+        or an operator import and are screened against a closed refusal set in
+        the same transaction — an inferred route, missing evidence or a
+        pay-to-play demand is durable knowledge, so no sweep rediscovers it.
+        Deduplicated on contact identity: one inbox is one prospect however
+        many sources found it. A candidate is not a target; promotion is the
+        operator's confirm call.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingCandidateBatchRequest' }
+      responses:
+        '200':
+          description: Batch screened; counts include duplicates and refusals.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookingCandidateIngestion' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    get:
+      operationId: listAutopilotBookingCandidates
+      summary: List discovery candidates by status
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: status
+        schema: { type: string, enum: [admitted, refused, promoted] }
+      - in: query
+        name: limit
+        schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        '200':
+          description: Candidates, newest first.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BookingCandidateView' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/booking-discovery/candidates/{candidate_id}/confirm:
+    post:
+      operationId: confirmAutopilotBookingCandidate
+      summary: Promote one admitted email-route candidate into a bookable target
+      description: >-
+        The human confirmation that ends a starved negotiation queue. Only an
+        admitted email route with a resolvable city promotes; if the
+        relationship already exists, the candidate links to it instead of
+        resetting its history. Promotion never resets anything.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: candidate_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Promoted, or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/autopilot/booking-discovery/candidates:
+    post:
+      operationId: reportBookingDiscoverySweep
+      summary: Report an executor's venue/promoter sweep
+      description: >-
+        The executor-facing half of booking-target discovery, on the commerce
+        key like every other executor route. Screening is re-applied on ingest
+        regardless of what the adapter believed about any prospect.
+      security:
+      - commerceBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingCandidateBatchRequest' }
+      responses:
+        '200':
+          description: Batch screened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookingCandidateIngestion' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/release-ledger:
     get:
       operationId: getAutopilotReleaseLedger
@@ -2040,6 +2183,64 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/posture:
+    get:
+      operationId: getAutopilotGrowthPosture
+      summary: Read which autonomy posture is live
+      description: >
+        A `null` posture means never applied — every authority surface still holds its
+        provisioned defaults. The posture is the one dial that sets all context levels,
+        the four class ceilings and the envelope switches together; individual knobs
+        remain editable and are only overwritten when a posture is applied again.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Current posture.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GrowthPostureView' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: setAutopilotGrowthPosture
+      summary: Apply an autonomy posture atomically
+      description: >-
+        One call, one transaction, one ledger entry: every context level, all four class
+        ceilings and the envelope switches move to the named posture's template. Two of
+        its properties are absolute — applying a posture is always a human act recorded
+        in the operator ledger, and money (`paid`) stays behind approval in every
+        posture.
+
+
+        Budgets are deliberately untouched: tune weekly touches, cooldowns and blast
+
+        radius whenever you like; the posture moves authority, never your tuned numbers.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrowthPostureRequest' }
+      responses:
+        '200':
+          description: Posture applied or idempotently replayed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutopilotMutation' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/policies/{context}:
@@ -2702,6 +2903,35 @@ paths:
                 maxItems: 10
                 items: { $ref: '#/components/schemas/NextBestAction' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/decisions/{decision_id}/handled-externally:
+    post:
+      operationId: markAutopilotDecisionHandledExternally
+      summary: Record that a human handled this finding outside the system
+      description: >-
+        The "done ourselves" outcome, and deliberately a first-class one rather
+        than a dismissal: an opportunity a human took is a success, and
+        recording it as ignored would teach the ranker the wrong thing.
+
+
+        The decision leaves the queue and the brief, because proposing work
+        somebody already did is how an operator stops reading the board. Any
+        action of it still parked is withdrawn in the same transaction, so a
+        handled finding cannot go out anyway hours later. The ledger row — not
+        a status column on the decision — is what every read model reads, so
+        nothing can disagree about whether this was handled.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: decision_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Handled externally, or idempotently replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/booking-targets/{target_id}/reply:
     post:
@@ -3389,6 +3619,104 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/releases/{release_id}/editorial-pitch:
+    post:
+      operationId: completeAutopilotEditorialPitch
+      summary: Record that the Spotify editorial pitch was submitted
+      description: >
+        The Spotify for Artists editorial pitch is one form per release and has no API. The agent
+        assembles it, works out the deadline and chases it, but cannot submit it and never claims
+        to have. This is the only thing that stops the chasing, and only a human can send it.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: release_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Submission recorded or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/playlist-placements:
+    post:
+      operationId: recordAutopilotPlaylistPlacement
+      summary: Record a placement claim, or what a public read of it found
+      description: >
+        The only way a playlist placement enters the system. `claimed` is the curator's word and
+        counts toward nothing; `present` and `absent` are what a public read found. `unreadable`
+        is deliberately its own value and advances no verification checkpoint, because a dead
+        credential is not evidence that a track is gone. A confirmation that disappears inside the
+        verification window settles as `withdrawn` and permanently suppresses the curator behind
+        it, along with every other target sharing their identity.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlaylistPlacementRequest' }
+      responses:
+        '200': { description: Report accepted or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/outreach-waves/{wave_id}/approve:
+    post:
+      operationId: approveAutopilotOutreachWave
+      summary: Approve a whole free-reach wave
+      description: >
+        Releases every pitch in one sealed wave at once. Approving forty pitches individually is
+        how a human stops approving, so a wave is drafted, sealed and approved as one thing. Only
+        a sealed wave may be approved: one still being drafted would grow after it was read. The
+        returned status carries how many pitches were released.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: wave_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Wave approved or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/team-opportunities/{opportunity_id}/terms:
+    post:
+      operationId: recordAutopilotTeamOpportunityTerms
+      summary: Record where the promoter stands on one opportunity
+      description: >
+        Opens or updates a negotiation. The walk-away floor, the target and the opening ask are
+        computed here from the show's costed trip and the operator's own policy, and are frozen
+        for the life of the conversation. A withdrawal settles whatever was live. A settled
+        negotiation is never reopened by another offer.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - in: path
+        name: opportunity_id
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamOpportunityTermsRequest' }
+      responses:
+        '200': { description: Position accepted or replayed, content: { application/json: { schema: { $ref: '#/components/schemas/AutopilotMutation' } } } }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/team-opportunities/{opportunity_id}/progress:
     post:
       operationId: recordAutopilotTeamOpportunityProgress
@@ -8033,7 +8361,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, apply_live_opportunity, prepare_funding_package, submit_funding_application, send_team_assignment_email, raise_growth_opportunity, raise_growth_debt, issue_referral_code, run_play_step]
+          enum: [change_ticket_price, change_ticket_capacity, request_fan_lifecycle_message, request_merch_reorder, change_merch_price, request_booking_outreach, request_audience_campaign, request_merch_bundle, request_outreach, request_beacon_discovery, request_beacon_outreach, request_show_growth, request_content_artifact, adjust_experiment, complete_show_task, escalate_show_task, request_promotion_budget_change, execute_release_milestone, escalate_editorial_pitch, apply_live_opportunity, counter_live_opportunity_terms, accept_live_opportunity_terms, verify_playlist_placement, prepare_funding_package, submit_funding_application, send_team_assignment_email, raise_growth_opportunity, raise_growth_debt, issue_referral_code, run_play_step]
       additionalProperties: true
     TeamAssigneeSummary:
       type: object
@@ -8321,11 +8649,27 @@ components:
     PlayLedgerEntry:
       type: object
       additionalProperties: false
-      required: [play_id, kind, event_id, anchor_at, hypothesis, state, started_at, steps_total, steps_settled, steps_skipped, recipients_reached, claims]
+      required: [play_id, kind, anchor, anchor_at, hypothesis, state, started_at, steps_total, steps_settled, steps_skipped, recipients_reached, claims]
       properties:
         play_id: { type: string, format: uuid }
-        kind: { type: string, enum: [track_us_ask, listing_completeness_sweep] }
-        event_id: { type: string, format: uuid }
+        kind: { type: string, enum: [track_us_ask, listing_completeness_sweep, follow_ask_ladder, dormant_revival] }
+        anchor:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind, event_id]
+              properties:
+                kind: { type: string, enum: [event] }
+                event_id: { type: string, format: uuid }
+            - type: object
+              additionalProperties: false
+              required: [kind, fan_id]
+              properties:
+                kind: { type: string, enum: [fan] }
+                fan_id: { type: string, format: uuid }
+          description: >
+            What the play hangs off. A show for the show-timed plays, and one fan for the
+            follow-ask ladder, which is climbed by a person rather than scheduled around a date.
         anchor_at: { type: string, format: date-time }
         hypothesis: { type: string, maxLength: 400 }
         state: { type: string, enum: [running, completed] }
@@ -8373,7 +8717,7 @@ components:
       additionalProperties: false
       required: [kind, record, standing, effective_max_recipients_per_step]
       properties:
-        kind: { type: string, enum: [track_us_ask, listing_completeness_sweep] }
+        kind: { type: string, enum: [track_us_ask, listing_completeness_sweep, follow_ask_ladder, dormant_revival] }
         record: { $ref: '#/components/schemas/PlayRecordCounts' }
         standing: { $ref: '#/components/schemas/PlayStanding' }
         effective_max_recipients_per_step: { type: integer, minimum: 0 }
@@ -8460,6 +8804,15 @@ components:
         minimum_confidence_basis_points: { type: integer, minimum: 0, maximum: 10000 }
         max_actions_24h: { type: integer, minimum: 1, maximum: 1000 }
         expected_version: { type: integer, format: int64, minimum: 1 }
+        config:
+          type: object
+          description: >
+            Optional domain-policy knobs for this context (screening floors, lead
+            windows, cooldowns), validated against the same typed config the
+            decision reader parses — an unknown key is refused here rather than
+            stored and silently ignored. Absent leaves the stored knobs alone;
+            an empty object resets them to defaults. This is how parameters are
+            tuned from the control plane without code changes.
     BookingTargetKind:
       type: string
       enum: [venue, promoter, festival]
@@ -8887,6 +9240,14 @@ components:
           - $ref: '#/components/schemas/LiveTravelBand'
           - type: 'null'
         metadata: { type: object, additionalProperties: true }
+        strategic_value_basis_points:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          default: 0
+          description: >
+            Operator-confirmed prestige, 0..=10000. A name match against a landmark promoter or
+            festival list is a suggestion an operator confirms here, never an automatic grant.
         expected_version: { type: integer, format: int64, minimum: 0 }
     TeamOpportunityMutation:
       type: object
@@ -8897,6 +9258,45 @@ components:
         opportunity_id: { type: string, format: uuid }
         version: { type: integer, format: int64, minimum: 1 }
         replayed: { type: boolean }
+    PlaylistPlacementRequest:
+      type: object
+      additionalProperties: false
+      required: [opportunity_id, playlist_external_id, track_external_id, report]
+      properties:
+        opportunity_id: { type: string, format: uuid }
+        playlist_external_id: { type: string, minLength: 1, maxLength: 200 }
+        track_external_id: { type: string, minLength: 1, maxLength: 200 }
+        report:
+          type: string
+          enum: [claimed, present, absent, unreadable]
+          description: >
+            `claimed` opens the placement and counts toward nothing. `present` and `absent` are
+            what a read found. `unreadable` records that the read did not happen and advances no
+            checkpoint.
+    TeamOpportunityTermsRequest:
+      type: object
+      additionalProperties: false
+      required: [position, currency, responds_by]
+      properties:
+        position:
+          type: string
+          enum: [offer, withdrawn]
+          description: >
+            What the promoter has said. The agent never invents this: somebody read an email and
+            wrote down what it said.
+        offered_fee_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+          description: Ignored on a withdrawal, because there is no longer an offer.
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        responds_by:
+          type: string
+          format: date-time
+          description: >
+            When the promoter's side goes cold. Must be in the future — a window that has already
+            closed opens a negotiation the next cycle immediately expires.
     TeamOpportunityProgressRequest:
       type: object
       additionalProperties: false
@@ -9123,9 +9523,18 @@ components:
     NextBestAction:
       type: object
       additionalProperties: false
-      required: [position, context, decision_kind, subject_kind, subject_id, authority, confidence, reason, recommended_action, ranked_by, consequence]
+      required: [position, decision_id, context, decision_kind, subject_kind, subject_id, authority, confidence, reason, recommended_action, ranked_by, consequence]
       properties:
         position: { type: integer, minimum: 1, maximum: 10 }
+        decision_id:
+          type: string
+          format: uuid
+          description: The finding itself — the target of a handled-externally write.
+        action_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The newest action this finding produced, where one exists.
         context: { $ref: '#/components/schemas/AutopilotContext' }
         decision_kind: { type: string, maxLength: 96 }
         subject_kind: { type: string, maxLength: 64 }
@@ -9819,6 +10228,126 @@ components:
         target_id: { type: string, format: uuid }
         status: { type: string, maxLength: 64 }
         replayed: { type: boolean }
+
+    GrowthPostureRequest:
+      type: object
+      additionalProperties: false
+      required: [posture, expected_version]
+      properties:
+        posture:
+          type: string
+          enum: [grounded, working, full_send]
+          description: >
+            grounded = sees everything, touches nobody (dry run). working =
+            first-party work runs alone; outward contact drafts for one-click
+            approval. full_send = owned audience and free pitching run
+            unattended within budget/cooldown/deliverability; money stays human.
+        expected_version: { type: integer, minimum: 1 }
+
+    GrowthPostureView:
+      type: object
+      additionalProperties: false
+      required: [posture, expected_version, set_at]
+      properties:
+        posture:
+          type: string
+          nullable: true
+          enum: [grounded, working, full_send, null]
+          description: Null until the first posture has been applied to this workspace.
+        expected_version: { type: integer, minimum: 1 }
+        set_at: { type: string, format: date-time, nullable: true }
+
+    BookingCandidateBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: '#/components/schemas/BookingCandidateRequest' }
+
+    BookingCandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [target_kind, display_name, route_kind, route_value, source, source_reference, fit_basis_points, route_is_published]
+      properties:
+        target_kind:
+          type: string
+          enum: [venue, promoter, festival]
+        display_name: { type: string, minLength: 1, maxLength: 200 }
+        city_slug:
+          type: string
+          maxLength: 80
+          description: Required for promotion — booking targets are city-scoped.
+        route_kind:
+          type: string
+          enum: [email, submission_form, handle]
+        route_value: { type: string, minLength: 1, maxLength: 2048 }
+        source: { type: string, minLength: 1, maxLength: 64 }
+        source_reference: { type: string, minLength: 1, maxLength: 2048 }
+        evidence:
+          type: string
+          maxLength: 4000
+          description: Verbatim published text the route was read from; refused without it.
+        fit_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        paid_to_apply:
+          type: boolean
+          description: The adapter's raw signal. A pay-to-play demand is a permanent refusal.
+        route_is_published:
+          type: boolean
+          description: False means the route was inferred — also permanent.
+        capacity: { type: integer, minimum: 1 }
+
+    BookingCandidateIngestion:
+      type: object
+      additionalProperties: false
+      required: [reported, admitted, refused, duplicates]
+      properties:
+        reported: { type: integer, minimum: 0 }
+        admitted: { type: integer, minimum: 0 }
+        refused: { type: integer, minimum: 0 }
+        duplicates: { type: integer, minimum: 0 }
+
+    BookingCandidateView:
+      type: object
+      additionalProperties: false
+      required: [candidate_id, target_kind, display_name, route_kind, route_value, source, fit_basis_points, status]
+      properties:
+        candidate_id: { type: string, format: uuid }
+        target_kind: { type: string, enum: [venue, promoter, festival] }
+        display_name: { type: string }
+        city_slug: { type: string, nullable: true }
+        route_kind: { type: string, enum: [email, submission_form, handle] }
+        route_value: { type: string }
+        source: { type: string }
+        fit_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        status: { type: string, enum: [admitted, refused, promoted] }
+        refusal_reason:
+          type: string
+          nullable: true
+          enum: [route_inferred, evidence_missing, paid_to_apply, poor_fit, null]
+        booking_target_id: { type: string, format: uuid, nullable: true }
+
+    DeliveryFaultRequest:
+      type: object
+      additionalProperties: false
+      required: [target_id, fault, occurred_at]
+      properties:
+        target_id: { type: string, format: uuid }
+        fault:
+          type: string
+          enum: [hard_bounce, soft_bounce, complaint]
+          description: >-
+            A hard bounce means the address does not exist and finishes the
+            target. A soft bounce counts toward the rate and suppresses
+            nobody. A complaint is the most expensive signal there is.
+        provider_reference:
+          type: string
+          maxLength: 200
+          description: The provider's own reference where it gave one. Deduplicated on.
+        occurred_at: { type: string, format: date-time }
 
     OpsQueueSummary:
       type: object

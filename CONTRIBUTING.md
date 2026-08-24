@@ -9,7 +9,7 @@ CrowdRelay accepts focused changes that preserve the reliability and privacy gua
 3. Add or update Rustdoc for public APIs.
 4. Add unit tests for domain/application rules and PostgreSQL integration tests for transactional behavior.
 5. Keep `openapi/openapi.yaml`, the browser client, migrations, and examples synchronized.
-6. Run `make check` and `node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts`.
+6. Run `just check` and `node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts`.
 7. Explain security, migration, and operational implications in the pull request.
 
 ## Engineering rules

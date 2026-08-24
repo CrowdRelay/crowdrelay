@@ -189,7 +189,9 @@ class FanActivationContract(unittest.TestCase):
             ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/candidates.rs"
         )
         self.assertIn('format!("action:referral-code:{}", snapshot.fan_id)', candidates)
-        actions = read(ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs")
+        actions = read(
+            ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
+        )
         guard = actions.split("INSERT INTO referral_codes", 1)[1].split('"#', 1)[0]
         self.assertIn("WHERE NOT EXISTS", guard)
         self.assertIn("ON CONFLICT DO NOTHING", guard)

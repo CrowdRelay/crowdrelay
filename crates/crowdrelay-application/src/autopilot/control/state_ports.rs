@@ -375,6 +375,10 @@ pub struct UpsertTeamOpportunity {
     pub country_code: Option<String>,
     pub travel_band: Option<LiveTravelBand>,
     pub metadata: serde_json::Value,
+    /// Operator-confirmed, `0..=10_000`. A name match against a landmark
+    /// promoter or festival list is a suggestion an operator confirms here,
+    /// never an automatic grant.
+    pub strategic_value_basis_points: u16,
     pub expected_version: i64,
 }
 
@@ -404,6 +408,48 @@ pub struct RecordTeamOpportunityProgress {
     pub occurred_at: OffsetDateTime,
 }
 
+/// Where the promoter stands right now.
+///
+/// The agent never invents this. Somebody read an email and wrote down what it
+/// said, and everything the negotiation does afterwards hangs off that.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromoterPosition {
+    /// A fee is on the table.
+    Offer { fee_minor: i64 },
+    /// They have gone. The negotiation settles and nothing further is drafted.
+    Withdrawn,
+}
+
+#[derive(Clone, Debug)]
+pub enum DeliveryFaultSubject {
+    /// The target is already known.
+    Target(OutreachTargetId),
+    /// The provider reported a recipient address. Resolved to the workspace's
+    /// target by normalized email; an unknown address is a 404 rather than a
+    /// silently dropped complaint, because a complaint about somebody who is
+    /// not in the system is still a complaint about the sending domain.
+    ContactEmail(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordDeliveryFault {
+    pub subject: DeliveryFaultSubject,
+    pub fault: DeliveryFault,
+    /// The provider's own reference, where it gave one. Webhooks retry, and a
+    /// retried complaint counted twice is a halt nobody earned.
+    pub provider_reference: Option<String>,
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordTeamOpportunityTerms {
+    pub opportunity_id: TeamOpportunityId,
+    pub position: PromoterPosition,
+    pub currency: String,
+    /// When the promoter's side of this goes cold.
+    pub responds_by: OffsetDateTime,
+}
+
 #[async_trait]
 pub trait AutopilotTeamStateRepository: Send + Sync {
     async fn upsert_release_plan(
@@ -424,6 +470,59 @@ pub trait AutopilotTeamStateRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         command: RecordTeamOpportunityProgress,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Records one bounce or spam complaint reported by the sending provider.
+    ///
+    /// The only way either becomes visible. A hard bounce also finishes the
+    /// address, through the suppression that already exists rather than a
+    /// second one invented here.
+    async fn record_delivery_fault(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordDeliveryFault,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Records that a human submitted the Spotify editorial pitch.
+    ///
+    /// The only way it ever becomes true. Nothing the agent can read would tell
+    /// it, and inferring it from silence is how a release goes out with no
+    /// pitch and a green dashboard.
+    async fn complete_editorial_pitch(
+        &self,
+        workspace_id: WorkspaceId,
+        release_id: ReleasePlanId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Records a curator's placement claim, or the result of one public read of
+    /// it.
+    ///
+    /// The only way a placement ever enters the system. A claim opens the row
+    /// and counts toward nothing; a read folds in and may settle it.
+    async fn record_playlist_placement(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordPlaylistPlacement,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError>;
+
+    /// Records what the promoter has said, and opens the negotiation if this is
+    /// the first thing they have said.
+    ///
+    /// The ladder is computed here, once, from the show's costed trip and the
+    /// operator's own policy — and never recomputed, so a counter sent last
+    /// week stays explainable from the row today.
+    async fn record_team_opportunity_terms(
+        &self,
+        workspace_id: WorkspaceId,
+        command: RecordTeamOpportunityTerms,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<AutopilotControlMutation, RepositoryError>;

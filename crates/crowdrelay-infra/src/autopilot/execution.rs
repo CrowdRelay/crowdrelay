@@ -230,12 +230,25 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::RequestContentArtifact { .. }
         | AutopilotActionPayload::RequestBeaconDiscovery { .. }
         | AutopilotActionPayload::RequestOutreachDiscovery { .. }
+        | AutopilotActionPayload::RequestBookingTargetDiscovery { .. }
+        | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
         | AutopilotActionPayload::RequestBeaconOutreach { .. }
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
         | AutopilotActionPayload::EscalateShowTask { .. }
         | AutopilotActionPayload::ExecuteReleaseMilestone { .. }
         | AutopilotActionPayload::ApplyLiveOpportunity { .. }
+        // A verification measures nothing; it decides whether anything may be
+        // counted at all. Its result lands on the placement row.
+        | AutopilotActionPayload::VerifyPlaylistPlacement { .. }
+        // A reminder measures nothing either. Whether the pitch was submitted
+        // is a thing only a human can report.
+        | AutopilotActionPayload::EscalateEditorialPitch { .. }
+        // A negotiation's effect is the booking, and the booking is measured
+        // where it belongs: Phase 7's predicted cost against the settled one.
+        // A seventy-two hour window after a counter measures nothing.
+        | AutopilotActionPayload::CounterLiveOpportunityTerms { .. }
+        | AutopilotActionPayload::AcceptLiveOpportunityTerms { .. }
         | AutopilotActionPayload::PrepareFundingPackage { .. }
         | AutopilotActionPayload::SubmitFundingApplication { .. }
         // A play's effect is the play's, not one send's: a tracker count moves
@@ -326,7 +339,11 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestOutreach { .. } => ("outreach_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => ("beacon_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => ("outreach_discovery_requested", 1.0, None),
+        AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => ("booking_target_discovery_requested", 1.0, None),
         AutopilotActionPayload::RequestBeaconOutreach { .. } => ("beacon_outreach_requested", 1.0, None),
+        AutopilotActionPayload::RequestBeaconInviteBatch { requested_count, .. } => {
+            ("beacon_invite_batch_requested", f64::from(*requested_count), None)
+        }
         AutopilotActionPayload::RaiseGrowthOpportunity {
             deviation_basis_points,
             ..
@@ -373,6 +390,21 @@ pub(super) async fn record_execution_outcome(
         ),
         AutopilotActionPayload::ExecuteReleaseMilestone { .. } => ("release_milestone_executed",1.0,None),
         AutopilotActionPayload::ApplyLiveOpportunity { score, .. } => ("live_opportunity_score",f64::from(*score),None),
+        AutopilotActionPayload::VerifyPlaylistPlacement { checkpoint, .. } => {
+            ("playlist_placement_checked", f64::from(*checkpoint), None)
+        }
+        AutopilotActionPayload::EscalateEditorialPitch { .. } => {
+            ("editorial_pitch_escalated", 1.0, None)
+        }
+        // The number worth recording is the money asked for or taken. A round
+        // count would say how hard the agent pushed and nothing about whether
+        // the push was worth making.
+        AutopilotActionPayload::CounterLiveOpportunityTerms { ask_minor, .. } => {
+            ("live_opportunity_counter_minor", *ask_minor as f64, None)
+        }
+        AutopilotActionPayload::AcceptLiveOpportunityTerms { fee_minor, .. } => {
+            ("live_opportunity_accepted_minor", *fee_minor as f64, None)
+        }
         AutopilotActionPayload::PrepareFundingPackage { .. } => ("funding_package_requested",1.0,None),
         AutopilotActionPayload::SubmitFundingApplication { .. } => ("funding_submission_requested",1.0,None),
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {
@@ -586,11 +618,15 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::RequestOutreach { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
+                | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
                 | AutopilotActionPayload::RequestBeaconOutreach { .. }
                 | AutopilotActionPayload::RequestContentArtifact { .. }
                 | AutopilotActionPayload::EscalateShowTask { .. }
                 | AutopilotActionPayload::RequestPromotionBudgetChange { .. }
                 | AutopilotActionPayload::ApplyLiveOpportunity { .. }
+                | AutopilotActionPayload::VerifyPlaylistPlacement { .. }
+                | AutopilotActionPayload::CounterLiveOpportunityTerms { .. }
+                | AutopilotActionPayload::AcceptLiveOpportunityTerms { .. }
                 | AutopilotActionPayload::PrepareFundingPackage { .. }
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
                 | AutopilotActionPayload::RunPlayStep { .. }
@@ -620,12 +656,17 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
+        AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",
         AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
+        AutopilotActionPayload::RequestBeaconInviteBatch { .. } => "beacon.invite_batch",
         AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
         AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",
         AutopilotActionPayload::EscalateShowTask { .. } => "show.escalation",
         AutopilotActionPayload::RequestPromotionBudgetChange { .. } => "promotion.budget",
         AutopilotActionPayload::ApplyLiveOpportunity { .. } => "opportunity.application",
+        AutopilotActionPayload::VerifyPlaylistPlacement { .. } => "playlist.verify",
+        AutopilotActionPayload::CounterLiveOpportunityTerms { .. } => "opportunity.terms",
+        AutopilotActionPayload::AcceptLiveOpportunityTerms { .. } => "opportunity.terms",
         AutopilotActionPayload::PrepareFundingPackage { .. } => "funding.package",
         AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
         AutopilotActionPayload::RunPlayStep { .. } => "play.step",
@@ -645,7 +686,9 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.outreach.requested" => "outreach.send",
         "viryaos.beacon.discovery_requested" => "beacon.discovery",
         "viryaos.outreach.discovery_requested" => "outreach.discovery",
+        "viryaos.booking.target_discovery_requested" => "booking.discovery",
         "viryaos.beacon.outreach_requested" => "beacon.outreach",
+        "viryaos.beacon.invite_batch_requested" => "beacon.invite_batch",
         "viryaos.beacon.release_delivery_confirmation_requested" => "beacon.release.mail",
         "viryaos.beacon.network_discovery_requested" => "beacon.network.discovery",
         "viryaos.beacon.invite_delivery_requested" => "beacon.network.invite",
@@ -655,6 +698,13 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "viryaos.ops.status_changed" => "ops.alert",
         "viryaos.promotion.budget_change_requested" => "promotion.budget",
         "viryaos.opportunity.application_requested" => "opportunity.application",
+        // One capability for both moves. An executor that can write to a
+        // promoter can write either message, and splitting them would let a
+        // workspace advertise the ability to accept without the ability to
+        // counter — which is the wrong half to have.
+        "viryaos.playlist.placement_check_requested" => "playlist.verify",
+        "viryaos.opportunity.terms_countered" => "opportunity.terms",
+        "viryaos.opportunity.terms_accepted" => "opportunity.terms",
         "viryaos.funding.package_requested" => "funding.package",
         "viryaos.funding.submission_requested" => "funding.submit",
         "viryaos.calendar.upsert_requested" => "calendar.upsert",

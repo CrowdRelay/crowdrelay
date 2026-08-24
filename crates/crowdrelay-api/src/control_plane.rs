@@ -80,6 +80,24 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/policies/{context}",
             post(crate::autopilot::set_authority),
         )
+        // The opportunity board: what the agent found and parked, then the two
+        // decisions a human can make about one finding. "Do it" approves the
+        // parked action through the existing approval handler and "done
+        // ourselves" records a human took it outside the system — both reuse
+        // the canonical admin handlers verbatim, so this surface grows no
+        // authority path of its own.
+        .route(
+            "/v1/control-plane/autopilot/next-best-actions",
+            get(crate::autopilot::next_best_actions),
+        )
+        .route(
+            "/v1/control-plane/autopilot/actions/{action_id}/approve",
+            post(crate::autopilot::approve_action),
+        )
+        .route(
+            "/v1/control-plane/autopilot/decisions/{decision_id}/handled-externally",
+            post(crate::autopilot::mark_decision_handled_externally),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher

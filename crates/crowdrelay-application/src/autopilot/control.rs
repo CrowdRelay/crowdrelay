@@ -2,15 +2,16 @@
 
 use async_trait::async_trait;
 use crowdrelay_domain::{
-    AutopilotActionId, AutopilotMeasurementId, BeaconId, BookingTargetId, CityId, ContentSourceId,
-    EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId, MarketSignalId,
-    MerchProductId, OutreachOpportunityId, OutreachTargetId, PlayId, PromotionCampaignId,
-    ReleasePlanId, TeamOpportunityId, WorkspaceId,
+    AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BeaconId, BookingTargetId,
+    CityId, ContentSourceId, EventId, ExperimentId, ExperimentVariantId, GrowthMetricSeriesId,
+    MarketSignalId, MerchProductId, OutreachOpportunityId, OutreachTargetId, PlayId,
+    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, WorkspaceId,
     acquisition_channel::{ChannelAttribution, UnattributedReason},
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconKind, BeaconReplyDisposition},
     booking::{BookingReplyDisposition, BookingTargetKind},
     content_supply::ContentSourceKind,
+    deliverability::DeliveryFault,
     experimentation::{ExperimentAllocationSlot, ExperimentMetric, assign_variant},
     fan_activation::MeaningfulAction,
     growth_metrics::{MetricDirection, MetricPlatform, MetricValueTier},
@@ -30,7 +31,11 @@ use serde::{Deserialize, Serialize, Serializer};
 use time::OffsetDateTime;
 
 use super::{
-    model::{AutopilotActionPayload, AutopilotContext, PlayKindStanding},
+    growth_posture::GrowthPosture,
+    model::{
+        AutopilotActionPayload, AutopilotContext, PlayAnchorRef, PlayKindStanding,
+        RecordPlaylistPlacement,
+    },
     ports::AutopilotMeasurementKind,
 };
 use crate::{IdempotencyKey, RepositoryError, RequestId};
@@ -275,6 +280,14 @@ pub struct AcquisitionChannels {
     pub channels: Vec<ChannelPerformance>,
     pub total_signups: u32,
     pub total_activated_30d: u32,
+    /// Did something meaningful in the last 30 days, however they arrived —
+    /// retention, not acquisition. The campaign brief's headline number,
+    /// derived from the facts on every read rather than stored and left to go
+    /// stale.
+    pub active_30d: u32,
+    /// Everyone contactable right now, whatever their signup date. The
+    /// denominator every owned-audience decision should be checked against.
+    pub reachable_consented: u32,
     /// People whose channel could not be established, by reason. Reported
     /// prominently: a report that hides its unknowns is how a 40% attribution
     /// gap goes unnoticed for a month.
@@ -320,6 +333,12 @@ pub struct TourEconomicsMutation {
 #[derive(Clone, Debug, Serialize)]
 pub struct NextBestAction {
     pub position: u8,
+    /// The finding itself, so an operator can say "we did this ourselves"
+    /// about exactly this row rather than about a subject and a guess.
+    pub decision_id: uuid::Uuid,
+    /// The newest action this finding produced, where one exists — what a
+    /// "do it" click approves through the existing approval path.
+    pub action_id: Option<uuid::Uuid>,
     pub context: AutopilotContext,
     pub decision_kind: String,
     pub subject_kind: String,
@@ -462,7 +481,7 @@ pub struct AutopilotChiefOfStaff {
 
 /// Authority-only policy mutation. Domain-specific thresholds remain typed
 /// config owned by code/migrations until a dedicated validated editor exists.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SetAutopilotAuthority {
     pub context: AutopilotContext,
     pub enabled: bool,
@@ -471,6 +490,10 @@ pub struct SetAutopilotAuthority {
     pub max_actions_24h: u32,
     /// Optimistic-concurrency guard from the overview read model.
     pub expected_version: i64,
+    /// Optional domain-policy knobs (already validated by the caller against
+    /// [`AutopilotPolicyConfig::parse_for`]). `None` leaves the stored knobs
+    /// alone; an empty object resets them to defaults.
+    pub config: Option<serde_json::Value>,
 }
 
 /// Operator command for the envelope, including the kill switch.
@@ -493,6 +516,32 @@ pub struct SetGrowthEnvelope {
     pub subject_cooldown_hours: u32,
     pub max_recipients_per_step: u32,
     pub expected_version: i64,
+}
+
+/// Applies one of the three named postures atomically.
+///
+/// One write sets every context level, all four class ceilings and the
+/// envelope switches from the posture template — the alternative is
+/// twenty-six endpoint calls and a missed switch. `expected_version` guards
+/// the posture row itself; individual knobs stay editable afterwards and are
+/// only overwritten the next time somebody applies a posture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetGrowthPosture {
+    pub posture: GrowthPosture,
+    pub expected_version: i64,
+}
+
+/// What the operator sees when they ask which posture is live.
+#[derive(Clone, Debug, Serialize)]
+pub struct GrowthPostureView {
+    /// `None` until somebody has applied a posture for the first time; every
+    /// authority surface still holds its provisioned defaults meanwhile, so
+    /// "never set" reads as exactly what it is rather than as a guess.
+    #[serde(rename = "posture")]
+    pub posture: Option<GrowthPosture>,
+    pub expected_version: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub set_at: Option<OffsetDateTime>,
 }
 
 /// Result of an audited operator mutation.

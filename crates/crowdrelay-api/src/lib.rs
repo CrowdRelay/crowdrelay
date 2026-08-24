@@ -288,6 +288,14 @@ fn one_segment_after(path: &str, prefix: &str) -> bool {
         .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'))
 }
 
+/// One identifier segment between a fixed prefix and a fixed suffix, e.g.
+/// `/v1/control-plane/autopilot/actions/{id}/approve`.
+fn one_segment_with_suffix(path: &str, prefix: &str, suffix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .and_then(|tail| tail.strip_suffix(suffix))
+        .is_some_and(|segment| !segment.is_empty() && !segment.contains('/'))
+}
+
 fn is_control_plane_management_path(path: &str) -> bool {
     path.starts_with("/v1/control-plane/ops/")
         || matches!(
@@ -300,6 +308,13 @@ fn is_control_plane_management_path(path: &str) -> bool {
         )
         || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
         || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
+        || path == "/v1/control-plane/autopilot/next-best-actions"
+        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/actions/", "/approve")
+        || one_segment_with_suffix(
+            path,
+            "/v1/control-plane/autopilot/decisions/",
+            "/handled-externally",
+        )
 }
 
 async fn enforce_privileged_namespace(

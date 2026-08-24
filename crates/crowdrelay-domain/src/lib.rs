@@ -23,6 +23,25 @@
 //! time, so downstream code can rely on structural correctness without
 //! re-validating.
 //!
+//! # Two tiers of modules — the engine/domain boundary
+//!
+//! Modules here split into two tiers, enforced by
+//! `scripts/test_engine_boundaries_v1.py`:
+//!
+//! **Engine core** (domain-agnostic mechanics, reusable by any vertical):
+//! `autonomy`, `action_class`, `growth_envelope`, `deliverability`,
+//! `learning`, `performance`, `next_best_action`. These may not import or
+//! name any bounded-context module. When a rule needs a domain fact (a
+//! ceiling, a threshold, a subject id), it takes that fact as a parameter —
+//! see `learning::effective_recipient_ceiling` taking a plain count rather
+//! than a play policy.
+//!
+//! **Bounded contexts** (`plays`, `beacons`, `live_opportunities`,
+//! `growth_metrics`, `fan_activation`, …): everything music-specific, plus
+//! whatever a future vertical would swap in. Adding a new business domain
+//! means adding contexts here and adapters in infra — never touching engine
+//! core.
+//!
 //! # Privacy
 //!
 //! Secret-bearing types (`NormalizedEmail`, `ReferralCode`, `CouponCode`,
@@ -40,12 +59,15 @@ pub mod autonomy;
 pub mod beacon_release;
 pub mod beacons;
 pub mod booking;
+pub mod booking_discovery;
 pub mod campaign_lifecycle;
 pub mod content_supply;
+pub mod deliverability;
 pub mod events;
 pub mod experimentation;
 pub mod fan_activation;
 pub mod fan_lifecycle;
+pub mod free_reach;
 pub mod funding;
 pub mod growth_debt;
 pub mod growth_envelope;
@@ -56,12 +78,14 @@ pub mod live_opportunities;
 pub mod market_intelligence;
 pub mod merch_bundle;
 pub mod merchandising;
+pub mod negotiation;
 pub mod next_best_action;
 pub mod objectives;
 pub mod operator_brief;
 pub mod outreach;
 pub mod performance;
 pub mod play_measurement;
+pub mod playlist_placement;
 pub mod plays;
 pub mod pricing;
 pub mod promotion;
@@ -73,6 +97,7 @@ pub mod show_settlement;
 pub mod target_discovery;
 pub mod team_operations;
 pub mod tour_economics;
+pub mod value_tier;
 pub mod values;
 
 pub use acquisition::{

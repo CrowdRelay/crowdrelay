@@ -13,16 +13,19 @@ use crowdrelay_domain::{
     campaign_lifecycle::{EventCampaignPhase, EventCampaignPolicy},
     content_supply::{ContentArtifactKind, ContentSupplyPolicy},
     experimentation::ExperimentPolicy,
+    free_reach::{WaveAnchor, WaveExpiry},
     funding::FundingPolicy,
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
     learning::{PlayRecord, PlayStanding},
-    live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
+    live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
-    outreach::{OutreachPhase, OutreachPolicy},
+    negotiation::{TermsRefusal, TermsSnapshot, TermsState},
+    outreach::{OutreachPhase, OutreachPolicy, OutreachTargetKind},
     play_measurement::PlayClaim,
-    plays::{PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepSkipReason},
+    playlist_placement::{PlacementObservation, PlacementSnapshot, PlacementState},
+    plays::{PlayAnchorKind, PlayKind, PlayPolicy, PlayStepKind, PlayStepState, StepSkipReason},
     pricing::TicketYieldPolicy,
     promotion::PromotionBudgetPolicy,
     release_autopilot::{ReleaseAutopilotPolicy, ReleaseMilestone},
@@ -152,6 +155,102 @@ pub enum AutopilotPolicyConfig {
     GrowthDebt(GrowthDebtPolicy),
     OutreachSupply(OutreachSupplyPolicy),
     Plays(PlayPolicy),
+}
+
+impl AutopilotPolicyConfig {
+    /// Parses one context's operator config from its stored JSON.
+    ///
+    /// The single source of truth for "what config keys does this context
+    /// accept": the policy reader, the write path and the API validator all
+    /// call this, so a key cannot be accepted on write and silently dropped
+    /// on read. An empty object means "reset to defaults" — every knob is
+    /// optional and every type carries its own defaults.
+    pub fn parse_for(
+        context: AutopilotContext,
+        raw: serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        match context {
+            AutopilotContext::TicketYield => {
+                Self::parse_into(raw, Self::TicketYield, TicketYieldPolicy::default())
+            }
+            AutopilotContext::FanLifecycle => {
+                Self::parse_into(raw, Self::FanLifecycle, FanLifecyclePolicy::default())
+            }
+            AutopilotContext::CampaignLifecycle => {
+                Self::parse_into(raw, Self::CampaignLifecycle, EventCampaignPolicy::default())
+            }
+            AutopilotContext::Merchandising => {
+                Self::parse_into(raw, Self::Merchandising, MerchReorderPolicy::default())
+            }
+            AutopilotContext::MerchPricing => {
+                Self::parse_into(raw, Self::MerchPricing, MerchPricePolicy::default())
+            }
+            AutopilotContext::MerchBundle => {
+                Self::parse_into(raw, Self::MerchBundle, MerchBundlePolicy::default())
+            }
+            AutopilotContext::BookingOpportunity => Self::parse_into(
+                raw,
+                Self::BookingOpportunity,
+                BookingOpportunityPolicy::default(),
+            ),
+            AutopilotContext::Outreach => {
+                Self::parse_into(raw, Self::Outreach, OutreachPolicy::default())
+            }
+            AutopilotContext::ContentSupply => {
+                Self::parse_into(raw, Self::ContentSupply, ContentSupplyPolicy::default())
+            }
+            AutopilotContext::PromotionBudget => {
+                Self::parse_into(raw, Self::PromotionBudget, PromotionBudgetPolicy::default())
+            }
+            AutopilotContext::Experimentation => {
+                Self::parse_into(raw, Self::Experimentation, ExperimentPolicy::default())
+            }
+            AutopilotContext::ShowOperations => {
+                Self::parse_into(raw, Self::ShowOperations, ShowOperationsPolicy::default())
+            }
+            AutopilotContext::Release => {
+                Self::parse_into(raw, Self::Release, ReleaseAutopilotPolicy::default())
+            }
+            AutopilotContext::LiveOpportunity => {
+                Self::parse_into(raw, Self::LiveOpportunity, LiveOpportunityPolicy::default())
+            }
+            AutopilotContext::Funding => {
+                Self::parse_into(raw, Self::Funding, FundingPolicy::default())
+            }
+            AutopilotContext::Beacon => {
+                Self::parse_into(raw, Self::Beacon, BeaconCampaignPolicy::default())
+            }
+            AutopilotContext::ShowGrowth => {
+                Self::parse_into(raw, Self::ShowGrowth, ShowGrowthPolicy::default())
+            }
+            AutopilotContext::GrowthMetrics => {
+                Self::parse_into(raw, Self::GrowthMetrics, GrowthMetricPolicy::default())
+            }
+            AutopilotContext::GrowthDebt => {
+                Self::parse_into(raw, Self::GrowthDebt, GrowthDebtPolicy::default())
+            }
+            AutopilotContext::OutreachSupply => {
+                Self::parse_into(raw, Self::OutreachSupply, OutreachSupplyPolicy::default())
+            }
+            AutopilotContext::Plays => Self::parse_into(raw, Self::Plays, PlayPolicy::default()),
+        }
+    }
+
+    fn parse_into<T>(
+        raw: serde_json::Value,
+        wrap: fn(T) -> Self,
+        default: T,
+    ) -> Result<Self, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        // An empty object is the reset-to-defaults spelling, matching how a
+        // provisioned workspace reads before anybody has tuned anything.
+        if raw.as_object().is_some_and(serde_json::Map::is_empty) {
+            return Ok(wrap(default));
+        }
+        serde_json::from_value::<T>(raw).map(wrap)
+    }
 }
 
 /// Persisted authority configuration for one bounded context.
@@ -335,16 +434,56 @@ pub enum AutopilotActionPayload {
         target_name: String,
         phase: OutreachPhase,
         template_key: String,
+        /// The wave this pitch belongs to, when it belongs to one.
+        ///
+        /// Membership lives here rather than in a column on the actions table:
+        /// a wave is one context's concern and that is the hottest table in
+        /// the system. Absent means an ordinary standing pitch, approved on its
+        /// own like every other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wave_id: Option<uuid::Uuid>,
+    },
+    /// Read a public playlist and report whether the track is in it.
+    ///
+    /// Contacts nobody and changes nothing outside the workspace, so it is
+    /// `first_party_reversible` — but it does need an executor with a Spotify
+    /// credential, and until one advertises `playlist.verify` these park rather
+    /// than pretending a claim was checked.
+    VerifyPlaylistPlacement {
+        opportunity_id: OutreachOpportunityId,
+        playlist_external_id: String,
+        track_external_id: String,
+        /// Which of the three reads this is. Named so a late worker cannot
+        /// satisfy two checkpoints with one read.
+        checkpoint: u8,
     },
     RequestBeaconDiscovery {
         event_id: EventId,
         target_count: u16,
+    },
+    /// Ask a verified scene node to run an invite batch for one of their own
+    /// city's shows. The beacon hands their community invite codes; the codes
+    /// are ours, so every signup that comes back is attributed and consented
+    /// by construction. Third-party: it is a request to a partner, not a
+    /// message to our audience.
+    RequestBeaconInviteBatch {
+        beacon_id: BeaconId,
+        beacon_version: i64,
+        event_id: EventId,
+        requested_count: u16,
     },
     /// Ask an adapter to sweep published sources for submission routes and post
     /// the candidates back. Reads public data, contacts nobody, and buys
     /// nothing; the screening that decides what is admissible stays here.
     RequestOutreachDiscovery {
         requested_candidates: u16,
+    },
+    /// Ask an adapter to sweep published venue/promoter routes and post
+    /// booking candidates back. Reads public data, contacts nobody, buys
+    /// nothing; screening and the third-party ceiling keep every judgement
+    /// about who may be approached exactly where it already lives.
+    RequestBookingTargetDiscovery {
+        requested_count: u16,
     },
     RequestBeaconOutreach {
         beacon_id: BeaconId,
@@ -391,10 +530,35 @@ pub enum AutopilotActionPayload {
         release_at: time::OffsetDateTime,
         milestone: ReleaseMilestone,
     },
+    /// Chase an unsubmitted Spotify editorial pitch. A nudge inside the
+    /// workspace, never a claim that anything was submitted.
+    EscalateEditorialPitch {
+        release_id: ReleasePlanId,
+        title: String,
+        due_at: time::OffsetDateTime,
+    },
     ApplyLiveOpportunity {
         opportunity_id: TeamOpportunityId,
         opportunity_kind: LiveOpportunityKind,
         score: u16,
+    },
+    /// Ask the promoter for a different fee. Drafted by the agent, sent by a
+    /// human at the current posture.
+    CounterLiveOpportunityTerms {
+        opportunity_id: TeamOpportunityId,
+        ask_minor: i64,
+        currency: String,
+        /// Which ask this is. Carried so the message can say "as discussed"
+        /// rather than opening the conversation again.
+        round: u8,
+    },
+    /// Take the fee on the table. Refused outright by the domain when the show
+    /// requires a contract, is exclusive, has no free date, could not be costed
+    /// or would push the year past its stretch — at every autonomy level.
+    AcceptLiveOpportunityTerms {
+        opportunity_id: TeamOpportunityId,
+        fee_minor: i64,
+        currency: String,
     },
     PrepareFundingPackage {
         opportunity_id: TeamOpportunityId,
@@ -456,9 +620,11 @@ pub enum AutopilotActionPayload {
         play_kind: PlayKind,
         step_index: u16,
         step_kind: PlayStepKind,
-        /// The show the step is anchored to. Carried so the executor renders
-        /// the ask about a specific date rather than about the band in general.
-        event_id: EventId,
+        /// The show the step is anchored to, when the play has one. Carried so
+        /// the executor renders the ask about a specific date rather than about
+        /// the band in general; absent for a play anchored on a fan, which has
+        /// no date to talk about.
+        event_id: Option<EventId>,
         /// Absent for a step with no audience. A listing sweep is work on our
         /// own surfaces and has no recipient; carrying a fan there would be a
         /// contact nobody made.
@@ -503,7 +669,15 @@ impl AutopilotActionPayload {
             Self::RequestBookingOutreach { .. }
             | Self::RequestOutreach { .. }
             | Self::RequestBeaconOutreach { .. }
+            // A partner being asked to carry invite codes is a real-world
+            // approach to somebody else's community, not a message to ours.
+            | Self::RequestBeaconInviteBatch { .. }
             | Self::ApplyLiveOpportunity { .. }
+            // A counter and an acceptance are both statements to somebody
+            // outside the workspace, and an acceptance is a commitment of the
+            // band's calendar and money. Neither is ours to take back.
+            | Self::CounterLiveOpportunityTerms { .. }
+            | Self::AcceptLiveOpportunityTerms { .. }
             | Self::SubmitFundingApplication { .. } => ActionClass::ThirdParty,
 
             // Fans who opted in. Free, but a sent message cannot be unsent.
@@ -517,6 +691,7 @@ impl AutopilotActionPayload {
             // as outward contact would spend the audience budget on ourselves.
             Self::RequestBeaconDiscovery { .. }
             | Self::RequestOutreachDiscovery { .. }
+            | Self::RequestBookingTargetDiscovery { .. }
             | Self::RequestContentArtifact { .. }
             | Self::AdjustExperiment { .. }
             | Self::CompleteShowTask { .. }
@@ -525,7 +700,12 @@ impl AutopilotActionPayload {
             | Self::RaiseGrowthOpportunity { .. }
             | Self::RaiseGrowthDebt { .. }
             | Self::IssueReferralCode { .. }
-            | Self::SendTeamAssignmentEmail { .. } => ActionClass::FirstPartyReversible,
+            | Self::SendTeamAssignmentEmail { .. }
+            // A public read. It contacts nobody and changes nothing, which is
+            // exactly why it may run unattended: the whole point is checking a
+            // claim without asking the person who made it.
+            | Self::VerifyPlaylistPlacement { .. }
+            | Self::EscalateEditorialPitch { .. } => ActionClass::FirstPartyReversible,
 
             // The step kind decides, not the play and not this table: the same
             // play may legitimately hold an owned-audience ask and a curator
@@ -558,9 +738,12 @@ impl AutopilotActionPayload {
                 | ReleaseMilestone::Countdown
                 | ReleaseMilestone::ReleaseDay
                 | ReleaseMilestone::Sustain => ActionClass::OwnedAudience,
-                ReleaseMilestone::SeedCalendar | ReleaseMilestone::Wrap => {
-                    ActionClass::FirstPartyReversible
-                }
+                // Parking the editorial pitch writes a task inside the
+                // workspace. It reaches nobody: the form itself is a human's to
+                // submit, and the agent never claims otherwise.
+                ReleaseMilestone::SeedCalendar
+                | ReleaseMilestone::EditorialPitch
+                | ReleaseMilestone::Wrap => ActionClass::FirstPartyReversible,
             },
         }
     }
@@ -578,6 +761,8 @@ impl AutopilotActionPayload {
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
+            Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
+            Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",
             Self::RequestOutreachDiscovery { .. } => "outreach.discovery.request",
             Self::RequestBeaconOutreach { .. } => "beacon.outreach.request",
             Self::RequestShowGrowth { .. } => "show.growth.request",
@@ -591,6 +776,10 @@ impl AutopilotActionPayload {
             Self::RequestPromotionBudgetChange { .. } => "promotion.budget_change.request",
             Self::ExecuteReleaseMilestone { .. } => "release.milestone.execute",
             Self::ApplyLiveOpportunity { .. } => "opportunity.live.apply",
+            Self::VerifyPlaylistPlacement { .. } => "playlist.placement.verify",
+            Self::EscalateEditorialPitch { .. } => "release.editorial_pitch.escalate",
+            Self::CounterLiveOpportunityTerms { .. } => "opportunity.terms.counter",
+            Self::AcceptLiveOpportunityTerms { .. } => "opportunity.terms.accept",
             Self::PrepareFundingPackage { .. } => "funding.package.prepare",
             Self::SubmitFundingApplication { .. } => "funding.application.submit",
             Self::RaiseGrowthOpportunity { .. } => "growth.opportunity.raise",
@@ -645,14 +834,56 @@ pub struct PlayKindStanding {
 ///
 /// Read separately from running plays because there is no state machine yet:
 /// this is an anchor being considered, not a play being advanced.
+/// The specific thing a play hangs off.
+///
+/// Carried as one value rather than an id plus a kind, because those two can
+/// disagree: an event id read as a fan is a play whose audience query returns
+/// nothing for ever, and nothing about that failure looks like a bug.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlayAnchorRef {
+    Event { event_id: EventId },
+    Fan { fan_id: FanId },
+}
+
+impl PlayAnchorRef {
+    #[must_use]
+    pub const fn kind(self) -> PlayAnchorKind {
+        match self {
+            Self::Event { .. } => PlayAnchorKind::Event,
+            Self::Fan { .. } => PlayAnchorKind::Fan,
+        }
+    }
+
+    #[must_use]
+    pub fn id(self) -> uuid::Uuid {
+        match self {
+            Self::Event { event_id } => event_id.into_uuid(),
+            Self::Fan { fan_id } => fan_id.into_uuid(),
+        }
+    }
+
+    /// The show, when there is one. A fan-anchored play has no date to render.
+    #[must_use]
+    pub const fn event_id(self) -> Option<EventId> {
+        match self {
+            Self::Event { event_id } => Some(event_id),
+            Self::Fan { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlayAnchor {
-    pub event_id: EventId,
+    pub anchor: PlayAnchorRef,
     pub anchor_at: OffsetDateTime,
-    /// False for a show that is cancelled or no longer published. Carried
-    /// rather than filtered away in SQL so the refusal to start is a domain
-    /// rule somebody can read, not a `WHERE` clause somebody can loosen.
+    /// False for a show that is cancelled or no longer published, or a fan who
+    /// is no longer contactable. Carried rather than filtered away in SQL so
+    /// the refusal to start is a domain rule somebody can read, not a `WHERE`
+    /// clause somebody can loosen.
     pub active: bool,
+    /// Hours from now to the anchor. Zero or negative for an anchor that has
+    /// already happened, which is every fan anchor: the moment they qualified.
     pub hours_until: i64,
 }
 
@@ -675,7 +906,7 @@ pub struct PlayStepPlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlayStart {
     pub kind: PlayKind,
-    pub event_id: EventId,
+    pub anchor: PlayAnchorRef,
     pub anchor_at: OffsetDateTime,
     pub hypothesis: &'static str,
     pub success_metric_platform: &'static str,
@@ -732,11 +963,125 @@ impl PlayAudience {
 pub struct PlayRunSnapshot {
     pub play_id: PlayId,
     pub kind: PlayKind,
-    pub event_id: EventId,
+    pub anchor: PlayAnchorRef,
     pub anchor_at: OffsetDateTime,
     pub anchor_active: bool,
     pub steps: Vec<PlayStepState>,
     pub audience: PlayAudience,
+}
+
+/// One claimed placement, with the public identifiers a read needs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaylistPlacementSnapshot {
+    pub placement: PlacementSnapshot,
+    pub playlist_external_id: String,
+    pub track_external_id: String,
+}
+
+/// A curator's claim, or the result of one public read of it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordPlaylistPlacement {
+    pub opportunity_id: OutreachOpportunityId,
+    pub playlist_external_id: String,
+    pub track_external_id: String,
+    /// Absent when this is the curator's claim arriving. Present when it is a
+    /// read reporting what it found.
+    pub observation: Option<PlacementObservation>,
+}
+
+/// Ending a placement, and whether the curator behind it is finished with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementSettlement {
+    pub opportunity_id: OutreachOpportunityId,
+    pub state: PlacementState,
+}
+
+/// One free-reach wave as the cycle reads it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutreachWaveSnapshot {
+    pub wave_id: uuid::Uuid,
+    pub snapshot: crowdrelay_domain::free_reach::WaveSnapshot,
+}
+
+/// An anchor that has no wave of this kind yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutreachWaveAnchor {
+    pub anchor: WaveAnchor,
+    pub anchor_at: OffsetDateTime,
+    pub target_kind: OutreachTargetKind,
+    pub active: bool,
+    pub hours_until: i64,
+    /// Targets of this kind that would pass the outreach rules right now.
+    pub eligible_targets: u32,
+}
+
+/// A wave about to be created, with the ceiling it was sized against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutreachWaveStart {
+    pub anchor: WaveAnchor,
+    pub anchor_at: OffsetDateTime,
+    pub target_kind: OutreachTargetKind,
+    /// Frozen at open, so an operator reading a sealed wave sees the budget it
+    /// was drafted under rather than today's.
+    pub capacity: u16,
+}
+
+/// Closing a wave, either for review or for good.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutreachWaveTransition {
+    /// Closed for changes and put in front of a human.
+    Seal,
+    /// Ended without being approved, for a stated reason.
+    Expire { reason: WaveExpiry },
+}
+
+/// The first-party numbers a pitch is allowed to claim.
+///
+/// Every field is optional and every one is omitted rather than defaulted when
+/// the workspace cannot answer it. A zero the agent invented reads exactly like
+/// a zero it measured, and the difference is the whole point: this exists so a
+/// pitch carries numbers instead of adjectives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct EvidencePacket {
+    /// The success series the workspace watches, and how fast it is moving.
+    pub trackers: Option<i64>,
+    pub trackers_per_day_milli: Option<i64>,
+    /// Paid tickets in the last ninety days. Real money from real people, which
+    /// is the only number in here a curator has no reason to discount.
+    pub paid_tickets_90d: Option<i64>,
+    /// Shows actually played in the last year.
+    pub shows_played_12m: Option<i64>,
+    /// Relationships that have replied positively before. Coverage we can point
+    /// at rather than coverage we hope for.
+    pub positive_replies_12m: Option<i64>,
+    /// When these were read. A number without one is a number from any time.
+    pub as_of: Option<OffsetDateTime>,
+}
+
+/// One live negotiation, with the opportunity it is about.
+///
+/// Carried together because every rule in `crowdrelay_domain::negotiation`
+/// needs both: the ladder comes from the terms row and the refusals come from
+/// the show. Read apart, they would be two moments' answers to one question.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveTermsSnapshot {
+    pub terms: TermsSnapshot,
+    pub opportunity: LiveOpportunitySnapshot,
+    /// The negotiation's currency, carried from the row rather than assumed:
+    /// a counter quoted in the wrong one is a different offer.
+    pub currency: String,
+}
+
+/// Ending a negotiation without an acceptance, and why.
+///
+/// Not an action: the agent records that it will not take these terms, and
+/// telling the promoter stays a human act. A declined row an operator can read
+/// is the point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TermsSettlement {
+    pub opportunity_id: TeamOpportunityId,
+    pub state: TermsState,
+    pub reason: Option<TermsRefusal>,
 }
 
 /// Settling a step without delivering it, and why.

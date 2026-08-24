@@ -61,15 +61,29 @@ pub(super) async fn read_series(
     metric_key: &str,
     at: OffsetDateTime,
 ) -> Result<SeriesReading, RepositoryError> {
+    // A play is a workspace-level campaign, so where the workspace declares a
+    // workspace-level series for the metric, that is the series. A per-city or
+    // per-source breakdown of the same key is a different question, not a
+    // second answer to this one — and treating it as one made every metric with
+    // a breakdown permanently unmeasurable.
+    //
+    // The fallback matters just as much: `bandsintown/trackers` exists *only*
+    // per event source, deliberately, because a workspace may sync two artists.
+    // One source resolves; two stay ambiguous, which is the honest answer.
     let series = sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT series.id, series.direction
-        FROM viryaos_growth_metric_series AS series
-        WHERE series.workspace_id = $1
-          AND series.platform = $2
-          AND series.metric_key = $3
-          AND series.active
-        ORDER BY series.id
+        WITH matching AS (
+            SELECT series.id, series.direction, (series.subject_kind IS NULL) AS workspace_level
+            FROM viryaos_growth_metric_series AS series
+            WHERE series.workspace_id = $1
+              AND series.platform = $2
+              AND series.metric_key = $3
+              AND series.active
+        )
+        SELECT id, direction
+        FROM matching
+        WHERE workspace_level = EXISTS (SELECT 1 FROM matching WHERE workspace_level)
+        ORDER BY id
         LIMIT 2
         "#,
     )
@@ -441,6 +455,7 @@ impl PostgresAutopilotRepository {
 struct PlayLedgerRow {
     play_id: Uuid,
     play_kind: String,
+    anchor_kind: String,
     anchor_id: Uuid,
     anchor_at: OffsetDateTime,
     hypothesis: String,
@@ -484,6 +499,7 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
                 SELECT
                     play.id AS play_id,
                     play.play_kind,
+                    play.anchor_kind,
                     play.anchor_id,
                     play.anchor_at,
                     play.hypothesis,
@@ -588,7 +604,11 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
                 entries.push(PlayLedgerEntry {
                     play_id: PlayId::from_uuid(play.play_id),
                     kind: PlayKind::parse(&play.play_kind).ok_or(RepositoryError::Unexpected)?,
-                    event_id: EventId::from_uuid(play.anchor_id),
+                    anchor: plays::anchor_ref(
+                        PlayAnchorKind::parse(&play.anchor_kind)
+                            .ok_or(RepositoryError::Unexpected)?,
+                        play.anchor_id,
+                    ),
                     anchor_at: play.anchor_at,
                     hypothesis: play.hypothesis,
                     state: play.state,
@@ -846,7 +866,8 @@ impl PostgresAutopilotRepository {
                         record,
                         standing,
                         effective_max_recipients_per_step: effective_recipient_ceiling(
-                            policy, standing,
+                            policy.max_recipients_per_step,
+                            standing,
                         ),
                     })
                 })

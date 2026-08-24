@@ -38,7 +38,7 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         self.assertIn("config.autopilot_poll_interval.min(Duration::from_secs(60))", main)
 
     def test_dispatch_event_and_capability_mapping_are_closed_loop(self):
-        actions = text("crates/crowdrelay-infra/src/autopilot/actions.rs")
+        actions = text("crates/crowdrelay-infra/src/autopilot/actions_execution.rs")
         execution = text("crates/crowdrelay-infra/src/autopilot/execution.rs")
         self.assertIn('"viryaos.team.assignment_email_requested"', actions)
         self.assertIn('"viryaos.team.assignment_email_requested" => "team.email"', execution)

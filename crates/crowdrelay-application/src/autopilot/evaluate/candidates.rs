@@ -211,6 +211,54 @@ fn lifecycle_candidate(
     }))
 }
 
+/// One chase about an editorial pitch nobody has submitted yet.
+///
+/// A nudge to the band's own operator, so `first_party_reversible`: it reaches
+/// nobody outside the workspace and the worst it can do is be ignored. The
+/// deadline travels with it, because a reminder that does not say by when is a
+/// reminder about nothing.
+fn editorial_pitch_escalation(
+    snapshot: &ReleasePlanSnapshot,
+    policy: &AutopilotPolicy,
+    domain_policy: &ReleaseAutopilotPolicy,
+    due_at: OffsetDateTime,
+    confidence: Confidence,
+) -> Result<DecisionCandidate, serde_json::Error> {
+    Ok(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::ReleasePlan(snapshot.release_id),
+        decision_kind: "escalate_editorial_pitch",
+        confidence,
+        disposition: disposition(policy.autonomy_level, confidence, policy.minimum_confidence),
+        reason: "the Spotify editorial pitch has no API, so it is somebody's job, and this one is \
+                 still not submitted with the deadline in sight",
+        input_snapshot: serde_json::to_value(snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::EscalateEditorialPitch {
+            release_id: snapshot.release_id,
+            title: snapshot.title.clone(),
+            due_at,
+        },
+        // Keyed on the last chase, so the next one is a new decision and the
+        // one before it is not silently swallowed.
+        decision_key: format!(
+            "decision:editorial-pitch:v{}:{}:{}",
+            policy.version,
+            snapshot.release_id,
+            snapshot
+                .editorial_pitch_escalated_at
+                .map_or(0, OffsetDateTime::unix_timestamp)
+        ),
+        action_idempotency_key: format!(
+            "action:editorial-pitch:{}:{}",
+            snapshot.release_id,
+            snapshot
+                .editorial_pitch_escalated_at
+                .map_or(0, OffsetDateTime::unix_timestamp)
+        ),
+    })
+}
+
 fn release_candidate(
     snapshot: ReleasePlanSnapshot,
     policy: &AutopilotPolicy,
@@ -219,16 +267,24 @@ fn release_candidate(
     let AutopilotPolicyConfig::Release(domain_policy) = &policy.config else {
         return Ok(None);
     };
-    let ReleaseDecision::Request {
-        milestone,
-        confidence,
-    } = evaluate_release(&snapshot, *domain_policy, now)
-    else {
-        return Ok(None);
+    let (milestone, confidence) = match evaluate_release(&snapshot, *domain_policy, now) {
+        ReleaseDecision::Request {
+            milestone,
+            confidence,
+        } => (milestone, confidence),
+        // Chasing an unfinished pitch is its own candidate: it repeats, and it
+        // is keyed on the round rather than on the milestone, so a reminder is
+        // not deduplicated against the one before it.
+        ReleaseDecision::EscalateEditorialPitch { due_at, confidence } => {
+            return editorial_pitch_escalation(&snapshot, policy, domain_policy, due_at, confidence)
+                .map(Some);
+        }
+        ReleaseDecision::Hold(_) => return Ok(None),
     };
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     let milestone_key = match milestone {
         ReleaseMilestone::SeedCalendar => "seed_calendar",
+        ReleaseMilestone::EditorialPitch => "editorial_pitch",
         ReleaseMilestone::Announcement => "announcement",
         ReleaseMilestone::StartPress => "start_press",
         ReleaseMilestone::FanWarmup => "fan_warmup",
@@ -263,6 +319,98 @@ fn release_candidate(
     }))
 }
 
+/// One move on one live negotiation.
+///
+/// The score is recomputed here rather than stored on the terms row. A stretch
+/// bar checked against the score a show had when the promoter first wrote is a
+/// bar checked against a stale fact, and the whole point of that refusal is
+/// that it reflects how full the year is *now*.
+fn live_terms_candidate(
+    snapshot: &LiveTermsSnapshot,
+    policy: &AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::LiveOpportunity(domain_policy) = &policy.config else {
+        return Ok(None);
+    };
+    let score = live_opportunity_score(snapshot.opportunity);
+    let decision = evaluate_terms(
+        snapshot.terms,
+        snapshot.opportunity,
+        *domain_policy,
+        score,
+        now,
+    );
+    let (decision_kind, reason, action) = match decision {
+        // Declining and expiring are settlements written straight to the row,
+        // not actions: the agent records that it will not take these terms and
+        // telling the promoter stays a human act.
+        TermsDecision::Hold | TermsDecision::Decline { .. } | TermsDecision::Expire => {
+            return Ok(None);
+        }
+        TermsDecision::Counter { ask_minor, round } => (
+            "counter_live_opportunity_terms",
+            "the offer on the table is below what this show costs to play, and the counter is \
+             the arithmetic rather than a guess",
+            AutopilotActionPayload::CounterLiveOpportunityTerms {
+                opportunity_id: snapshot.terms.opportunity_id,
+                ask_minor,
+                currency: snapshot.currency.clone(),
+                round,
+            },
+        ),
+        TermsDecision::Accept { fee_minor } => (
+            "accept_live_opportunity_terms",
+            "the fee on the table clears the band's own floor and the show breaks none of the \
+             refusals that hold at every autonomy level",
+            AutopilotActionPayload::AcceptLiveOpportunityTerms {
+                opportunity_id: snapshot.terms.opportunity_id,
+                fee_minor,
+                currency: snapshot.currency.clone(),
+            },
+        ),
+    };
+    // Confidence is the opportunity's own, so a marginal show does not become a
+    // confident negotiation by having a number attached to it.
+    let confidence = snapshot.opportunity.evidence_confidence;
+    let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    // Every move here is third_party, and the class ceiling already downgrades
+    // it. Forcing approval as well is belt and braces on the one action in the
+    // system that commits the band's calendar and money at once.
+    if matches!(disposition, PolicyDisposition::AutoExecute) {
+        disposition = PolicyDisposition::RequireApproval;
+    }
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::TeamOpportunity(snapshot.terms.opportunity_id),
+        decision_kind,
+        confidence,
+        disposition,
+        reason,
+        input_snapshot: serde_json::json!({
+            "terms": snapshot.terms,
+            "opportunity": snapshot.opportunity,
+            "score": score,
+        }),
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action,
+        // The round is in the key on purpose. A second ask is a second
+        // decision, and one keyed only on the opportunity would be silently
+        // deduplicated against the first.
+        decision_key: format!(
+            "decision:live-terms:v{}:{}:{}:{}",
+            policy.version,
+            snapshot.terms.opportunity_id,
+            decision_kind,
+            snapshot.terms.counter_rounds
+        ),
+        action_idempotency_key: format!(
+            "action:live-terms:{}:{}:{}",
+            snapshot.terms.opportunity_id, decision_kind, snapshot.terms.counter_rounds
+        ),
+    }))
+}
+
 fn live_opportunity_candidate(
     snapshot: LiveOpportunitySnapshot,
     policy: &AutopilotPolicy,
@@ -272,14 +420,33 @@ fn live_opportunity_candidate(
         return Ok(None);
     };
     let decision = evaluate_live_opportunity(snapshot, *domain_policy, now);
-    let (score, confidence, forced_approval) = match decision {
+    let (score, confidence, forced_approval, decision_kind, reason) = match decision {
         LiveOpportunityDecision::Hold => return Ok(None),
-        LiveOpportunityDecision::PrepareForApproval { score, confidence } => {
-            (score, confidence, true)
-        }
-        LiveOpportunityDecision::SubmitAutomatically { score, confidence } => {
-            (score, confidence, false)
-        }
+        LiveOpportunityDecision::PrepareForApproval { score, confidence } => (
+            score,
+            confidence,
+            true,
+            "apply_live_opportunity",
+            "verified live opportunity clears deterministic fit and economics gates",
+        ),
+        LiveOpportunityDecision::SubmitAutomatically { score, confidence } => (
+            score,
+            confidence,
+            false,
+            "apply_live_opportunity",
+            "verified live opportunity clears deterministic fit and economics gates",
+        ),
+        // Never dropped by a budget rule: a full year is a reason to ask, not a
+        // reason to throw away the best offer of it. Named separately from the
+        // ordinary prepare path so the operator sees *why* this landed in
+        // front of them — the calendar, not an ordinary review gate.
+        LiveOpportunityDecision::EscalateLandmark { score, confidence } => (
+            score,
+            confidence,
+            true,
+            "escalate_landmark_opportunity",
+            "a landmark opportunity arrived at or past the annual stretch; the year being full is not a reason to lose it",
+        ),
     };
     let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     if forced_approval && matches!(disposition, PolicyDisposition::AutoExecute) {
@@ -288,10 +455,10 @@ fn live_opportunity_candidate(
     Ok(Some(DecisionCandidate {
         context: policy.context,
         subject: ActionSubject::TeamOpportunity(snapshot.opportunity_id),
-        decision_kind: "apply_live_opportunity",
+        decision_kind,
         confidence,
         disposition,
-        reason: "verified live opportunity clears deterministic fit and economics gates",
+        reason,
         input_snapshot: serde_json::to_value(snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::ApplyLiveOpportunity {
@@ -361,9 +528,18 @@ fn merch_bundle_candidate(
     }))
 }
 
+/// One pitch, optionally stamped with the wave it belongs to.
+///
+/// A wave pitch is the same pitch: same cadence, same relevance bar, same
+/// idempotency key. What the wave changes is how it is presented to a human and
+/// nothing at all about whether it is allowed. Keying it identically is also
+/// what makes the two paths safe to run side by side — the second insert of the
+/// same pitch is deduplicated by the database rather than by a rule somebody
+/// has to remember.
 fn outreach_candidate(
     snapshot: OutreachSnapshot,
     policy: &AutopilotPolicy,
+    wave_id: Option<uuid::Uuid>,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::Outreach(domain_policy) = &policy.config else {
@@ -374,7 +550,13 @@ fn outreach_candidate(
     else {
         return Ok(None);
     };
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    // A wave is approved as a wave. A pitch inside one that executed on its own
+    // would be a batch the operator never saw all of, which is the failure
+    // waves exist to prevent.
+    if wave_id.is_some() && matches!(disposition, PolicyDisposition::AutoExecute) {
+        disposition = PolicyDisposition::RequireApproval;
+    }
     let template_key = match snapshot.target_kind {
         crowdrelay_domain::outreach::OutreachTargetKind::Playlist => "outreach.playlist.v1",
         crowdrelay_domain::outreach::OutreachTargetKind::Radio => "outreach.radio.v1",
@@ -402,6 +584,7 @@ fn outreach_candidate(
             target_name: snapshot.target_id.to_string(),
             phase,
             template_key: template_key.to_owned(),
+            wave_id,
         },
         decision_key: format!(
             "decision:outreach:v{}:{}:{}:tv{}:{:?}:{}:{}",

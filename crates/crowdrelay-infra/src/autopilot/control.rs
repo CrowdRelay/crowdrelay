@@ -429,6 +429,24 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn load_growth_posture(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<GrowthPostureView, RepositoryError> {
+        self.load_growth_posture_impl(workspace_id).await
+    }
+
+    async fn set_growth_posture(
+        &self,
+        workspace_id: WorkspaceId,
+        command: SetGrowthPosture,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.set_growth_posture_impl(workspace_id, command, idempotency_key, request_id)
+            .await
+    }
+
     async fn set_tour_economics(
         &self,
         workspace_id: WorkspaceId,
@@ -446,7 +464,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 "policy": command.policy,
                 "expected_version": command.expected_version,
             });
-            if let Some(existing) = insert_operator_action(
+            if let Some(existing) = operator_actions::insert_operator_action(
                 &mut transaction,
                 workspace_id,
                 operation_id,
@@ -560,7 +578,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 "source_revision": command.source_revision,
                 "expected_version": command.expected_version,
             });
-            if let Some(existing) = insert_operator_action(
+            if let Some(existing) = operator_actions::insert_operator_action(
                 &mut transaction,
                 workspace_id,
                 operation_id,
@@ -663,7 +681,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 "max_recipients_per_step": command.max_recipients_per_step,
                 "expected_version": command.expected_version,
             });
-            let inserted = insert_operator_action(
+            let inserted = operator_actions::insert_operator_action(
                 &mut transaction,
                 workspace_id,
                 operation_id,
@@ -758,7 +776,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 "max_actions_24h": command.max_actions_24h,
                 "expected_version": command.expected_version,
             });
-            let inserted = insert_operator_action(
+            let inserted = operator_actions::insert_operator_action(
                 &mut transaction,
                 workspace_id,
                 operation_id,
@@ -789,6 +807,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     max_actions_24h = $6,
                     guarded_until = CASE WHEN $4 <> 'bounded_auto' OR guarded_until <= now() THEN NULL ELSE guarded_until END,
                     guardrail_reason = CASE WHEN $4 <> 'bounded_auto' OR guarded_until <= now() THEN NULL ELSE guardrail_reason END,
+                    config = COALESCE($8, config),
                     version = version + 1
                 WHERE workspace_id = $1 AND context = $2 AND version = $7
                   AND ($4 <> 'bounded_auto' OR guarded_until IS NULL OR guarded_until <= now())
@@ -801,6 +820,9 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .bind(i32::from(command.minimum_confidence.basis_points()))
             .bind(i32::try_from(command.max_actions_24h).map_err(|_| RepositoryError::Unexpected)?)
             .bind(command.expected_version)
+            // $8: the knobs. `COALESCE($8, config)` in the statement means a
+            // write without them leaves the operator's tuning untouched.
+            .bind(command.config.clone())
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
@@ -848,7 +870,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let operation_id = Uuid::now_v7();
             let details = json!({"member_key": member_key.clone()});
-            if let Some(existing) = insert_operator_action(
+            if let Some(existing) = operator_actions::insert_operator_action(
                 &mut transaction,
                 workspace_id,
                 operation_id,
@@ -999,199 +1021,26 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         )
         .await
     }
-}
 
-impl PostgresAutopilotRepository {
-    async fn control_action_transition(
+    async fn approve_outreach_wave(
         &self,
         workspace_id: WorkspaceId,
-        action_id: AutopilotActionId,
+        wave_id: Uuid,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
-        operator_action: &'static str,
-        target_status: &'static str,
     ) -> Result<AutopilotControlMutation, RepositoryError> {
-        self.bounded(async {
-            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            let operation_id = Uuid::now_v7();
-            let details = json!({"requested_status": target_status});
-            let replay = insert_operator_action(
-                &mut transaction,
-                workspace_id,
-                operation_id,
-                operator_action,
-                "autopilot_action",
-                action_id.into_uuid(),
-                idempotency_key,
-                request_id,
-                &details,
-            )
-            .await?;
-            if let Some(existing) = replay {
-                let status = sqlx::query_scalar::<_, String>(
-                    "SELECT status FROM viryaos_autopilot_actions WHERE workspace_id = $1 AND id = $2",
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(action_id.into_uuid())
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(map_sqlx)?
-                .ok_or(RepositoryError::NotFound)?;
-                transaction.commit().await.map_err(map_sqlx)?;
-                return Ok(AutopilotControlMutation {
-                    operation_id: existing,
-                    target_id: action_id.into_uuid(),
-                    status,
-                    replayed: true,
-                });
-            }
-
-            let updated = if target_status == "queued" {
-                sqlx::query_scalar::<_, String>(
-                    r#"
-                    UPDATE viryaos_autopilot_actions
-                    SET status = 'queued', approved_at = now(), approved_by = 'operator:admin_api_key'
-                    WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
-                      AND (approval_expires_at IS NULL OR approval_expires_at > now())
-                    RETURNING status
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(action_id.into_uuid())
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(map_sqlx)?
-            } else {
-                sqlx::query_scalar::<_, String>(
-                    r#"
-                    UPDATE viryaos_autopilot_actions
-                    SET status = 'cancelled', finished_at = now()
-                    WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'
-                    RETURNING status
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(action_id.into_uuid())
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(map_sqlx)?
-            };
-            // The transition matched nothing, and the operator deserves to know
-            // which nothing. Collapsing all three into `Conflict` made a wrong
-            // action id, an already-approved action and an expired approval
-            // read identically in the cockpit, so a stale queue looked like a
-            // broken button.
-            let status = match updated {
-                Some(status) => status,
-                None => {
-                    let existing = sqlx::query_scalar::<_, String>(
-                        "SELECT status FROM viryaos_autopilot_actions
-                         WHERE workspace_id = $1 AND id = $2",
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(action_id.into_uuid())
-                    .fetch_optional(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                    return Err(existing.map_or(RepositoryError::NotFound, |_| {
-                        RepositoryError::Conflict
-                    }));
-                }
-            };
-            if target_status == "queued" {
-                sqlx::query(
-                    r#"
-                    UPDATE viryaos_team_assignments
-                    SET status='done', completed_at=now(), next_reminder_at=NULL
-                    WHERE workspace_id=$1 AND action_id=$2 AND status='open'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(action_id.into_uuid())
-                .execute(&mut *transaction)
-                .await
-                .map_err(map_sqlx)?;
-            } else {
-                sqlx::query(
-                    r#"
-                    UPDATE viryaos_team_assignments
-                    SET status='cancelled', completed_at=NULL, next_reminder_at=NULL
-                    WHERE workspace_id=$1 AND action_id=$2 AND status='open'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(action_id.into_uuid())
-                .execute(&mut *transaction)
-                .await
-                .map_err(map_sqlx)?;
-            }
-            transaction.commit().await.map_err(map_sqlx)?;
-            Ok(AutopilotControlMutation {
-                operation_id,
-                target_id: action_id.into_uuid(),
-                status,
-                replayed: false,
-            })
-        })
-        .await
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn insert_operator_action(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    operation_id: Uuid,
-    action: &'static str,
-    target_type: &'static str,
-    target_id: Uuid,
-    idempotency_key: &IdempotencyKey,
-    request_id: Option<&RequestId>,
-    details: &Value,
-) -> Result<Option<Uuid>, RepositoryError> {
-    let inserted = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO operator_actions (
-            id, workspace_id, action, target_type, target_id,
-            idempotency_key, request_id, details
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(operation_id)
-    .bind(workspace_id.into_uuid())
-    .bind(action)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(idempotency_key.as_str())
-    .bind(request_id.map(RequestId::as_str))
-    .bind(details)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    if inserted.is_some() {
-        return Ok(None);
+        self.approve_outreach_wave_operator(workspace_id, wave_id, idempotency_key, request_id)
+            .await
     }
 
-    let existing = sqlx::query_as::<_, ExistingOperatorActionRow>(
-        r#"
-        SELECT id, action, target_type, target_id, details
-        FROM operator_actions
-        WHERE workspace_id = $1 AND idempotency_key = $2
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(idempotency_key.as_str())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    if existing.action != action
-        || existing.target_type != target_type
-        || existing.target_id != target_id
-        || existing.details != *details
-    {
-        return Err(RepositoryError::Conflict);
+    async fn mark_decision_handled_externally(
+        &self,
+        workspace_id: WorkspaceId,
+        decision_id: AutopilotDecisionId,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<AutopilotControlMutation, RepositoryError> {
+        self.mark_decision_handled_operator(workspace_id, decision_id, idempotency_key, request_id)
+            .await
     }
-    Ok(Some(existing.id))
 }

@@ -3,7 +3,7 @@ import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-MAKEFILE = (ROOT / "Makefile").read_text()
+JUSTFILE = (ROOT / "justfile").read_text()
 WAITER = ROOT / "scripts/deploy.sh"
 SAFE = ROOT / "scripts/deploy-production-safe.sh"
 WAITER_TEXT = WAITER.read_text()
@@ -15,8 +15,10 @@ class MakeDeployContract(unittest.TestCase):
         subprocess.run(["bash", "-n", str(WAITER)], check=True)
         subprocess.run(["bash", "-n", str(SAFE)], check=True)
 
-    def test_make_deploy_is_the_guarded_entrypoint(self) -> None:
-        self.assertIn("deploy:\n\tbash scripts/deploy.sh", MAKEFILE)
+    def test_just_deploy_is_the_guarded_entrypoint(self) -> None:
+        # The task runner migrated from make to just; the guarded deploy
+        # chain must survive the rename.
+        self.assertIn("deploy:\n    bash scripts/deploy.sh", JUSTFILE)
         self.assertIn('wait_for_workflow "CI" "CI"', WAITER_TEXT)
         self.assertIn("wait_for_image_release", WAITER_TEXT)
         self.assertNotIn('wait_for_workflow "Publish container images" "IMAGES"', WAITER_TEXT)

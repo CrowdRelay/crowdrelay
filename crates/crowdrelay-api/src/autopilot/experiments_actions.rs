@@ -182,6 +182,76 @@ pub async fn cancel_action(
     mutate_action(state, headers, action_id, false).await
 }
 
+/// Records that a human handled this finding outside the system.
+///
+/// The "done ourselves" button, and a first-class outcome rather than a
+/// dismissal: an opportunity a human took is a success. The decision leaves
+/// the queue and the brief, and any action of it still parked is withdrawn so
+/// the agent cannot send what somebody already did by hand.
+pub async fn mark_decision_handled_externally(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(decision_id) = Uuid::parse_str(&decision_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .mark_decision_handled_externally(
+            state.ops.workspace_id(),
+            AutopilotDecisionId::from_uuid(decision_id),
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Approves every pitch in one free-reach wave.
+///
+/// The whole reason waves exist: an operator reads one batch and says yes once.
+/// Approving forty pitches individually is how a human stops approving.
+pub async fn approve_outreach_wave(
+    State(state): State<AppState>,
+    Path(wave_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(wave_id) = Uuid::parse_str(&wave_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .approve_outreach_wave(
+            state.ops.workspace_id(),
+            wave_id,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => private_json(StatusCode::OK, result),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 async fn mutate_action(
     state: AppState,
     headers: HeaderMap,

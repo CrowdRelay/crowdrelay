@@ -88,6 +88,11 @@ pub async fn discover_team_opportunity(
                 "summary": request.summary,
             }
         }),
+        // A name match against a landmark list is a suggestion an operator
+        // confirms, never an automatic grant: "Festival" in a title means
+        // nothing on its own. Text-based discovery never sets this above
+        // Standard.
+        strategic_value_basis_points: 0,
         expected_version: 0,
     };
     match state

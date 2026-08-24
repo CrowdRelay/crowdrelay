@@ -32,6 +32,41 @@ use crate::{
     play_measurement::PlayMeasurementPolicy,
 };
 
+/// What a play's schedule hangs off.
+///
+/// Every play until the follow-ask ladder was anchored on a show, and the
+/// anchor was therefore implicit. It cannot stay implicit: a ladder climbed by
+/// one fan over months has no show in it, and a play whose anchor kind is
+/// assumed is a play whose audience query reads the wrong table.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayAnchorKind {
+    /// A published show. Its date is in the future, so steps may precede it.
+    Event,
+    /// One fan. The anchor moment is when they qualified, so every step of such
+    /// a play follows it.
+    Fan,
+}
+
+impl PlayAnchorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Event => "event",
+            Self::Fan => "fan",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "event" => Some(Self::Event),
+            "fan" => Some(Self::Fan),
+            _ => None,
+        }
+    }
+}
+
 /// A campaign the agent knows how to run.
 ///
 /// Deliberately a closed set. A play is a piece of judgement about how this band
@@ -55,6 +90,23 @@ pub enum PlayKind {
     /// that is not listed, or listed without a ticket link, cannot be found by
     /// the people already looking for it. Nothing here contacts anyone.
     ListingCompletenessSweep,
+    /// Ask one engaged fan, three times across four months, to follow the band
+    /// where future dates are announced.
+    ///
+    /// The track-us ask reaches the fans of one show at the moment that show is
+    /// the thing on their mind. It therefore never reaches the fan who bought a
+    /// ticket last spring and has had no date near them since — which is most
+    /// of the list, most of the time. This is the ladder for exactly those
+    /// people: one ask, then a nudge, then a last one, each with a single call
+    /// to action and months between them.
+    FollowAskLadder,
+    /// Write once more to a fan who was here and stopped being here.
+    ///
+    /// A quiet fan is not a lost one, and the list already holds the people who
+    /// bought a ticket two years ago and have heard nothing since. This is the
+    /// cheapest audience the band has left, and the only one it currently does
+    /// nothing with. Two messages, then the agent stops.
+    DormantRevival,
 }
 
 impl PlayKind {
@@ -63,6 +115,8 @@ impl PlayKind {
         match self {
             Self::TrackUsAsk => "track_us_ask",
             Self::ListingCompletenessSweep => "listing_completeness_sweep",
+            Self::FollowAskLadder => "follow_ask_ladder",
+            Self::DormantRevival => "dormant_revival",
         }
     }
 
@@ -71,13 +125,29 @@ impl PlayKind {
         match value {
             "track_us_ask" => Some(Self::TrackUsAsk),
             "listing_completeness_sweep" => Some(Self::ListingCompletenessSweep),
+            "follow_ask_ladder" => Some(Self::FollowAskLadder),
+            "dormant_revival" => Some(Self::DormantRevival),
             _ => None,
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 2] {
-        [Self::TrackUsAsk, Self::ListingCompletenessSweep]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::TrackUsAsk,
+            Self::ListingCompletenessSweep,
+            Self::FollowAskLadder,
+            Self::DormantRevival,
+        ]
+    }
+
+    /// What this play's schedule hangs off.
+    #[must_use]
+    pub const fn anchor_kind(self) -> PlayAnchorKind {
+        match self {
+            Self::TrackUsAsk | Self::ListingCompletenessSweep => PlayAnchorKind::Event,
+            Self::FollowAskLadder | Self::DormantRevival => PlayAnchorKind::Fan,
+        }
     }
 
     /// What the play claims will happen, recorded when it starts so the claim
@@ -92,6 +162,15 @@ impl PlayKind {
             Self::ListingCompletenessSweep => {
                 "a show that is listed completely, with a working ticket link, is found by people \
                  already searching for it, so the free listing surfaces reach more of them"
+            }
+            Self::FollowAskLadder => {
+                "an engaged fan asked once, and twice more over the months that follow, will \
+                 follow the band where dates are announced, so every future date reaches them \
+                 without the band paying for it"
+            }
+            Self::DormantRevival => {
+                "a fan who came once and went quiet will come back when there is a date near them \
+                 and somebody remembers to tell them, so the count of fans active in a month rises"
             }
         }
     }
@@ -108,6 +187,15 @@ impl PlayKind {
             // supposed to move, and the measurement layer reports it as
             // correlational — which is exactly what it is.
             Self::ListingCompletenessSweep => ("bandsintown", "trackers"),
+            // The same series, and the same one every rung asks for. A ladder
+            // whose rungs pointed at different platforms would be measured
+            // against a number two of its three messages never mentioned, and
+            // the platform the agent can actually read is this one.
+            Self::FollowAskLadder => ("bandsintown", "trackers"),
+            // First-party and exactly the thing being attempted: a revived fan
+            // is a fan who became active again. Unlike a tracker count, this is
+            // a number the workspace owns and observes directly.
+            Self::DormantRevival => ("signal", "activated_fans_30d"),
         }
     }
 
@@ -117,6 +205,8 @@ impl PlayKind {
         match self {
             Self::TrackUsAsk => &TRACK_US_ASK_STEPS,
             Self::ListingCompletenessSweep => &LISTING_SWEEP_STEPS,
+            Self::FollowAskLadder => &FOLLOW_ASK_LADDER_STEPS,
+            Self::DormantRevival => &DORMANT_REVIVAL_STEPS,
         }
     }
 }
@@ -168,6 +258,56 @@ const LISTING_SWEEP_STEPS: [PlayStepSpec; 1] = [PlayStepSpec {
     window_hours: 14 * 24,
 }];
 
+// Every rung follows the anchor, because the anchor is the moment the fan
+// qualified rather than a date in the future. The spacing is the point: the
+// same ask three times in a month is nagging, and the same ask three times
+// across four months is a campaign. Fourteen days of window each, so a rung
+// that cannot be sent this week is still the right message next week and a
+// recorded skip after that.
+const FOLLOW_ASK_LADDER_STEPS: [PlayStepSpec; 3] = [
+    PlayStepSpec {
+        index: 0,
+        kind: PlayStepKind::FollowAskFirst,
+        class: PlayStepKind::FollowAskFirst.action_class(),
+        offset_hours: 0,
+        window_hours: 14 * 24,
+    },
+    PlayStepSpec {
+        index: 1,
+        kind: PlayStepKind::FollowAskSecond,
+        class: PlayStepKind::FollowAskSecond.action_class(),
+        offset_hours: 45 * 24,
+        window_hours: 14 * 24,
+    },
+    PlayStepSpec {
+        index: 2,
+        kind: PlayStepKind::FollowAskFinal,
+        class: PlayStepKind::FollowAskFinal.action_class(),
+        offset_hours: 120 * 24,
+        window_hours: 14 * 24,
+    },
+];
+
+// Two messages and then the agent stops. Somebody who has ignored the band for
+// a year and then ignored two reminders has answered, and a third would be the
+// campaign talking to itself.
+const DORMANT_REVIVAL_STEPS: [PlayStepSpec; 2] = [
+    PlayStepSpec {
+        index: 0,
+        kind: PlayStepKind::DormantRevivalFirst,
+        class: PlayStepKind::DormantRevivalFirst.action_class(),
+        offset_hours: 0,
+        window_hours: 14 * 24,
+    },
+    PlayStepSpec {
+        index: 1,
+        kind: PlayStepKind::DormantRevivalFinal,
+        class: PlayStepKind::DormantRevivalFinal.action_class(),
+        offset_hours: 45 * 24,
+        window_hours: 14 * 24,
+    },
+];
+
 /// Who a step is sent to.
 ///
 /// Not every step has recipients. A listing sweep is work on the band's own
@@ -189,6 +329,11 @@ pub enum PlayStepKind {
     AnnounceAsk,
     PostShowAsk,
     ListingSweep,
+    FollowAskFirst,
+    FollowAskSecond,
+    FollowAskFinal,
+    DormantRevivalFirst,
+    DormantRevivalFinal,
 }
 
 impl PlayStepKind {
@@ -198,6 +343,11 @@ impl PlayStepKind {
             Self::AnnounceAsk => "announce_ask",
             Self::PostShowAsk => "post_show_ask",
             Self::ListingSweep => "listing_sweep",
+            Self::FollowAskFirst => "follow_ask_first",
+            Self::FollowAskSecond => "follow_ask_second",
+            Self::FollowAskFinal => "follow_ask_final",
+            Self::DormantRevivalFirst => "dormant_revival_first",
+            Self::DormantRevivalFinal => "dormant_revival_final",
         }
     }
 
@@ -207,6 +357,11 @@ impl PlayStepKind {
             "announce_ask" => Some(Self::AnnounceAsk),
             "post_show_ask" => Some(Self::PostShowAsk),
             "listing_sweep" => Some(Self::ListingSweep),
+            "follow_ask_first" => Some(Self::FollowAskFirst),
+            "follow_ask_second" => Some(Self::FollowAskSecond),
+            "follow_ask_final" => Some(Self::FollowAskFinal),
+            "dormant_revival_first" => Some(Self::DormantRevivalFirst),
+            "dormant_revival_final" => Some(Self::DormantRevivalFinal),
             _ => None,
         }
     }
@@ -219,6 +374,15 @@ impl PlayStepKind {
             Self::AnnounceAsk => "play.track_us.announce",
             Self::PostShowAsk => "play.track_us.post_show",
             Self::ListingSweep => "play.listing.sweep",
+            // One template per rung, because three sends of the same copy are
+            // three sends whose separate results cannot be read — and because
+            // the third message to somebody who ignored two has to say
+            // something the first did not.
+            Self::FollowAskFirst => "play.follow_ask.first",
+            Self::FollowAskSecond => "play.follow_ask.second",
+            Self::FollowAskFinal => "play.follow_ask.final",
+            Self::DormantRevivalFirst => "play.dormant_revival.first",
+            Self::DormantRevivalFinal => "play.dormant_revival.final",
         }
     }
 
@@ -239,6 +403,26 @@ impl PlayStepKind {
                 "a published show three weeks out is worth checking is listed completely, because \
                  an incomplete listing cannot be found by the people already looking"
             }
+            Self::FollowAskFirst => {
+                "this fan has come to a show or said they wanted to, and has never been asked to \
+                 follow the band where the next date is announced"
+            }
+            Self::FollowAskSecond => {
+                "six weeks after the first ask, and a single message that goes unread is not an \
+                 answer — one nudge is the difference between asking and not"
+            }
+            Self::FollowAskFinal => {
+                "the last rung. Four months after the first ask, and after this the ladder is \
+                 finished for this fan whatever they did with it"
+            }
+            Self::DormantRevivalFirst => {
+                "this fan came to a show or wanted to, has done nothing for a year, and there is a \
+                 date coming that is a reason to write to them"
+            }
+            Self::DormantRevivalFinal => {
+                "six weeks on and no sign of life. This is the last message, and after it the \
+                 agent leaves them alone"
+            }
         }
     }
 
@@ -258,6 +442,15 @@ impl PlayStepKind {
             // Our own listings. Free, reaches nobody outside the workspace, and
             // undone by doing the opposite.
             Self::ListingSweep => ActionClass::FirstPartyReversible,
+            // Every rung is a message to a consented fan of this workspace, so
+            // the ladder spends the same budget and obeys the same cooldown as
+            // the show-timed asks.
+            Self::FollowAskFirst | Self::FollowAskSecond | Self::FollowAskFinal => {
+                ActionClass::OwnedAudience
+            }
+            // Quiet is not withdrawn consent. A fan who stopped turning up is
+            // still a fan of this workspace who agreed to hear from it.
+            Self::DormantRevivalFirst | Self::DormantRevivalFinal => ActionClass::OwnedAudience,
         }
     }
 
@@ -265,7 +458,13 @@ impl PlayStepKind {
     #[must_use]
     pub const fn audience(self) -> StepAudience {
         match self {
-            Self::AnnounceAsk | Self::PostShowAsk => StepAudience::Fans,
+            Self::AnnounceAsk
+            | Self::PostShowAsk
+            | Self::FollowAskFirst
+            | Self::FollowAskSecond
+            | Self::FollowAskFinal
+            | Self::DormantRevivalFirst
+            | Self::DormantRevivalFinal => StepAudience::Fans,
             Self::ListingSweep => StepAudience::None,
         }
     }
@@ -493,7 +692,16 @@ pub fn play_is_worth_starting(
     hours_until_anchor: i64,
     policy: PlayPolicy,
 ) -> bool {
-    if !anchor_active || hours_until_anchor < policy.minimum_lead_hours as i64 {
+    if !anchor_active {
+        return false;
+    }
+    // The operator's minimum lead exists to stop a step that runs *before* its
+    // anchor being scheduled into a moment that has already gone. A play whose
+    // every step follows its anchor has no such moment to miss, and holding one
+    // to the same floor would refuse every play anchored on something that has
+    // already happened — which is every fan-anchored play there will ever be.
+    let anticipates_anchor = kind.steps().iter().any(|spec| spec.offset_hours < 0);
+    if anticipates_anchor && hours_until_anchor < policy.minimum_lead_hours as i64 {
         return false;
     }
     // And at least one of this play's own steps must still have a window. The
@@ -805,6 +1013,42 @@ mod tests {
     }
 
     #[test]
+    fn a_revival_stops_after_two_and_never_precedes_its_anchor() {
+        // Somebody who ignored the band for a year and then ignored two
+        // reminders has answered. A third would be the campaign talking to
+        // itself.
+        let steps = PlayKind::DormantRevival.steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(PlayKind::DormantRevival.anchor_kind(), PlayAnchorKind::Fan);
+        for spec in steps {
+            assert!(spec.offset_hours >= 0);
+            assert_eq!(spec.class, ActionClass::OwnedAudience);
+            assert_eq!(spec.kind.audience(), StepAudience::Fans);
+        }
+        assert!(play_is_worth_starting(
+            PlayKind::DormantRevival,
+            true,
+            0,
+            PlayPolicy::default()
+        ));
+    }
+
+    #[test]
+    fn the_two_fan_anchored_plays_are_judged_by_different_numbers() {
+        // A revival is measured on fans becoming active again, which is the
+        // thing it attempts. Borrowing the ladder's tracker series would read a
+        // number none of its messages mentions.
+        assert_eq!(
+            PlayKind::DormantRevival.success_metric(),
+            ("signal", "activated_fans_30d")
+        );
+        assert_ne!(
+            PlayKind::DormantRevival.success_metric(),
+            PlayKind::FollowAskLadder.success_metric()
+        );
+    }
+
+    #[test]
     fn every_play_names_a_hypothesis_a_metric_and_at_least_one_step() {
         for kind in PlayKind::all() {
             assert!(!kind.hypothesis().is_empty());
@@ -812,7 +1056,112 @@ mod tests {
             let (platform, metric_key) = kind.success_metric();
             assert!(!platform.is_empty() && !metric_key.is_empty());
             assert_eq!(PlayKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(
+                PlayAnchorKind::parse(kind.anchor_kind().as_str()),
+                Some(kind.anchor_kind())
+            );
         }
+    }
+
+    #[test]
+    fn every_step_kind_names_its_own_template_and_survives_a_round_trip() {
+        // A rung that reused another's template would be a message whose result
+        // cannot be told apart from the message before it.
+        let mut templates = Vec::new();
+        for kind in PlayKind::all() {
+            for spec in kind.steps() {
+                assert_eq!(PlayStepKind::parse(spec.kind.as_str()), Some(spec.kind));
+                assert_eq!(spec.class, spec.kind.action_class());
+                templates.push(spec.kind.template_key());
+            }
+        }
+        let unique: std::collections::BTreeSet<_> = templates.iter().collect();
+        assert_eq!(unique.len(), templates.len(), "one template per step kind");
+    }
+
+    #[test]
+    fn a_fan_anchored_play_starts_even_though_its_anchor_is_now() {
+        // The whole ladder follows its anchor, so there is no lead time to
+        // wait for. Applying the show-shaped minimum here would refuse every
+        // fan-anchored play the system will ever have.
+        let policy = PlayPolicy::default();
+        assert_eq!(PlayKind::FollowAskLadder.anchor_kind(), PlayAnchorKind::Fan);
+        assert!(play_is_worth_starting(
+            PlayKind::FollowAskLadder,
+            true,
+            0,
+            policy
+        ));
+        // And a fan who is no longer a reason to act is still never started.
+        assert!(!play_is_worth_starting(
+            PlayKind::FollowAskLadder,
+            false,
+            0,
+            policy
+        ));
+    }
+
+    #[test]
+    fn the_ladder_spaces_its_rungs_by_months_and_never_overlaps_them() {
+        // Three sends of one ask in a month is nagging. The gaps are the play.
+        let steps = PlayKind::FollowAskLadder.steps();
+        assert_eq!(steps.len(), 3);
+        let mut previous_close = i64::MIN;
+        for spec in steps {
+            assert!(
+                spec.offset_hours >= 0,
+                "a rung before the anchor would be scheduled into the past"
+            );
+            let (due, expires) = step_schedule(*spec, anchor());
+            assert!(
+                due.unix_timestamp() > previous_close,
+                "a rung must not open before the one above it has closed"
+            );
+            previous_close = expires.unix_timestamp();
+            assert_eq!(spec.class, ActionClass::OwnedAudience);
+            assert_eq!(spec.kind.audience(), StepAudience::Fans);
+        }
+    }
+
+    #[test]
+    fn a_ladder_rung_reaches_exactly_one_fan_and_is_never_re_sent() {
+        let spec = PlayKind::FollowAskLadder.steps()[0];
+        let (due_at, expires_at) = step_schedule(spec, anchor());
+        let mut snapshot = PlaySnapshot {
+            play_id: PlayId::new(),
+            kind: PlayKind::FollowAskLadder,
+            anchor_at: anchor(),
+            anchor_active: true,
+            steps: vec![PlayStepState {
+                index: 0,
+                kind: spec.kind,
+                class: spec.class,
+                due_at,
+                expires_at,
+                settled: false,
+                recipients_emitted: 0,
+            }],
+            eligible_recipients: 1,
+        };
+        let due = due_at + Duration::hours(1);
+        assert!(matches!(
+            evaluate_play(&snapshot, PlayPolicy::default(), due),
+            PlayDecision::RunStep {
+                kind: PlayStepKind::FollowAskFirst,
+                class: ActionClass::OwnedAudience,
+                ..
+            }
+        ));
+        // The anchor fan is the only recipient, so once they are committed to
+        // the rung has nobody left and settles rather than holding open.
+        snapshot.eligible_recipients = 0;
+        if let Some(step) = snapshot.steps.first_mut() {
+            step.recipients_emitted = 1;
+        }
+        assert_eq!(
+            skip(evaluate_play(&snapshot, PlayPolicy::default(), due)),
+            StepSkipReason::NoEligibleRecipients
+        );
     }
 
     #[test]

@@ -91,8 +91,31 @@ jobs:
           cargo run --locked --package crowdrelay-worker -- setup
           cargo run --locked --package crowdrelay-worker -- setup
 
+      # Mirrors the `just ci` recipe (justfile is the source of truth).
+      # Inlined here so CI needs no third-party installer action; if a recipe
+      # changes materially, update both places — the task-runner contract test
+      # fails the build when this block and the justfile drift apart.
       - name: Run repository checks
-        run: make ci
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --all-targets --all-features
+          node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          bash scripts/audit-public-tree.sh
+          python3 scripts/check-ci-policy.py
+          python3 scripts/source-size-ratchet.py
+          python3 scripts/api-sql-ratchet.py
+          python3 scripts/test-modularity-contract.py
+          python3 scripts/check-postgres-major.py
+          python3 scripts/postgres18_runtime_contract.py
+          python3 scripts/area_wallet_authority_v2_contract.py
+          python3 scripts/staff_device_sessions_v2_contract.py
+          python3 scripts/test-ecosystem-contract-v2.py
+          python3 scripts/test-ops-control-plane-v2.py
+          python3 scripts/test-ecosystem-design-contract.py
+          python3 scripts/test-image-provenance-policy.py
 
       - name: Test all PostgreSQL integration paths sequentially
         shell: bash
@@ -303,3 +326,28 @@ jobs:
             --set '*.platform=${{ matrix.platform }}' \
             --set "*.cache-from=type=registry,ref=${BUILD_CACHE_REF}" \
             --set '*.output=type=cacheonly'
+
+  summary:
+    # Single green check for branch protection, and the relation view for the
+    # run panel: everything above reports into one node instead of eight
+    # independent dots.
+    name: All checks passed
+    needs: [rust, dependency-security, containers]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate job results
+        shell: bash
+        run: |
+          set -euo pipefail
+          results='"${{ join(needs.*.result, '","') }}"'
+          echo "job results: [${results}]"
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              exit 1
+            fi
+          done
+          # Skipped containers on non-PR pushes are fine; a skipped security
+          # scan is not, and the pinned audit job never skips.
+          echo "OK"

@@ -50,7 +50,7 @@ class RockSolidPublicReadPath(unittest.TestCase):
         canary_script = (ROOT / "scripts/synesthesia-production-canary.sh").read_text()
         self.assertIn("SYNESTHESIA_BASE_URL", smoke)
         self.assertIn("schedule:", smoke)
-        self.assertIn('cron: "7 */6 * * *"', smoke)
+        self.assertIn('cron: "7 3 * * *"', smoke)
         self.assertIn("require_200 synesthesia_home", probe_script)
         self.assertIn("require_200 synesthesia_boot_art", probe_script)
         self.assertIn("menu-world.webp", probe_script)

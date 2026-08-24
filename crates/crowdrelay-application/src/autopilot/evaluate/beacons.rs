@@ -96,3 +96,52 @@ pub(super) fn beacon_candidate(
         ),
     }))
 }
+
+/// The acquisition ask: a verified scene node carries invite codes for their
+/// city's show. Third-party by the payload's own class, so the ceiling, the
+/// envelope and the posture all gate it exactly like any other partner
+/// contact.
+pub(super) fn beacon_invite_candidate(
+    snapshot: BeaconInviteSnapshot,
+    policy: &AutopilotPolicy,
+    _now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::Beacon(domain_policy) = &policy.config else {
+        return Ok(None);
+    };
+    let BeaconInviteDecision::Request {
+        requested_count,
+        confidence,
+    } = evaluate_beacon_invite_batch(snapshot, domain_policy.invite)
+    else {
+        return Ok(None);
+    };
+    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::Beacon(snapshot.beacon_id),
+        decision_kind: "request_beacon_invite_batch",
+        confidence,
+        disposition,
+        reason: "warm scene node inside their city's invite window is due an ask",
+        input_snapshot: serde_json::to_value(snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::RequestBeaconInviteBatch {
+            beacon_id: snapshot.beacon_id,
+            beacon_version: snapshot.beacon_version,
+            event_id: snapshot.event_id,
+            requested_count,
+        },
+        decision_key: format!(
+            "decision:beacon-invite:v{}:{}:{}:{}",
+            policy.version, snapshot.beacon_id, snapshot.event_id, snapshot.beacon_version,
+        ),
+        // One ask per beacon per show for ever — the cooldown lives in the
+        // rule, but the key makes even a policy change unable to double-ask
+        // about the same pair.
+        action_idempotency_key: format!(
+            "action:beacon-invite:{}:{}",
+            snapshot.beacon_id, snapshot.event_id
+        ),
+    }))
+}

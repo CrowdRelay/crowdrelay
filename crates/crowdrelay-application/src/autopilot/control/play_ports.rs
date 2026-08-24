@@ -40,7 +40,10 @@ pub struct PlayClaimView {
 pub struct PlayLedgerEntry {
     pub play_id: PlayId,
     pub kind: PlayKind,
-    pub event_id: EventId,
+    /// What the play hangs off, and which kind of thing that is. A ledger row
+    /// naming only a uuid would leave an operator guessing whether it points at
+    /// a show or at one of their own fans.
+    pub anchor: PlayAnchorRef,
     pub anchor_at: OffsetDateTime,
     /// Frozen when the play started, so the claim can be read back rather than
     /// reconstructed from whatever the code says today.

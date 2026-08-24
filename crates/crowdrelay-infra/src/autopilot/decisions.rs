@@ -159,6 +159,95 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_deliverability_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<DeliverabilitySnapshot, RepositoryError> {
+        // The operator's own ceiling, so the ramp is measured against the
+        // number they set rather than against a constant in here.
+        let (envelope, _) = self.load_growth_envelope_impl(workspace_id, now).await?;
+        self.load_deliverability_snapshot_impl(
+            workspace_id,
+            now,
+            envelope.weekly_third_party_touches,
+        )
+        .await
+    }
+
+    async fn load_outreach_waves(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<OutreachWaveSnapshot>, RepositoryError> {
+        self.load_outreach_waves_impl(workspace_id, now).await
+    }
+
+    async fn load_outreach_wave_anchors(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<OutreachWaveAnchor>, RepositoryError> {
+        self.load_outreach_wave_anchors_impl(workspace_id, now)
+            .await
+    }
+
+    async fn open_outreach_wave(
+        &self,
+        workspace_id: WorkspaceId,
+        start: &OutreachWaveStart,
+    ) -> Result<bool, RepositoryError> {
+        self.open_outreach_wave_impl(workspace_id, start).await
+    }
+
+    async fn transition_outreach_wave(
+        &self,
+        workspace_id: WorkspaceId,
+        wave_id: uuid::Uuid,
+        transition: OutreachWaveTransition,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.transition_outreach_wave_impl(workspace_id, wave_id, transition, now)
+            .await
+    }
+
+    async fn load_playlist_placements(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PlaylistPlacementSnapshot>, RepositoryError> {
+        self.load_playlist_placements_impl(workspace_id, now).await
+    }
+
+    async fn settle_playlist_placement(
+        &self,
+        workspace_id: WorkspaceId,
+        settlement: PlacementSettlement,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.settle_playlist_placement_impl(workspace_id, settlement, now)
+            .await
+    }
+
+    async fn load_live_opportunity_terms(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<LiveTermsSnapshot>, RepositoryError> {
+        self.load_live_opportunity_terms_impl(workspace_id, now)
+            .await
+    }
+
+    async fn settle_live_opportunity_terms(
+        &self,
+        workspace_id: WorkspaceId,
+        settlement: &TermsSettlement,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.settle_live_opportunity_terms_impl(workspace_id, settlement, now)
+            .await
+    }
+
     async fn load_funding_opportunity_snapshots(
         &self,
         workspace_id: WorkspaceId,
@@ -183,6 +272,24 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<BeaconCampaignSnapshot>, RepositoryError> {
         self.load_beacon_campaign_snapshots_impl(workspace_id, now)
+            .await
+    }
+
+    async fn load_booking_supply_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<BookingSupplySnapshot, RepositoryError> {
+        self.load_booking_supply_snapshot_impl(workspace_id, now)
+            .await
+    }
+
+    async fn load_beacon_invite_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<BeaconInviteSnapshot>, RepositoryError> {
+        self.load_beacon_invite_snapshots_impl(workspace_id, now)
             .await
     }
 

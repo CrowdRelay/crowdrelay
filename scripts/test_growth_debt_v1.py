@@ -22,7 +22,7 @@ LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/growth_debt.rs
 CANDIDATE = (
     ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/growth_debt.rs"
 )
-ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs"
+ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
 CHIEF = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/chief.rs"
 OPENAPI = ROOT / "openapi/openapi.yaml"
 
@@ -140,7 +140,7 @@ class GrowthDebtContract(unittest.TestCase):
     def test_hygiene_debt_cannot_outrank_debt_with_an_outcome_at_stake(self) -> None:
         # The same value-tier ordering as growth_metrics, deliberately shared:
         # one ordering decides what outranks what across both detectors.
-        self.assertIn("growth_metrics::MetricValueTier", self.domain)
+        self.assertIn("value_tier::MetricValueTier", self.domain)
         self.assertIn("MetricValueTier::Downstream", self.domain)
         self.assertIn(
             "downstream_debt_outranks_hygiene_debt_at_the_same_overdue_ratio",

@@ -68,7 +68,9 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         self.assertIn('encoded.len() <= 2_048', api)
 
     def test_external_evidence_waits_for_provider_receipt(self):
-        actions = (ROOT / 'crates/crowdrelay-infra/src/autopilot/actions.rs').read_text()
+        actions = (
+            ROOT / 'crates/crowdrelay-infra/src/autopilot/actions_execution.rs'
+        ).read_text()
         execution = (ROOT / 'crates/crowdrelay-infra/src/autopilot/execution.rs').read_text()
         runtime = (ROOT / 'crates/crowdrelay-infra/src/autopilot/runtime.rs').read_text()
         snapshots = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs').read_text()

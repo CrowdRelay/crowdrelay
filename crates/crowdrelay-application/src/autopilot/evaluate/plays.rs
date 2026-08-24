@@ -55,6 +55,13 @@ pub(super) fn play_start(
     let AutopilotPolicyConfig::Plays(domain_policy) = policy.config else {
         return None;
     };
+    // The loader is asked for one kind's anchors at a time, so a mismatch here
+    // means a query returned the wrong table's rows. Refusing is the only safe
+    // answer: a play started on the wrong anchor kind reads an audience that
+    // does not exist and skips every step it has.
+    if anchor.anchor.kind() != kind.anchor_kind() {
+        return None;
+    }
     if !play_is_worth_starting(kind, anchor.active, anchor.hours_until, domain_policy) {
         return None;
     }
@@ -79,7 +86,7 @@ pub(super) fn play_start(
     let last_expiry = steps.iter().map(|step| step.expires_at).max()?;
     Some(PlayStart {
         kind,
-        event_id: anchor.event_id,
+        anchor: anchor.anchor,
         anchor_at: anchor.anchor_at,
         hypothesis: kind.hypothesis(),
         success_metric_platform: platform,
@@ -129,14 +136,14 @@ pub(super) fn play_step_candidate(
         // what the envelope's cooldown is keyed on, and a listing sweep must
         // not spend a person's weekly contact budget on work that reaches
         // nobody.
-        subject: fan_id.map_or(ActionSubject::Event(snapshot.event_id), ActionSubject::Fan),
+        subject: fan_id.map_or_else(|| anchor_subject(snapshot.anchor), ActionSubject::Fan),
         decision_kind: "run_play_step",
         confidence,
         disposition,
         reason: step_kind.reason(),
         input_snapshot: serde_json::json!({
             "play": serde_json::to_value(domain_snapshot(snapshot))?,
-            "event_id": snapshot.event_id,
+            "anchor": snapshot.anchor,
             "recipient_fan_id": fan_id,
         }),
         policy_snapshot: policy_evidence(policy, domain_policy)?,
@@ -145,7 +152,7 @@ pub(super) fn play_step_candidate(
             play_kind: snapshot.kind,
             step_index: index,
             step_kind,
-            event_id: snapshot.event_id,
+            event_id: snapshot.anchor.event_id(),
             fan_id,
             template_key: step_kind.template_key().to_owned(),
         },
@@ -176,4 +183,17 @@ pub(super) fn play_step_candidate(
 /// anything else was left out of one.
 fn recipient_key(fan_id: Option<FanId>) -> String {
     fan_id.map_or_else(|| "anchor".to_owned(), |fan_id| fan_id.to_string())
+}
+
+/// What the envelope's cooldown is keyed on when a step reaches nobody.
+///
+/// A listing sweep must not spend a person's weekly contact budget on work
+/// that reaches nobody, so it is keyed on the show. A fan-anchored play with no
+/// recipient cannot occur — every one of its steps contacts the anchor — and
+/// keying it on the fan is right if one ever does.
+fn anchor_subject(anchor: PlayAnchorRef) -> ActionSubject {
+    match anchor {
+        PlayAnchorRef::Event { event_id } => ActionSubject::Event(event_id),
+        PlayAnchorRef::Fan { fan_id } => ActionSubject::Fan(fan_id),
+    }
 }

@@ -5,6 +5,9 @@
 
 use super::*;
 
+mod growth;
+use growth::growth_routes;
+
 pub(super) fn application_routes(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(live))
@@ -591,6 +594,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::ingest_outreach_candidates_internal),
         )
         .route(
+            "/v1/internal/autopilot/booking-discovery/candidates",
+            post(autopilot::ingest_booking_candidates_internal),
+        )
+        .route(
+            "/v1/internal/autopilot/outreach/delivery-faults",
+            post(autopilot::record_delivery_fault),
+        )
+        .route(
             "/v1/admin/autopilot/release-ledger",
             get(autopilot::release_ledger),
         )
@@ -618,6 +629,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/growth-envelope",
             post(autopilot::set_growth_envelope),
+        )
+        .route(
+            "/v1/admin/autopilot/posture",
+            get(autopilot::growth_posture).post(autopilot::set_growth_posture),
         )
         .route(
             "/v1/admin/autopilot/policies/{context}",
@@ -754,6 +769,15 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(autopilot::confirm_outreach_candidate),
         )
         .route(
+            "/v1/admin/autopilot/booking-discovery/candidates",
+            post(autopilot::ingest_booking_candidates_admin)
+                .get(autopilot::list_booking_candidates),
+        )
+        .route(
+            "/v1/admin/autopilot/booking-discovery/candidates/{candidate_id}/confirm",
+            post(autopilot::confirm_booking_candidate),
+        )
+        .route(
             "/v1/admin/autopilot/outreach/submission-channels",
             post(autopilot::upsert_submission_channel),
         )
@@ -850,6 +874,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/autopilot/actions/{action_id}/cancel",
             post(autopilot::cancel_action),
         )
+        .route(
+            "/v1/admin/autopilot/decisions/{decision_id}/handled-externally",
+            post(autopilot::mark_decision_handled_externally),
+        )
         .merge(ops_routes::router())
         .route("/v1/admin/admission/passes", post(admission::issue_pass))
         .route(
@@ -883,6 +911,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/me/pass", get(admission::my_pass))
         .route("/v1/me/pass/qr", get(admission::my_pass_qr))
         .route("/v1/staff/admission/redeem", post(admission::redeem_pass))
+        .merge(growth_routes())
         .layer(DefaultBodyLimit::max(MAX_PUBLIC_BODY_BYTES))
         .with_state(state)
 }
