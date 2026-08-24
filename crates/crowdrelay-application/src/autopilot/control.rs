@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use time::OffsetDateTime;
 
 use super::{
-    model::{AutopilotActionPayload, AutopilotContext},
+    model::{AutopilotActionPayload, AutopilotContext, PlayKindStanding},
     ports::AutopilotMeasurementKind,
 };
 use crate::{IdempotencyKey, RepositoryError, RequestId};

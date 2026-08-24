@@ -16,6 +16,7 @@ use crowdrelay_domain::{
     funding::FundingPolicy,
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
+    learning::{PlayRecord, PlayStanding},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
@@ -623,6 +624,18 @@ pub struct CandidatePersistence {
     pub decision_created: bool,
     pub action_created: bool,
     pub quota_throttled: bool,
+}
+
+/// One kind of play, its measured record and what that record is allowed to
+/// change about it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct PlayKindStanding {
+    pub kind: PlayKind,
+    pub record: PlayRecord,
+    pub standing: PlayStanding,
+    /// The operator's ceiling narrowed by the record. Never widened: a perfect
+    /// record still reaches exactly the number an operator configured.
+    pub effective_max_recipients_per_step: u32,
 }
 
 /// A fact the agent could hang a campaign on, before any play exists for it.

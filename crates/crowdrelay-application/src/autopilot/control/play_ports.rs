@@ -57,11 +57,22 @@ pub struct PlayLedgerEntry {
     pub claims: Vec<PlayClaimView>,
 }
 
+/// The ledger and the standings together.
+///
+/// Returned as one read because they answer one question. A list of campaigns
+/// with no standings beside it invites the reader to conclude that a kind which
+/// stopped appearing simply had no shows, when it may have retired itself.
+#[derive(Clone, Debug, Serialize)]
+pub struct PlayLedger {
+    pub plays: Vec<PlayLedgerEntry>,
+    pub standings: Vec<PlayKindStanding>,
+}
+
 #[async_trait]
 pub trait AutopilotPlayLedgerRepository: Send + Sync {
     async fn load_play_ledger(
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<Vec<PlayLedgerEntry>, RepositoryError>;
+    ) -> Result<PlayLedger, RepositoryError>;
 }

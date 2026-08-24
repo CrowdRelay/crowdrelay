@@ -39,11 +39,11 @@ use crowdrelay_application::{
         GrowthMetricTrendView, GrowthOutreachSummary, ManagerBookingPolicySummary,
         ManagerConfigMutation, MerchProductEconomicsMutation, NextBestAction,
         PLAYLIST_TEMPLATE_KEY, PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView,
-        PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
-        PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
-        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
-        RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
-        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
+        PlayKindStanding, PlayLedger, PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot,
+        PlayStart, PlayStepSettlement, PromotionBudgetGuardrailMutation,
+        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
+        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect,
+        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
         SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
         SettleShowCost, ShowCostLedgerEntry, ShowCostMutation, TeamAssigneeSummary,
@@ -74,6 +74,10 @@ use crowdrelay_domain::{
     growth_metrics::{
         GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
         MetricValueTier, compute_trend, velocity_ratio_basis_points,
+    },
+    learning::{
+        LearningPolicy, PlayRecord, PlayStanding, RetirementReason, assess_play_standing,
+        effective_recipient_ceiling,
     },
     live_opportunities::{
         BookingManagerPolicy, LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,

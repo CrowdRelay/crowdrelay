@@ -332,6 +332,7 @@ impl PostgresAutopilotRepository {
                     ("insufficient", Some(reason.as_str()), None, None)
                 }
             };
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let updated = sqlx::query(
                 r#"
                 UPDATE viryaos_play_outcomes
@@ -360,14 +361,29 @@ impl PostgresAutopilotRepository {
             .bind(reason)
             .bind(assessment)
             .bind(delta)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
-            if updated.rows_affected() == 1 {
-                Ok(())
-            } else {
-                Err(RepositoryError::Conflict)
+            if updated.rows_affected() != 1 {
+                return Err(RepositoryError::Conflict);
             }
+            // The record moves with the outcome or not at all. Two writes would
+            // let a crash leave a play scored and unlearned from, and the
+            // difference is invisible afterwards.
+            if outcome.claim == PlayClaim::Correlational {
+                record_play_outcome(
+                    &mut transaction,
+                    workspace_id,
+                    outcome.kind,
+                    match verdict {
+                        PlayOutcomeVerdict::Measured { assessment, .. } => assessment,
+                        PlayOutcomeVerdict::Insufficient { .. } => None,
+                    },
+                )
+                .await?;
+            }
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(())
         })
         .await
     }
@@ -461,7 +477,7 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         _now: OffsetDateTime,
-    ) -> Result<Vec<PlayLedgerEntry>, RepositoryError> {
+    ) -> Result<PlayLedger, RepositoryError> {
         self.bounded(async {
             let plays = sqlx::query_as::<_, PlayLedgerRow>(
                 r#"
@@ -507,8 +523,12 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
+            let standings = self.play_standings_for_read(workspace_id).await?;
             if plays.is_empty() {
-                return Ok(Vec::new());
+                return Ok(PlayLedger {
+                    plays: Vec::new(),
+                    standings,
+                });
             }
             let play_ids: Vec<Uuid> = plays.iter().map(|play| play.play_id).collect();
             let claims = sqlx::query_as::<_, PlayClaimRow>(
@@ -581,7 +601,10 @@ impl AutopilotPlayLedgerRepository for PostgresAutopilotRepository {
                     claims: views,
                 });
             }
-            Ok(entries)
+            Ok(PlayLedger {
+                plays: entries,
+                standings,
+            })
         })
         .await
     }
@@ -631,5 +654,204 @@ impl AutopilotPlayOutcomeRepository for PostgresAutopilotRepository {
     ) -> Result<(), RepositoryError> {
         self.fail_play_outcome_impl(workspace_id, outcome_id, error_kind, retryable, now)
             .await
+    }
+}
+
+/// Folds one play's measured verdict into the record for its kind.
+///
+/// `None` is an outcome nobody could measure. It is counted so the record is
+/// complete and left out of every calculation, because being unable to see
+/// whether a play worked is a reason to fix the measurement rather than to stop
+/// running the play.
+pub(super) async fn record_play_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    kind: PlayKind,
+    assessment: Option<EffectAssessment>,
+) -> Result<(), RepositoryError> {
+    let existing = sqlx::query_as::<_, PlayLearningRow>(
+        r#"
+        SELECT play_kind, improved_count, neutral_count, worsened_count,
+               insufficient_count, consecutive_worsened, retired_reason
+        FROM viryaos_play_learning
+        WHERE workspace_id = $1 AND play_kind = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(kind.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let record = existing
+        .as_ref()
+        .map(play_record)
+        .transpose()?
+        .unwrap_or_default()
+        .observe(assessment);
+
+    // The policy is the operator's, read from the plays context rather than
+    // assumed: a workspace that widened the sample size before retiring a play
+    // must not have that overruled by a default sitting in this file.
+    let policy = play_learning_policy(transaction, workspace_id).await?;
+    let standing = assess_play_standing(record, policy);
+    let (retired_reason, weight) = match standing {
+        PlayStanding::Retired { reason } => (Some(reason.as_str()), 0_i32),
+        PlayStanding::Untested { .. } | PlayStanding::Weighted { .. } => {
+            (None, i32::from(standing.weight_basis_points()))
+        }
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_play_learning (
+            workspace_id, play_kind, improved_count, neutral_count, worsened_count,
+            insufficient_count, consecutive_worsened, weight_basis_points,
+            retired_at, retired_reason
+        )
+        VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,
+            CASE WHEN $9::text IS NULL THEN NULL ELSE now() END, $9
+        )
+        ON CONFLICT (workspace_id, play_kind) DO UPDATE SET
+            improved_count = EXCLUDED.improved_count,
+            neutral_count = EXCLUDED.neutral_count,
+            worsened_count = EXCLUDED.worsened_count,
+            insufficient_count = EXCLUDED.insufficient_count,
+            consecutive_worsened = EXCLUDED.consecutive_worsened,
+            weight_basis_points = EXCLUDED.weight_basis_points,
+            -- A retirement keeps the moment it was decided. Refreshing it on
+            -- every later write would make an old decision look new.
+            retired_at = CASE
+                WHEN EXCLUDED.retired_reason IS NULL THEN NULL
+                ELSE COALESCE(viryaos_play_learning.retired_at, now())
+            END,
+            retired_reason = EXCLUDED.retired_reason
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(kind.as_str())
+    .bind(i32::try_from(record.improved).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.neutral).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.worsened).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.insufficient).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.consecutive_worsened).unwrap_or(i32::MAX))
+    .bind(weight)
+    .bind(retired_reason)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct PlayLearningRow {
+    play_kind: String,
+    improved_count: i32,
+    neutral_count: i32,
+    worsened_count: i32,
+    insufficient_count: i32,
+    consecutive_worsened: i32,
+    retired_reason: Option<String>,
+}
+
+fn play_record(row: &PlayLearningRow) -> Result<PlayRecord, RepositoryError> {
+    let count = |value: i32| u32::try_from(value).map_err(|_| RepositoryError::Unexpected);
+    Ok(PlayRecord {
+        improved: count(row.improved_count)?,
+        neutral: count(row.neutral_count)?,
+        worsened: count(row.worsened_count)?,
+        insufficient: count(row.insufficient_count)?,
+        consecutive_worsened: count(row.consecutive_worsened)?,
+        // Only an operator sets this, and once set the rule keeps returning it
+        // however the counts move.
+        operator_retired: row.retired_reason.as_deref()
+            == Some(RetirementReason::OperatorRetired.as_str()),
+    })
+}
+
+async fn play_learning_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+) -> Result<LearningPolicy, RepositoryError> {
+    let config = sqlx::query_scalar::<_, Value>(
+        "SELECT config FROM viryaos_autopilot_policies WHERE workspace_id=$1 AND context='plays'",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(config
+        .and_then(|config| serde_json::from_value::<PlayPolicy>(config).ok())
+        .unwrap_or_default()
+        .learning)
+}
+
+impl PostgresAutopilotRepository {
+    /// The standings, with the operator's own plays policy behind them.
+    ///
+    /// The read model resolves the policy itself rather than taking one from
+    /// the caller: an HTTP handler holding a stale policy would report a
+    /// standing the evaluator does not act on.
+    async fn play_standings_for_read(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<PlayKindStanding>, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        let learning = play_learning_policy(&mut transaction, workspace_id).await?;
+        transaction.commit().await.map_err(map_sqlx)?;
+        self.load_play_standings_impl(
+            workspace_id,
+            PlayPolicy {
+                learning,
+                ..PlayPolicy::default()
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn load_play_standings_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        policy: PlayPolicy,
+    ) -> Result<Vec<PlayKindStanding>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, PlayLearningRow>(
+                r#"
+                SELECT play_kind, improved_count, neutral_count, worsened_count,
+                       insufficient_count, consecutive_worsened, retired_reason
+                FROM viryaos_play_learning
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            // Every kind is reported, including the ones with no record at all.
+            // A kind missing from the read would be a play with no standing,
+            // and the caller would have to invent one.
+            PlayKind::all()
+                .into_iter()
+                .map(|kind| {
+                    let record = rows
+                        .iter()
+                        .find(|row| row.play_kind == kind.as_str())
+                        .map(play_record)
+                        .transpose()?
+                        .unwrap_or_default();
+                    let standing = assess_play_standing(record, policy.learning);
+                    Ok(PlayKindStanding {
+                        kind,
+                        record,
+                        standing,
+                        effective_max_recipients_per_step: effective_recipient_ceiling(
+                            policy, standing,
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .await
     }
 }

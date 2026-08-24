@@ -237,12 +237,7 @@ pub async fn play_ledger(State(state): State<AppState>, headers: HeaderMap) -> R
         .load_play_ledger(state.ops.workspace_id(), OffsetDateTime::now_utc())
         .await
     {
-        Ok(plays) => private_json(StatusCode::OK, PlayLedgerResponse { plays }),
+        Ok(ledger) => private_json(StatusCode::OK, ledger),
         Err(error) => repository_problem(error, request_id(&headers)),
     }
-}
-
-#[derive(Debug, Serialize)]
-struct PlayLedgerResponse {
-    plays: Vec<PlayLedgerEntry>,
 }

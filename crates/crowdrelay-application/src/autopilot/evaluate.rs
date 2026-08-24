@@ -33,7 +33,8 @@ use crowdrelay_domain::{
     outreach::{OutreachDecision, OutreachSnapshot, evaluate_outreach},
     play_measurement::measurement_due_at,
     plays::{
-        PlayDecision, PlayKind, PlaySnapshot, evaluate_play, play_is_worth_starting, step_schedule,
+        PlayDecision, PlayKind, PlayPolicy, PlaySnapshot, evaluate_play, play_is_worth_starting,
+        step_schedule,
     },
     pricing::{
         TicketAllocationDecision, TicketYieldDecision, TicketYieldSnapshot,
@@ -529,12 +530,38 @@ where
                     }
                 }
                 AutopilotContext::Plays => {
+                    let AutopilotPolicyConfig::Plays(play_policy) = policy.config else {
+                        continue;
+                    };
+                    // Read once for the whole context: a standing belongs to the
+                    // play kind, and re-reading it per show would be a query per
+                    // candidate for an answer that cannot change mid-cycle.
+                    let standings = self
+                        .repository
+                        .load_play_standings(self.workspace_id, play_policy)
+                        .await?;
+                    let standing_for = |kind: PlayKind| {
+                        standings
+                            .iter()
+                            .find(|standing| standing.kind == kind)
+                            .copied()
+                    };
+
                     // Starting comes first so a play created this cycle can run
                     // a step that is already due. An announce step for a show
                     // announced fourteen days late is due the moment its play
                     // exists, and making it wait a cycle for no reason is a
                     // cycle of its window spent.
                     for kind in PlayKind::all() {
+                        // A retired kind is proposed no longer. Retirement bites
+                        // here and only here: a campaign already committed to a
+                        // specific show finishes under the ceilings it started
+                        // with, because abandoning it mid-run would leave steps
+                        // that nothing ever settles.
+                        if standing_for(kind).is_some_and(|standing| standing.standing.is_retired())
+                        {
+                            continue;
+                        }
                         let anchors = self
                             .repository
                             .load_play_anchors(self.workspace_id, kind, now)
@@ -557,13 +584,26 @@ where
                         .load_play_snapshots(self.workspace_id, now)
                         .await?;
                     for mut snapshot in snapshots {
+                        // The record narrows the reach of a running play and
+                        // never widens it. A retired kind keeps its configured
+                        // ceiling so the campaign in flight can still settle.
+                        let narrowed = standing_for(snapshot.kind)
+                            .filter(|standing| !standing.standing.is_retired())
+                            .map_or(policy.clone(), |standing| AutopilotPolicy {
+                                config: AutopilotPolicyConfig::Plays(PlayPolicy {
+                                    max_recipients_per_step: standing
+                                        .effective_max_recipients_per_step,
+                                    ..play_policy
+                                }),
+                                ..policy.clone()
+                            });
                         let mut limits = CycleLimits {
                             ceilings: &ceilings,
                             envelope: &envelope,
                             usage: &mut usage,
                             touch_ages: &touch_ages,
                         };
-                        self.advance_play(&mut snapshot, &policy, &mut limits, &mut report, now)
+                        self.advance_play(&mut snapshot, &narrowed, &mut limits, &mut report, now)
                             .await?;
                     }
                 }
