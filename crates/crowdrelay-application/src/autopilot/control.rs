@@ -397,6 +397,23 @@ pub struct ChiefOfStaffStopped {
     pub detail: String,
 }
 
+/// A declared target the operator should hear about without asking.
+///
+/// Only the ones that warrant it: a target being met is good news that can wait
+/// for somebody to look, and one nobody can measure belongs with the gaps.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChiefOfStaffObjective {
+    pub platform: String,
+    pub metric_key: String,
+    pub scope_kind: String,
+    /// `behind` or `missed`.
+    pub state: String,
+    pub progress_basis_points: u32,
+    pub shortfall: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    pub deadline: OffsetDateTime,
+}
+
 /// Something that moved, and what the number is allowed to prove.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChiefOfStaffMovement {
@@ -437,6 +454,10 @@ pub struct AutopilotChiefOfStaff {
     pub stopped: Vec<ChiefOfStaffStopped>,
     /// What moved, with the strength of the claim attached to every number.
     pub moved: Vec<ChiefOfStaffMovement>,
+    /// Declared targets that are behind or already missed. A target being met
+    /// is good news that can wait; one nobody can measure is a gap, and is
+    /// reported as one.
+    pub objectives_at_risk: Vec<ChiefOfStaffObjective>,
 }
 
 /// Authority-only policy mutation. Domain-specific thresholds remain typed
