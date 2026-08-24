@@ -20,7 +20,7 @@ fi
 # anonymized examples may be tracked.
 unexpected_n8n="$(
   git ls-files 'n8n/**' |
-    grep -Ev '^n8n/(README\.md|examples/.*\.example\.json)$' || true
+    grep -Ev '^n8n/(README\.md|viryaos-executor-contract\.md|examples/.*\.example\.json)$' || true
 )"
 if [[ -n "$unexpected_n8n" ]]; then
   echo "Unexpected public n8n files:" >&2
