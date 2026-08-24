@@ -350,6 +350,10 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         .checked_add(i64::try_from(show_tasks.len()).map_err(|_| RepositoryError::Unexpected)?)
         .and_then(|value| value.checked_add(i64::try_from(deadline_attention).ok()?))
         .ok_or(RepositoryError::Unexpected)?;
+    let (acted_alone_24h, about_to_act, parked_for_approval) =
+        chief_activity(repo, workspace_id).await?;
+    let stopped = chief_stopped(repo, workspace_id).await?;
+    let moved = chief_movements(repo, workspace_id).await?;
     Ok(AutopilotChiefOfStaff {
         executed_24h: stats.executed_24h,
         failed_24h: stats.failed_24h,
@@ -364,5 +368,204 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         attention_items,
         top_opportunities,
         show_tasks,
+        acted_alone_24h,
+        about_to_act,
+        parked_for_approval,
+        stopped,
+        moved,
     })
+}
+
+#[derive(sqlx::FromRow)]
+struct ActivityRow {
+    bucket: String,
+    action_kind: String,
+    action_class: String,
+    count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct StoppedRow {
+    kind: String,
+    reason: String,
+    count: i64,
+    detail: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct MovementRow {
+    subject: String,
+    claim: String,
+    assessment: String,
+    delta_basis_points: Option<i32>,
+}
+
+/// What the agent did alone, what it is about to do, and what is parked.
+///
+/// One query for all three: they are the same rows partitioned by status and
+/// by who authorised them, and three round trips would let the sections
+/// disagree about a single action that changed state between reads.
+///
+/// "Alone" means the action was approved by policy rather than by a person.
+/// That is the distinction an operator is checking for, and it is stored on the
+/// row rather than inferred.
+async fn chief_activity(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<
+    (
+        Vec<crowdrelay_application::autopilot::ChiefOfStaffActivity>,
+        Vec<crowdrelay_application::autopilot::ChiefOfStaffActivity>,
+        Vec<crowdrelay_application::autopilot::ChiefOfStaffActivity>,
+    ),
+    RepositoryError,
+> {
+    use crowdrelay_application::autopilot::ChiefOfStaffActivity;
+    let rows = sqlx::query_as::<_, ActivityRow>(
+        r#"
+        SELECT
+            CASE
+                WHEN action.status = 'succeeded' THEN 'acted_alone'
+                WHEN action.status = 'awaiting_approval' THEN 'parked'
+                ELSE 'about_to_act'
+            END AS bucket,
+            action.action_kind,
+            COALESCE(action.action_class, 'first_party_reversible') AS action_class,
+            count(*)::bigint AS count
+        FROM viryaos_autopilot_actions AS action
+        WHERE action.workspace_id = $1
+          AND (
+                (action.status = 'succeeded'
+                 AND action.finished_at >= now() - INTERVAL '24 hours'
+                 AND action.approved_by = 'policy:bounded_auto')
+             OR action.status IN ('queued', 'processing', 'awaiting_approval')
+          )
+        GROUP BY 1, 2, 3
+        ORDER BY count DESC, action.action_kind
+        LIMIT 60
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let mut alone = Vec::new();
+    let mut about = Vec::new();
+    let mut parked = Vec::new();
+    for row in rows {
+        let entry = ChiefOfStaffActivity {
+            action_kind: row.action_kind,
+            action_class: row.action_class,
+            count: row.count,
+        };
+        match row.bucket.as_str() {
+            "acted_alone" => alone.push(entry),
+            "parked" => parked.push(entry),
+            _ => about.push(entry),
+        }
+    }
+    Ok((alone, about, parked))
+}
+
+/// What the agent stopped, and why.
+///
+/// Every reason is the stored one, verbatim. Summarising `window_closed` and
+/// `no_eligible_recipients` into "skipped" would merge a queue nobody worked
+/// with an audience that did not exist, and those have different fixes.
+async fn chief_stopped(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<crowdrelay_application::autopilot::ChiefOfStaffStopped>, RepositoryError> {
+    use crowdrelay_application::autopilot::ChiefOfStaffStopped;
+    let rows = sqlx::query_as::<_, StoppedRow>(
+        r#"
+        SELECT 'play_step_skipped' AS kind, step.skip_reason AS reason,
+               count(*)::bigint AS count,
+               'campaign steps that will never be sent' AS detail
+        FROM viryaos_play_steps AS step
+        WHERE step.workspace_id = $1
+          AND step.skip_reason IS NOT NULL
+          AND step.settled_at >= now() - INTERVAL '7 days'
+        GROUP BY step.skip_reason
+        UNION ALL
+        SELECT 'action_failed', COALESCE(action.last_error_kind, 'unknown'),
+               count(*)::bigint,
+               'actions that reached their attempt limit'
+        FROM viryaos_autopilot_actions AS action
+        WHERE action.workspace_id = $1
+          AND action.status = 'failed'
+          AND action.finished_at >= now() - INTERVAL '7 days'
+        GROUP BY action.last_error_kind
+        UNION ALL
+        SELECT 'play_retired', learning.retired_reason, count(*)::bigint,
+               'play kinds the agent will not propose again'
+        FROM viryaos_play_learning AS learning
+        WHERE learning.workspace_id = $1 AND learning.retired_reason IS NOT NULL
+        GROUP BY learning.retired_reason
+        UNION ALL
+        SELECT 'outcome_insufficient', outcome.evidence_reason, count(*)::bigint,
+               'campaigns whose effect could not be measured'
+        FROM viryaos_play_outcomes AS outcome
+        WHERE outcome.workspace_id = $1
+          AND outcome.evidence = 'insufficient'
+          AND outcome.finished_at >= now() - INTERVAL '7 days'
+        GROUP BY outcome.evidence_reason
+        ORDER BY 3 DESC, 1, 2
+        LIMIT 40
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ChiefOfStaffStopped {
+            kind: row.kind,
+            reason: row.reason,
+            count: row.count,
+            detail: row.detail,
+        })
+        .collect())
+}
+
+/// What moved, with the strength of the claim on every number.
+///
+/// Only settled, measured outcomes appear. A claim that could not be made is
+/// reported under `stopped` instead, because "we could not tell" belongs with
+/// the gaps rather than with the results.
+async fn chief_movements(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<crowdrelay_application::autopilot::ChiefOfStaffMovement>, RepositoryError> {
+    use crowdrelay_application::autopilot::ChiefOfStaffMovement;
+    let rows = sqlx::query_as::<_, MovementRow>(
+        r#"
+        SELECT
+            outcome.success_metric_platform || ' ' || outcome.success_metric_key AS subject,
+            outcome.claim,
+            outcome.effect_assessment AS assessment,
+            outcome.delta_basis_points
+        FROM viryaos_play_outcomes AS outcome
+        WHERE outcome.workspace_id = $1
+          AND outcome.evidence = 'measured'
+          AND outcome.effect_assessment IS NOT NULL
+          AND outcome.finished_at >= now() - INTERVAL '7 days'
+        ORDER BY outcome.finished_at DESC
+        LIMIT 20
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ChiefOfStaffMovement {
+            subject: row.subject,
+            claim: row.claim,
+            assessment: row.assessment,
+            delta_basis_points: row.delta_basis_points,
+        })
+        .collect())
 }

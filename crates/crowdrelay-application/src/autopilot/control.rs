@@ -366,6 +366,48 @@ pub struct ChiefOfStaffAttentionItem {
     pub urgency: String,
 }
 
+/// One line of "the agent did this", "it is about to do this" or "this is
+/// waiting for you", grouped by what the work actually is.
+///
+/// Counts by action kind rather than a list of rows. An operator reading a
+/// morning brief needs to know that eleven fan messages went out unattended,
+/// not eleven identifiers.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChiefOfStaffActivity {
+    pub action_kind: String,
+    pub action_class: String,
+    pub count: i64,
+}
+
+/// Something the agent did not do, and why.
+///
+/// The section with no equivalent anywhere else in the system. Every other read
+/// model reports what happened; an autonomous agent that only reports its
+/// successes is one whose gaps are invisible until somebody goes looking.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChiefOfStaffStopped {
+    /// `play_step_skipped`, `action_failed`, `play_retired` or
+    /// `outcome_insufficient`.
+    pub kind: String,
+    /// The stored reason, verbatim. Never a summary: `window_closed` and
+    /// `no_eligible_recipients` are different problems with different fixes.
+    pub reason: String,
+    pub count: i64,
+    pub detail: String,
+}
+
+/// Something that moved, and what the number is allowed to prove.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChiefOfStaffMovement {
+    pub subject: String,
+    /// `attributed` or `correlational`, carried so the strength of the claim
+    /// travels with the number into the brief.
+    pub claim: String,
+    pub assessment: String,
+    /// Absent when the baseline was too flat to carry a percentage.
+    pub delta_basis_points: Option<i32>,
+}
+
 /// Deterministic daily operating brief. `estimated_minutes_saved_24h` is a
 /// coarse action-kind workload estimate, not fabricated AI precision.
 #[derive(Clone, Debug, Serialize)]
@@ -383,6 +425,17 @@ pub struct AutopilotChiefOfStaff {
     pub attention_items: Vec<ChiefOfStaffAttentionItem>,
     pub top_opportunities: Vec<ChiefOfStaffOpportunity>,
     pub show_tasks: Vec<ChiefOfStaffShowTask>,
+    /// What the agent did with nobody watching, in the last 24 hours.
+    pub acted_alone_24h: Vec<ChiefOfStaffActivity>,
+    /// What it will do next unless somebody stops it.
+    pub about_to_act: Vec<ChiefOfStaffActivity>,
+    /// What it will not do until somebody says yes.
+    pub parked_for_approval: Vec<ChiefOfStaffActivity>,
+    /// What it stopped, and why. Read before the rest: this is the agent
+    /// reporting its own gaps, and it is the only section nothing else covers.
+    pub stopped: Vec<ChiefOfStaffStopped>,
+    /// What moved, with the strength of the claim attached to every number.
+    pub moved: Vec<ChiefOfStaffMovement>,
 }
 
 /// Authority-only policy mutation. Domain-specific thresholds remain typed

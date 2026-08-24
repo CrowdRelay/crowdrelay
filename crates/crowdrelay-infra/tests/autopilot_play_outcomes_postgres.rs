@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use crowdrelay_application::autopilot::{
-    AutopilotDecisionRepository, AutopilotPlayLedgerRepository, AutopilotPlayOutcomeRepository,
-    PlayStart, PlayStepPlan, assess_play_claim,
+    AutopilotControlRepository, AutopilotDecisionRepository, AutopilotPlayLedgerRepository,
+    AutopilotPlayOutcomeRepository, PlayStart, PlayStepPlan, assess_play_claim,
 };
 use crowdrelay_domain::{
     EventId, WorkspaceId,
@@ -469,7 +469,10 @@ async fn a_settled_outcome_is_folded_into_the_record_for_its_kind()
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(record.0, 1, "the correlational verdict is the play's verdict");
+    assert_eq!(
+        record.0, 1,
+        "the correlational verdict is the play's verdict"
+    );
     assert_eq!(
         record.3, 0,
         "the attributed claim settled insufficient and must not count"
@@ -520,5 +523,68 @@ async fn the_schema_refuses_a_silent_stop() -> Result<(), Box<dyn std::error::Er
     .execute(&fixture.pool)
     .await;
     assert!(unexplained.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_brief_reports_what_moved_and_what_could_not_be_measured()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("brief-sections").await?;
+    let series_id = create_series(&fixture).await?;
+    seed_series(&fixture, series_id, -14, 0, 500, 1).await?;
+    let start = play_start(&fixture, 10);
+    assert!(
+        fixture
+            .repository
+            .start_play(fixture.workspace_id, &start)
+            .await?
+    );
+    record_reach(&fixture).await?;
+    seed_series(&fixture, series_id, 1, 10, 519, 5).await?;
+
+    let after = fixture.now + time::Duration::days(11);
+    for outcome in fixture
+        .repository
+        .claim_due_play_outcomes(fixture.workspace_id, 8, after)
+        .await?
+    {
+        let observation = fixture
+            .repository
+            .observe_play_outcome(fixture.workspace_id, &outcome, after)
+            .await?;
+        let verdict = assess_play_claim(&outcome, &observation, PlayMeasurementPolicy::default());
+        fixture
+            .repository
+            .complete_play_outcome(fixture.workspace_id, &outcome, &observation, verdict, after)
+            .await?;
+    }
+
+    let brief = fixture
+        .repository
+        .load_chief_of_staff(fixture.workspace_id, after)
+        .await?;
+    assert!(
+        brief
+            .moved
+            .iter()
+            .any(|movement| movement.claim == "correlational"),
+        "a measured claim is a result, and it says which kind of claim it is"
+    );
+    assert!(
+        brief
+            .stopped
+            .iter()
+            .any(|stopped| stopped.kind == "outcome_insufficient"
+                && stopped.reason == "no_attribution_key"),
+        "a claim nobody could make is a gap, reported with its own reason"
+    );
+    assert!(
+        !brief
+            .moved
+            .iter()
+            .any(|movement| movement.assessment.is_empty()),
+        "nothing reaches the moved section without a verdict"
+    );
     Ok(())
 }
