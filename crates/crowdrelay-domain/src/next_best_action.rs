@@ -180,6 +180,11 @@ pub struct QueueCandidate {
     /// convincing lie in the whole queue.
     pub deviation_basis_points: Option<u32>,
     pub measured_effect: Option<MeasuredEffect>,
+    /// True when this finding moves a series an operator has an active target
+    /// on. It ranks below a real deadline on purpose: a show next week beats a
+    /// quarterly goal, and an objective that could outrank one would let a
+    /// number nobody is waiting on push aside a date somebody is.
+    pub contributes_to_objective: bool,
 }
 
 /// Why an entry landed where it did — the single factor that decided its
@@ -189,6 +194,8 @@ pub struct QueueCandidate {
 pub enum RankFactor {
     Authority,
     Deadline,
+    /// The finding moves a number an operator declared a target on.
+    Objective,
     ValueTier,
     MeasuredEffect,
     Confidence,
@@ -203,6 +210,7 @@ impl RankFactor {
         match self {
             Self::Authority => "authority",
             Self::Deadline => "deadline",
+            Self::Objective => "objective",
             Self::ValueTier => "value_tier",
             Self::MeasuredEffect => "measured_effect",
             Self::Confidence => "confidence",
@@ -226,10 +234,11 @@ pub struct RankedAction {
 }
 
 /// The ordered comparison key. Higher sorts first on every component.
-const fn rank_key(candidate: &QueueCandidate) -> [u32; 6] {
+const fn rank_key(candidate: &QueueCandidate) -> [u32; 7] {
     [
         candidate.authority.tier() as u32,
         deadline_tier(candidate.hours_until_deadline) as u32,
+        candidate.contributes_to_objective as u32,
         match candidate.value_tier {
             Some(tier) => tier.weight() as u32,
             // An unknown tier must not beat a known-downstream one, and must
@@ -250,10 +259,11 @@ const fn rank_key(candidate: &QueueCandidate) -> [u32; 6] {
 }
 
 /// The first component where two keys differ, as an operator-readable factor.
-fn separating_factor(left: &[u32; 6], right: &[u32; 6]) -> RankFactor {
-    const FACTORS: [RankFactor; 6] = [
+fn separating_factor(left: &[u32; 7], right: &[u32; 7]) -> RankFactor {
+    const FACTORS: [RankFactor; 7] = [
         RankFactor::Authority,
         RankFactor::Deadline,
+        RankFactor::Objective,
         RankFactor::ValueTier,
         RankFactor::MeasuredEffect,
         RankFactor::Confidence,
@@ -281,7 +291,7 @@ pub fn rank_next_best_actions(mut candidates: Vec<QueueCandidate>) -> Vec<Ranked
     });
     candidates.truncate(MAX_QUEUE_ENTRIES);
 
-    let keys: Vec<[u32; 6]> = candidates.iter().map(rank_key).collect();
+    let keys: Vec<[u32; 7]> = candidates.iter().map(rank_key).collect();
     candidates
         .into_iter()
         .enumerate()
@@ -332,7 +342,39 @@ mod tests {
             value_tier: None,
             deviation_basis_points: None,
             measured_effect: None,
+            contributes_to_objective: false,
         }
+    }
+
+    #[test]
+    fn a_finding_that_moves_a_declared_target_outranks_one_that_does_not() {
+        let mut toward = candidate(AuthorityState::Observed, 1);
+        toward.contributes_to_objective = true;
+        let queue = rank_next_best_actions(vec![candidate(AuthorityState::Observed, 2), toward]);
+        assert_eq!(
+            queue.first().map(|entry| entry.candidate.subject_id),
+            Some(Uuid::from_u128(1))
+        );
+        assert_eq!(
+            queue.first().map(|entry| entry.ranked_by),
+            Some(RankFactor::Objective)
+        );
+    }
+
+    #[test]
+    fn a_real_deadline_still_beats_a_declared_target() {
+        // A show next week beats a quarterly goal. An objective that could
+        // outrank a date would let a number nobody is waiting on push aside one
+        // somebody is.
+        let mut dated = candidate(AuthorityState::Observed, 1);
+        dated.hours_until_deadline = Some(24);
+        let mut toward = candidate(AuthorityState::Observed, 2);
+        toward.contributes_to_objective = true;
+        let queue = rank_next_best_actions(vec![toward, dated]);
+        assert_eq!(
+            queue.first().map(|entry| entry.candidate.subject_id),
+            Some(Uuid::from_u128(1))
+        );
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub mod market_intelligence;
 pub mod merch_bundle;
 pub mod merchandising;
 pub mod next_best_action;
+pub mod objectives;
 pub mod operator_brief;
 pub mod outreach;
 pub mod performance;

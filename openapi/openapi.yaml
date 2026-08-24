@@ -2499,6 +2499,90 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/objectives:
+    get:
+      operationId: getAutopilotObjectives
+      summary: Read declared targets and where their series say they stand
+      description: >
+        Returns every live target with its state derived on read from the series it names — never
+        stored, because a stored "on track" goes stale silently. A target with no observation is
+        `unmeasurable` with the reason rather than `on_track`, and a deadline that passed unmet is
+        `missed` rather than quietly absent. An objective is never evidence of progress: actions
+        taken toward it move the number zero.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Live targets and their derived state.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthObjectivesResponse'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+    post:
+      operationId: declareAutopilotObjective
+      summary: Declare a target on a metric series
+      description: >
+        Freezes the series' current value as the objective's baseline, because progress measured
+        from a baseline that moves is not progress. One live target per series per scope:
+        re-declaring returns the existing one with `replayed: true` rather than opening a second
+        target a report could pick between. A series with no observation yields a null baseline,
+        and the objective then reports as unmeasurable rather than counting from zero.
+      security:
+      - adminBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrowthObjectiveRequest'
+      responses:
+        '200':
+          description: Target declared, or already declared.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthObjectiveMutation'
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/objectives/{objective_id}/retire:
+    post:
+      operationId: retireAutopilotObjective
+      summary: Retire a target without deleting it
+      description: >
+        The row stays and stops counting. A target that was declared and then removed is exactly
+        what a later review needs to see, and a deleted one cannot be reviewed.
+      security:
+      - adminBearer: []
+      parameters:
+      - name: objective_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Target retired, or already retired.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrowthObjectiveMutation'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/chief-of-staff:
     get:
       operationId: getAutopilotChiefOfStaff
@@ -8125,6 +8209,81 @@ components:
           type: array
           maxItems: 500
           items: { $ref: '#/components/schemas/ShowCostLedgerEntry' }
+    ObjectiveScopeKind:
+      type: string
+      description: >
+        A workspace target and a city target are different promises; merging them would let a
+        national number hide a city where nothing is happening.
+      enum: [workspace, city, event, release_plan]
+    ObjectiveStateName:
+      type: string
+      description: >
+        `met` and `missed` are terminal — a series that later falls back does not un-meet an
+        objective, and a passed deadline is reported rather than forgotten. `unmeasurable` always
+        carries a reason.
+      enum: [met, on_track, behind, missed, unmeasurable]
+    ObjectiveGap:
+      type: string
+      enum: [no_observation, too_early_to_project, no_distance_to_cover]
+    ObjectiveState:
+      type: object
+      additionalProperties: true
+      required: [state]
+      properties:
+        state: { $ref: '#/components/schemas/ObjectiveStateName' }
+        progress_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        projected_value: { type: integer, format: int64 }
+        final_value: { type: integer, format: int64 }
+        shortfall: { type: integer, format: int64 }
+        reason: { $ref: '#/components/schemas/ObjectiveGap' }
+    GrowthObjectiveRequest:
+      type: object
+      additionalProperties: false
+      required: [platform, metric_key, scope_kind, direction, target_value, deadline, declared_by]
+      properties:
+        platform: { type: string, enum: [spotify, youtube, bandsintown, social, website, ticketing, signal, merch] }
+        metric_key: { type: string, minLength: 1, maxLength: 64 }
+        scope_kind: { $ref: '#/components/schemas/ObjectiveScopeKind' }
+        scope_id: { type: [string, 'null'], format: uuid }
+        direction: { type: string, enum: [higher_is_better, lower_is_better] }
+        target_value: { type: integer, format: int64 }
+        deadline: { type: string, format: date-time }
+        declared_by: { type: string, minLength: 1, maxLength: 120 }
+    GrowthObjectiveMutation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, objective_id, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        objective_id: { type: string, format: uuid }
+        baseline_value: { type: [integer, 'null'], format: int64 }
+        replayed: { type: boolean }
+    GrowthObjectiveView:
+      type: object
+      additionalProperties: false
+      required: [objective_id, platform, metric_key, scope_kind, baseline_value, target_value, declared_at, deadline, declared_by, state]
+      properties:
+        objective_id: { type: string, format: uuid }
+        platform: { type: string, maxLength: 32 }
+        metric_key: { type: string, maxLength: 64 }
+        scope_kind: { $ref: '#/components/schemas/ObjectiveScopeKind' }
+        scope_id: { type: [string, 'null'], format: uuid }
+        baseline_value: { type: integer, format: int64 }
+        target_value: { type: integer, format: int64 }
+        declared_at: { type: string, format: date-time }
+        deadline: { type: string, format: date-time }
+        declared_by: { type: string, maxLength: 120 }
+        observed_value: { type: [integer, 'null'], format: int64 }
+        state: { $ref: '#/components/schemas/ObjectiveState' }
+    GrowthObjectivesResponse:
+      type: object
+      additionalProperties: false
+      required: [objectives]
+      properties:
+        objectives:
+          type: array
+          maxItems: 64
+          items: { $ref: '#/components/schemas/GrowthObjectiveView' }
     PlayClaimStrength:
       type: string
       description: >

@@ -17,20 +17,21 @@ use crowdrelay_application::{
         AutopilotContentStateRepository, AutopilotContext, AutopilotControlRepository,
         AutopilotExperimentStateRepository, AutopilotGrowthMetricRepository,
         AutopilotMarketStateRepository, AutopilotMerchStateRepository,
-        AutopilotOutreachStateRepository, AutopilotPlayLedgerRepository,
-        AutopilotShowCostRepository, AutopilotTargetDiscoveryRepository,
-        AutopilotTeamStateRepository, AutopilotTicketStateRepository, CreateExperiment,
-        CreateExperimentVariant, ExperimentObservation, FreezeShowCostPrediction,
-        GrowthMetricSubject, GrowthMetricTrendView, IngestOutreachCandidate, ManagerConfigSource,
-        OutreachSweepReport, RecordBeaconReply, RecordBookingReply, RecordGrowthMetricPoint,
-        RecordOutreachReply, RecordTeamOpportunityProgress, SetAutopilotAuthority,
-        SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics, SettleShowCost,
-        ShowCostLedgerEntry, TeamOpportunityKind, TeamOpportunityProgress, UpsertBeacon,
-        UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource, UpsertGrowthMetricSeries,
-        UpsertMerchProductEconomics, UpsertOutreachOpportunity, UpsertOutreachTarget,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleasePlan,
-        UpsertSubmissionChannel, UpsertTeamOpportunity, UpsertTicketAllocationGuardrail,
-        assign_experiment_variant,
+        AutopilotObjectiveRepository, AutopilotOutreachStateRepository,
+        AutopilotPlayLedgerRepository, AutopilotShowCostRepository,
+        AutopilotTargetDiscoveryRepository, AutopilotTeamStateRepository,
+        AutopilotTicketStateRepository, CreateExperiment, CreateExperimentVariant,
+        DeclareGrowthObjective, ExperimentObservation, FreezeShowCostPrediction,
+        GrowthMetricSubject, GrowthMetricTrendView, GrowthObjectiveView, IngestOutreachCandidate,
+        ManagerConfigSource, OutreachSweepReport, RecordBeaconReply, RecordBookingReply,
+        RecordGrowthMetricPoint, RecordOutreachReply, RecordTeamOpportunityProgress,
+        SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
+        SettleShowCost, ShowCostLedgerEntry, TeamOpportunityKind, TeamOpportunityProgress,
+        UpsertBeacon, UpsertBookingTarget, UpsertCityMarketSignal, UpsertContentSource,
+        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertOutreachOpportunity,
+        UpsertOutreachTarget, UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState,
+        UpsertReleasePlan, UpsertSubmissionChannel, UpsertTeamOpportunity,
+        UpsertTicketAllocationGuardrail, assign_experiment_variant,
     },
 };
 use crowdrelay_domain::{
@@ -47,6 +48,7 @@ use crowdrelay_domain::{
     },
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
+    objectives::ObjectiveScope,
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
     show_settlement::SettledShowCost,
     target_discovery::{CandidateSource, ChannelCost, RouteKind},
@@ -149,5 +151,6 @@ include!("autopilot/outreach_release.rs");
 include!("autopilot/experiments_actions.rs");
 include!("autopilot/growth_metrics.rs");
 include!("autopilot/show_cost.rs");
+include!("autopilot/objectives.rs");
 include!("autopilot/target_discovery.rs");
 include!("autopilot/validation.rs");

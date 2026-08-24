@@ -37,13 +37,18 @@ class NextBestActionContract(unittest.TestCase):
     def test_the_ranking_order_matches_the_documented_order(self) -> None:
         factors = re.findall(
             r"RankFactor::(\w+),",
-            self.domain.split("const FACTORS: [RankFactor; 6] = [", 1)[1].split("];", 1)[0],
+            self.domain.split("const FACTORS: [RankFactor; 7] = [", 1)[1].split("];", 1)[0],
         )
         self.assertEqual(
             factors,
             [
                 "Authority",
                 "Deadline",
+                # An objective ranks below a real deadline on purpose: a show
+                # next week beats a quarterly goal, and a target that could
+                # outrank a date would let a number nobody is waiting on push
+                # aside one somebody is.
+                "Objective",
                 "ValueTier",
                 "MeasuredEffect",
                 "Confidence",
@@ -60,7 +65,7 @@ class NextBestActionContract(unittest.TestCase):
         )
         # The key is compared component by component; there is no place a
         # weight could be introduced without changing this shape.
-        self.assertIn("-> [u32; 6]", self.domain)
+        self.assertIn("-> [u32; 7]", self.domain)
         self.assertIn("separating_factor", self.domain)
 
     def test_the_response_is_capped_in_the_domain_and_in_the_contract(self) -> None:
