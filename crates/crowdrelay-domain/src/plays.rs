@@ -487,12 +487,25 @@ pub fn evaluate_play(
 /// Separate from [`evaluate_play`] because there is no play yet: this reads an
 /// anchor, not a state machine.
 #[must_use]
-pub const fn play_is_worth_starting(
+pub fn play_is_worth_starting(
+    kind: PlayKind,
     anchor_active: bool,
     hours_until_anchor: i64,
     policy: PlayPolicy,
 ) -> bool {
-    anchor_active && hours_until_anchor >= policy.minimum_lead_hours as i64
+    if !anchor_active || hours_until_anchor < policy.minimum_lead_hours as i64 {
+        return false;
+    }
+    // And at least one of this play's own steps must still have a window. The
+    // operator's minimum lead is a floor for every play; each play then has its
+    // own earliest useful moment, and starting one whose every window has
+    // already closed produces a campaign that exists only to record its own
+    // skips. The track-us ask asks fourteen days out and the listing sweep
+    // twenty-one; one number for both would be wrong for one of them.
+    kind.steps().iter().any(|spec| {
+        let closes_at_hours = i64::from(spec.offset_hours) + i64::from(spec.window_hours);
+        hours_until_anchor + closes_at_hours > 0
+    })
 }
 
 /// Derives one step's schedule from the anchor. The only place offsets are
@@ -679,10 +692,43 @@ mod tests {
     #[test]
     fn a_show_too_close_to_run_the_first_step_is_never_started() {
         let policy = PlayPolicy::default();
-        assert!(!play_is_worth_starting(true, 24, policy));
-        assert!(play_is_worth_starting(true, 30 * 24, policy));
+        let kind = PlayKind::TrackUsAsk;
+        assert!(!play_is_worth_starting(kind, true, 24, policy));
+        assert!(play_is_worth_starting(kind, true, 30 * 24, policy));
         // And a cancelled show is never a reason to start one.
-        assert!(!play_is_worth_starting(false, 30 * 24, policy));
+        assert!(!play_is_worth_starting(kind, false, 30 * 24, policy));
+    }
+
+    #[test]
+    fn a_play_whose_every_window_has_closed_is_never_started() {
+        // The sweep asks twenty-one days out with a fortnight's window, so it
+        // closes seven days before the show. An operator who lowers the floor
+        // to two days would otherwise start a sweep for a show three days away:
+        // a campaign that exists only to record its own skip.
+        let policy = PlayPolicy {
+            minimum_lead_hours: 48,
+            ..PlayPolicy::default()
+        };
+        assert!(!play_is_worth_starting(
+            PlayKind::ListingCompletenessSweep,
+            true,
+            3 * 24,
+            policy
+        ));
+        assert!(play_is_worth_starting(
+            PlayKind::ListingCompletenessSweep,
+            true,
+            10 * 24,
+            policy
+        ));
+        // The track-us ask still has its post-show step at that distance, which
+        // is why one lead time for every play would be wrong for one of them.
+        assert!(play_is_worth_starting(
+            PlayKind::TrackUsAsk,
+            true,
+            3 * 24,
+            policy
+        ));
     }
 
     #[test]
