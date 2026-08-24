@@ -220,6 +220,13 @@ pub fn effective_recipient_ceiling(policy: PlayPolicy, standing: PlayStanding) -
     if standing.is_retired() {
         return 0;
     }
+    // An operator who configured nothing gets nothing. The floor below exists so
+    // a weight cannot become a silent retirement, not so a record can overrule a
+    // deliberate zero — raising it here would be this module doing the one thing
+    // it is not allowed to do.
+    if policy.max_recipients_per_step == 0 {
+        return 0;
+    }
     let scaled = u64::from(policy.max_recipients_per_step)
         .saturating_mul(u64::from(standing.weight_basis_points()))
         / 10_000;
@@ -351,6 +358,25 @@ mod tests {
             ..PlayPolicy::default()
         };
         assert!(effective_recipient_ceiling(tiny, standing) >= 1);
+    }
+
+    #[test]
+    fn a_configured_zero_is_never_raised_to_one() {
+        // The floor exists so a weight cannot become a silent retirement, not
+        // so a record can overrule an operator who deliberately set nothing.
+        let silent = PlayPolicy {
+            max_recipients_per_step: 0,
+            ..PlayPolicy::default()
+        };
+        for standing in [
+            PlayStanding::Untested { measured: 0 },
+            PlayStanding::Weighted {
+                basis_points: 10_000,
+                measured: 9,
+            },
+        ] {
+            assert_eq!(effective_recipient_ceiling(silent, standing), 0);
+        }
     }
 
     #[test]
