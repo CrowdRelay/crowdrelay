@@ -958,23 +958,35 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
 
             // An operator reassignment is still a real external handoff. Do not
-            // commit it unless the provider-confirmed team-email executor is live.
-            super::ensure_executor_capability_strict(&mut transaction, workspace_id, "team.email")
+            // The assignment itself is internal routing and must always
+            // commit. The reminder e-mail is best-effort: without a live
+            // team-email executor we skip it (and say so in the logs)
+            // instead of refusing the operator's decision.
+            let team_email_live =
+                super::executor_capability_available(&mut transaction, workspace_id, "team.email")
+                    .await?;
+            if team_email_live {
+                super::team::queue_team_email_action(
+                    &mut transaction,
+                    workspace_id,
+                    persisted_assignment_id,
+                    &action.0,
+                    &member.3,
+                    &member.2,
+                    super::team::friendly_action_title(&action.1),
+                    format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.1),
+                    due_at,
+                    0,
+                    OffsetDateTime::now_utc(),
+                )
                 .await?;
-            super::team::queue_team_email_action(
-                &mut transaction,
-                workspace_id,
-                persisted_assignment_id,
-                &action.0,
-                &member.3,
-                &member.2,
-                super::team::friendly_action_title(&action.1),
-                format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.1),
-                due_at,
-                0,
-                OffsetDateTime::now_utc(),
-            )
-            .await?;
+            } else {
+                tracing::warn!(
+                    workspace_id = %workspace_id.into_uuid(),
+                    action_id = %action_id.into_uuid(),
+                    "assignment committed without reminder e-mail: team.email executor is not live"
+                );
+            }
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(AutopilotControlMutation {
                 operation_id,
