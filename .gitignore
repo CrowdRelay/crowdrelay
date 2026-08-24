@@ -22,9 +22,12 @@ deploy/backups/
 backups/
 
 # n8n is private by default. Only provider-neutral documentation and examples
-# are part of the public repository.
+# are part of the public repository. The executor contract is whitelisted too:
+# two test gates read it verbatim, so an untracked copy means green locally
+# and FileNotFoundError on every runner.
 n8n/*
 !n8n/README.md
+!n8n/viryaos-executor-contract.md
 !n8n/examples/
 !n8n/examples/**
 
