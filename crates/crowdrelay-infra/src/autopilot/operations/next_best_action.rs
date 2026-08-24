@@ -12,6 +12,7 @@
 
 use super::*;
 use crowdrelay_application::autopilot::{AutopilotActionPayload, NextBestAction};
+use crowdrelay_domain::plays::PlayKind;
 use crowdrelay_domain::{
     growth_metrics::MetricValueTier,
     next_best_action::{AuthorityState, QueueCandidate, rank_next_best_actions},
@@ -160,6 +161,26 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     .await
     .map_err(map_sqlx)?;
 
+    // The series an operator has live targets on. Loaded once: an objective is
+    // a workspace-level fact and re-reading it per candidate would be a query
+    // per queue entry for an answer that cannot change mid-read.
+    let targeted: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT platform, metric_key
+        FROM viryaos_growth_objectives
+        WHERE workspace_id = $1
+          AND retired_at IS NULL
+          -- A deadline that has passed is history. History must not keep
+          -- promoting work up the queue.
+          AND deadline > $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+
     let mut candidates = Vec::with_capacity(rows.len());
     for row in rows {
         let Some(authority) = AuthorityState::from_disposition(&row.disposition) else {
@@ -185,6 +206,13 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 // Phase 5 fills this. Reading it as "no measured record" is
                 // correct today and stays correct once measurements exist.
                 measured_effect: None,
+                contributes_to_objective: payload_series(row.payload.as_ref()).is_some_and(
+                    |(platform, metric_key)| {
+                        targeted
+                            .iter()
+                            .any(|(target, key)| *target == platform && *key == metric_key)
+                    },
+                ),
             },
         ));
     }
@@ -230,4 +258,27 @@ pub(in crate::autopilot) async fn load_next_best_actions(
             })
         })
         .collect()
+}
+
+/// The series a finding moves, when it names one.
+///
+/// Two payloads can say: a growth-metric opportunity carries the series
+/// directly, and a play step carries the play whose success metric is declared
+/// in the domain. Everything else moves a number nobody can name from the
+/// payload alone, and guessing one would let an unrelated finding ride an
+/// objective up the queue.
+fn payload_series(payload: Option<&Value>) -> Option<(String, String)> {
+    let payload = payload?;
+    match payload.get("kind").and_then(Value::as_str)? {
+        "raise_growth_opportunity" => Some((
+            payload.get("platform")?.as_str()?.to_owned(),
+            payload.get("metric_key")?.as_str()?.to_owned(),
+        )),
+        "run_play_step" => {
+            let kind = PlayKind::parse(payload.get("play_kind")?.as_str()?)?;
+            let (platform, metric_key) = kind.success_metric();
+            Some((platform.to_owned(), metric_key.to_owned()))
+        }
+        _ => None,
+    }
 }

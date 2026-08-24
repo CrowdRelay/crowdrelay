@@ -819,6 +819,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route("/v1/admin/autopilot/plays", get(autopilot::play_ledger))
         .route(
+            "/v1/admin/autopilot/objectives",
+            get(autopilot::growth_objectives).post(autopilot::declare_growth_objective),
+        )
+        .route(
+            "/v1/admin/autopilot/objectives/{objective_id}/retire",
+            post(autopilot::retire_growth_objective),
+        )
+        .route(
             "/v1/admin/autopilot/show-economics",
             get(autopilot::show_economics),
         )

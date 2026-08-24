@@ -17,6 +17,7 @@ use crowdrelay_domain::{
     live_opportunities::{BookingManagerPolicy, LiveTravelBand},
     market_intelligence::CityMarketSignalKind,
     next_best_action::{AuthorityState, RankFactor},
+    objectives::{ObjectiveScope, ObjectiveState},
     outreach::{OutreachReplyDisposition, OutreachTargetKind},
     performance::EffectAssessment,
     play_measurement::PlayClaim,
@@ -489,3 +490,4 @@ include!("control/growth_metric_ports.rs");
 include!("control/target_discovery_ports.rs");
 include!("control/play_ports.rs");
 include!("control/show_cost_ports.rs");
+include!("control/objective_ports.rs");

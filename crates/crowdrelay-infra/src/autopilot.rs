@@ -6,6 +6,7 @@ mod decisions;
 mod growth;
 mod growth_metrics;
 mod measurement;
+mod objectives;
 mod operations;
 mod play_outcomes;
 mod plays;
@@ -27,23 +28,25 @@ use crowdrelay_application::{
         AutopilotFirstPartyGrowthMetrics, AutopilotGrowthMetricRepository, AutopilotGrowthOverview,
         AutopilotManualStep, AutopilotMarketStateRepository, AutopilotMeasurementKind,
         AutopilotMeasurementRepository, AutopilotMerchStateRepository,
-        AutopilotPlayLedgerRepository, AutopilotPlayOutcomeRepository, AutopilotPolicy,
-        AutopilotPolicyConfig, AutopilotPolicySummary, AutopilotRuntimeRepository,
-        AutopilotShowCostRepository, AutopilotTicketStateRepository, BookingTargetMutation,
-        CandidatePersistence, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
-        ClaimedAutopilotMeasurement, ClaimedPlayOutcome, DecisionCandidate, ExecutionClaimMutation,
-        ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
-        FirstPartyGrowthMetricReport, FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES,
-        GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress, GrowthDeliveryTotals,
-        GrowthMetricPointMutation, GrowthMetricSeriesMutation, GrowthMetricSubject,
-        GrowthMetricTrendView, GrowthOutreachSummary, ManagerBookingPolicySummary,
-        ManagerConfigMutation, MerchProductEconomicsMutation, NextBestAction,
-        PLAYLIST_TEMPLATE_KEY, PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView,
-        PlayKindStanding, PlayLedger, PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot,
-        PlayStart, PlayStepSettlement, PromotionBudgetGuardrailMutation,
-        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
-        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect,
-        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
+        AutopilotObjectiveRepository, AutopilotPlayLedgerRepository,
+        AutopilotPlayOutcomeRepository, AutopilotPolicy, AutopilotPolicyConfig,
+        AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotShowCostRepository,
+        AutopilotTicketStateRepository, BookingTargetMutation, CandidatePersistence,
+        CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
+        ClaimedAutopilotMeasurement, ClaimedPlayOutcome, DecisionCandidate, DeclareGrowthObjective,
+        ExecutionClaimMutation, ExecutionReportMutation, ExecutorHeartbeatMutation,
+        ExecutorReportStatus, FirstPartyGrowthMetricReport, FreezeShowCostPrediction,
+        GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress,
+        GrowthDeliveryTotals, GrowthMetricPointMutation, GrowthMetricSeriesMutation,
+        GrowthMetricSubject, GrowthMetricTrendView, GrowthObjectiveMutation, GrowthObjectiveView,
+        GrowthOutreachSummary, ManagerBookingPolicySummary, ManagerConfigMutation,
+        MerchProductEconomicsMutation, NextBestAction, PLAYLIST_TEMPLATE_KEY,
+        PendingAutopilotAction, PlayAnchor, PlayAudience, PlayClaimView, PlayKindStanding,
+        PlayLedger, PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot, PlayStart,
+        PlayStepSettlement, PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
+        RecentAutopilotDecision, RecentAutopilotEffect, RecordExecutionReport,
+        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordRumSample,
         ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
         SetAutopilotAuthority, SetGrowthEnvelope, SetManagerBookingPolicy, SetTourEconomics,
         SettleShowCost, ShowCostLedgerEntry, ShowCostMutation, TeamAssigneeSummary,
@@ -88,6 +91,7 @@ use crowdrelay_domain::{
     merchandising::{
         MerchInventorySnapshot, MerchPricePolicy, MerchPriceSnapshot, MerchReorderPolicy,
     },
+    objectives::{GrowthObjective, ObjectivePolicy, ObjectiveScope, assess_objective},
     outreach::{OutreachPolicy, OutreachSnapshot},
     performance::{EffectAssessment, EffectResult},
     play_measurement::{PlayClaim, PlayOutcomeVerdict},
