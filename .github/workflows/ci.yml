@@ -318,6 +318,13 @@ jobs:
       # build depends on. The variable is not called CACHE_REF because
       # docker-bake.hcl reads that name from the environment, which would hand
       # this job the writing cache-to export as well.
+      # buildx bake auto-loads docker-compose.yml next to the HCL, and that
+      # file declares `env_file: .env` for runtime services. The PR gate only
+      # builds, so an operator-local .env is irrelevant — but its absence
+      # fails bake's compose parsing before a single layer compiles.
+      - name: Provide the compose env placeholder
+        run: touch .env
+
       - name: Build both runtime targets once
         env:
           BUILD_CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache:${{ matrix.arch }}
