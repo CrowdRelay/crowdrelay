@@ -9035,7 +9035,7 @@ components:
     AutopilotChiefOfStaff:
       type: object
       additionalProperties: false
-      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks]
+      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved]
       properties:
         executed_24h: { type: integer, format: int64, minimum: 0 }
         failed_24h: { type: integer, format: int64, minimum: 0 }
@@ -9059,6 +9059,61 @@ components:
           type: array
           maxItems: 20
           items: { $ref: '#/components/schemas/ChiefOfStaffShowTask' }
+        acted_alone_24h:
+          description: What the agent did with nobody watching, grouped by action kind.
+          type: array
+          maxItems: 60
+          items: { $ref: '#/components/schemas/ChiefOfStaffActivity' }
+        about_to_act:
+          description: What it will do next unless somebody stops it.
+          type: array
+          maxItems: 60
+          items: { $ref: '#/components/schemas/ChiefOfStaffActivity' }
+        parked_for_approval:
+          description: What it will not do until somebody says yes.
+          type: array
+          maxItems: 60
+          items: { $ref: '#/components/schemas/ChiefOfStaffActivity' }
+        stopped:
+          description: >
+            What the agent stopped and why, with every reason reported verbatim rather than
+            summarised. This is the agent reporting its own gaps; no other section covers it.
+          type: array
+          maxItems: 40
+          items: { $ref: '#/components/schemas/ChiefOfStaffStopped' }
+        moved:
+          description: >
+            What moved, with the strength of the claim attached to every number. Only settled,
+            measured outcomes appear — a claim that could not be made is reported under `stopped`.
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/ChiefOfStaffMovement' }
+    ChiefOfStaffActivity:
+      type: object
+      additionalProperties: false
+      required: [action_kind, action_class, count]
+      properties:
+        action_kind: { type: string, maxLength: 96 }
+        action_class: { type: string, enum: [first_party_reversible, owned_audience, third_party, paid] }
+        count: { type: integer, format: int64, minimum: 0 }
+    ChiefOfStaffStopped:
+      type: object
+      additionalProperties: false
+      required: [kind, reason, count, detail]
+      properties:
+        kind: { type: string, enum: [play_step_skipped, action_failed, play_retired, outcome_insufficient] }
+        reason: { type: string, maxLength: 96 }
+        count: { type: integer, format: int64, minimum: 0 }
+        detail: { type: string, maxLength: 200 }
+    ChiefOfStaffMovement:
+      type: object
+      additionalProperties: false
+      required: [subject, claim, assessment]
+      properties:
+        subject: { type: string, maxLength: 160 }
+        claim: { $ref: '#/components/schemas/PlayClaimStrength' }
+        assessment: { type: string, enum: [improved, neutral, worsened] }
+        delta_basis_points: { type: [integer, 'null'] }
 
     ExecutorCapability:
       type: object
