@@ -143,7 +143,11 @@ class GrowthEnvelopeContract(unittest.TestCase):
         # cycle with fifty findings would enqueue all fifty against a budget of
         # five. Every one of them would be a send nobody authorised.
         persist = self.evaluate.split("async fn persist(", 1)[1].split("\n    }", 1)[0]
-        self.assertIn("usage: &mut EnvelopeUsage", persist)
+        # The usage moved into `CycleLimits`, which carries every cycle-wide
+        # limit together so a budget cannot be topped up on one path and not
+        # another. The claim is unchanged: it is mutable and it is spent here.
+        self.assertIn("limits: &mut CycleLimits", persist)
+        self.assertIn("usage: &'a mut EnvelopeUsage", self.evaluate)
         spend = persist.split("if persisted.action_created {", 1)[1]
         self.assertIn("owned_audience_touches_7d.saturating_add(1)", spend)
         self.assertIn("third_party_touches_7d.saturating_add(1)", spend)
