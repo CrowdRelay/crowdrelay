@@ -42,6 +42,7 @@ class OperatorBriefV2Contract(unittest.TestCase):
             "parked_for_approval",
             "stopped",
             "moved",
+            "objectives_at_risk",
         ]
 
     def test_the_brief_answers_all_five_questions(self) -> None:
@@ -110,6 +111,15 @@ class OperatorBriefV2Contract(unittest.TestCase):
             "\n    ExecutorCapability:", 1
         )[0]
         self.assertIn("claim: { $ref: '#/components/schemas/PlayClaimStrength' }", schema)
+
+    def test_a_target_at_risk_reaches_the_brief_and_a_met_one_does_not(self) -> None:
+        # A target being met is good news that can wait; one nobody can measure
+        # is a gap and belongs under `stopped`.
+        objectives = self.infra.split("async fn chief_objectives", 1)[1]
+        self.assertIn("state.warrants_attention()", objectives)
+        self.assertIn("load_growth_objectives", objectives)
+        schema = self.openapi.split("ChiefOfStaffObjective:", 1)[1].split("\n    ChiefOfStaffActivity:", 1)[0]
+        self.assertIn("enum: [behind, missed]", schema)
 
     def test_every_section_is_bounded(self) -> None:
         # A brief that can grow without limit is a brief nobody reads.

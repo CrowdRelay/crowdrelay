@@ -9194,7 +9194,7 @@ components:
     AutopilotChiefOfStaff:
       type: object
       additionalProperties: false
-      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved]
+      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved, objectives_at_risk]
       properties:
         executed_24h: { type: integer, format: int64, minimum: 0 }
         failed_24h: { type: integer, format: int64, minimum: 0 }
@@ -9247,6 +9247,26 @@ components:
           type: array
           maxItems: 20
           items: { $ref: '#/components/schemas/ChiefOfStaffMovement' }
+        objectives_at_risk:
+          description: >
+            Declared targets that are behind or already missed. A target being met is good news
+            that can wait for somebody to look; one nobody can measure is a gap and is reported
+            under `stopped` instead.
+          type: array
+          maxItems: 64
+          items: { $ref: '#/components/schemas/ChiefOfStaffObjective' }
+    ChiefOfStaffObjective:
+      type: object
+      additionalProperties: false
+      required: [platform, metric_key, scope_kind, state, progress_basis_points, shortfall, deadline]
+      properties:
+        platform: { type: string, maxLength: 32 }
+        metric_key: { type: string, maxLength: 64 }
+        scope_kind: { $ref: '#/components/schemas/ObjectiveScopeKind' }
+        state: { type: string, enum: [behind, missed] }
+        progress_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        shortfall: { type: integer, format: int64 }
+        deadline: { type: string, format: date-time }
     ChiefOfStaffActivity:
       type: object
       additionalProperties: false

@@ -354,6 +354,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         chief_activity(repo, workspace_id).await?;
     let stopped = chief_stopped(repo, workspace_id).await?;
     let moved = chief_movements(repo, workspace_id).await?;
+    let objectives_at_risk = chief_objectives(repo, workspace_id, now).await?;
     Ok(AutopilotChiefOfStaff {
         executed_24h: stats.executed_24h,
         failed_24h: stats.failed_24h,
@@ -373,6 +374,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         parked_for_approval,
         stopped,
         moved,
+        objectives_at_risk,
     })
 }
 
@@ -566,6 +568,53 @@ async fn chief_movements(
             claim: row.claim,
             assessment: row.assessment,
             delta_basis_points: row.delta_basis_points,
+        })
+        .collect())
+}
+
+/// Declared targets that warrant an operator's attention without being asked.
+///
+/// The state is derived from the series by the same rule the objectives read
+/// uses, so the brief and the objectives screen can never disagree about
+/// whether something is behind.
+async fn chief_objectives(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Vec<crowdrelay_application::autopilot::ChiefOfStaffObjective>, RepositoryError> {
+    use crowdrelay_application::autopilot::{AutopilotObjectiveRepository, ChiefOfStaffObjective};
+    use crowdrelay_domain::objectives::ObjectiveState;
+    Ok(repo
+        .load_growth_objectives(workspace_id, now)
+        .await?
+        .into_iter()
+        .filter(|objective| objective.state.warrants_attention())
+        .map(|objective| ChiefOfStaffObjective {
+            platform: objective.platform,
+            metric_key: objective.metric_key,
+            scope_kind: objective.scope_kind,
+            state: objective.state.as_str().to_owned(),
+            progress_basis_points: match objective.state {
+                ObjectiveState::Behind {
+                    progress_basis_points,
+                    ..
+                }
+                | ObjectiveState::Missed {
+                    progress_basis_points,
+                    ..
+                } => progress_basis_points,
+                ObjectiveState::Met { .. }
+                | ObjectiveState::OnTrack { .. }
+                | ObjectiveState::Unmeasurable { .. } => 0,
+            },
+            shortfall: match objective.state {
+                ObjectiveState::Behind { shortfall, .. }
+                | ObjectiveState::Missed { shortfall, .. } => shortfall,
+                ObjectiveState::Met { .. }
+                | ObjectiveState::OnTrack { .. }
+                | ObjectiveState::Unmeasurable { .. } => 0,
+            },
+            deadline: objective.deadline,
         })
         .collect())
 }
