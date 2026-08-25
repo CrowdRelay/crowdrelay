@@ -118,8 +118,9 @@ fn new_reward_code() -> Option<String> {
     let hex = hex::encode_upper(bytes);
     let groups = hex
         .as_bytes()
-        .chunks_exact(4)
-        .map(std::str::from_utf8)
+        .as_chunks::<4>()
+        .0.iter()
+        .map(|chunk| std::str::from_utf8(chunk))
         .collect::<Result<Vec<_>, _>>()
         .ok()?
         .join("-");
