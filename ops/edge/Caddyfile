@@ -67,17 +67,12 @@ signal-api.virya.music {
 
 # BEGIN CROWDRELAY CONTROL PLANE
 # Managed CrowdRelay Control Plane edge block.
-# The Basic Auth password is stored only as an Argon2id hash below.
-# The Control Plane bearer token is read at request time from Caddy's persistent /config volume.
+# No edge Basic Auth: the styled SPA login is the gate. The Bearer token
+# substitution stays — Caddy replaces the browser request with the
+# server-held admin token after the tab-scoped session is issued.
 control.virya.music {
     encode zstd gzip
     import security_headers
-
-    basic_auth argon2id {
-        # Argon2id hash of the staff password, supplied by the host
-        # environment. This repository is public: the hash is never tracked.
-        staff {$CONTROL_PLANE_STAFF_PASSWORD_HASH}
-    }
 
     reverse_proxy control-plane:8090 {
         health_uri /healthz/ready
