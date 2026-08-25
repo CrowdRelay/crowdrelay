@@ -214,7 +214,7 @@ async fn load_snapshot(
               ON action.workspace_id=emission.workspace_id AND action.id=emission.action_id
             WHERE emission.workspace_id=$1
               AND action.status='succeeded'
-              AND emission.emitted_at<=now() - INTERVAL '10 minutes'
+              AND emission.emitted_at<=now() - ($2 * INTERVAL '1 second')
               AND NOT EXISTS (
                   SELECT 1 FROM viryaos_autopilot_execution_reports report
                   WHERE report.workspace_id=emission.workspace_id
@@ -248,6 +248,10 @@ async fn load_snapshot(
         "#,
     )
     .bind(workspace_id.into_uuid())
+    // The lag window is a real query parameter, not just alert cosmetics:
+    // keeping it in sync with EXECUTOR_REPORT_STALL_SECONDS here is what makes
+    // the threshold change mean anything.
+    .bind(EXECUTOR_REPORT_STALL_SECONDS)
     .fetch_one(&mut **transaction)
     .await
 }
