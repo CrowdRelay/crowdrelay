@@ -363,13 +363,21 @@ class ViryaOsAutopilotV1(unittest.TestCase):
             projection,
         )
 
-    def test_content_execution_still_pins_the_decided_source_version(self):
-        # The projection is what was too eager, not the pin. Execution must keep
-        # refusing to act on evidence that has since changed underneath it.
+    def test_content_execution_gates_on_liveness_not_a_pinned_version(self):
+        # The pin was what was too eager in the other direction: measurement
+        # refreshes bump the source version while an action waits out its
+        # execution delay, and the emitted payload ships the freshly read row
+        # anyway — so a pinned version only converted routine churn into a
+        # permanent Conflict. Execution must still refuse dead evidence:
+        # inactive or expired sources never execute.
         self.assertIn(
-            "FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND version=$3",
+            "FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND active AND expires_at>now()",
             INFRA_TEXT,
         )
+        execution_query = INFRA_TEXT.split(
+            "SELECT source_kind,title,metadata FROM viryaos_content_sources", 1
+        )[1].split("FOR UPDATE", 1)[0]
+        self.assertNotIn("version=", execution_query)
 
     def test_autopilot_does_not_expand_the_rust_compile_graph(self):
         domain_manifest = (ROOT / "crates/crowdrelay-domain/Cargo.toml").read_text()

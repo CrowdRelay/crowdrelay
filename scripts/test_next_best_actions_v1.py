@@ -86,7 +86,13 @@ class NextBestActionContract(unittest.TestCase):
         self.assertIn("a_denied_decision_never_enters_the_queue", self.domain)
 
     def test_finished_work_is_not_next(self) -> None:
-        self.assertIn("done.status IN ('succeeded', 'cancelled')", self.loader)
+        # Terminal means the newest action left the queue in any direction:
+        # succeeded, cancelled, or failed. A failed action's finding is dead
+        # work — approving it again can only answer with a conflict.
+        self.assertIn(
+            "action.action_status NOT IN ('succeeded', 'cancelled', 'failed')",
+            self.loader,
+        )
 
     def test_a_refreshed_finding_appears_once_not_once_per_cycle(self) -> None:
         # Every evaluation cycle writes a new decision row when the evidence
