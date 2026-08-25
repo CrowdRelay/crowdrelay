@@ -61,6 +61,7 @@ pub mod beacons;
 pub mod booking;
 pub mod booking_discovery;
 pub mod campaign_lifecycle;
+pub mod community_outreach;
 pub mod content_supply;
 pub mod deliverability;
 pub mod events;
