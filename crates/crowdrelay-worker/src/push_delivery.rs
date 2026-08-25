@@ -8,7 +8,7 @@ mod crypto;
 mod providers;
 mod repository;
 
-use std::{env, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -17,12 +17,13 @@ use getrandom::fill as fill_random;
 use sqlx::PgPool;
 use tokio::{
     sync::watch,
+    task::JoinSet,
     time::{MissedTickBehavior, interval},
 };
 
 use self::{
     providers::{ProviderConfig, ProviderOutcome, PushPayload, PushProviders},
-    repository::{ProviderTerminal, PushDeliveryRepository},
+    repository::{ClaimedDelivery, ProviderTerminal, PushDeliveryRepository},
 };
 
 const PUSH_BATCH_SIZE: i64 = 8;
@@ -30,7 +31,7 @@ const PUSH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct PushDeliveryWorker {
     repository: PushDeliveryRepository,
-    providers: PushProviders,
+    providers: Arc<PushProviders>,
 }
 
 impl PushDeliveryWorker {
@@ -60,7 +61,7 @@ impl PushDeliveryWorker {
                 operation_timeout,
                 quiet_timezone,
             ),
-            providers,
+            providers: Arc::new(providers),
         })
     }
 
@@ -93,61 +94,86 @@ impl PushDeliveryWorker {
             return Ok(());
         }
         tracing::debug!(count = deliveries.len(), "claimed fan push deliveries");
+        // Deliveries are independent: each claim runs its own provider round
+        // trip and persistence so one slow or failing delivery cannot stall
+        // the batch. The claimed batch size is the concurrency cap.
+        let mut tasks = JoinSet::new();
         for delivery in deliveries {
-            let ack_token = new_ack_token()?;
-            if !self
-                .repository
-                .start_provider(&delivery, &ack_token)
-                .await?
-            {
-                tracing::warn!(delivery_id = %delivery.id, "push claim changed before provider start");
-                continue;
-            }
-            let payload = PushPayload::from_delivery(&delivery, &ack_token);
-            let outcome = self.providers.send(&delivery, &payload).await;
-            match outcome {
-                ProviderOutcome::Accepted { reference } => {
-                    self.repository
-                        .provider_accepted(delivery.id, reference.as_deref())
-                        .await?;
-                    tracing::debug!(
-                        delivery_id = %delivery.id,
-                        transport = delivery.transport,
-                        "push provider accepted delivery; awaiting device acknowledgement"
-                    );
+            let repository = self.repository.clone();
+            let providers = Arc::clone(&self.providers);
+            tasks.spawn(async move { deliver_one(&repository, &providers, delivery).await });
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "fan push delivery failed; siblings continue");
                 }
-                ProviderOutcome::Retry { code } => {
-                    self.repository.retry_later(delivery.id, code).await?;
-                    tracing::warn!(delivery_id = %delivery.id, code, "push delivery scheduled for safe retry");
-                }
-                ProviderOutcome::Failed {
-                    code,
-                    invalidate_endpoint,
-                } => {
-                    self.repository
-                        .terminal(
-                            delivery.id,
-                            ProviderTerminal::Failed,
-                            code,
-                            invalidate_endpoint,
-                        )
-                        .await?;
-                    tracing::warn!(delivery_id = %delivery.id, code, "push delivery failed closed");
-                }
-                ProviderOutcome::Ambiguous { code } => {
-                    self.repository
-                        .terminal(delivery.id, ProviderTerminal::Ambiguous, code, false)
-                        .await?;
+                Err(join_error) => {
                     tracing::error!(
-                        delivery_id = %delivery.id,
-                        code,
-                        "push provider outcome ambiguous; automatic resend suppressed"
+                        cancelled = join_error.is_cancelled(),
+                        panic = join_error.is_panic(),
+                        "fan push delivery task stopped unexpectedly"
                     );
                 }
             }
         }
         Ok(())
     }
+}
+
+async fn deliver_one(
+    repository: &PushDeliveryRepository,
+    providers: &PushProviders,
+    delivery: ClaimedDelivery,
+) -> Result<()> {
+    let ack_token = new_ack_token()?;
+    if !repository.start_provider(&delivery, &ack_token).await? {
+        tracing::warn!(delivery_id = %delivery.id, "push claim changed before provider start");
+        return Ok(());
+    }
+    let payload = PushPayload::from_delivery(&delivery, &ack_token);
+    match providers.send(&delivery, &payload).await {
+        ProviderOutcome::Accepted { reference } => {
+            repository
+                .provider_accepted(delivery.id, reference.as_deref())
+                .await?;
+            tracing::debug!(
+                delivery_id = %delivery.id,
+                transport = delivery.transport,
+                "push provider accepted delivery; awaiting device acknowledgement"
+            );
+        }
+        ProviderOutcome::Retry { code } => {
+            repository.retry_later(delivery.id, code).await?;
+            tracing::warn!(delivery_id = %delivery.id, code, "push delivery scheduled for safe retry");
+        }
+        ProviderOutcome::Failed {
+            code,
+            invalidate_endpoint,
+        } => {
+            repository
+                .terminal(
+                    delivery.id,
+                    ProviderTerminal::Failed,
+                    code,
+                    invalidate_endpoint,
+                )
+                .await?;
+            tracing::warn!(delivery_id = %delivery.id, code, "push delivery failed closed");
+        }
+        ProviderOutcome::Ambiguous { code } => {
+            repository
+                .terminal(delivery.id, ProviderTerminal::Ambiguous, code, false)
+                .await?;
+            tracing::error!(
+                delivery_id = %delivery.id,
+                code,
+                "push provider outcome ambiguous; automatic resend suppressed"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn new_ack_token() -> Result<String> {

@@ -150,8 +150,37 @@ impl OutboxWorker {
                         error_kind = error.kind,
                         "failed to materialize outbox batch"
                     );
-                    for claim in &outbox_claims {
-                        self.release_failed_outbox(claim, error.kind).await;
+                    // Releases are independent lease writes, so they run
+                    // concurrently like dispatches; a shutdown abandons the
+                    // rest to lease recovery rather than serializing up to a
+                    // full batch of bounded database timeouts.
+                    let mut releases = JoinSet::new();
+                    for claim in outbox_claims {
+                        if shutdown_requested(shutdown) {
+                            break;
+                        }
+                        let worker = self.clone();
+                        releases.spawn(async move {
+                            worker.release_failed_outbox(&claim, error.kind).await
+                        });
+                    }
+                    while !releases.is_empty() {
+                        if shutdown_requested(shutdown) {
+                            break;
+                        }
+                        let Some(result) = releases.join_next().await else {
+                            break;
+                        };
+                        match result {
+                            Ok(()) => {}
+                            Err(join_error) => {
+                                tracing::error!(
+                                    cancelled = join_error.is_cancelled(),
+                                    panic = join_error.is_panic(),
+                                    "outbox release task stopped unexpectedly; its lease will be recovered"
+                                );
+                            }
+                        }
                     }
                 }
             }

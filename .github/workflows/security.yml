@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
+  # Called by ci.yml so per-change audits share this single definition.
+  workflow_call:
 
 permissions:
   contents: read
@@ -19,24 +21,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Generate deterministic lock SBOM
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: python3 scripts/generate_lock_sbom.py Cargo.lock artifacts/crowdrelay-sbom.cdx.json
       - name: Upload dependency SBOM
-        if: always()
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: crowdrelay-sbom-${{ github.sha }}
           path: artifacts/crowdrelay-sbom.cdx.json
           if-no-files-found: error
           retention-days: 90
-      - name: Cache pinned cargo-audit binary
-        id: cargo-audit-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-0.22.2
+      # Prebuilt release binary instead of compiling cargo-audit from source;
+      # the version pin and the action SHA together fix the supply chain.
       - name: Install pinned cargo-audit
-        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked --version 0.22.2
+        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+        with:
+          tool: cargo-audit@0.22.2
       - name: Audit reachable Rust dependencies
         shell: bash
         run: |

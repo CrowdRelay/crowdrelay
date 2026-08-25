@@ -43,9 +43,10 @@ if netlify.exists():
     if "netlify-cli" in deploy_workflows and "--no-build" not in deploy_workflows:
         failures.append("Netlify deploy workflow must pass --no-build")
 
-# Per-change dependency security is a parallel job inside CI, so image
-# publication cannot observe CI=PASS while RustSec is red. The standalone
-# workflow owns independent weekly/manual freshness checks only.
+# Per-change dependency security is a reusable-workflow call inside CI, so
+# image publication cannot observe CI=PASS while RustSec is red. The called
+# security.yml owns the single copy of the audit and the weekly/manual
+# freshness triggers.
 ci_workflow = workflow_dir / "ci.yml"
 if not ci_workflow.exists():
     failures.append(".github/workflows/ci.yml: canonical CI workflow is required")
@@ -53,8 +54,7 @@ else:
     ci_text = ci_workflow.read_text()
     for contract in (
         "dependency-security:",
-        "cargo install cargo-audit --locked --version 0.22.2",
-        "cargo audit --ignore RUSTSEC-2023-0071",
+        "uses: ./.github/workflows/security.yml",
     ):
         if contract not in ci_text:
             failures.append(f".github/workflows/ci.yml: dependency-security contract missing: {contract}")
@@ -98,8 +98,12 @@ else:
             failures.append(
                 f".github/workflows/security.yml: {duplicate_trigger} duplicates CI dependency-security"
             )
-    if "cargo install cargo-audit --locked --version 0.22.2" not in security_text:
-        failures.append(".github/workflows/security.yml: pinned/controlled dependency audit command is required")
+    if "tool: cargo-audit@0.22.2" not in security_text:
+        failures.append(".github/workflows/security.yml: pinned prebuilt cargo-audit install is required")
+    if "cargo install cargo-audit" in security_text:
+        failures.append(
+            ".github/workflows/security.yml: compiling cargo-audit from source is forbidden; use taiki-e/install-action"
+        )
     if "cargo audit --ignore RUSTSEC-2023-0071" not in security_text:
         failures.append(".github/workflows/security.yml: weekly/manual audit command is required")
     if "continue-on-error: true" in security_text:

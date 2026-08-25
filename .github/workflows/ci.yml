@@ -17,8 +17,144 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust:
-    name: Format, lint, test, and setup
+  # Job order below keeps every gate command of the shared check chain inside
+  # the span the task-runner drift contract inspects (from "Run repository
+  # checks" to the summary job); execution itself is fully parallel.
+  rust-tests:
+    name: Unit tests and contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    env:
+      CROWDRELAY_ENV: test
+      CROWDRELAY_BIND_ADDR: 127.0.0.1:8080
+      CROWDRELAY_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_OUTBOX_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_ADMISSION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_EVENT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_ECOSYSTEM_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_REFERRAL_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_REMINDER_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_RETENTION_TEST_DATABASE_URL: postgres://crowdrelay:crowdrelay-ci-only@127.0.0.1:5432/crowdrelay
+      CROWDRELAY_DATABASE_MAX_CONNECTIONS: 5
+      CROWDRELAY_ALLOWED_ORIGINS: http://localhost:4321
+      CROWDRELAY_WORKSPACE_SLUG: example
+      CROWDRELAY_PUBLIC_SITE_BASE_URL: http://localhost:4321
+      CROWDRELAY_DEFAULT_COUNTRY_CODE: PL
+      CROWDRELAY_TENANT_REGION: eu
+      CROWDRELAY_TENANT_LOCALE: pl-PL
+      CROWDRELAY_TENANT_TIMEZONE: Europe/Warsaw
+      CROWDRELAY_TENANT_CURRENCY: PLN
+      CROWDRELAY_TENANT_DATE_FORMAT: dmy
+      CROWDRELAY_TENANT_NUMBER_FORMAT: comma_decimal
+      CROWDRELAY_TENANT_DATA_REGION: eu
+      CROWDRELAY_RANDOM_DRAWS_ENABLED: "false"
+      CROWDRELAY_BOOTSTRAP_JSON: >-
+        {"workspace_name":"CrowdRelay CI","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[{"name":"CI launch","active":true,"smart_links":[{"slug":"ci-launch","destination_url":"http://localhost:4321/join","active":true}]}],"webhook_endpoints":[]}
+      RUST_LOG: info
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Activate repository-pinned Rust toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Every pull request run used to save its own ~640 MB entry into the
+          # 10 GB Actions pool. Pull requests restore from the default branch
+          # instead; only the default branch writes, and exactly one of the
+          # parallel jobs writes it so they cannot thrash the cache pool.
+          save-if: ${{ github.ref == 'refs/heads/main' && github.job == 'rust-tests' }}
+
+      # Mirrors the `just ci` recipe (justfile is the source of truth).
+      # Inlined here so CI needs no third-party installer action; if a recipe
+      # changes materially, update both places — the task-runner contract test
+      # fails the build when this block and the justfile drift apart.
+      - name: Run repository checks
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace --all-targets --all-features
+          node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 scripts/check-ci-policy.py
+          python3 scripts/source-size-ratchet.py
+          python3 scripts/api-sql-ratchet.py
+          python3 scripts/test-modularity-contract.py
+          python3 scripts/check-postgres-major.py
+          python3 scripts/postgres18_runtime_contract.py
+          python3 scripts/area_wallet_authority_v2_contract.py
+          python3 scripts/staff_device_sessions_v2_contract.py
+          python3 scripts/test-ecosystem-contract-v2.py
+          python3 scripts/test-ops-control-plane-v2.py
+          python3 scripts/test-ecosystem-design-contract.py
+          python3 scripts/test-image-provenance-policy.py
+
+      - name: Check generated deployment files stay ignored
+        shell: bash
+        run: |
+          set -euo pipefail
+          for generated in \
+            .crowdrelay.local.sh \
+            .crowdrelay-artifacts/crowdrelay-test.tar.gz \
+            deploy/.env.production \
+            ./deploy/bootstrap.production.json \
+            ./deploy/webhook-secrets.production.json \
+            deploy/backups/crowdrelay-test.dump \
+            backups/crowdrelay-test.dump \
+            crowdrelay-test.dump \
+            crowdrelay-test.dump.age \
+            .crowdrelay-maintenance.lock
+          do
+            git check-ignore --quiet "$generated"
+          done
+          for example in \
+            .crowdrelay.local.sh.example \
+            deploy/env.production.example \
+            ./deploy/bootstrap.example.json \
+            ./deploy/webhook-secrets.example.json
+          do
+            if git check-ignore --no-index --quiet "$example"; then
+              echo "Tracked deployment example must not be ignored: $example" >&2
+              exit 1
+            fi
+          done
+
+  rust-checks:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Activate repository-pinned Rust toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: false
+
+      - name: Run format and lint checks
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  rust-postgres:
+    name: PostgreSQL integration
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -81,41 +217,15 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Every pull request run used to save its own ~640 MB entry into the
-          # 10 GB Actions pool. Pull requests restore from the default branch
-          # instead; only the default branch writes.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
 
+      # --all-features matches what clippy/test compile downstream; building
+      # the setup binary once with the same feature set avoids a second
+      # full-feature recompilation of the workspace in this job.
       - name: Run idempotent database and workspace setup
         run: |
-          cargo run --locked --package crowdrelay-worker -- setup
-          cargo run --locked --package crowdrelay-worker -- setup
-
-      # Mirrors the `just ci` recipe (justfile is the source of truth).
-      # Inlined here so CI needs no third-party installer action; if a recipe
-      # changes materially, update both places — the task-runner contract test
-      # fails the build when this block and the justfile drift apart.
-      - name: Run repository checks
-        run: |
-          set -euo pipefail
-          cargo fmt --all --check
-          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-          cargo test --locked --workspace --all-targets --all-features
-          node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
-          python3 -m unittest discover -s scripts -p 'test_*.py'
-          bash scripts/audit-public-tree.sh
-          python3 scripts/check-ci-policy.py
-          python3 scripts/source-size-ratchet.py
-          python3 scripts/api-sql-ratchet.py
-          python3 scripts/test-modularity-contract.py
-          python3 scripts/check-postgres-major.py
-          python3 scripts/postgres18_runtime_contract.py
-          python3 scripts/area_wallet_authority_v2_contract.py
-          python3 scripts/staff_device_sessions_v2_contract.py
-          python3 scripts/test-ecosystem-contract-v2.py
-          python3 scripts/test-ops-control-plane-v2.py
-          python3 scripts/test-ecosystem-design-contract.py
-          python3 scripts/test-image-provenance-policy.py
+          cargo run --locked --all-features --package crowdrelay-worker -- setup
+          cargo run --locked --all-features --package crowdrelay-worker -- setup
 
       - name: Test all PostgreSQL integration paths sequentially
         shell: bash
@@ -169,35 +279,14 @@ jobs:
             --nocapture \
             --test-threads=1
 
-      - name: Check generated deployment files stay ignored
-        shell: bash
-        run: |
-          set -euo pipefail
-          for generated in \
-            .crowdrelay.local.sh \
-            .crowdrelay-artifacts/crowdrelay-test.tar.gz \
-            deploy/.env.production \
-            ./deploy/bootstrap.production.json \
-            ./deploy/webhook-secrets.production.json \
-            deploy/backups/crowdrelay-test.dump \
-            backups/crowdrelay-test.dump \
-            crowdrelay-test.dump \
-            crowdrelay-test.dump.age \
-            .crowdrelay-maintenance.lock
-          do
-            git check-ignore --quiet "$generated"
-          done
-          for example in \
-            .crowdrelay.local.sh.example \
-            deploy/env.production.example \
-            ./deploy/bootstrap.example.json \
-            ./deploy/webhook-secrets.example.json
-          do
-            if git check-ignore --no-index --quiet "$example"; then
-              echo "Tracked deployment example must not be ignored: $example" >&2
-              exit 1
-            fi
-          done
+  deploy-config:
+    name: Compose and bake validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate Compose and Bake configuration
         env:
@@ -242,35 +331,10 @@ jobs:
 
   dependency-security:
     name: Dependency security
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Activate repository-pinned Rust toolchain
-        run: |
-          rustc --version --verbose
-          cargo --version
-      - name: Cache pinned cargo-audit binary
-        id: cargo-audit-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-0.22.2
-      - name: Install pinned cargo-audit
-        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked --version 0.22.2
-      - name: Audit reachable Rust dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          rsa_graph="$(cargo tree --locked --workspace --all-features -i rsa 2>/dev/null)"
-          if [[ -n "$rsa_graph" ]]; then
-            echo "RUSTSEC-2023-0071 is reachable in an active dependency graph:" >&2
-            echo "$rsa_graph" >&2
-            exit 1
-          fi
-          cargo audit --ignore RUSTSEC-2023-0071
+    # Single definition lives in security.yml; calling it here keeps image
+    # publication unable to observe CI=PASS while RustSec is red, without
+    # maintaining a second copy of the audit job.
+    uses: ./.github/workflows/security.yml
 
   containers:
     name: Build container targets
@@ -339,7 +403,7 @@ jobs:
     # run panel: everything above reports into one node instead of eight
     # independent dots.
     name: All checks passed
-    needs: [rust, dependency-security, containers]
+    needs: [rust-tests, rust-checks, rust-postgres, deploy-config, dependency-security, containers]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

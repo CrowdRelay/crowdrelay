@@ -1,4 +1,10 @@
-use std::{env, fs::File, io::Read, time::Duration};
+use std::{
+    env,
+    fs::File,
+    io::Read,
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use reqwest::{Client, StatusCode, redirect::Policy};
@@ -145,7 +151,9 @@ pub struct PushProviders {
 struct FcmProvider {
     project_id: String,
     service_account: ServiceAccount,
-    cached_token: Option<CachedToken>,
+    /// Shared token cache so concurrent sends can take `&self`; a refresh
+    /// stampede after expiry is bounded by the claimed batch size and harmless.
+    cached_token: Mutex<Option<CachedToken>>,
 }
 
 struct WebPushProvider {
@@ -174,7 +182,7 @@ impl PushProviders {
                 Some(FcmProvider {
                     project_id,
                     service_account,
-                    cached_token: None,
+                    cached_token: Mutex::new(None),
                 })
             }
             (None, None) => None,
@@ -205,7 +213,7 @@ impl PushProviders {
     }
 
     pub async fn send(
-        &mut self,
+        &self,
         delivery: &ClaimedDelivery,
         payload: &PushPayload<'_>,
     ) -> ProviderOutcome {
@@ -220,11 +228,11 @@ impl PushProviders {
     }
 
     async fn send_fcm(
-        &mut self,
+        &self,
         delivery: &ClaimedDelivery,
         payload: &PushPayload<'_>,
     ) -> ProviderOutcome {
-        let Some(mut provider) = self.fcm.take() else {
+        let Some(provider) = self.fcm.as_ref() else {
             return ProviderOutcome::Failed {
                 code: "fcm_not_configured",
                 invalidate_endpoint: false,
@@ -234,14 +242,12 @@ impl PushProviders {
             Ok(value) => value,
             Err(TokenError::Retry(error)) => {
                 tracing::warn!(%error, "FCM OAuth token refresh transiently failed");
-                self.fcm = Some(provider);
                 return ProviderOutcome::Retry {
                     code: "fcm_oauth_retry",
                 };
             }
             Err(TokenError::Fatal(error)) => {
                 tracing::error!(%error, "FCM OAuth token refresh failed closed");
-                self.fcm = Some(provider);
                 return ProviderOutcome::Failed {
                     code: "fcm_oauth_failed",
                     invalidate_endpoint: false,
@@ -278,7 +284,6 @@ impl PushProviders {
             .json(&message)
             .send()
             .await;
-        self.fcm = Some(provider);
         classify_fcm_response(result).await
     }
 
@@ -365,9 +370,13 @@ impl PushProviders {
 }
 
 impl FcmProvider {
-    async fn access_token(&mut self, client: &Client) -> Result<String, TokenError> {
+    async fn access_token(&self, client: &Client) -> Result<String, TokenError> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        if let Some(token) = self.cached_token.as_ref()
+        if let Some(token) = self
+            .cached_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
             && token.expires_at > now.saturating_add(90)
         {
             return Ok(token.value.clone());
@@ -427,10 +436,13 @@ impl FcmProvider {
                 "FCM OAuth returned invalid token metadata"
             )));
         }
-        self.cached_token = Some(CachedToken {
-            value: token.access_token.clone(),
-            expires_at: now.saturating_add(token.expires_in),
-        });
+        self.cached_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(CachedToken {
+                value: token.access_token.clone(),
+                expires_at: now.saturating_add(token.expires_in),
+            });
         Ok(token.access_token)
     }
 }
