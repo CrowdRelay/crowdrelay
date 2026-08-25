@@ -2,7 +2,7 @@
 --
 -- Queue/proof/executor health belongs to the Rust control plane. External
 -- automation (n8n, Discord, email) is only a notification adapter for the
--- durable `crowdrelay.ops.status_changed` event emitted on incident transitions
+-- durable `viryaos.ops.status_changed` event emitted on incident transitions
 -- and bounded reminders. This table stores only aggregate operational facts.
 
 CREATE TABLE viryaos_ops_alert_state (
