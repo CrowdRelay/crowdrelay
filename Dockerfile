@@ -4,7 +4,7 @@
 # both rebuilt in place upstream, which silently rebased every published image
 # and invalidated the whole build cache on someone else's schedule. Dependabot
 # owns bumping these.
-ARG RUST_IMAGE=rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+ARG RUST_IMAGE=rust:1.98.0-bookworm@sha256:e536cf316987faedfe8ae120f83b70c7df0068fdb4fc9efcce55c71a625001d5
 ARG CARGO_CHEF_VERSION=0.1.77
 
 FROM ${RUST_IMAGE} AS chef

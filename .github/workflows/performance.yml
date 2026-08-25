@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 35
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:19beta3-alpine
         env:
           POSTGRES_DB: crowdrelay
           POSTGRES_USER: crowdrelay
