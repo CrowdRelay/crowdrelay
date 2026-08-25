@@ -163,14 +163,33 @@ def command_push(files: list[Path]) -> None:
 
 
 def main() -> None:
-    command, *files = sys.argv[1:]
-    paths = [Path(file) for file in files]
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print("Usage:")
+        print("  python3 scripts/import-n8n-workflows.py prepare [files...]   # transform examples -> deployable copies")
+        print("  python3 scripts/import-n8n-workflows.py push <files...>      # push deployable copies to n8n")
+        print()
+        print("  prepare (no files) processes ALL n8n/examples/*.example.json")
+        print("  push requires N8N_BASE_URL and N8N_API_KEY environment variables")
+        sys.exit(0)
+
+    command = args[0]
+    files = args[1:]
+
     if command == "prepare":
+        paths = [Path(f) for f in files] if files else sorted((Path("n8n/examples")).glob("*.example.json"))
         command_prepare(paths)
     elif command == "push":
+        paths = [Path(f) for f in files]
+        if not paths:
+            # Default: push everything in private-production-exports
+            export_dir = Path("n8n/private-production-exports")
+            paths = sorted(export_dir.glob("*.json"))
+            if not paths:
+                raise SystemExit(f"No JSON files found in {export_dir}. Run 'prepare' first.")
         command_push(paths)
     else:
-        raise SystemExit(__doc__)
+        raise SystemExit(f"Unknown command: {command}. Use 'prepare' or 'push'.")
 
 
 if __name__ == "__main__":
