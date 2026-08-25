@@ -783,7 +783,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route(
             "/v1/admin/autopilot/releases",
-            post(autopilot::upsert_release_plan),
+            post(autopilot::upsert_release_plan).get(autopilot::list_release_plans),
         )
         .route(
             "/v1/admin/autopilot/team-opportunities/discover",

@@ -686,3 +686,51 @@ pub async fn upsert_content_source(
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }
+
+/// The operator's release-plan list: what the panel renders before anybody
+/// edits anything. Read-only, so no idempotency ledger row is written.
+pub async fn list_release_plans(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match state
+        .autopilot
+        .load_release_plan_snapshots(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(plans) => private_json(StatusCode::OK, plans),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Free-reach waves still drafting or waiting on a human. This is the queue an
+/// approval decision reads: a sealed wave with pitches in it, not a promise.
+#[derive(serde::Serialize)]
+struct OutreachWaveView<'a> {
+    wave_id: uuid::Uuid,
+    #[serde(flatten)]
+    snapshot: &'a crowdrelay_domain::free_reach::WaveSnapshot,
+}
+
+pub async fn list_outreach_waves(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match state
+        .autopilot
+        .load_outreach_waves(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(waves) => private_json(
+            StatusCode::OK,
+            waves
+                .iter()
+                .map(|wave| OutreachWaveView {
+                    wave_id: wave.wave_id,
+                    snapshot: &wave.snapshot,
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}

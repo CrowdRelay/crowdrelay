@@ -3123,6 +3123,21 @@ paths:
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/releases:
+    get:
+      operationId: listAutopilotReleasePlans
+      summary: Release plans the outreach and content cycles plan around
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Current release-plan snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AutopilotReleasePlanSnapshot' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
     post:
       operationId: upsertAutopilotReleasePlan
       summary: Create or update a deterministic release campaign plan
@@ -3672,6 +3687,22 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/outreach-waves:
+    get:
+      operationId: listAutopilotOutreachWaves
+      summary: Free-reach waves still drafting or waiting on a human
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Current wave snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AutopilotOutreachWaveView' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/outreach-waves/{wave_id}/approve:
     post:
       operationId: approveAutopilotOutreachWave
@@ -9107,6 +9138,39 @@ components:
         release_id: { type: string, format: uuid }
         version: { type: integer, format: int64, minimum: 1 }
         replayed: { type: boolean }
+    AutopilotReleasePlanSnapshot:
+      type: object
+      additionalProperties: false
+      required: [release_id, title, release_at, active, assets_ready, communication_enabled, press_enabled]
+      properties:
+        release_id: { type: string, format: uuid }
+        title: { type: string }
+        release_at: { type: string, format: date-time }
+        active: { type: boolean }
+        assets_ready: { type: boolean }
+        communication_enabled: { type: boolean }
+        press_enabled: { type: boolean }
+    AutopilotOutreachWaveView:
+      type: object
+      additionalProperties: true
+      required: [wave_id, anchor, target_kind, state, opened_at, anchor_at, pitches, eligible_targets, third_party_budget_remaining, anchor_active]
+      properties:
+        wave_id: { type: string, format: uuid }
+        anchor:
+          type: object
+          required: [kind]
+          properties:
+            kind: { type: string, enum: [release, event] }
+            release_id: { type: string, format: uuid }
+            event_id: { type: string, format: uuid }
+        target_kind: { type: string }
+        state: { type: string, enum: [drafting, sealed, approved, expired] }
+        opened_at: { type: string, format: date-time }
+        anchor_at: { type: string, format: date-time }
+        pitches: { type: integer, minimum: 0 }
+        eligible_targets: { type: integer, minimum: 0 }
+        third_party_budget_remaining: { type: integer, minimum: 0 }
+        anchor_active: { type: boolean }
     ManagerConfigSource:
       type: string
       enum: [google_sheets, operator]
