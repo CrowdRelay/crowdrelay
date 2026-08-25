@@ -393,6 +393,105 @@ async fn a_complaint_rate_closes_the_ceiling_against_real_rows() {
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_failed_action_takes_its_finding_off_the_board_instead_of_parking_a_dead_button() {
+    let fixture = fixture("failed-off-board").await.expect("fixture");
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation
+         ) VALUES ($1,$2,'e2e-failed-off-board','content_supply','content_source',$3,
+                   'request_content_artifact',9000,'require_approval','e2e','{}','{}','{}')",
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect("decision");
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, last_error_kind, finished_at
+         ) VALUES ($1,$2,'content_supply','content.artifact.request','content_source',$3,
+                   'e2e-failed-1','{\"kind\":\"request_content_artifact\"}',
+                   'failed', 'state_changed', now())",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect("failed action");
+
+    // The executor claims only `queued` or stale `processing` actions, so this
+    // failed row is terminal. A finding whose only action is terminal must not
+    // sit in the queue: approving it can only ever answer with a conflict.
+    let queue = fixture
+        .repository
+        .load_next_best_actions(fixture.workspace_id, fixture.now)
+        .await
+        .expect("queue");
+    assert!(
+        !queue.iter().any(|entry| entry.decision_id == decision_id),
+        "a failed action's finding is dead work, not an operator decision"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_approved_action_reads_as_executing_not_awaiting_approval() {
+    let fixture = fixture("approved-executing").await.expect("fixture");
+    let decision_id = Uuid::now_v7();
+    let subject_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation
+         ) VALUES ($1,$2,'e2e-approved-executing','beacon','beacon',$3,
+                   'beacon_outreach_request',10000,'require_approval','e2e','{}','{}','{}')",
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(subject_id)
+    .execute(&fixture.pool)
+    .await
+    .expect("decision");
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, approved_at
+         ) VALUES ($1,$2,'beacon','beacon.outreach.request','beacon',$3,
+                   'e2e-approved-1','{\"kind\":\"beacon_outreach_request\"}',
+                   'queued', now())",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(subject_id)
+    .execute(&fixture.pool)
+    .await
+    .expect("approved action");
+
+    let queue = fixture
+        .repository
+        .load_next_best_actions(fixture.workspace_id, fixture.now)
+        .await
+        .expect("queue");
+    let entry = queue
+        .iter()
+        .find(|candidate| candidate.decision_id == decision_id)
+        .expect("an in-flight finding stays visible until it lands");
+    assert_eq!(
+        entry.authority.as_str(),
+        "auto_executing",
+        "an approved action must not keep asking a human who already answered"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn done_ourselves_takes_the_finding_and_its_parked_action_off_the_board() {
     let fixture = fixture("handled").await.expect("fixture");
     let decision_id = Uuid::now_v7();
