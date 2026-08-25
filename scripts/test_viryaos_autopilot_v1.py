@@ -94,17 +94,23 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("fan.status = 'active'", outbox)
 
     def test_postgres_18_aio_and_volume_layout_are_pinned(self):
+        # Postgres 19 beta until GA (expected Sep/Oct 2026): the image is a
+        # default that CROWDRELAY_POSTGRES_IMAGE can override, and production's
+        # external database stays on its own supported major. The AIO worker
+        # pool auto-scales instead of a fixed io_workers flag.
         compose = COMPOSE.read_text()
         ci = CI.read_text()
-        self.assertIn("postgres:18-alpine", compose)
+        self.assertIn("postgres:19beta3-alpine", compose)
+        self.assertIn("CROWDRELAY_POSTGRES_IMAGE:-postgres:19beta3-alpine", compose)
         self.assertIn('io_method=worker', compose)
-        self.assertIn('CROWDRELAY_POSTGRES_IO_WORKERS:-3', compose)
+        self.assertIn('CROWDRELAY_POSTGRES_IO_MIN_WORKERS:-2', compose)
+        self.assertIn('CROWDRELAY_POSTGRES_IO_MAX_WORKERS:-8', compose)
         self.assertIn('CROWDRELAY_POSTGRES_EFFECTIVE_IO_CONCURRENCY:-16', compose)
         self.assertIn('CROWDRELAY_POSTGRES_MAINTENANCE_IO_CONCURRENCY:-16', compose)
-        self.assertIn("crowdrelay_postgres18:/var/lib/postgresql", compose)
-        self.assertNotIn("crowdrelay_postgres:/var/lib/postgresql", compose)
+        self.assertIn("crowdrelay_postgres19:/var/lib/postgresql", compose)
+        self.assertNotIn("crowdrelay_postgres18:/var/lib/postgresql", compose)
         self.assertNotIn("/var/lib/postgresql/data", compose)
-        self.assertIn("postgres:18-alpine", ci)
+        self.assertIn("postgres:19beta3-alpine", ci)
 
 
     def test_queue_indexes_match_workspace_scoped_hot_paths(self):
