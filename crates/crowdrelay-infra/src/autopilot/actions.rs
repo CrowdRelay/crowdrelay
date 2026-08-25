@@ -4,7 +4,87 @@ use super::*;
 
 const TEAM_ASSIGNMENT_EMAIL_ACTION_KIND: &str = "team.assignment.email";
 
+/// How long an approved action may sit `queued` while nobody advertises the
+/// capability it needs. Executor registries are heartbeats, not promises: a
+/// capability can disappear between approval and execution, and without this
+/// grace window the action would rot in the queue forever — unclickable for
+/// the operator, unclaimable for the worker, and a standing source of
+/// executor-lag alerts.
+const NO_EXECUTOR_GRACE: time::Duration = time::Duration::hours(24);
+
 impl PostgresAutopilotRepository {
+    /// Cancels approved actions that waited out the grace window while no
+    /// live executor advertised the capability their payload needs.
+    ///
+    /// The capability mapping is applied in Rust — restating it in SQL would
+    /// create a second authority the claim path could disagree with. The
+    /// cancel itself mirrors the expired-approval sweep: terminal status,
+    /// honest error kind, no retry.
+    pub async fn cancel_unexecutable_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<u64, RepositoryError> {
+        self.bounded(async move {
+            let stale: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
+                r#"
+                SELECT id, payload FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1 AND status = 'queued'
+                  AND approved_at IS NOT NULL AND approved_at <= $2 - $3
+                LIMIT 200
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .bind(NO_EXECUTOR_GRACE)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            let live: Vec<String> = sqlx::query_scalar(
+                r#"
+                SELECT DISTINCT capability FROM viryaos_executor_capabilities
+                WHERE workspace_id = $1 AND expires_at > $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            let mut cancelled = 0u64;
+            for (id, payload) in stale {
+                let Ok(parsed) = serde_json::from_value::<AutopilotActionPayload>(payload) else {
+                    continue;
+                };
+                let Some(capability) = executor_capability_for_payload(&parsed) else {
+                    continue;
+                };
+                if live.iter().any(|advertised| advertised == capability) {
+                    continue;
+                }
+                cancelled += sqlx::query(
+                    r#"
+                    UPDATE viryaos_autopilot_actions
+                    SET status = 'cancelled', finished_at = $3,
+                        last_error_kind = 'no_executor'
+                    WHERE workspace_id = $1 AND id = $2 AND status = 'queued'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(id)
+                .bind(now)
+                .execute(&self.pool)
+                .await
+                .map_err(map_sqlx)?
+                .rows_affected();
+            }
+            Ok(cancelled)
+        })
+        .await
+    }
+
     pub async fn claim_due_autonomous_actions(
         &self,
         workspace_id: WorkspaceId,
