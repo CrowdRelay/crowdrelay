@@ -176,7 +176,7 @@ class FreeReachWavesContract(unittest.TestCase):
         # What goes out is what was true when the band said it, not when the
         # agent drafted it.
         emit = read(ACTIONS).split("AutopilotActionPayload::RequestOutreach {", 1)[1]
-        emit = emit.split("viryaos.outreach.requested", 1)[1]
+        emit = emit.split("crowdrelay.outreach.requested", 1)[1]
         self.assertIn('"evidence": evidence', emit)
         assembly = self.infra.split("pub(super) async fn evidence_packet", 1)[1]
         self.assertIn("ticket_orders", assembly)

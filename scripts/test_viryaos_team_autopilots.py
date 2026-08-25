@@ -26,7 +26,7 @@ class TeamAutopilotsContract(unittest.TestCase):
 
     def test_release_drives_calendar_campaign_press_patronage_and_endorsement(self):
         source = text("crates/crowdrelay-infra/src/autopilot/operations/execution.rs")
-        self.assertIn("viryaos.calendar.upsert_requested", source)
+        self.assertIn("crowdrelay.calendar.upsert_requested", source)
         self.assertIn("communication.campaign_due", source)
         self.assertIn("release.press.v1", source)
         self.assertIn("release.media_patronage.v1", source)
@@ -38,7 +38,7 @@ class TeamAutopilotsContract(unittest.TestCase):
         evaluator = text("crates/crowdrelay-application/src/autopilot/evaluate.rs")
         for value in ("Welcome", "SynesthesiaFollowUp", "DormantReactivation"):
             self.assertIn(value, domain)
-        for template in ("viryaos.fan.welcome.v1", "viryaos.synesthesia.follow_up.v1", "viryaos.fan.reactivation.v1"):
+        for template in ("crowdrelay.fan.welcome.v1", "crowdrelay.synesthesia.follow_up.v1", "crowdrelay.fan.reactivation.v1"):
             self.assertIn(template, evaluator)
 
     def test_live_auto_application_is_fee_contract_and_exclusivity_bounded(self):
@@ -65,7 +65,7 @@ class TeamAutopilotsContract(unittest.TestCase):
 
     def test_approval_actions_emit_one_provider_neutral_notification(self):
         persistence = text("crates/crowdrelay-infra/src/autopilot/decisions.rs")
-        self.assertIn("viryaos.autopilot.approval_requested", persistence)
+        self.assertIn("crowdrelay.autopilot.approval_requested", persistence)
         self.assertIn('status == "awaiting_approval"', persistence)
 
     def test_published_action_contract_includes_team_autopilot_actions(self):
@@ -126,7 +126,7 @@ class TeamAutopilotsContract(unittest.TestCase):
         actions = text(
             "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
         )
-        self.assertIn("viryaos.fan_lifecycle.message_requested", actions)
+        self.assertIn("crowdrelay.fan_lifecycle.message_requested", actions)
         self.assertIn('"email": fan.0', actions)
         self.assertIn('"display_name": fan.1', actions)
         self.assertIn('"locale": fan.2', actions)

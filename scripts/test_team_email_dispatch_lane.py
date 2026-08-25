@@ -40,8 +40,8 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
     def test_dispatch_event_and_capability_mapping_are_closed_loop(self):
         actions = text("crates/crowdrelay-infra/src/autopilot/actions_execution.rs")
         execution = text("crates/crowdrelay-infra/src/autopilot/execution.rs")
-        self.assertIn('"viryaos.team.assignment_email_requested"', actions)
-        self.assertIn('"viryaos.team.assignment_email_requested" => "team.email"', execution)
+        self.assertIn('"crowdrelay.team.assignment_email_requested"', actions)
+        self.assertIn('"crowdrelay.team.assignment_email_requested" => "team.email"', execution)
         self.assertIn("SendTeamAssignmentEmail", execution)
         self.assertIn("payload_requires_executor", actions)
 
@@ -49,7 +49,7 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         integration = text("crates/crowdrelay-infra/tests/autopilot_team_email_postgres.rs")
         ci = text(".github/workflows/ci.yml")
         self.assertIn("claim_due_team_email_actions", integration)
-        self.assertIn("viryaos.team.assignment_email_requested", integration)
+        self.assertIn("crowdrelay.team.assignment_email_requested", integration)
         self.assertIn('assert_eq!(action_status, "succeeded")', integration)
         self.assertIn("autopilot_team_email_postgres", ci)
         self.assertIn("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL", ci)

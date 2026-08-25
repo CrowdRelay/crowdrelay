@@ -14,16 +14,16 @@ use crowdrelay_domain::{
 use time::Duration as TimeDuration;
 
 #[derive(Debug, FromRow)]
-struct TeamRoutingRow {
-    member_id: Uuid,
-    member_key: String,
-    display_name: String,
-    normalized_email: String,
-    active: bool,
-    skills: Vec<String>,
-    capacity_basis_points: i32,
-    open_assignments: i64,
-    recent_assignments: i64,
+pub(in crate::autopilot) struct TeamRoutingRow {
+    pub member_id: Uuid,
+    pub member_key: String,
+    pub display_name: String,
+    pub normalized_email: String,
+    pub active: bool,
+    pub skills: Vec<String>,
+    pub capacity_basis_points: i32,
+    pub open_assignments: i64,
+    pub recent_assignments: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -537,7 +537,7 @@ pub(super) async fn queue_team_email_action(
     Ok(())
 }
 
-async fn load_team_routing(
+pub(in crate::autopilot) async fn load_team_routing(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
@@ -562,7 +562,12 @@ async fn load_team_routing(
     .fetch_all(&mut **tx).await.map_err(map_sqlx)
 }
 
-fn select_member_index(team: &[TeamRoutingRow], need: TeamAssignmentNeed) -> Option<usize> {
+/// Skill-fit-first, fairness-second selection over the live routing snapshot.
+/// Shared by the scheduled routers and the `member_key="auto"` assignment path.
+pub(in crate::autopilot) fn select_member_index(
+    team: &[TeamRoutingRow],
+    need: TeamAssignmentNeed,
+) -> Option<usize> {
     let snapshots = team
         .iter()
         .map(|member| TeamMemberRoutingSnapshot {

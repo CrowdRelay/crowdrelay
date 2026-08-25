@@ -11,7 +11,7 @@ class OpsWatchdogContract(unittest.TestCase):
         migration = (ROOT / "migrations/0046_viryaos_ops_watchdog.sql").read_text()
         main = (ROOT / "crates/crowdrelay-worker/src/main.rs").read_text()
         self.assertIn("viryaos_ops_alert_state", migration)
-        self.assertIn("viryaos.ops.status_changed", worker)
+        self.assertIn("crowdrelay.ops.status_changed", worker)
         self.assertIn("ALERT_REPEAT_AFTER", worker)
         self.assertIn('"recovered"', worker)
         self.assertIn("OpsWatchdogWorker::new", main)

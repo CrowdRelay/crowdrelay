@@ -64,7 +64,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.fan_lifecycle.message_requested",
+                        "crowdrelay.fan_lifecycle.message_requested",
                         json!({
                             "action_id": action.id,
                             "fan_id": fan_id,
@@ -86,7 +86,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.merch.reorder_requested",
+                        "crowdrelay.merch.reorder_requested",
                         json!({
                             "action_id": action.id,
                             "variant_id": variant_id,
@@ -140,7 +140,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.booking.outreach_requested",
+                        "crowdrelay.booking.outreach_requested",
                         json!({
                             "action_id": action.id,
                             "city_id": city_id,
@@ -209,7 +209,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.merch.bundle_requested",
+                        "crowdrelay.merch.bundle_requested",
                         json!({
                             "action_id": action.id,
                             "product_a": product_a,
@@ -256,7 +256,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.outreach.requested",
+                        "crowdrelay.outreach.requested",
                         json!({
                             "action_id": action.id,
                             "opportunity_id": opportunity_id,
@@ -291,7 +291,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.outreach.discovery_requested",
+                        "crowdrelay.outreach.discovery_requested",
                         json!({
                             "action_id": action.id,
                             "requested_candidates": requested_candidates,                            // The adapter sweeps and reports; it never decides.
@@ -332,7 +332,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.booking.target_discovery_requested",
+                        "crowdrelay.booking.target_discovery_requested",
                         json!({
                             "action_id": action.id,
                             "requested_count": requested_count,
@@ -379,7 +379,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.beacon.discovery_requested",
+                        "crowdrelay.beacon.discovery_requested",
                         json!({
                             "action_id": action.id,
                             "event": {
@@ -468,7 +468,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.beacon.invite_batch_requested",
+                        "crowdrelay.beacon.invite_batch_requested",
                         json!({
                             "action_id": action.id,
                             "beacon_id": beacon_id,
@@ -553,7 +553,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.beacon.outreach_requested",
+                        "crowdrelay.beacon.outreach_requested",
                         json!({
                             "action_id": action.id,
                             "beacon_id": beacon_id,
@@ -689,7 +689,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.content.artifact_requested",
+                        "crowdrelay.content.artifact_requested",
                         json!({
                             "action_id": action.id,
                             "source_id": source_id,
@@ -735,7 +735,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.show.task_attention_required",
+                        "crowdrelay.show.task_attention_required",
                         json!({
                             "action_id": action.id,
                             "event_id": event_id,
@@ -763,7 +763,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.promotion.budget_change_requested",
+                        "crowdrelay.promotion.budget_change_requested",
                         json!({
                             "action_id": action.id,
                             "campaign_id": campaign_id,
@@ -797,7 +797,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.playlist.placement_check_requested",
+                        "crowdrelay.playlist.placement_check_requested",
                         json!({
                             "action_id": action.id,
                             "opportunity_id": opportunity_id,
@@ -871,7 +871,7 @@ impl PostgresAutopilotRepository {
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "viryaos.team.assignment_email_requested",
+                        "crowdrelay.team.assignment_email_requested",
                         json!({
                             "action_id": action.id,
                             "assignment_id": assignment_id,

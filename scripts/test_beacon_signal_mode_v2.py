@@ -80,7 +80,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertIn("status NOT IN ('suppressed','closed')", MEMBER)
         self.assertIn("viryaos_beacon_campaigns.status='declined' THEN 'declined'", MEMBER)
         self.assertNotIn("let campaign_status = match payload.action", MEMBER)
-        self.assertIn("viryaos.beacon.signal_engagement_recorded", MEMBER)
+        self.assertIn("crowdrelay.beacon.signal_engagement_recorded", MEMBER)
 
     def test_press_room_requests_assets_and_coverage_are_complete(self) -> None:
         for symbol in (
@@ -94,8 +94,8 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
             self.assertIn(symbol, API)
         self.assertIn("valid_https_url", MEMBER)
         self.assertIn("valid_press_url", ADMIN)
-        self.assertIn("viryaos.beacon.coverage_submitted", MEMBER)
-        self.assertIn("viryaos.beacon.press_request_resolved", ADMIN)
+        self.assertIn("crowdrelay.beacon.coverage_submitted", MEMBER)
+        self.assertIn("crowdrelay.beacon.press_request_resolved", ADMIN)
         self.assertIn("viryaos_beacon_press_assets", MEMBER)
         self.assertIn("PressRoomEventView", MEMBER)
         self.assertIn("event.description", MEMBER)
@@ -146,7 +146,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertIn("audience_kind='beacon'", MEMBER)
         self.assertIn("if payload.do_not_contact", MEMBER)
         self.assertIn("accepts_outreach=false,do_not_contact=true", MEMBER)
-        self.assertIn("viryaos.beacon.signal_left", MEMBER)
+        self.assertIn("crowdrelay.beacon.signal_left", MEMBER)
 
 
 if __name__ == "__main__":

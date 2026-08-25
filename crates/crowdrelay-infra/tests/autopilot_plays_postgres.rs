@@ -348,7 +348,7 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM outbox_events
-             WHERE workspace_id=$1 AND event_type='viryaos.play.step_requested'"
+             WHERE workspace_id=$1 AND event_type='crowdrelay.play.step_requested'"
         )
         .bind(workspace_id.into_uuid())
         .fetch_one(&pool)
@@ -718,7 +718,7 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM outbox_events
-             WHERE workspace_id=$1 AND event_type='viryaos.play.step_requested'"
+             WHERE workspace_id=$1 AND event_type='crowdrelay.play.step_requested'"
         )
         .bind(workspace_id.into_uuid())
         .fetch_one(&pool)
@@ -981,7 +981,7 @@ async fn a_ladder_is_anchored_on_one_engaged_fan_and_needs_a_tracked_link()
         .await?;
     let emitted = sqlx::query_scalar::<_, serde_json::Value>(
         "SELECT payload FROM outbox_events
-         WHERE workspace_id=$1 AND event_type='viryaos.play.step_requested'",
+         WHERE workspace_id=$1 AND event_type='crowdrelay.play.step_requested'",
     )
     .bind(workspace_id.into_uuid())
     .fetch_one(&pool)

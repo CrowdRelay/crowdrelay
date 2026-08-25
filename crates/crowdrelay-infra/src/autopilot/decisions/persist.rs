@@ -142,7 +142,7 @@ macro_rules! decision_persist {
                     r#"
                     INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts)
                     VALUES (
-                        $1, 'viryaos.autopilot.approval_requested', 1,
+                        $1, 'crowdrelay.autopilot.approval_requested', 1,
                         jsonb_build_object(
                             'action_id', $2::uuid,
                             'context', $3::text,

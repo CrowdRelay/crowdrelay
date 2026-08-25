@@ -943,7 +943,7 @@ pub(super) async fn execute_play_step(
         transaction,
         workspace_id,
         action_id,
-        "viryaos.play.step_requested",
+        "crowdrelay.play.step_requested",
         json!({
             "action_id": action_id,
             "play_id": play_id,

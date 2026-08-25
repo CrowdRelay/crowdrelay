@@ -1,5 +1,5 @@
 {
-  "viryaos.ops.status_changed": "9ebb4d9b-e1d5-5936-83a0-d1c037fac3c3",
+  "crowdrelay.ops.status_changed": "9ebb4d9b-e1d5-5936-83a0-d1c037fac3c3",
   "communication.campaign_due": "VOSCAM000000001",
   "admission.pass.claimed": "a389e0f8-320a-5417-abd5-d5d4bee1dace",
   "admission.pass.issued": "crfbbaaa23e9a24a",
@@ -45,11 +45,11 @@
   "ticket.order.delivery_requested": "l1oOdJJTTilvWUOt",
   "ticket.order.paid": "1sKFQTJgXWoH5rmr",
   "ticket.order.refund_recorded": "a4d01240-d313-5d1c-9f02-33e6c2a558db",
-  "viryaos.team.assignment_email_requested": "xKKQ7m0nYxvfGCCM",
-  "viryaos.ops.operator_brief": "K35zjjtGjBUkoloM",
-  "viryaos.outreach.discovery_requested": "z94prDnSfhC2xV0k",
-  "viryaos.content.artifact_requested": "VOSTEAMOPS00001",
-  "viryaos.merch.reorder_requested": "VOSTEAMOPS00001",
-  "viryaos.merch.bundle_requested": "VOSTEAMOPS00001",
-  "viryaos.show.task_attention_required": "VOSTEAMOPS00001"
+  "crowdrelay.team.assignment_email_requested": "xKKQ7m0nYxvfGCCM",
+  "crowdrelay.ops.operator_brief": "K35zjjtGjBUkoloM",
+  "crowdrelay.outreach.discovery_requested": "z94prDnSfhC2xV0k",
+  "crowdrelay.content.artifact_requested": "VOSTEAMOPS00001",
+  "crowdrelay.merch.reorder_requested": "VOSTEAMOPS00001",
+  "crowdrelay.merch.bundle_requested": "VOSTEAMOPS00001",
+  "crowdrelay.show.task_attention_required": "VOSTEAMOPS00001"
 }

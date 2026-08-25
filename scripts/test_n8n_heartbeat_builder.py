@@ -23,7 +23,7 @@ class N8nHeartbeatBuilderTest(unittest.TestCase):
         with self.manifest.open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["event_type", "workflow_id", "capability", "enabled"], delimiter="\t")
             writer.writeheader()
-            writer.writerow({"event_type": "viryaos.team.assignment_email_requested", "workflow_id": "live-workflow", "capability": "team.email", "enabled": "1"})
+            writer.writerow({"event_type": "crowdrelay.team.assignment_email_requested", "workflow_id": "live-workflow", "capability": "team.email", "enabled": "1"})
         now = datetime.now(timezone.utc).replace(microsecond=0)
         self.attestation = self.root / "attestation.json"
         data = {
@@ -50,7 +50,7 @@ class N8nHeartbeatBuilderTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["workflow_attestation_sha"], hashlib.sha256(self.attestation.read_bytes()).hexdigest())
 
     def test_manifest_drift_fails_closed(self):
-        self.manifest.write_text(self.manifest.read_text() + "viryaos.other\tother\tother.cap\t0\n")
+        self.manifest.write_text(self.manifest.read_text() + "crowdrelay.other\tother\tother.cap\t0\n")
         with self.assertRaisesRegex(ValueError, "route-manifest SHA"):
             MODULE.build_heartbeat(self.manifest, self.attestation, "n8n-blue", "v1", 90, self.now)
 

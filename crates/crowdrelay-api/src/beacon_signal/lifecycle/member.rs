@@ -300,7 +300,7 @@ pub async fn record_event_engagement(
         "help_details": help_details,
     });
     if let Err(error) = sqlx::query(
-        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.signal_engagement_recorded',1,$2,$3)",
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'crowdrelay.beacon.signal_engagement_recorded',1,$2,$3)",
     )
     .bind(workspace_id)
     .bind(event_payload)
@@ -444,7 +444,7 @@ pub async fn submit_coverage(
         "title": title,
     });
     if let Err(error) = sqlx::query(
-        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.coverage_submitted',1,$2,$3)",
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'crowdrelay.beacon.coverage_submitted',1,$2,$3)",
     )
     .bind(workspace_id)
     .bind(event_payload)
@@ -546,7 +546,7 @@ pub async fn leave(
         "do_not_contact": payload.do_not_contact,
     });
     if let Err(error) = sqlx::query(
-        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.signal_left',1,$2,$3)",
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'crowdrelay.beacon.signal_left',1,$2,$3)",
     )
     .bind(workspace_id)
     .bind(event_payload)

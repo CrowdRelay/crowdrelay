@@ -16,16 +16,6 @@ pub(crate) fn bearer_sha256(headers: &HeaderMap) -> Option<[u8; 32]> {
     Some(Sha256::digest(raw_token.as_bytes()).into())
 }
 
-pub(crate) fn bearer_sha256_matches(headers: &HeaderMap, expected_hash: Option<[u8; 32]>) -> bool {
-    let Some(expected_hash) = expected_hash else {
-        return false;
-    };
-    let Some(candidate) = bearer_sha256(headers) else {
-        return false;
-    };
-    constant_time_eq(&candidate, &expected_hash)
-}
-
 /// Accepts either the active credential or its immediately preceding value,
 /// so operators can rotate static bearer keys without a rejection window.
 /// Both comparisons stay constant time; `None` on both sides fails closed.
@@ -64,16 +54,24 @@ mod tests {
         let expected: [u8; 32] = Sha256::digest(b"correct-key").into();
         let mut headers = HeaderMap::new();
 
-        assert!(!bearer_sha256_matches(&headers, Some(expected)));
+        assert!(!bearer_sha256_matches_either(
+            &headers,
+            Some(expected),
+            None
+        ));
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_static("Bearer correct-key"),
         );
-        assert!(bearer_sha256_matches(&headers, Some(expected)));
-        assert!(!bearer_sha256_matches(&headers, None));
+        assert!(bearer_sha256_matches_either(&headers, Some(expected), None));
+        assert!(!bearer_sha256_matches_either(&headers, None, None));
 
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer wrong-key"));
-        assert!(!bearer_sha256_matches(&headers, Some(expected)));
+        assert!(!bearer_sha256_matches_either(
+            &headers,
+            Some(expected),
+            None
+        ));
 
         let previous: [u8; 32] = Sha256::digest(b"previous-key").into();
         assert!(!bearer_sha256_matches_either(

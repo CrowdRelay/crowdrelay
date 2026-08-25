@@ -14,7 +14,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const e=$json; if(!e||e.type!=='viryaos.beacon.network_discovery_requested'||e.version!==1) throw new Error('Unsupported event'); const d=e.data??{}; if(!d.run_id||!d.country_code||!Number.isInteger(d.target_count)) throw new Error('Invalid discovery request'); return [{json:{event_id:e.id,run_id:d.run_id,country_code:d.country_code,target_count:d.target_count}}];"
+        "jsCode": "const e=$json; if(!e||e.type!=='crowdrelay.beacon.network_discovery_requested'||e.version!==1) throw new Error('Unsupported event'); const d=e.data??{}; if(!d.run_id||!d.country_code||!Number.isInteger(d.target_count)) throw new Error('Invalid discovery request'); return [{json:{event_id:e.id,run_id:d.run_id,country_code:d.country_code,target_count:d.target_count}}];"
       },
       "id": "b1000000-0000-4000-8000-000000000002",
       "name": "Validate discovery intent",

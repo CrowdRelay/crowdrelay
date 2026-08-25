@@ -28,7 +28,7 @@ It must not purchase placement, change ticket pricing, fabricate reviews/crowd/s
 
 ### Play steps
 
-`play.step` carries `viryaos.play.step_requested`: one step of one running campaign, for **one consented fan**, with the fan's contact details, the show it is about and a `template_key` naming the message. It is emitted per recipient on purpose — that is what makes the send idempotent, keeps the daily quota and the weekly owned-audience envelope meaningful, and bounds a play that goes wrong to one message rather than a segment.
+`play.step` carries `crowdrelay.play.step_requested`: one step of one running campaign, for **one consented fan**, with the fan's contact details, the show it is about and a `template_key` naming the message. It is emitted per recipient on purpose — that is what makes the send idempotent, keeps the daily quota and the weekly owned-audience envelope meaningful, and bounds a play that goes wrong to one message rather than a segment.
 
 CrowdRelay has already decided everything that matters: who is eligible, whether consent is current at the moment of dispatch, whether the step is still inside its window and whether the show is still on. The executor renders the named template from the supplied facts and sends it. It must not broaden the recipient list, substitute a different template, re-send a step it has already reported, or send at all once the event is past — a step delivered outside its moment is a different, worse message than one not delivered, and CrowdRelay records that omission as a skip rather than letting it arrive late.
 
@@ -36,7 +36,7 @@ CrowdRelay has already decided everything that matters: who is eligible, whether
 
 Executors post what they found to `POST /v1/internal/autopilot/outreach/candidates` with the commerce key and an `Idempotency-Key`, up to 100 candidates per batch; CrowdRelay screens each one on write. The admin route of the same name stays for operator imports. Discovery is executor work, so it lives on the internal surface: requiring the admin key would hand an adapter authority over every admin route in order to post a list of playlist contacts.
 
-An adapter may sweep unprompted, and it may also be *asked* to. `outreach.discovery` carries `viryaos.outreach.discovery_requested`, emitted when the agent has fewer confirmed submission routes than its policy floor. The event carries `requested_candidates`, the screening thresholds a sweep can pre-filter against, and the callback path. The sweep reads published data, contacts nobody and buys nothing, which is why it is `first_party_reversible`.
+An adapter may sweep unprompted, and it may also be *asked* to. `outreach.discovery` carries `crowdrelay.outreach.discovery_requested`, emitted when the agent has fewer confirmed submission routes than its policy floor. The event carries `requested_candidates`, the screening thresholds a sweep can pre-filter against, and the callback path. The sweep reads published data, contacts nobody and buys nothing, which is why it is `first_party_reversible`.
 
 **Report the batch even when it is empty.** The internal route accepts an empty `candidates` array and the admin route does not, and that difference is the point: CrowdRelay tells a sweep that found nothing admissible — after which it stops asking — from one that was never answered, which stays an operator problem. It reads that from the ingestion itself, not from candidate rows, because both cases leave zero of those. An adapter that returns silently keeps the request alive for ever instead of backing it off.
 
@@ -52,7 +52,7 @@ Nothing is contacted as a result of ingestion. An operator confirms the route th
 
 ## The daily operator brief
 
-`viryaos.ops.operator_brief` is a first-party notice to the band's own operator, not an audience message, and it rides the ops-alert channel and workflow that already carry `viryaos.ops.status_changed`. The workflow must branch on the event type: the payload is `headline`, `summary`, `snapshot` and `observed_at`, with no `alert_key` or `state`, because a brief is not a condition that opens and recovers.
+`crowdrelay.ops.operator_brief` is a first-party notice to the band's own operator, not an audience message, and it rides the ops-alert channel and workflow that already carry `crowdrelay.ops.status_changed`. The workflow must branch on the event type: the payload is `headline`, `summary`, `snapshot` and `observed_at`, with no `alert_key` or `state`, because a brief is not a condition that opens and recovers.
 
 CrowdRelay sends at most one a day and decides on its own whether there is anything worth saying; the executor delivers it and never suppresses, batches or re-sends it. Deliver it even while the agent is disabled — an operator whose agent is switched off with work waiting is precisely the reader the brief exists for, and a delivery path that goes quiet with the agent reproduces the silence it was built to break.
 
@@ -74,7 +74,7 @@ The reference is what makes a retried webhook a replay instead of a second count
 
 ## Scene-node invite batches
 
-`beacon.invite_batch` carries `viryaos.beacon.invite_batch_requested`: one verified scene node (latarnik) being asked to run invite codes for **one upcoming show in their own city**. The payload names the beacon (id, version, display name, contact email), the show (title, slug, start) and a `requested_count`; CrowdRelay issues the invite codes through its own machinery when the partner answers yes, so every signup that comes back is attributed and consented by construction.
+`beacon.invite_batch` carries `crowdrelay.beacon.invite_batch_requested`: one verified scene node (latarnik) being asked to run invite codes for **one upcoming show in their own city**. The payload names the beacon (id, version, display name, contact email), the show (title, slug, start) and a `requested_count`; CrowdRelay issues the invite codes through its own machinery when the partner answers yes, so every signup that comes back is attributed and consented by construction.
 
 A worked example is `n8n/examples/autopilot-beacon-invite-batch.example.json`: validate, claim once, compose the single-ask message from the payload facts (identifies sender, states where the address came from, explicit opt-out), send via the workspace Gmail credential, report the receipt with the claim token. The executor must never issue codes itself, invent signups, purchase or bot invites, broaden the ask beyond the named show, or re-ask on its own schedule: one batch per beacon per show is decided in CrowdRelay, and the cooldown lives there too.
 

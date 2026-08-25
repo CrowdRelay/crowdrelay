@@ -53,7 +53,7 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
 
     def test_invite_outbox_contains_job_id_not_plaintext_capability(self) -> None:
         queue = ADMIN.rsplit("async fn queue_invites", 1)[1]
-        self.assertIn("viryaos.beacon.invite_delivery_requested", queue)
+        self.assertIn("crowdrelay.beacon.invite_delivery_requested", queue)
         self.assertIn('json!({"job_id": job_id})', queue)
         self.assertNotIn("invite_url", queue)
         self.assertNotIn("invite_token", queue)
@@ -70,9 +70,9 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
 
     def test_executor_capabilities_fail_closed_until_private_workflows_are_attested(self) -> None:
         pairs = (
-            ("viryaos.beacon.release_delivery_confirmation_requested", "beacon.release.mail"),
-            ("viryaos.beacon.network_discovery_requested", "beacon.network.discovery"),
-            ("viryaos.beacon.invite_delivery_requested", "beacon.network.invite"),
+            ("crowdrelay.beacon.release_delivery_confirmation_requested", "beacon.release.mail"),
+            ("crowdrelay.beacon.network_discovery_requested", "beacon.network.discovery"),
+            ("crowdrelay.beacon.invite_delivery_requested", "beacon.network.invite"),
         )
         for event, capability in pairs:
             self.assertIn(f'"{event}" => "{capability}"', EXECUTOR)

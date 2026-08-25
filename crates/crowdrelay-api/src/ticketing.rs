@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, request_id,
-    security::{bearer_sha256, bearer_sha256_matches, bearer_sha256_matches_either},
+    security::{bearer_sha256, bearer_sha256_matches_either},
     ticket_qr::encode_ticket_qr,
 };
 

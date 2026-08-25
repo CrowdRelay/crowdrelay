@@ -287,7 +287,7 @@ pub(in crate::autopilot) async fn execute_release_milestone(
                 tx,
                 workspace_id,
                 action_id,
-                "viryaos.release.editorial_pitch_parked",
+                "crowdrelay.release.editorial_pitch_parked",
                 json!({
                     "action_id": action_id,
                     "release_id": release_id,
@@ -353,7 +353,7 @@ async fn seed_release_calendar(
         crate::autopilot::ensure_executor_capability(tx, workspace_id, "calendar.upsert").await?;
         let outbox_id = Uuid::now_v7();
         let starts_at = release_at + time::Duration::days(days);
-        sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'viryaos.calendar.upsert_requested',1,$3,$4,12)"#)
+        sqlx::query(r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts) VALUES($1,$2,'crowdrelay.calendar.upsert_requested',1,$3,$4,12)"#)
           .bind(outbox_id).bind(workspace_id.into_uuid()).bind(json!({"action_id":action_id,"calendar_key":calendar_key,"title":format!("VIRYA · {title} · {label}"),"starts_at":starts_at,"source_kind":"release","source_id":release_id})).bind(format!("autopilot-action:{action_id}:{slug}"))
           .execute(&mut **tx).await.map_err(map_sqlx)?;
         sqlx::query(r#"INSERT INTO viryaos_calendar_requests(workspace_id,source_kind,source_id,calendar_key,title,starts_at,action_id,outbox_event_id) VALUES($1,'release',$2,$3,$4,$5,$6,$7)"#)
@@ -489,7 +489,7 @@ async fn seed_deadline_calendar(
     let outbox_id = Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO outbox_events(id,workspace_id,event_type,event_version,payload,request_id,max_attempts)
-           VALUES($1,$2,'viryaos.calendar.upsert_requested',1,$3,$4,12)"#,
+           VALUES($1,$2,'crowdrelay.calendar.upsert_requested',1,$3,$4,12)"#,
     )
     .bind(outbox_id)
     .bind(workspace_id.into_uuid())
@@ -584,7 +584,7 @@ pub(in crate::autopilot) async fn execute_live_opportunity(
         tx,
         workspace_id,
         action_id,
-        "viryaos.opportunity.application_requested",
+        "crowdrelay.opportunity.application_requested",
         json!({
             "action_id": action_id,
             "opportunity_id": opportunity_id,
@@ -694,9 +694,9 @@ pub(in crate::autopilot) async fn execute_live_opportunity_terms(
         workspace_id,
         action_id,
         if accept {
-            "viryaos.opportunity.terms_accepted"
+            "crowdrelay.opportunity.terms_accepted"
         } else {
-            "viryaos.opportunity.terms_countered"
+            "crowdrelay.opportunity.terms_countered"
         },
         json!({
             "action_id": action_id,
@@ -797,7 +797,7 @@ pub(in crate::autopilot) async fn prepare_funding_package(
         tx,
         workspace_id,
         action_id,
-        "viryaos.funding.package_requested",
+        "crowdrelay.funding.package_requested",
         json!({
             "action_id": action_id,
             "opportunity_id": opportunity_id,
@@ -856,7 +856,7 @@ pub(in crate::autopilot) async fn submit_funding_application(
         tx,
         workspace_id,
         action_id,
-        "viryaos.funding.submission_requested",
+        "crowdrelay.funding.submission_requested",
         json!({
             "action_id": action_id,
             "opportunity_id": opportunity_id,
@@ -903,7 +903,7 @@ pub(in crate::autopilot) async fn escalate_editorial_pitch(
         tx,
         workspace_id,
         action_id,
-        "viryaos.release.editorial_pitch_escalated",
+        "crowdrelay.release.editorial_pitch_escalated",
         json!({
             "action_id": action_id,
             "release_id": release_id,

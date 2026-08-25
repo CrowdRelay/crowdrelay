@@ -201,7 +201,7 @@ class PlaylistPlacementContract(unittest.TestCase):
             execution,
         )
         self.assertIn(
-            '"viryaos.playlist.placement_check_requested" => "playlist.verify"', execution
+            '"crowdrelay.playlist.placement_check_requested" => "playlist.verify"', execution
         )
 
     def test_the_screening_rules_are_the_ones_phase_nine_already_built(self) -> None:

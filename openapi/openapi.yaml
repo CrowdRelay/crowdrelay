@@ -69,7 +69,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/StaffDeviceSessionCredential' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
-        '429': {{ $ref: '#/components/responses/PrivateProblem' }}
+        '429': { $ref: '#/components/responses/PrivateProblem' }
   /admin/staff/sessions:
     get:
       operationId: listStaffDeviceSessions
@@ -659,7 +659,7 @@ paths:
         '201': { description: Latarnik session created; bearer token is returned once. }
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
-        '429': {{ $ref: '#/components/responses/PrivateProblem' }}
+        '429': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
   /beacon/me:
     get:

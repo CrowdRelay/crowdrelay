@@ -46,7 +46,7 @@ class EditorialPitchContract(unittest.TestCase):
         # is worse than no dashboard.
         for emitted in ("editorial_pitch_parked", "editorial_pitch_escalated"):
             block = self.executor if emitted == "editorial_pitch_parked" else self.executor
-            self.assertIn(f'"viryaos.release.{emitted}"', block)
+            self.assertIn(f'"crowdrelay.release.{emitted}"', block)
         self.assertEqual(
             self.executor.count('"submitted_by_agent": false'),
             2,

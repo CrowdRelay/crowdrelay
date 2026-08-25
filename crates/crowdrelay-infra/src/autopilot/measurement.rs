@@ -437,7 +437,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     sqlx::query(
                         r#"
                         INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,max_attempts)
-                        VALUES ($1,'viryaos.autopilot.authority_demoted',1,
+                        VALUES ($1,'crowdrelay.autopilot.authority_demoted',1,
                             jsonb_build_object(
                                 'context',$2::text,
                                 'reason','two_consecutive_worsened_effects',

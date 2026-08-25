@@ -57,7 +57,7 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertIn("Dziękujemy Latarniku", RELEASES)
         self.assertIn("Paczkomat", RELEASES)
         self.assertIn("784947481", RELEASES)
-        launch = ADMIN.split("viryaos.beacon.release_delivery_confirmation_requested", 1)[1].split(
+        launch = ADMIN.split("crowdrelay.beacon.release_delivery_confirmation_requested", 1)[1].split(
             ".execute(&mut *tx)", 1
         )[0]
         for field in ("subject", "text", "contact_email", "member_url"):
@@ -66,7 +66,7 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertIn("AS mail(beacon_id,display_name,contact_email,subject,body_text,request_id)", launch)
         for shipping_pii in ("recipient_name", "recipient_phone", "parcel_locker_code"):
             self.assertNotIn(shipping_pii, launch)
-        confirmed = MEMBER.split("viryaos.beacon.release_delivery_confirmed", 1)[1].split(
+        confirmed = MEMBER.split("crowdrelay.beacon.release_delivery_confirmed", 1)[1].split(
             ".execute(&mut *tx)", 1
         )[0]
         for shipping_pii in ("recipient_name", "recipient_phone", "parcel_locker_code"):
