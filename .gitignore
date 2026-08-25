@@ -53,3 +53,7 @@ CLAUDE.md
 .claude/
 scripts/migrate-to-virya-crowdrelay.sh
 scripts/provision-oracle-instance.sh
+
+# Local-only PG upgrade tooling (untracked by request)
+scripts/local/
+backups-local/

@@ -94,7 +94,7 @@ The supported HTTP integration contract is [`openapi/openapi.yaml`](openapi/open
 
 ## Tech stack
 
-Rust 1.97 (edition 2024), Tokio, Axum 0.8, SQLx 0.8 and PostgreSQL 18.
+Rust 1.98 (edition 2024), Tokio, Axum 0.8, SQLx 0.8 and PostgreSQL 19 (dev/CI run the 19 beta; GA flip tracked in `scripts/local/pg-beta-to-ga-upgrade.sh`).
 
 | Crate | Responsibility |
 | --- | --- |

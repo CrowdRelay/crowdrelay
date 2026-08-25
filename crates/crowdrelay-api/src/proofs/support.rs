@@ -160,10 +160,14 @@ fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     let mut level = leaves.to_vec();
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pair in level.chunks(2) {
-            let left = pair.first().copied()?;
-            let right = pair.get(1).copied().unwrap_or(left);
+        // Full pairs hash directly; an odd trailing leaf duplicates itself,
+        // matching the unwrap_or(left) semantics this replaces.
+        let (pairs, tail) = level.as_chunks::<2>();
+        for &[left, right] in pairs {
             next.push(node_hash(left, right));
+        }
+        if let [single] = tail {
+            next.push(node_hash(*single, *single));
         }
         level = next;
     }
@@ -198,10 +202,12 @@ fn merkle_path(leaves: &[[u8; 32]], index: usize) -> Result<Vec<RawMerkleStep>, 
             hash: sibling,
         });
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pair in level.chunks(2) {
-            let left = pair.first().copied().ok_or(ProofError::Unexpected)?;
-            let right = pair.get(1).copied().unwrap_or(left);
+        let (pairs, tail) = level.as_chunks::<2>();
+        for &[left, right] in pairs {
             next.push(node_hash(left, right));
+        }
+        if let [single] = tail {
+            next.push(node_hash(*single, *single));
         }
         cursor /= 2;
         level = next;

@@ -1,14 +1,19 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    # Beta until 19 GA (expected Sep/Oct 2026): flip the default via
+    # CROWDRELAY_POSTGRES_IMAGE or in scripts/local/pg-beta-to-ga-upgrade.sh.
+    image: ${CROWDRELAY_POSTGRES_IMAGE:-postgres:19beta3-alpine}
     env_file:
       - ${CROWDRELAY_ENV_FILE:-.env}
+    shm_size: 128mb
     command:
       - "postgres"
       - "-c"
       - "io_method=worker"
       - "-c"
-      - "io_workers=${CROWDRELAY_POSTGRES_IO_WORKERS:-3}"
+      - "io_min_workers=${CROWDRELAY_POSTGRES_IO_MIN_WORKERS:-2}"
+      - "-c"
+      - "io_max_workers=${CROWDRELAY_POSTGRES_IO_MAX_WORKERS:-8}"
       - "-c"
       - "effective_io_concurrency=${CROWDRELAY_POSTGRES_EFFECTIVE_IO_CONCURRENCY:-16}"
       - "-c"
@@ -16,7 +21,7 @@ services:
     ports:
       - "127.0.0.1:${CROWDRELAY_POSTGRES_PORT:-5432}:5432"
     volumes:
-      - crowdrelay_postgres18:/var/lib/postgresql
+      - crowdrelay_postgres19:/var/lib/postgresql
     healthcheck:
       test:
         [
@@ -27,6 +32,11 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     restart: unless-stopped
 
   migrate:
@@ -76,6 +86,11 @@ services:
     mem_limit: 256m
     cpus: 1.00
     stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     restart: unless-stopped
 
   worker:
@@ -114,7 +129,12 @@ services:
     mem_limit: 256m
     cpus: 1.00
     stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     restart: unless-stopped
 
 volumes:
-  crowdrelay_postgres18:
+  crowdrelay_postgres19:
