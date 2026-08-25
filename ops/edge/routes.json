@@ -51,5 +51,7 @@
   "crowdrelay.content.artifact_requested": "VOSTEAMOPS00001",
   "crowdrelay.merch.reorder_requested": "VOSTEAMOPS00001",
   "crowdrelay.merch.bundle_requested": "VOSTEAMOPS00001",
-  "crowdrelay.show.task_attention_required": "VOSTEAMOPS00001"
+  "crowdrelay.show.task_attention_required": "VOSTEAMOPS00001",
+  "crowdrelay.autopilot.approval_requested": "VOSAPR000000001",
+  "crowdrelay.fan_lifecycle.message_requested": "VOSMAIL000000001"
 }

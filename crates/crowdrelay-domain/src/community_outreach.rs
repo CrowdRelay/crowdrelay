@@ -93,7 +93,11 @@ pub fn select_due_communities(
                 && !matches!(target.self_promo_policy, SelfPromoPolicy::Prohibited)
         })
         .collect();
-    due.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.community_name.cmp(&b.community_name)));
+    due.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then(a.community_name.cmp(&b.community_name))
+    });
     due.truncate(policy.pack_size as usize);
     due
 }
@@ -154,7 +158,10 @@ mod tests {
 
     #[test]
     fn pack_size_caps_the_batch() {
-        let policy = OutreachCadencePolicy { pack_size: 2, ..Default::default() };
+        let policy = OutreachCadencePolicy {
+            pack_size: 2,
+            ..Default::default()
+        };
         let many: Vec<OutreachTarget> = (0..5)
             .map(|i| target(&format!("c{i}"), 50 + i as u16 * 10, None))
             .collect();
