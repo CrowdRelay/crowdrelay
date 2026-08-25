@@ -37,6 +37,9 @@ pub struct OperatorBriefSnapshot {
     /// Actions parked because no executor advertises the capability they need.
     /// Work the agent decided on and physically cannot perform.
     pub actions_parked: u32,
+    /// True when parked actions exist but no executor has a fresh heartbeat.
+    /// The execution plane itself is dead, not just one capability gap.
+    pub execution_plane_dead: bool,
     /// Off-platform feeds the agent has no series for. Reported so "we saw no
     /// change" is never confused with "we could not look".
     pub blind_platforms: u16,
@@ -86,6 +89,9 @@ pub enum BriefHeadline {
     /// series only stops it measuring. Ranked below `Failing`: a failed action
     /// is already visible in the ledger, and this is not.
     DiscoveryReadNothing,
+    /// Actions are parked AND no executor has heartbeated recently. The
+    /// execution plane itself is dead, not just one capability gap.
+    ExecutionPlaneDead,
     /// Actions failed.
     Failing,
     /// Decisions are waiting on a human inside the normal window.
@@ -108,6 +114,7 @@ impl BriefHeadline {
             Self::Worked => "worked",
             Self::Blind => "blind",
             Self::DiscoveryReadNothing => "discovery_read_nothing",
+            Self::ExecutionPlaneDead => "execution_plane_dead",
             Self::Failing => "failing",
             Self::AwaitingApproval => "awaiting_approval",
             Self::WorkParked => "work_parked",
@@ -178,6 +185,9 @@ fn headline(snapshot: &OperatorBriefSnapshot, policy: OperatorBriefPolicy) -> Br
     if (!snapshot.agent_enabled || snapshot.dry_run) && waiting > 0 {
         return BriefHeadline::DisabledWithWorkWaiting;
     }
+    if snapshot.actions_parked > 0 && snapshot.execution_plane_dead {
+        return BriefHeadline::ExecutionPlaneDead;
+    }
     if snapshot.actions_parked > 0 {
         return BriefHeadline::WorkParked;
     }
@@ -211,6 +221,7 @@ mod tests {
             actions_awaiting_approval: 0,
             oldest_approval_age_hours: None,
             actions_parked: 0,
+            execution_plane_dead: false,
             blind_platforms: 0,
             last_sweep_read_nothing: false,
             agent_enabled: true,
