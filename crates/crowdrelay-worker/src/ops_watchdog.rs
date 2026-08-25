@@ -19,7 +19,12 @@ use uuid::Uuid;
 const OUTBOX_STALL_SECONDS: i64 = 5 * 60;
 const DELIVERY_STALL_SECONDS: i64 = 5 * 60;
 const PROOF_STALL_SECONDS: i64 = 60 * 60;
-const EXECUTOR_REPORT_STALL_SECONDS: i64 = 10 * 60;
+/// Executor flows run on roughly hourly n8n schedules and post their receipts
+/// when they run, so a healthy gap between an emission and its receipt is one
+/// executor cycle, not ten seconds. The window has to clear that cycle with
+/// margin: at ten minutes it flapped open on every normal hourly batch and
+/// recovered again minutes later, which was pure alert noise.
+const EXECUTOR_REPORT_STALL_SECONDS: i64 = 2 * 60 * 60;
 const AUTOPILOT_FAILURE_THRESHOLD: i64 = 3;
 const ALERT_REPEAT_AFTER: time::Duration = time::Duration::hours(6);
 
