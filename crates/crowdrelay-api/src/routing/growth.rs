@@ -6,7 +6,10 @@
 //! fee, a wave they approve, a curator's claim, and a form only they can
 //! submit.
 
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 use crate::{AppState, autopilot};
 
@@ -19,6 +22,10 @@ pub(super) fn growth_routes() -> Router<AppState> {
         .route(
             "/v1/admin/autopilot/team-opportunities/{opportunity_id}/terms",
             post(autopilot::record_team_opportunity_terms),
+        )
+        .route(
+            "/v1/admin/autopilot/outreach-waves",
+            get(autopilot::list_outreach_waves),
         )
         .route(
             "/v1/admin/autopilot/outreach-waves/{wave_id}/approve",
