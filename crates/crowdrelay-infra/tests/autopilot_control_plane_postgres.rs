@@ -704,3 +704,108 @@ async fn applying_a_posture_moves_all_four_surfaces_atomically() {
         .expect("replay");
     assert!(replay.replayed);
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace_window() {
+    let fixture = fixture("no-executor-sweep").await.expect("fixture");
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation
+         ) VALUES ($1,$2,'e2e-no-executor','beacon','beacon',$3,
+                   'beacon_outreach_request',9000,'require_approval','e2e','{}','{}','{}')",
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect("decision");
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, approved_at
+         ) VALUES ($1,$2,'beacon','beacon.outreach.request','beacon',$3,
+                   'e2e-no-executor-1','{\"kind\":\"request_beacon_outreach\",\"beacon_id\":\"01a029d5-1555-70d3-b3ea-3672216e7fe4\",\"event_id\":\"ef8b0ff0-d9bf-48d1-a143-a1cb27e8c322\",\"beacon_version\":1,\"phase\":\"initial\",\"template_key\":\"beacon.local_story.v1\"}',
+                   'queued', now() - interval '2 days')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect("stale queued action");
+
+    // Nobody advertises `beacon.outreach`, the action has waited far beyond
+    // the grace window: the sweep must retire it instead of letting it rot.
+    let cancelled = fixture
+        .repository
+        .cancel_unexecutable_actions(fixture.workspace_id, fixture.now)
+        .await
+        .expect("sweep");
+    assert_eq!(cancelled, 1);
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM viryaos_autopilot_actions \
+         WHERE workspace_id = $1 AND idempotency_key = 'e2e-no-executor-1'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("action row");
+    assert_eq!(status, "cancelled");
+
+    // A capability that IS advertised protects its action from the sweep:
+    // register `content.artifact` and give a content action the same age.
+    sqlx::query(
+        "INSERT INTO viryaos_executor_instances (
+             workspace_id, executor_id, version, manifest_sha,
+             observed_at, expires_at
+         ) VALUES ($1,'e2e-executor','v1','e2e', now(), now() + interval '1 hour')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await
+    .expect("executor instance");
+    sqlx::query(
+        "INSERT INTO viryaos_executor_capabilities (
+             workspace_id, executor_id, capability, capability_version,
+             observed_at, expires_at
+         ) VALUES ($1,'e2e-executor','content.artifact','v1', now(), now() + interval '1 hour')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .execute(&fixture.pool)
+    .await
+    .expect("capability");
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_actions (
+             workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
+             idempotency_key, payload, status, approved_at
+         ) VALUES ($1,$2,'content_supply','content.artifact.request','content_source',$3,
+                   'e2e-no-executor-2','{\"kind\":\"request_content_artifact\"}',
+                   'queued', now() - interval '2 days')",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect("supported queued action");
+    let cancelled = fixture
+        .repository
+        .cancel_unexecutable_actions(fixture.workspace_id, fixture.now)
+        .await
+        .expect("second sweep");
+    assert_eq!(cancelled, 0);
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM viryaos_autopilot_actions \
+         WHERE workspace_id = $1 AND idempotency_key = 'e2e-no-executor-2'",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("supported action row");
+    assert_eq!(status, "queued", "a live executor keeps its work claimable");
+}

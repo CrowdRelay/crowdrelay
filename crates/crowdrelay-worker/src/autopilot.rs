@@ -141,6 +141,21 @@ impl AutopilotWorker {
         }
         match self
             .repository
+            .cancel_unexecutable_actions(self.workspace_id, now)
+            .await
+        {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "cancelled ViryaOS actions with no live executor")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS no-executor sweep failed");
+            }
+        }
+
+        match self
+            .repository
             .claim_due_autonomous_actions(self.workspace_id, ACTION_BATCH_SIZE, now)
             .await
         {
