@@ -674,17 +674,13 @@ impl PostgresAutopilotRepository {
                 }
                 AutopilotActionPayload::RequestContentArtifact {
                     source_id,
-                    source_version,
+                    source_version: _,
                     artifact,
                     template_key,
                 } => {
-                    let source = operations::load_content_source_for_execution(
-                        &mut transaction,
-                        workspace_id,
-                        *source_id,
-                        *source_version,
-                    )
-                    .await?;
+                    let source =
+                        operations::load_content_source_for_execution(&mut transaction, workspace_id, *source_id)
+                            .await?;
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
