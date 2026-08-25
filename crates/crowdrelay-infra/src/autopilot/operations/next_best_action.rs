@@ -35,6 +35,7 @@ struct QueueRow {
     reason: String,
     disposition: String,
     payload: Option<Value>,
+    action_status: Option<String>,
     due_at: Option<OffsetDateTime>,
 }
 
@@ -94,10 +95,12 @@ pub(in crate::autopilot) async fn load_next_best_actions(
             decision.reason,
             decision.disposition,
             action.payload,
+            action.action_status,
             deadline.due_at
         FROM viryaos_autopilot_decisions AS decision
         LEFT JOIN LATERAL (
-            SELECT candidate.id AS action_id, candidate.payload, candidate.approval_expires_at
+            SELECT candidate.id AS action_id, candidate.payload, candidate.approval_expires_at,
+                   candidate.status AS action_status
             FROM viryaos_autopilot_actions AS candidate
             WHERE candidate.workspace_id = decision.workspace_id
               AND candidate.decision_id = decision.id
@@ -147,13 +150,14 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 AND handled.target_type = 'autopilot_decision'
                 AND handled.target_id = decision.id
           )
-          -- Work that already finished is not next.
-          AND NOT EXISTS (
-              SELECT 1 FROM viryaos_autopilot_actions AS done
-              WHERE done.workspace_id = decision.workspace_id
-                AND done.decision_id = decision.id
-                AND done.status IN ('succeeded', 'cancelled')
-          )
+          -- Work whose newest action already left the queue is not next. The
+          -- lateral join above carries that action's status: a `failed` action
+          -- is as terminal as a succeeded or cancelled one (the executor
+          -- claims only `queued` or stale `processing`), so keeping such a
+          -- finding listed would park a dead button in front of the operator,
+          -- whose every click comes back as a conflict.
+          AND (action.action_status IS NULL
+               OR action.action_status NOT IN ('succeeded', 'cancelled', 'failed'))
           -- Only the newest decision per subject and kind. An evidence refresh
           -- writes a new decision row, and the queue must show the finding
           -- once, not once per cycle it survived.
@@ -202,6 +206,16 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     for row in rows {
         let Some(authority) = AuthorityState::from_disposition(&row.disposition) else {
             continue;
+        };
+        // The disposition says what was decided; the action row says where the
+        // work actually is. An approved-and-queued finding must not keep
+        // presenting itself as blocked on a human: the operator would click
+        // approve again and collect a conflict for a decision already made.
+        let authority = match (row.action_status.as_deref(), authority) {
+            (Some("queued" | "processing"), AuthorityState::AwaitingApproval) => {
+                AuthorityState::AutoExecuting
+            }
+            (_, other) => other,
         };
         let context = super::parse_context(&row.context)?;
         let (value_tier, deviation_basis_points, recommended_action) =
