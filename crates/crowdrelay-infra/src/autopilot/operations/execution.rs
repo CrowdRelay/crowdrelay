@@ -139,10 +139,14 @@ pub(in crate::autopilot) async fn load_content_source_for_execution(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     source_id: ContentSourceId,
-    version: i64,
 ) -> Result<(String, String, Value), RepositoryError> {
-    sqlx::query_as::<_,(String,String,Value)>("SELECT source_kind,title,metadata FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND version=$3 AND active AND expires_at>now() FOR UPDATE")
-      .bind(workspace_id.into_uuid()).bind(source_id.into_uuid()).bind(version).fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)
+    // The decision-time source_version is deliberately not re-checked here:
+    // measurement refreshes bump the version while an action waits out its
+    // execution delay, and the emitted payload ships this freshly read row
+    // anyway, so a pinned version only converted routine churn into permanent
+    // action failures. Liveness (active, unexpired) is the real gate.
+    sqlx::query_as::<_,(String,String,Value)>("SELECT source_kind,title,metadata FROM viryaos_content_sources WHERE workspace_id=$1 AND id=$2 AND active AND expires_at>now() FOR UPDATE")
+      .bind(workspace_id.into_uuid()).bind(source_id.into_uuid()).fetch_optional(&mut **tx).await.map_err(map_sqlx)?.ok_or(RepositoryError::Conflict)
 }
 
 pub(in crate::autopilot) async fn execute_experiment_adjustment(
