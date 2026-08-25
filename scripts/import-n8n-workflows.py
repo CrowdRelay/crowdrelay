@@ -117,6 +117,24 @@ def command_prepare(files: list[Path]) -> None:
         print(f"prepared {destination}")
 
 
+# Settings keys the n8n public API accepts; instance exports carry extras
+# (binaryMode, versionCounter, instanceId) that the PUT schema rejects.
+SETTINGS_ALLOWED_KEYS = (
+    "saveExecutionProgress",
+    "saveManualExecutions",
+    "saveDataErrorExecution",
+    "saveDataSuccessExecution",
+    "executionTimeout",
+    "errorWorkflow",
+    "timezone",
+    "executionOrder",
+    "callerPolicy",
+    "callerIds",
+    "timeSavedPerExecution",
+    "redactionPolicy",
+)
+
+
 def command_push(files: list[Path]) -> None:
     base_url = os.environ.get("N8N_BASE_URL", "")
     api_key = os.environ.get("N8N_API_KEY", "")
@@ -142,7 +160,11 @@ def command_push(files: list[Path]) -> None:
             "name": name,
             "nodes": workflow.get("nodes", []),
             "connections": workflow.get("connections", {}),
-            "settings": workflow.get("settings", {}),
+            "settings": {
+                key: value
+                for key, value in (workflow.get("settings") or {}).items()
+                if key in SETTINGS_ALLOWED_KEYS
+            },
         }
         existing_id = by_name.get(name)
         method = "PUT" if existing_id else "POST"
