@@ -343,7 +343,7 @@ async fn the_floor_still_holds_when_the_move_is_finally_sent()
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM outbox_events
-             WHERE workspace_id=$1 AND event_type='viryaos.opportunity.terms_countered'"
+             WHERE workspace_id=$1 AND event_type='crowdrelay.opportunity.terms_countered'"
         )
         .bind(fixture.workspace_id.into_uuid())
         .fetch_one(&fixture.pool)

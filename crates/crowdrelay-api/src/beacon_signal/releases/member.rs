@@ -133,7 +133,7 @@ pub async fn confirm_release_delivery(
     if let Err(error) = sqlx::query(
         r#"
         INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id,max_attempts)
-        VALUES ($1,'viryaos.beacon.release_delivery_confirmed',1,$2,$3,12)
+        VALUES ($1,'crowdrelay.beacon.release_delivery_confirmed',1,$2,$3,12)
         "#,
     )
     .bind(workspace_id)

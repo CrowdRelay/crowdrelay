@@ -24,7 +24,7 @@ class N8nWorkflowAttestationContract(unittest.TestCase):
             writer.writeheader()
             writer.writerow(
                 {
-                    "event_type": "viryaos.team.assignment_email_requested",
+                    "event_type": "crowdrelay.team.assignment_email_requested",
                     "workflow_id": "VOSTEAMEMAIL001",
                     "capability": "team.email",
                     "enabled": "1",

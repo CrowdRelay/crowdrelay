@@ -309,7 +309,7 @@ pub async fn admin_set_state(
     let status = payload.status.as_str();
     let event_payload = serde_json::json!({"beacon_id":beacon_id,"status":status});
     if let Err(error) = sqlx::query(
-        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.signal_state_changed',1,$2,$3)",
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'crowdrelay.beacon.signal_state_changed',1,$2,$3)",
     )
     .bind(workspace_id)
     .bind(event_payload)
@@ -386,7 +386,7 @@ pub async fn admin_resolve_press_request(
         "resolution_note":resolution_note,
     });
     if let Err(error) = sqlx::query(
-        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.press_request_resolved',1,$2,$3)",
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'crowdrelay.beacon.press_request_resolved',1,$2,$3)",
     )
     .bind(workspace_id)
     .bind(event_payload)

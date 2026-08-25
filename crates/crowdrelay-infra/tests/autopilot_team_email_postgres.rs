@@ -155,7 +155,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
         r#"
         SELECT payload
         FROM outbox_events
-        WHERE workspace_id=$1 AND event_type='viryaos.team.assignment_email_requested'
+        WHERE workspace_id=$1 AND event_type='crowdrelay.team.assignment_email_requested'
         "#,
     )
     .bind(workspace_id.into_uuid())

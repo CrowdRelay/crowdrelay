@@ -938,7 +938,7 @@ pub async fn create_press_request(
         "details": details,
     });
     if let Err(error) = sqlx::query(
-        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'viryaos.beacon.press_request_created',1,$2,$3)",
+        "INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id) VALUES ($1,'crowdrelay.beacon.press_request_created',1,$2,$3)",
     )
     .bind(workspace_id)
     .bind(event_payload)

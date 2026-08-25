@@ -102,7 +102,7 @@ class BookingDiscoveryContract(unittest.TestCase):
 
     def test_the_request_publishes_its_screening_contract_to_the_adapter(self) -> None:
         emission = read(ACTIONS_EXECUTION).split(
-            '"viryaos.booking.target_discovery_requested"', 1
+            '"crowdrelay.booking.target_discovery_requested"', 1
         )[1][:2500]
         self.assertIn('"callback_path": "/v1/internal/autopilot/booking-discovery/candidates"', emission)
         self.assertIn("minimum_fit_basis_points", emission)
@@ -111,7 +111,7 @@ class BookingDiscoveryContract(unittest.TestCase):
     def test_executor_capability_mapping_closed_loop(self) -> None:
         execution = read(EXECUTION)
         self.assertIn('AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery"', execution)
-        self.assertIn('"viryaos.booking.target_discovery_requested" => "booking.discovery"', execution)
+        self.assertIn('"crowdrelay.booking.target_discovery_requested" => "booking.discovery"', execution)
 
     def test_supply_snapshot_reads_targets_and_cooldown_clock(self) -> None:
         sql = read(SNAPSHOTS).split(

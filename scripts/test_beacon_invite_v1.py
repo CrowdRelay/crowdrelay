@@ -63,7 +63,7 @@ class BeaconInviteContract(unittest.TestCase):
 
     def test_codes_are_ours_so_signups_are_attributable(self) -> None:
         emission = read(ACTIONS_EXECUTION).split(
-            "viryaos.beacon.invite_batch_requested", 1
+            "crowdrelay.beacon.invite_batch_requested", 1
         )[1][:2000]
         self.assertIn('"codes_issued_by_crowdrelay": true', emission)
         self.assertIn('"never_purchase_or_bot_invites": true', emission)

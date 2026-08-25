@@ -87,7 +87,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("communication_campaign_recipients", infra)
         self.assertIn("campaign.status IN ('scheduled', 'completed')", infra)
         self.assertNotIn("synesthesia.completed_at <= $2 - INTERVAL '48 hours'", infra)
-        self.assertIn('"viryaos.fan_lifecycle.message_requested"', outbox)
+        self.assertIn('"crowdrelay.fan_lifecycle.message_requested"', outbox)
         self.assertIn("eligibility_target", outbox)
         self.assertIn("require_consent", outbox)
         self.assertIn("consent.purpose = 'marketing'", outbox)
@@ -151,7 +151,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("AutopilotMarketStateRepository", app)
         self.assertIn("upsert_autopilot_promotion_state", infra)
         self.assertIn("EXCLUDED.observed_at > viryaos_promotion_campaign_states.observed_at", infra)
-        self.assertIn("viryaos.promotion.budget_change_requested", infra)
+        self.assertIn("crowdrelay.promotion.budget_change_requested", infra)
         self.assertIn("ensure_promotion_state_current", infra)
 
 

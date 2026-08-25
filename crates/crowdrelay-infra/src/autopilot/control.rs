@@ -908,6 +908,23 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)?
             .ok_or(RepositoryError::Conflict)?;
 
+            // `member_key="auto"` delegates to the skill-fit + fairness
+            // engine (same selector the scheduled routers use), so a one-
+            // click assignment always splits work evenly across the team.
+            let resolved_member_key = if member_key == "auto" {
+                let team =
+                    super::team::load_team_routing(&mut transaction, workspace_id, OffsetDateTime::now_utc())
+                        .await?;
+                let need = super::team::assignment_need(&action.0, &action.1);
+                let index = super::team::select_member_index(&team, need)
+                    .ok_or(RepositoryError::Conflict)?;
+                team.get(index)
+                    .map(|member| member.member_key.clone())
+                    .ok_or(RepositoryError::Conflict)?
+            } else {
+                member_key.clone()
+            };
+
             let member = sqlx::query_as::<_, (Uuid, String, String, String)>(
                 r#"
                 SELECT profile.member_id, profile.member_key, member.display_name, member.normalized_email
@@ -919,7 +936,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                 "#,
             )
             .bind(workspace_id.into_uuid())
-            .bind(&member_key)
+            .bind(&resolved_member_key)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(map_sqlx)?

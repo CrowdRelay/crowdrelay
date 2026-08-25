@@ -144,11 +144,11 @@ impl HttpMetrics {
             return String::new();
         };
         let mut rows = series.iter().collect::<Vec<_>>();
-        rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+        rows.sort_by_key(|(key, _)| *key);
         let mut out = String::from(
             "# HELP crowdrelay_http_route_request_duration_seconds HTTP request latency by bounded route template.\n# TYPE crowdrelay_http_route_request_duration_seconds histogram\n",
         );
-        for ((key, stat)) in rows {
+        for (key, stat) in rows {
             let (method, tail) = key.split_once(' ').unwrap_or(("", key.as_str()));
             let (route, status_class) = tail.rsplit_once(' ').unwrap_or((tail, "2xx"));
             let escaped_route = route.replace('\\', "\\\\").replace('"', "\\\"");

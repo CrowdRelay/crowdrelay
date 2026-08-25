@@ -141,14 +141,14 @@ class OutreachSupplyContract(unittest.TestCase):
             execution,
         )
         self.assertIn(
-            '"viryaos.outreach.discovery_requested" => "outreach.discovery"',
+            '"crowdrelay.outreach.discovery_requested" => "outreach.discovery"',
             execution,
         )
 
     def test_the_emitted_contract_forbids_inventing_a_contact(self) -> None:
         # The adapter is told the rules the ingest path will apply anyway. An
         # inferred address is a bounce at best and a burned curator at worst.
-        emission = read(ACTIONS).split("viryaos.outreach.discovery_requested", 1)[1][
+        emission = read(ACTIONS).split("crowdrelay.outreach.discovery_requested", 1)[1][
             :4000
         ]
         self.assertIn("never_infer_or_pattern_guess_an_address", emission)
@@ -230,7 +230,7 @@ class OutreachSupplyContract(unittest.TestCase):
         # The published workflow is the thing an operator actually imports, so
         # the rule that keeps the supply clean has to survive in it too.
         sweep = read(ROOT / "n8n/examples/autopilot-outreach-discovery.example.json")
-        self.assertIn("viryaos.outreach.discovery_requested", sweep)
+        self.assertIn("crowdrelay.outreach.discovery_requested", sweep)
         self.assertIn("route_is_published", sweep)
         self.assertIn("evidence", sweep)
         # The base URL already carries /v1, so the path is appended without it.

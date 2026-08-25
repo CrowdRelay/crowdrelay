@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse,json,re
 from pathlib import Path
-EVENT="viryaos.team.assignment_email_requested"; CANONICAL="VOSTEAMEMAIL001"; HEX=re.compile(r"^[0-9a-f]{64}$")
+EVENT="crowdrelay.team.assignment_email_requested"; CANONICAL="VOSTEAMEMAIL001"; HEX=re.compile(r"^[0-9a-f]{64}$")
 p=argparse.ArgumentParser(); p.add_argument("inventory",type=Path); a=p.parse_args(); data=json.loads(a.inventory.read_text()); ws=data.get("workflows")
 if not isinstance(ws,list): raise SystemExit("TEAM_EMAIL_CUTOVER=FAIL workflows-missing")
 active=[w for w in ws if isinstance(w,dict) and w.get("active") is True and EVENT in (w.get("events") if isinstance(w.get("events"),list) else [])]

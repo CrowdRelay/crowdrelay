@@ -218,8 +218,8 @@ class LiveOpportunityTermsContract(unittest.TestCase):
             'AutopilotActionPayload::CounterLiveOpportunityTerms { .. } => "opportunity.terms"',
             execution,
         )
-        self.assertIn('"viryaos.opportunity.terms_countered" => "opportunity.terms"', execution)
-        self.assertIn('"viryaos.opportunity.terms_accepted" => "opportunity.terms"', execution)
+        self.assertIn('"crowdrelay.opportunity.terms_countered" => "opportunity.terms"', execution)
+        self.assertIn('"crowdrelay.opportunity.terms_accepted" => "opportunity.terms"', execution)
         requires = execution.split("fn payload_requires_executor", 1)[1].split("\n}", 1)[0]
         self.assertIn("CounterLiveOpportunityTerms", requires)
         self.assertIn("AcceptLiveOpportunityTerms", requires)

@@ -200,7 +200,7 @@ impl OperatorBriefWorker {
             INSERT INTO outbox_events (
                 workspace_id, event_type, event_version, payload, request_id, max_attempts
             ) VALUES (
-                $1, 'viryaos.ops.operator_brief', 1,
+                $1, 'crowdrelay.ops.operator_brief', 1,
                 jsonb_build_object(
                     'headline', $2::text,
                     'summary', $3::text,

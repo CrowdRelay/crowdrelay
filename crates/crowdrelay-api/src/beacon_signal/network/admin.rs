@@ -279,7 +279,7 @@ async fn request_discovery(
     if let Err(error) = sqlx::query(
         r#"
         INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id,max_attempts)
-        VALUES ($1,'viryaos.beacon.network_discovery_requested',1,$2,$3,12)
+        VALUES ($1,'crowdrelay.beacon.network_discovery_requested',1,$2,$3,12)
         "#,
     )
     .bind(workspace_id)
@@ -635,7 +635,7 @@ async fn queue_invites(
     if let Err(error) = sqlx::query(
         r#"
         INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id,max_attempts)
-        VALUES ($1,'viryaos.beacon.invite_delivery_requested',1,$2,$3,12)
+        VALUES ($1,'crowdrelay.beacon.invite_delivery_requested',1,$2,$3,12)
         "#,
     )
     .bind(workspace_id)

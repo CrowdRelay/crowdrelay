@@ -430,7 +430,7 @@ async fn emit_status_change(
         INSERT INTO outbox_events (
             workspace_id, event_type, event_version, payload, request_id, max_attempts
         ) VALUES (
-            $1, 'viryaos.ops.status_changed', 1,
+            $1, 'crowdrelay.ops.status_changed', 1,
             jsonb_build_object(
                 'alert_key', $2::text,
                 'state', $3::text,

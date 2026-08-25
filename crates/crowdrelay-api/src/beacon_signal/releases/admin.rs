@@ -405,7 +405,7 @@ pub async fn admin_launch_release_campaign(
         r#"
         INSERT INTO outbox_events
           (workspace_id,event_type,event_version,payload,request_id,max_attempts)
-        SELECT $1,'viryaos.beacon.release_delivery_confirmation_requested',1,
+        SELECT $1,'crowdrelay.beacon.release_delivery_confirmation_requested',1,
                jsonb_build_object(
                  'campaign_id',$2,
                  'campaign_slug',$3,

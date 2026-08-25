@@ -30,7 +30,7 @@ ROUTES = ROOT / "ops/edge/routes.json"
 BRIDGE = ROOT / "ops/edge/bridge.js"
 CONTRACT = ROOT / "n8n/README.md"
 
-EVENT_TYPE = "viryaos.ops.operator_brief"
+EVENT_TYPE = "crowdrelay.ops.operator_brief"
 
 
 def read(path: Path) -> str:
@@ -176,7 +176,7 @@ class OperatorBriefContract(unittest.TestCase):
         )
 
     def test_the_example_workflow_branches_on_the_event_type(self) -> None:
-        # It shares a destination with viryaos.ops.status_changed, not a shape:
+        # It shares a destination with crowdrelay.ops.status_changed, not a shape:
         # a brief carries no alert_key and no state.
         workflow = read(ROOT / "n8n/examples/autopilot-operator-brief.example.json")
         self.assertIn(EVENT_TYPE, workflow)

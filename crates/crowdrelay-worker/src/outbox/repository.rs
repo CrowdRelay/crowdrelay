@@ -33,7 +33,7 @@ pub(super) fn eligibility_target(event_type: &str, payload: &Value) -> Eligibili
                 .and_then(Value::as_str),
             true,
         ),
-        "viryaos.fan_lifecycle.message_requested" => {
+        "crowdrelay.fan_lifecycle.message_requested" => {
             (payload.get("fan_id").and_then(Value::as_str), true)
         }
         _ => return EligibilityTarget::NotGated,
@@ -683,7 +683,7 @@ mod eligibility_tests {
         );
         assert_eq!(
             eligibility_target(
-                "viryaos.fan_lifecycle.message_requested",
+                "crowdrelay.fan_lifecycle.message_requested",
                 &serde_json::json!({"fan_id": fan_id.to_string()})
             ),
             EligibilityTarget::Fan {

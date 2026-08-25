@@ -284,7 +284,7 @@ async fn enqueue_due_beacon_release_activations(
             sqlx::query(
                 r#"
                 INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id)
-                VALUES ($1,'viryaos.beacon.release_delivery_confirmation_requested',1,$2,$3)
+                VALUES ($1,'crowdrelay.beacon.release_delivery_confirmation_requested',1,$2,$3)
                 "#,
             )
             .bind(row.workspace_id)

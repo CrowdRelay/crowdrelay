@@ -249,7 +249,7 @@ pub(in crate::autopilot) async fn execute_show_growth(
         tx,
         workspace_id,
         action_id,
-        "viryaos.show_growth.requested",
+        "crowdrelay.show_growth.requested",
         json!({
             "action_id": action_id,
             "event_id": event_id,

@@ -167,12 +167,12 @@ fn lifecycle_candidate(
         FanLifecycleDecision::Hold(_) => return Ok(None),
     };
     let template_key = match template {
-        LifecycleTemplate::Welcome => "viryaos.fan.welcome.v1",
-        LifecycleTemplate::SynesthesiaFollowUp => "viryaos.synesthesia.follow_up.v1",
-        LifecycleTemplate::DormantReactivation => "viryaos.fan.reactivation.v1",
-        LifecycleTemplate::FirstTicketThankYou => "viryaos.fan.first_ticket_thanks.v1",
-        LifecycleTemplate::ReturningFanThankYou => "viryaos.fan.returning_thanks.v1",
-        LifecycleTemplate::ReferralThankYou => "viryaos.fan.referral_thanks.v1",
+        LifecycleTemplate::Welcome => "crowdrelay.fan.welcome.v1",
+        LifecycleTemplate::SynesthesiaFollowUp => "crowdrelay.synesthesia.follow_up.v1",
+        LifecycleTemplate::DormantReactivation => "crowdrelay.fan.reactivation.v1",
+        LifecycleTemplate::FirstTicketThankYou => "crowdrelay.fan.first_ticket_thanks.v1",
+        LifecycleTemplate::ReturningFanThankYou => "crowdrelay.fan.returning_thanks.v1",
+        LifecycleTemplate::ReferralThankYou => "crowdrelay.fan.referral_thanks.v1",
     };
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     let subject = ActionSubject::Fan(snapshot.fan_id);

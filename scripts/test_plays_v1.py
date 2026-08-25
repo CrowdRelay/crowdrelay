@@ -238,7 +238,7 @@ class PlaysContract(unittest.TestCase):
         execution = read(EXECUTION)
         self.assertIn("AutopilotActionPayload::RunPlayStep { .. }", execution)
         self.assertIn('AutopilotActionPayload::RunPlayStep { .. } => "play.step"', execution)
-        self.assertIn('"viryaos.play.step_requested" => "play.step"', execution)
+        self.assertIn('"crowdrelay.play.step_requested" => "play.step"', execution)
         requires = execution.split("fn payload_requires_executor", 1)[1].split("\n}", 1)[0]
         self.assertIn("RunPlayStep", requires)
         self._skip_if_private(CONTRACT)
