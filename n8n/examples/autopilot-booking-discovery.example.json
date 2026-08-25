@@ -1,0 +1,72 @@
+{
+  "name": "CrowdRelay — VIRYA OS booking discovery executor",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "bd-trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-620, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// CrowdRelay decided WHICH city needs venues and HOW MANY to find.\n// This workflow reads published booking/contact routes and reports them.\n// It never contacts anyone — screening happens on ingest in CrowdRelay.\nconst e = $json;\nif (!e || e.type !== 'viryaos.booking.target_discovery_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nif (!d.requested_count || !Number.isInteger(d.requested_count)) throw new Error('missing requested_count');\nreturn [{ json: {\n  action_id: String(d.action_id || ''),\n  requested_count: d.requested_count,\n  screening: d.screening_contract ?? {},\n}}];"
+      },
+      "id": "bd-validate",
+      "name": "Validate discovery request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 0]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 6 * * *" }]
+        }
+      },
+      "id": "bd-schedule",
+      "name": "Daily sweep tick",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-620, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "= {{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/booking-discovery/candidates' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}" },
+            { "name": "Idempotency-Key", "value": "={{ $json.idempotency_key }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.body) }}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "bd-report",
+      "name": "Report discovered candidates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 100],
+      "notes": "Replace this HTTP node pair with your actual venue-source scraping logic. The contract is: POST candidates to /v1/internal/autopilot/booking-discovery/candidates with commerce key + Idempotency-Key. Each candidate needs target_kind (venue/promoter/festival), display_name, city_slug, route_kind (email/submission_form/handle), route_value, source, source_reference, evidence, fit_basis_points, route_is_published."
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [[{ "node": "Validate discovery request", "type": "main", "index": 0 }]]
+    },
+    "Validate discovery request": {
+      "main": [[{ "node": "Report discovered candidates", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "meta": { "instanceId": "example" },
+  "active": false,
+  "notes": "TEMPLATE ONLY. The middle section (venue source scanning) is intentionally left as a stub because every operator uses different sources. Wire your preferred search/scrape nodes between 'Validate discovery request' and 'Report discovered candidates'. The output shape must match BookingCandidateBatchRequest."
+}

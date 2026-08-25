@@ -126,6 +126,7 @@ impl OperatorBriefWorker {
                 (SELECT count(*) FROM viryaos_autopilot_actions
                   WHERE workspace_id=$1 AND status='queued'
                     AND last_error_kind='awaiting_executor')::bigint AS parked,
+                (NOT EXISTS (SELECT 1 FROM viryaos_executor_instances WHERE workspace_id=$1 AND expires_at > now())) AS execution_plane_dead,
                 -- Off-platform feeds with no series at all. A platform we cannot
                 -- see must never be reported as a platform that did not move.
                 (SELECT count(*) FROM (VALUES ('spotify'),('youtube'),('bandsintown')) AS
@@ -165,6 +166,7 @@ impl OperatorBriefWorker {
             actions_awaiting_approval: clamp(row.awaiting),
             oldest_approval_age_hours: row.oldest_approval_hours.map(clamp),
             actions_parked: clamp(row.parked),
+            execution_plane_dead: row.execution_plane_dead,
             blind_platforms: u16::try_from(row.blind_platforms.max(0)).unwrap_or(u16::MAX),
             last_sweep_read_nothing: row.last_sweep_read_nothing,
             // A workspace with no envelope row has never been configured, and
@@ -229,6 +231,10 @@ impl OperatorBriefWorker {
 /// reports; the read models and the operator decide.
 fn summary(snapshot: &OperatorBriefSnapshot, headline: BriefHeadline) -> String {
     match headline {
+        BriefHeadline::ExecutionPlaneDead => format!(
+            "{} actions parked; no executor has heartbeated — the execution plane is dead",
+            snapshot.actions_parked
+        ),
         BriefHeadline::ApprovalStale => format!(
             "{} decisions await approval; the oldest has waited {} hours",
             snapshot.actions_awaiting_approval,
@@ -282,6 +288,7 @@ struct BriefRow {
     awaiting: i64,
     oldest_approval_hours: Option<i64>,
     parked: i64,
+    execution_plane_dead: bool,
     blind_platforms: i64,
     last_sweep_read_nothing: bool,
     agent_enabled: Option<bool>,
@@ -295,6 +302,7 @@ mod tests {
 
     fn snapshot() -> OperatorBriefSnapshot {
         OperatorBriefSnapshot {
+            execution_plane_dead: false,
             actions_executed_24h: 0,
             actions_failed_24h: 0,
             actions_awaiting_approval: 12,
@@ -313,6 +321,7 @@ mod tests {
         // `unwrap_or(false)` and `unwrap_or(true)` are the safe direction: an
         // unconfigured workspace must not be reported as a live agent.
         let row = BriefRow {
+            execution_plane_dead: false,
             executed_24h: 0,
             failed_24h: 0,
             awaiting: 1,
