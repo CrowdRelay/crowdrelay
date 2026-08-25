@@ -5,8 +5,9 @@
 //! scale-out would move this behind a shared store before instances multiply.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Extension, Request},
@@ -19,7 +20,10 @@ use crate::{Problem, request_id};
 
 const WINDOW_SECS: u64 = 60;
 const MAX_ENTRIES: usize = 10_240;
-const SWEEP_MIN_INTERVAL_SECS: u64 = 30;
+/// Minimum spacing between full-map sweeps. Reclamation is amortized: at most
+/// one O(n) pass per interval regardless of traffic, instead of per-request
+/// scans once the map reaches its entry bound.
+const SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_IDENTITY_BYTES: usize = 64;
 
 const PUBLIC_AUTH_PATHS: &[&str] = &[
@@ -98,7 +102,10 @@ type EntryKey = (LimitClass, Box<str>);
 pub struct RateLimiter {
     policy: RateLimitPolicy,
     entries: Mutex<HashMap<EntryKey, Window>>,
-    last_sweep: Mutex<u64>,
+    last_sweep: Mutex<Instant>,
+    /// Set once when a poisoned lock is first observed so the fail-open
+    /// degradation is reported exactly once instead of per request.
+    poison_reported: AtomicBool,
 }
 
 impl RateLimiter {
@@ -106,7 +113,17 @@ impl RateLimiter {
         Self {
             policy,
             entries: Mutex::new(HashMap::new()),
-            last_sweep: Mutex::new(0),
+            last_sweep: Mutex::new(Instant::now()),
+            poison_reported: AtomicBool::new(false),
+        }
+    }
+
+    fn report_poisoned_lock(&self, lock: &'static str) {
+        if !self.poison_reported.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                lock,
+                "rate limiter mutex poisoned; admission fails open until restart"
+            );
         }
     }
 
@@ -120,8 +137,11 @@ impl RateLimiter {
         let now = unix_seconds();
         let bucket = now / WINDOW_SECS;
         let key: EntryKey = (class, Box::from(identity));
-        let mut entries = self.entries.lock().ok()?;
-        self.sweep_if_due(&mut entries, bucket, now);
+        let Ok(mut entries) = self.entries.lock() else {
+            self.report_poisoned_lock("entries");
+            return None;
+        };
+        self.sweep_if_due(&mut entries, bucket);
         match entries.get_mut(&key) {
             Some(window) if window.bucket == bucket => {
                 if window.count >= limit {
@@ -137,7 +157,9 @@ impl RateLimiter {
             }
             None => {
                 if entries.len() >= MAX_ENTRIES {
-                    self.evict_stale(&mut entries, bucket);
+                    // Deadline-gated sweep first; only genuinely live entries
+                    // past the bound fall through to oldest-bucket eviction.
+                    self.sweep_if_due(&mut entries, bucket);
                     while entries.len() >= MAX_ENTRIES {
                         self.evict_oldest(&mut entries);
                     }
@@ -148,14 +170,15 @@ impl RateLimiter {
         }
     }
 
-    fn sweep_if_due(&self, entries: &mut HashMap<EntryKey, Window>, current_bucket: u64, now: u64) {
+    fn sweep_if_due(&self, entries: &mut HashMap<EntryKey, Window>, current_bucket: u64) {
         let Ok(mut last) = self.last_sweep.lock() else {
+            self.report_poisoned_lock("last_sweep");
             return;
         };
-        if now.saturating_sub(*last) < SWEEP_MIN_INTERVAL_SECS && entries.len() < MAX_ENTRIES {
+        if last.elapsed() < SWEEP_MIN_INTERVAL {
             return;
         }
-        *last = now;
+        *last = Instant::now();
         drop(last);
         self.evict_stale(entries, current_bucket);
     }
@@ -164,14 +187,15 @@ impl RateLimiter {
         entries.retain(|_, window| window.bucket >= current_bucket.saturating_sub(1));
     }
 
+    /// Evicts one entry from the oldest window bucket. Runs only past
+    /// `MAX_ENTRIES`; `extract_if` removes the victim without cloning its key.
     fn evict_oldest(&self, entries: &mut HashMap<EntryKey, Window>) {
-        let oldest = entries
-            .iter()
-            .min_by_key(|(_, window)| window.bucket)
-            .map(|(key, _)| key.clone());
-        if let Some(oldest) = oldest {
-            entries.remove(&oldest);
-        }
+        let Some(oldest) = entries.values().map(|window| window.bucket).min() else {
+            return;
+        };
+        entries
+            .extract_if(|_, window| window.bucket == oldest)
+            .next();
     }
 }
 
@@ -366,6 +390,39 @@ mod tests {
             limiter.evict_stale(&mut entries, unix_seconds() / WINDOW_SECS);
             assert!(entries.len() < MAX_ENTRIES);
         }
+    }
+
+    #[test]
+    fn at_cap_inserts_admit_and_stay_bounded() {
+        let limiter = RateLimiter::new(policy(u32::MAX));
+        {
+            let mut entries = limiter.entries.lock().unwrap();
+            let bucket = unix_seconds() / WINDOW_SECS;
+            for index in 0..MAX_ENTRIES {
+                let identity: Box<str> = format!("10.{index}.0.1").into();
+                entries.insert((LimitClass::General, identity), Window { bucket, count: 1 });
+            }
+        }
+        // A fresh identity past the bound is still admitted once, and the
+        // oldest-bucket eviction keeps the map from growing without limit.
+        assert!(
+            limiter
+                .admit(LimitClass::General, "203.0.113.200")
+                .is_none()
+        );
+        assert!(limiter.entries.lock().unwrap().len() <= MAX_ENTRIES);
+    }
+
+    #[test]
+    fn poisoned_entries_mutex_fails_open_and_reports_once() {
+        let limiter = RateLimiter::new(policy(1));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = limiter.entries.lock().unwrap();
+            panic!("poison the entries lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(limiter.admit(LimitClass::General, "203.0.113.7").is_none());
+        assert!(limiter.poison_reported.load(Ordering::Relaxed));
     }
 
     #[test]

@@ -75,6 +75,10 @@ jobs:
           rustc --version --verbose
           cargo --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Matches ci.yml: only the default branch writes to the shared
+          # cache pool; scheduled runs restore from its latest entry.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Restore most recent passing performance baseline
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

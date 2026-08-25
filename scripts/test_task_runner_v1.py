@@ -62,7 +62,10 @@ class TaskRunnerContract(unittest.TestCase):
 
     def test_the_summary_job_gives_the_panel_one_node(self) -> None:
         ci = read(CI)
-        self.assertIn("needs: [rust, dependency-security, containers]", ci)
+        self.assertIn(
+            "needs: [rust-tests, rust-checks, rust-postgres, deploy-config, dependency-security, containers]",
+            ci,
+        )
         self.assertIn("All checks passed", ci)
 
 

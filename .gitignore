@@ -14,6 +14,7 @@ coverage/
 # .git/info/exclude so they are never documented by the public repository.
 .crowdrelay.local.sh
 .crowdrelay-artifacts/
+/artifacts/
 .crowdrelay-maintenance.lock
 deploy/.env.*
 !deploy/env.production.example
