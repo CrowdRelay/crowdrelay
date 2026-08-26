@@ -309,6 +309,36 @@ impl PostgresPortfolioRepository {
             .begin()
             .await
             .map_err(PortfolioError::unexpected)?;
+        // Explicit cap probe so a full month reads as CapReached instead of a
+        // silently empty batch.
+        let spent_campaigns: i32 = sqlx::query_scalar(
+            r#"
+            SELECT count(DISTINCT ledger.campaign_reference)::int
+            FROM amplification_consents AS consent
+            LEFT JOIN amplification_deliveries AS ledger
+              ON ledger.consent_id = consent.id
+             AND ledger.delivered_at >= date_trunc('month', now())
+            WHERE consent.id = $2
+              AND consent.status = 'active'
+              AND (consent.from_workspace_id = $1 OR consent.to_workspace_id = $1)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(consent_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(PortfolioError::unexpected)?
+        .ok_or(PortfolioError::NotFound)?;
+        let max_campaigns: i16 = sqlx::query_scalar(
+            "SELECT max_campaigns_per_month FROM amplification_consents WHERE id = $1",
+        )
+        .bind(consent_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PortfolioError::unexpected)?;
+        if spent_campaigns >= i32::from(max_campaigns) {
+            return Err(PortfolioError::CapReached);
+        }
         let inserted = sqlx::query_scalar::<_, i64>(
             r#"
             WITH edge AS (

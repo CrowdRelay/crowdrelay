@@ -7,11 +7,11 @@
 //! database rather than mocks. Run via `just test-postgres`.
 
 use crowdrelay_domain::audience_graph::{OutreachStage, PlaceKind};
+use crowdrelay_domain::portfolio::ConsentStatus;
 use crowdrelay_infra::audience_graph::{
     AudienceGraphError, PostgresAudienceGraphRepository, UpsertPlaceInput,
 };
 use crowdrelay_infra::fan_import::{ImportEntry, PostgresFanImportRepository};
-use crowdrelay_domain::portfolio::ConsentStatus;
 use crowdrelay_infra::portfolio::{PortfolioError, PostgresPortfolioRepository};
 use crowdrelay_infra::tenant_settings::{TenantBrandSettings, TenantSettingsRepository};
 use sqlx::PgPool;
@@ -22,7 +22,31 @@ const TEST_DATABASE_URL_KEY: &str = "CROWDRELAY_TEST_DATABASE_URL";
 async fn pool() -> PgPool {
     let url = std::env::var(TEST_DATABASE_URL_KEY)
         .expect("set CROWDRELAY_TEST_DATABASE_URL to a disposable database");
-    PgPool::connect(&url).await.expect("connect to test database")
+    PgPool::connect(&url)
+        .await
+        .expect("connect to test database")
+}
+
+/// Workspace deletion cascades through every table the tests touch, so each
+/// run starts from a clean slate even against a reused database.
+async fn cleanup(pool: &PgPool, workspace_ids: &[Uuid]) {
+    // Outbox rows are RESTRICT-deliberately durable, so they go first; every
+    // other table cascades with the workspace.
+    sqlx::query("DELETE FROM outbox_events WHERE workspace_id = ANY($1)")
+        .bind(workspace_ids)
+        .execute(pool)
+        .await
+        .expect("cascade outbox");
+    sqlx::query("DELETE FROM audit_events WHERE workspace_id = ANY($1)")
+        .bind(workspace_ids)
+        .execute(pool)
+        .await
+        .expect("cascade audit");
+    sqlx::query("DELETE FROM workspaces WHERE id = ANY($1)")
+        .bind(workspace_ids)
+        .execute(pool)
+        .await
+        .expect("cascade workspaces");
 }
 
 async fn seed_workspace(pool: &PgPool, tag: &str) -> Uuid {
@@ -69,8 +93,12 @@ async fn audience_graph_upsert_advances_and_decays() -> Result<(), Box<dyn std::
     let url = format!("https://reddit.com/r/ag-{}", workspace.simple());
 
     // Upsert is idempotent per (workspace, platform, url) and seeds the pipeline.
-    let first = repo.upsert_place(&place_input(workspace, "reddit", &url, "r/AG")).await?;
-    let second = repo.upsert_place(&place_input(workspace, "reddit", &url, "r/AG renamed")).await?;
+    let first = repo
+        .upsert_place(&place_input(workspace, "reddit", &url, "r/AG"))
+        .await?;
+    let second = repo
+        .upsert_place(&place_input(workspace, "reddit", &url, "r/AG renamed"))
+        .await?;
     assert_eq!(first, second);
     let seeded = repo.place_detail(workspace, first).await?;
     assert_eq!(seeded.stage.as_deref(), Some("discovered"));
@@ -85,7 +113,10 @@ async fn audience_graph_upsert_advances_and_decays() -> Result<(), Box<dyn std::
         None,
     )
     .await;
-    assert!(matches!(illegal, Err(AudienceGraphError::InvalidTransition { .. })));
+    assert!(matches!(
+        illegal,
+        Err(AudienceGraphError::InvalidTransition { .. })
+    ));
 
     // The legal move lands, and rules re-arm the cooldown on the edge.
     repo.attach_rules(
@@ -125,10 +156,13 @@ async fn audience_graph_upsert_advances_and_decays() -> Result<(), Box<dyn std::
     .bind(first)
     .execute(&pool)
     .await?;
-    let decayed = repo.decay_dormant(workspace, time::Duration::days(45), 100).await?;
+    let decayed = repo
+        .decay_dormant(workspace, time::Duration::days(45), 100)
+        .await?;
     assert_eq!(decayed, 1);
     let dormant = repo.place_detail(workspace, first).await?;
     assert_eq!(dormant.stage.as_deref(), Some("dormant"));
+    cleanup(&pool, &[workspace]).await;
     Ok(())
 }
 
@@ -175,20 +209,25 @@ async fn portfolio_edges_route_only_within_an_organization_and_cap_deliveries()
             21,
         )
         .await;
-    assert!(matches!(cross_org, Err(PortfolioError::NotInSameOrganization)));
+    assert!(matches!(
+        cross_org,
+        Err(PortfolioError::NotInSameOrganization)
+    ));
 
     repo.decide_amplification(owner, consent, ConsentStatus::Active, Some("op"), None)
         .await?;
 
     // Two active owner fans; one suppressed address must never be reached.
     for (index, status) in [("a", "active"), ("b", "active"), ("c", "suppressed")] {
-        sqlx::query("INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,$4)")
-            .bind(Uuid::now_v7())
-            .bind(owner)
-            .bind(format!("fan-{index}-{}@pf.test", owner.simple()))
-            .bind(status)
-            .execute(&pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner)
+        .bind(format!("fan-{index}-{}@pf.test", owner.simple()))
+        .bind(status)
+        .execute(&pool)
+        .await?;
     }
 
     let preview = repo.preview_audience(owner, consent).await?;
@@ -205,6 +244,7 @@ async fn portfolio_edges_route_only_within_an_organization_and_cap_deliveries()
         .run_amplification_campaign(owner, consent, "pf-camp-2", "Hello", "Body", 100)
         .await;
     assert!(matches!(capped, Err(PortfolioError::CapReached)));
+    cleanup(&pool, &[owner, beneficiary, outsider]).await;
     Ok(())
 }
 
@@ -224,11 +264,20 @@ async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn 
         .await?;
 
     let entries = vec![
-        ImportEntry { email: "new@x.test".into(), display_name: Some("New".into()), locale: Some("pl".into()) },
-        ImportEntry { email: "gone@x.test".into(), display_name: None, locale: None },
+        ImportEntry {
+            email: "new@x.test".into(),
+            display_name: Some("New".into()),
+            locale: Some("pl".into()),
+        },
+        ImportEntry {
+            email: "gone@x.test".into(),
+            display_name: None,
+            locale: None,
+        },
     ];
+    let source = format!("pilot-batch-{}", workspace.simple());
     let counts = repo
-        .import_batch(workspace, "pilot-batch", &entries, 2, 60)
+        .import_batch(workspace, &source, &entries, 2, 60)
         .await?;
     assert_eq!(counts.imported_pending, 1);
     assert_eq!(counts.skipped_suppressed, 1);
@@ -255,18 +304,23 @@ async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn 
     assert!(payload.get("confirmation_token").is_some());
 
     // An immediate re-import hits the resend cooldown instead of double-sending.
+    // The retry keeps the SAME source label: it is a re-run of one import.
     let again = repo
-        .import_batch(workspace, "pilot-batch-retry", &entries, 2, 60)
+        .import_batch(workspace, &source, &entries, 2, 60)
         .await?;
     assert_eq!(again.cooldown_skipped, 1);
 
     // One audit row names the source.
     let audited: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM audit_events WHERE action='fans.imported' AND metadata->>'source'='pilot-batch'",
+        "SELECT count(*) FROM audit_events WHERE action='fans.imported' AND metadata->>'source'=$1 AND metadata->>'imported_pending'='1'",
     )
+    .bind(&source)
     .fetch_one(&pool)
     .await?;
     assert_eq!(audited, 1);
+    // No cleanup here on purpose: audit_events is append-only by trigger, so
+    // this test leaves its single-workspace footprint behind. Assertions are
+    // scoped to the per-run unique source label instead.
     Ok(())
 }
 
@@ -283,11 +337,16 @@ async fn tenant_settings_default_to_the_shipped_constants_then_follow_overrides(
     let before = repo.brand_settings(workspace).await?;
     assert_eq!(*before, TenantBrandSettings::default());
 
-    repo.set_setting(workspace, "member_site_base_url", "https://fans.example.org")
-        .await?;
+    repo.set_setting(
+        workspace,
+        "member_site_base_url",
+        "https://fans.example.org",
+    )
+    .await?;
     let after = repo.brand_settings(workspace).await?;
     assert_eq!(after.member_site_base_url, "https://fans.example.org");
     // Untouched keys keep their defaults; overrides are per-key data.
     assert_eq!(after.member_area_path, "pl/latarnik");
+    cleanup(&pool, &[workspace]).await;
     Ok(())
 }
