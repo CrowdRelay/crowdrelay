@@ -80,10 +80,7 @@ async fn load_admin_overview(
     .fetch_all(&state.pool)
     .await
     .map_err(TicketingError::sqlx)?;
-    let mut recent_orders = Vec::with_capacity(recent_rows.len());
-    for row in recent_rows {
-        recent_orders.push(load_order_view_pool(&state.pool, state.workspace_id, row).await?);
-    }
+    let recent_orders = load_order_views_pool_batch(&state.pool, state.workspace_id, recent_rows).await?;
     Ok(AdminTicketingOverview {
         sale,
         reserved_orders: totals.reserved_orders,
@@ -430,5 +427,104 @@ async fn load_order_view_pool(
     let items = load_order_items_pool(pool, workspace_id, row.id).await?;
     let tickets = load_issued_tickets_pool(pool, workspace_id, row.id).await?;
     Ok(order_view(row, items, tickets))
+}
+
+#[derive(FromRow)]
+struct BatchOrderItemRow {
+    ticket_order_id: Uuid,
+    #[sqlx(flatten)]
+    item: OrderItemRow,
+}
+
+#[derive(FromRow)]
+struct BatchIssuedTicketRow {
+    ticket_order_id: Uuid,
+    #[sqlx(flatten)]
+    ticket: IssuedTicketRow,
+}
+
+/// Loads a page of order views with TWO queries total instead of two per
+/// order: the staff overview renders up to 50 recent orders, so the per-order
+/// loop serialized ~100 sequential pool round trips per dashboard render.
+async fn load_order_views_pool_batch(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    rows: Vec<OrderRow>,
+) -> Result<Vec<TicketOrderView>, TicketingError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let order_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let items = sqlx::query_as::<_, BatchOrderItemRow>(
+        r#"
+        SELECT
+            item.ticket_order_id,
+            item.id,
+            item.ticket_type_id,
+            ticket_type.slug AS ticket_type_slug,
+            ticket_type.name AS ticket_type_name,
+            item.quantity,
+            item.unit_gross_minor,
+            item.unit_net_minor,
+            item.unit_vat_minor,
+            item.total_gross_minor,
+            item.total_net_minor,
+            item.total_vat_minor
+        FROM ticket_order_items AS item
+        JOIN ticket_types AS ticket_type
+          ON ticket_type.workspace_id = item.workspace_id
+         AND ticket_type.id = item.ticket_type_id
+        WHERE item.workspace_id = $1 AND item.ticket_order_id = ANY($2)
+        ORDER BY ticket_type.sort_order, item.id
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&order_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(TicketingError::sqlx)?;
+    let tickets = sqlx::query_as::<_, BatchIssuedTicketRow>(
+        r#"
+        SELECT
+            item.ticket_order_id,
+            pass.id AS pass_id,
+            item.id AS order_item_id,
+            pass.ticket_sequence AS sequence,
+            pass.public_reference,
+            pass.status,
+            pass.holder_name,
+            pass.holder_email,
+            pass.redeemed_at
+        FROM admission_passes AS pass
+        JOIN ticket_order_items AS item
+          ON item.workspace_id = pass.workspace_id
+         AND item.id = pass.ticket_order_item_id
+        WHERE item.workspace_id = $1 AND item.ticket_order_id = ANY($2)
+        ORDER BY item.id, pass.ticket_sequence
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&order_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(TicketingError::sqlx)?;
+    // Query ORDER BY keeps each bucket's internal ordering identical to the
+    // per-order loader; grouping appends in that same order.
+    let mut grouped: HashMap<Uuid, (Vec<OrderItemRow>, Vec<IssuedTicketRow>)> =
+        HashMap::with_capacity(rows.len());
+    for batch in items {
+        grouped.entry(batch.ticket_order_id).or_default().0.push(batch.item);
+    }
+    for batch in tickets {
+        grouped.entry(batch.ticket_order_id).or_default().1.push(batch.ticket);
+    }
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let (items, tickets) =
+                grouped.remove(&row.id).unwrap_or_else(|| (Vec::new(), Vec::new()));
+            order_view(row, items, tickets)
+        })
+        .collect())
 }
 

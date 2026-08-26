@@ -264,12 +264,10 @@ async fn issue_admission_winners(
         if selected >= target {
             break;
         }
-        if admission_already_exists(transaction, draw.workspace_id, pool.id, candidate.fan_id)
-            .await?
-        {
-            continue;
-        }
-
+        // No pre-flight EXISTS here: the pass insert below carries a unique
+        // constraint on (workspace_id, admission_pool_id, fan_id) with
+        // ON CONFLICT DO NOTHING, so a repeat winner costs one statement,
+        // not two.
         let mut token_bytes = [0_u8; 32];
         fill_random(&mut token_bytes).map_err(|_| DrawWorkerError::Entropy)?;
         let claim_token = hex::encode(token_bytes);
@@ -359,23 +357,6 @@ async fn issue_admission_winners(
     .map_err(DrawWorkerError::sqlx)?;
 
     Ok(selected)
-}
-
-async fn admission_already_exists(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    pool_id: Uuid,
-    fan_id: Uuid,
-) -> Result<bool, DrawWorkerError> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM admission_passes WHERE workspace_id = $1 AND admission_pool_id = $2 AND fan_id = $3)",
-    )
-    .bind(workspace_id)
-    .bind(pool_id)
-    .bind(fan_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(DrawWorkerError::sqlx)
 }
 
 async fn issue_physical_winners(

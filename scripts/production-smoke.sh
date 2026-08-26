@@ -4,7 +4,7 @@ set -Eeuo pipefail
 : "${CROWDRELAY_BASE_URL:?CROWDRELAY_BASE_URL is required}"
 : "${VIRYA_BASE_URL:?VIRYA_BASE_URL is required}"
 SYNESTHESIA_BASE_URL="${SYNESTHESIA_BASE_URL:-https://synesthesia.virya.music}"
-SMOKE_STATE_DIR="${SMOKE_STATE_DIR:-${TMPDIR:-/tmp}/virya-production-smoke}"
+SMOKE_STATE_DIR="${SMOKE_STATE_DIR:-${TMPDIR:-/tmp}/crowdrelay-production-smoke}"
 ALERT_COOLDOWN_SECONDS="${ALERT_COOLDOWN_SECONDS:-3600}"
 mkdir -p "$SMOKE_STATE_DIR"
 

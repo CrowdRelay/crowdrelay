@@ -24,6 +24,10 @@ const MAX_ENTRIES: usize = 10_240;
 /// one O(n) pass per interval regardless of traffic, instead of per-request
 /// scans once the map reaches its entry bound.
 const SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// How many oldest-bucket entries one cap-pressure pass may drop. One O(n)
+/// scan frees a whole batch, so an identity-churn flood pays the scan cost
+/// once per batch instead of once per admission.
+const CAP_EVICT_BATCH: usize = MAX_ENTRIES / 16;
 const MAX_IDENTITY_BYTES: usize = 64;
 
 const PUBLIC_AUTH_PATHS: &[&str] = &[
@@ -160,9 +164,7 @@ impl RateLimiter {
                     // Deadline-gated sweep first; only genuinely live entries
                     // past the bound fall through to oldest-bucket eviction.
                     self.sweep_if_due(&mut entries, bucket);
-                    while entries.len() >= MAX_ENTRIES {
-                        self.evict_oldest(&mut entries);
-                    }
+                    self.evict_oldest_batch(&mut entries);
                 }
                 entries.insert(key, Window { bucket, count: 1 });
                 None
@@ -187,15 +189,23 @@ impl RateLimiter {
         entries.retain(|_, window| window.bucket >= current_bucket.saturating_sub(1));
     }
 
-    /// Evicts one entry from the oldest window bucket. Runs only past
-    /// `MAX_ENTRIES`; `extract_if` removes the victim without cloning its key.
-    fn evict_oldest(&self, entries: &mut HashMap<EntryKey, Window>) {
+    /// Drops up to `CAP_EVICT_BATCH` entries from the oldest window bucket.
+    /// The oldest bucket is never empty past the cap, so one O(n) pass always
+    /// frees at least one slot and usually a full batch — a fresh identity
+    /// admission then skips the scan entirely until the freed room fills up
+    /// again. `extract_if` removes victims without cloning their keys.
+    fn evict_oldest_batch(&self, entries: &mut HashMap<EntryKey, Window>) {
         let Some(oldest) = entries.values().map(|window| window.bucket).min() else {
             return;
         };
-        entries
-            .extract_if(|_, window| window.bucket == oldest)
-            .next();
+        let mut remaining = CAP_EVICT_BATCH;
+        entries.retain(|_, window| {
+            if window.bucket == oldest && remaining > 0 {
+                remaining -= 1;
+                return false;
+            }
+            true
+        });
     }
 }
 
@@ -411,6 +421,48 @@ mod tests {
                 .is_none()
         );
         assert!(limiter.entries.lock().unwrap().len() <= MAX_ENTRIES);
+    }
+
+    #[test]
+    fn cap_eviction_frees_a_batch_per_pass_not_one_entry() {
+        let limiter = RateLimiter::new(policy(u32::MAX));
+        let current = unix_seconds() / WINDOW_SECS;
+        let stale_count = CAP_EVICT_BATCH / 2;
+        {
+            let mut entries = limiter.entries.lock().unwrap();
+            for index in 0..stale_count {
+                let identity: Box<str> = format!("10.{index}.0.1").into();
+                entries.insert(
+                    (LimitClass::General, identity),
+                    Window {
+                        bucket: current - 1,
+                        count: 1,
+                    },
+                );
+            }
+            for index in 0..(MAX_ENTRIES - stale_count) {
+                let identity: Box<str> = format!("172.16.{index}.1").into();
+                entries.insert(
+                    (LimitClass::General, identity),
+                    Window {
+                        bucket: current,
+                        count: 1,
+                    },
+                );
+            }
+            limiter.evict_oldest_batch(&mut entries);
+            // One O(n) pass cleared every stale-window entry at once; a
+            // per-entry evictor would have needed `stale_count` full scans.
+            assert_eq!(entries.len(), MAX_ENTRIES - stale_count);
+            assert!(!entries.values().any(|window| window.bucket == current - 1));
+        }
+        for offset in 0..64 {
+            assert!(
+                limiter
+                    .admit(LimitClass::General, &format!("203.0.113.{offset}"))
+                    .is_none()
+            );
+        }
     }
 
     #[test]

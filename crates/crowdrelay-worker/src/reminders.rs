@@ -242,34 +242,67 @@ async fn enqueue_due_beacon_release_activations(
     .await
     .map_err(ReminderSchedulerError::Database)?;
 
-    let mut queued = 0u64;
-    let mut suppressed = 0u64;
+    // Set-based follow-ups: one pass partitions the locked batch, then each
+    // side lands as a single statement instead of two-to-three round trips
+    // per recipient inside this transaction.
+    let mut queued_rows: Vec<&DueBeaconReleaseActivationRow> = Vec::with_capacity(rows.len());
+    let mut suppressed_workspaces: Vec<Uuid> = Vec::new();
+    let mut suppressed_campaigns: Vec<Uuid> = Vec::new();
+    let mut suppressed_beacons: Vec<Uuid> = Vec::new();
     for row in &rows {
-        if row.contactable {
-            let Some(contact_email) = row
+        let has_contact_email = row
+            .contact_email
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if row.contactable && has_contact_email {
+            queued_rows.push(row);
+        } else {
+            suppressed_workspaces.push(row.workspace_id);
+            suppressed_campaigns.push(row.campaign_id);
+            suppressed_beacons.push(row.beacon_id);
+        }
+    }
+
+    if !suppressed_workspaces.is_empty() {
+        sqlx::query(
+            r#"
+            UPDATE viryaos_beacon_release_recipients
+            SET activation_suppressed_at=now()
+            WHERE (workspace_id, campaign_id, beacon_id) IN (
+                SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::uuid[])
+            )
+              AND activation_queued_at IS NULL AND activation_suppressed_at IS NULL
+            "#,
+        )
+        .bind(&suppressed_workspaces)
+        .bind(&suppressed_campaigns)
+        .bind(&suppressed_beacons)
+        .execute(&mut **transaction)
+        .await
+        .map_err(ReminderSchedulerError::Database)?;
+    }
+
+    let queued = u64::try_from(queued_rows.len()).unwrap_or(u64::MAX);
+    if !queued_rows.is_empty() {
+        let workspaces: Vec<Uuid> = queued_rows.iter().map(|row| row.workspace_id).collect();
+        let campaigns: Vec<Uuid> = queued_rows.iter().map(|row| row.campaign_id).collect();
+        let beacons: Vec<Uuid> = queued_rows.iter().map(|row| row.beacon_id).collect();
+        let mut payloads = Vec::with_capacity(queued_rows.len());
+        let mut request_ids = Vec::with_capacity(queued_rows.len());
+        for row in &queued_rows {
+            let contact_email = row
                 .contact_email
                 .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            else {
-                sqlx::query(
-                    "UPDATE viryaos_beacon_release_recipients SET activation_suppressed_at=now() WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3 AND activation_queued_at IS NULL AND activation_suppressed_at IS NULL",
-                )
-                .bind(row.workspace_id)
-                .bind(row.campaign_id)
-                .bind(row.beacon_id)
-                .execute(&mut **transaction)
-                .await
-                .map_err(ReminderSchedulerError::Database)?;
-                suppressed = suppressed.saturating_add(1);
-                continue;
-            };
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
             let copy = beacon_release_activation_copy(
                 &row.locale,
                 &row.display_name,
                 &row.release_title,
                 RELEASE_MEMBER_URL,
             );
-            let payload = json!({
+            payloads.push(json!({
                 "campaign_id": row.campaign_id,
                 "release_title": row.release_title,
                 "beacon_id": row.beacon_id,
@@ -280,49 +313,46 @@ async fn enqueue_due_beacon_release_activations(
                 "template": "beacon_physical_release_activation_v1",
                 "subject": copy.subject,
                 "text": copy.text,
-            });
-            sqlx::query(
-                r#"
-                INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id)
-                VALUES ($1,'crowdrelay.beacon.release_delivery_confirmation_requested',1,$2,$3)
-                "#,
-            )
-            .bind(row.workspace_id)
-            .bind(payload)
-            .bind(format!(
+            }));
+            request_ids.push(format!(
                 "beacon-release-activation:{}:{}",
                 row.campaign_id, row.beacon_id
-            ))
-            .execute(&mut **transaction)
-            .await
-            .map_err(ReminderSchedulerError::Database)?;
-            sqlx::query(
-                "UPDATE viryaos_beacon_release_recipients SET activation_queued_at=now() WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3 AND activation_queued_at IS NULL AND activation_suppressed_at IS NULL",
-            )
-            .bind(row.workspace_id)
-            .bind(row.campaign_id)
-            .bind(row.beacon_id)
-            .execute(&mut **transaction)
-            .await
-            .map_err(ReminderSchedulerError::Database)?;
-            queued = queued.saturating_add(1);
-        } else {
-            sqlx::query(
-                "UPDATE viryaos_beacon_release_recipients SET activation_suppressed_at=now() WHERE workspace_id=$1 AND campaign_id=$2 AND beacon_id=$3 AND activation_queued_at IS NULL AND activation_suppressed_at IS NULL",
-            )
-            .bind(row.workspace_id)
-            .bind(row.campaign_id)
-            .bind(row.beacon_id)
-            .execute(&mut **transaction)
-            .await
-            .map_err(ReminderSchedulerError::Database)?;
-            suppressed = suppressed.saturating_add(1);
+            ));
         }
+        sqlx::query(
+            r#"
+            INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id)
+            SELECT workspace, 'crowdrelay.beacon.release_delivery_confirmation_requested', 1, payload, request_id
+            FROM unnest($1::uuid[], $2::jsonb[], $3::text[]) AS queued(workspace, payload, request_id)
+            "#,
+        )
+        .bind(&workspaces)
+        .bind(&payloads)
+        .bind(&request_ids)
+        .execute(&mut **transaction)
+        .await
+        .map_err(ReminderSchedulerError::Database)?;
+        sqlx::query(
+            r#"
+            UPDATE viryaos_beacon_release_recipients
+            SET activation_queued_at=now()
+            WHERE (workspace_id, campaign_id, beacon_id) IN (
+                SELECT unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::uuid[])
+            )
+              AND activation_queued_at IS NULL AND activation_suppressed_at IS NULL
+            "#,
+        )
+        .bind(&workspaces)
+        .bind(&campaigns)
+        .bind(&beacons)
+        .execute(&mut **transaction)
+        .await
+        .map_err(ReminderSchedulerError::Database)?;
     }
     if !rows.is_empty() {
         tracing::debug!(
             queued,
-            suppressed,
+            suppressed = suppressed_workspaces.len(),
             "Latarnik release activation follow-ups reconciled"
         );
     }

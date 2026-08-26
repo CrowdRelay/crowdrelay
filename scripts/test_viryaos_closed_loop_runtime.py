@@ -52,10 +52,10 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
 
     def test_server_smoke_preserves_bounded_alerting(self):
         smoke = (ROOT / 'scripts/production-smoke.sh').read_text()
-        service = (ROOT / 'deploy/systemd/virya-production-smoke.service').read_text()
+        service = (ROOT / 'deploy/systemd/crowdrelay-production-smoke.service').read_text()
         self.assertIn('ALERT_COOLDOWN_SECONDS', smoke)
         self.assertIn('production smoke recovered', smoke)
-        self.assertIn('StateDirectory=virya-production-smoke', service)
+        self.assertIn('StateDirectory=crowdrelay-production-smoke', service)
 
     def test_public_rum_has_no_identity_fields(self):
         migration = (ROOT / 'migrations/0040_viryaos_closed_loop_runtime.sql').read_text()

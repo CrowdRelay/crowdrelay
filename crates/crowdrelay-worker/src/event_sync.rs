@@ -5,7 +5,11 @@
 //! atomically upserts the normalized result. A failed provider call never removes
 //! or hides previously persisted concerts.
 
-use std::{collections::HashSet, env, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    time::Duration,
+};
 
 use reqwest::{Client, Url};
 use serde::Deserialize;
@@ -317,10 +321,25 @@ struct EventUpsertResult {
     inserted: bool,
 }
 
+/// Snapshot columns returned alongside the upsert identity so the caller does
+/// not need a second round trip to learn what the row now looks like.
 #[derive(Debug, FromRow)]
-struct InsertedEventRow {
+struct InsertedEventSnapshotRow {
     id: Uuid,
     inserted: bool,
+    city_id: Option<Uuid>,
+    city_name: Option<String>,
+    country_code: Option<String>,
+    slug: String,
+    title: String,
+    description: Option<String>,
+    venue: Option<String>,
+    venue_address: Option<String>,
+    timezone: String,
+    starts_at: OffsetDateTime,
+    ticket_url: Option<String>,
+    external_event_url: Option<String>,
+    status: String,
 }
 
 async fn claim_source(pool: &PgPool) -> Result<Option<EventSourceRow>, EventSyncError> {
