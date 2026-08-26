@@ -28,8 +28,9 @@ fn workspace(state: &crate::AppState) -> Uuid {
 
 fn error_response(error: FanbaseError, request_id_value: Option<String>) -> Response {
     match error {
-        FanbaseError::NotFound | FanbaseError::NameTaken => {
-            Problem::not_found(request_id_value).into_response()
+        FanbaseError::NotFound => Problem::not_found(request_id_value).into_response(),
+        FanbaseError::NameTaken | FanbaseError::ConnectionExists => {
+            Problem::conflict(request_id_value).into_response()
         }
         FanbaseError::Database(_) => Problem::service_unavailable(request_id_value).into_response(),
     }

@@ -25,6 +25,9 @@ pub enum FanbaseError {
     /// A fanbase with this name already exists in the workspace.
     #[error("fanbase name already taken")]
     NameTaken,
+    /// A connection with this platform + external account already exists.
+    #[error("connection already exists")]
+    ConnectionExists,
     #[error("fanbase database operation failed")]
     Database(sqlx::Error),
 }
@@ -465,7 +468,7 @@ impl PostgresFanbaseRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(Self::unexpected)?
-        .ok_or(FanbaseError::NameTaken)?;
+        .ok_or(FanbaseError::ConnectionExists)?;
         Ok(id)
     }
 
