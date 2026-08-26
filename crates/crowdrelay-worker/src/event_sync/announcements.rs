@@ -22,27 +22,21 @@ async fn enqueue_copy_enrichment(
     event_id: Uuid,
     source_hash: &[u8; 32],
 ) -> Result<(), EventSyncError> {
-    sqlx::query(
-        r#"
-        UPDATE event_copy_enrichments
-        SET status = 'stale',
-            rejection_reason = 'Bandsintown source facts changed',
-            completed_at = now()
-        WHERE workspace_id = $1
-          AND event_id = $2
-          AND status = 'pending'
-          AND source_hash <> $3
-        "#,
-    )
-    .bind(source.workspace_id)
-    .bind(event_id)
-    .bind(source_hash.as_slice())
-    .execute(&mut **transaction)
-    .await
-    .map_err(EventSyncError::sqlx)?;
-
+    // One statement does both sides of the handoff: stale-marking of pending
+    // enrichments whose source facts changed, and the idempotent insert of the
+    // new request. The insert stays conditional on a non-manual description.
     let enrichment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
+        WITH stale AS (
+            UPDATE event_copy_enrichments
+            SET status = 'stale',
+                rejection_reason = 'Bandsintown source facts changed',
+                completed_at = now()
+            WHERE workspace_id = $1
+              AND event_id = $2
+              AND status = 'pending'
+              AND source_hash <> $3
+        )
         INSERT INTO event_copy_enrichments (
             workspace_id, event_id, source_hash, language
         )
@@ -123,30 +117,6 @@ async fn load_event_snapshots(
     .bind(workspace_id)
     .bind(event_ids)
     .fetch_all(&mut **transaction)
-    .await
-    .map_err(EventSyncError::sqlx)
-}
-
-async fn load_event_snapshot(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    event_id: Uuid,
-) -> Result<PersistedEventSnapshot, EventSyncError> {
-    sqlx::query_as::<_, PersistedEventSnapshot>(
-        r#"
-        SELECT
-            event.id, event.city_id, city.name AS city_name,
-            city.country_code, event.slug, event.title, event.description,
-            event.venue, event.venue_address, event.timezone, event.starts_at,
-            event.ticket_url, event.external_event_url, event.status
-        FROM events AS event
-        LEFT JOIN cities AS city ON city.id = event.city_id
-        WHERE event.workspace_id = $1 AND event.id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(event_id)
-    .fetch_one(&mut **transaction)
     .await
     .map_err(EventSyncError::sqlx)
 }

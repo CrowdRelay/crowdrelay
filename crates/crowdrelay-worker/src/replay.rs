@@ -12,6 +12,8 @@ use anyhow::{Context, Result, bail};
 use crowdrelay_application::autopilot::{AutopilotContext, GrowthPosture};
 use crowdrelay_domain::autonomy::{Confidence, PolicyDisposition, disposition};
 use sqlx::PgPool;
+use time::OffsetDateTime;
+use uuid::Uuid;
 
 const DEFAULT_SINCE_DAYS: u32 = 30;
 const MAX_SINCE_DAYS: u32 = 365;
@@ -148,35 +150,46 @@ pub(crate) const DISPOSITION_LABELS: [&str; 5] = [
     "auto_execute",
 ];
 
+#[cfg(test)]
 fn counterfactual(decisions: &[RecordedDecision]) -> Vec<PostureReplay> {
-    GrowthPosture::ALL
-        .into_iter()
-        .map(|posture| {
-            let mut counts = DispositionCounts::EMPTY;
-            let mut flips = 0_u64;
-            let mut unparsed = 0_u64;
-            for decision in decisions {
-                let Some(context) = decision.context else {
-                    unparsed += 1;
-                    continue;
-                };
-                let confidence = Confidence::saturating_from_basis_points(decision.confidence_bp);
-                let minimum =
-                    Confidence::saturating_from_basis_points(decision.minimum_confidence_bp);
-                let outcome = disposition(posture.context_level(context), confidence, minimum);
-                counts.record(outcome);
-                if DispositionCounts::label_of(outcome) != decision.recorded_disposition {
-                    flips += 1;
-                }
-            }
-            PostureReplay {
-                posture: posture.as_str(),
-                counts,
-                flips_vs_recorded: flips,
-                unparsed,
-            }
+    let mut replays = GrowthPosture::ALL
+        .iter()
+        .map(|posture| PostureReplay {
+            posture: posture.as_str(),
+            counts: DispositionCounts::EMPTY,
+            flips_vs_recorded: 0_u64,
+            unparsed: 0_u64,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    fold_counterfactual(&mut replays, decisions);
+    replays
+}
+
+/// Folds one streamed page of decisions into the per-posture accumulators.
+/// Counting is order- and chunk-independent, so pages compose exactly like a
+/// single pass over the whole history would.
+fn fold_counterfactual(replays: &mut [PostureReplay], decisions: &[RecordedDecision]) {
+    for decision in decisions {
+        for replay in replays.iter_mut() {
+            let Some(posture) = GrowthPosture::ALL
+                .iter()
+                .find(|p| p.as_str() == replay.posture)
+            else {
+                continue;
+            };
+            let Some(context) = decision.context else {
+                replay.unparsed += 1;
+                continue;
+            };
+            let confidence = Confidence::saturating_from_basis_points(decision.confidence_bp);
+            let minimum = Confidence::saturating_from_basis_points(decision.minimum_confidence_bp);
+            let outcome = disposition(posture.context_level(context), confidence, minimum);
+            replay.counts.record(outcome);
+            if DispositionCounts::label_of(outcome) != decision.recorded_disposition {
+                replay.flips_vs_recorded += 1;
+            }
+        }
+    }
 }
 
 pub async fn run_replay(
@@ -185,41 +198,74 @@ pub async fn run_replay(
     workspace_slug: &str,
     options: ReplayOptions,
 ) -> Result<()> {
-    let rows = sqlx::query_as::<_, (String, i32, String, serde_json::Value)>(
-        r#"
-        SELECT context, confidence_basis_points, disposition, policy_snapshot
-        FROM viryaos_autopilot_decisions
-        WHERE workspace_id = $1
-          AND evaluated_at >= now() - make_interval(days => $2::int)
-        ORDER BY evaluated_at
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(i32::try_from(options.since_days).unwrap_or(i32::MAX))
-    .fetch_all(database)
-    .await
-    .context("failed to read autopilot decision history")?;
-
-    let decisions: Vec<RecordedDecision> = rows
-        .into_iter()
-        .map(
-            |(context_raw, confidence_bp, disposition_raw, snapshot)| RecordedDecision {
-                context: AutopilotContext::from_storage(&context_raw),
-                confidence_bp: u16::try_from(confidence_bp.clamp(0, i32::from(u16::MAX)))
-                    .unwrap_or(u16::MAX),
-                recorded_disposition: DispositionCounts::parse(&disposition_raw)
-                    .map(DispositionCounts::label_of)
-                    .unwrap_or("deny"),
-                minimum_confidence_bp: snapshot
-                    .get("minimum_confidence_basis_points")
-                    .and_then(serde_json::Value::as_i64)
-                    .and_then(|value| u16::try_from(value).ok())
-                    .unwrap_or(8_000),
-            },
-        )
-        .collect();
-
-    let replays = counterfactual(&decisions);
+    // Decision history grows with every autopilot cycle, so stream it in
+    // keyset pages instead of materializing a year of JSONB payloads at once.
+    // The replay is pure counting, so folding per page is equivalent; the
+    // (evaluated_at, id) cursor keeps page boundaries duplicate-free.
+    const PAGE_SIZE: i64 = 5_000;
+    let workspace_uuid = workspace_id.into_uuid();
+    let mut replays = GrowthPosture::ALL
+        .iter()
+        .map(|posture| PostureReplay {
+            posture: posture.as_str(),
+            counts: DispositionCounts::EMPTY,
+            flips_vs_recorded: 0_u64,
+            unparsed: 0_u64,
+        })
+        .collect::<Vec<_>>();
+    let mut decision_count = 0_usize;
+    let mut cursor_time: Option<(OffsetDateTime, Uuid)> = None;
+    loop {
+        let rows =
+            sqlx::query_as::<_, (OffsetDateTime, Uuid, String, i32, String, serde_json::Value)>(
+                r#"
+            SELECT evaluated_at, id, context, confidence_basis_points, disposition, policy_snapshot
+            FROM viryaos_autopilot_decisions
+            WHERE workspace_id = $1
+              AND evaluated_at >= now() - make_interval(days => $2::int)
+              AND ($3::timestamptz IS NULL OR (evaluated_at, id) > ($3, $4))
+            ORDER BY evaluated_at, id
+            LIMIT $5
+            "#,
+            )
+            .bind(workspace_uuid)
+            .bind(i32::try_from(options.since_days).unwrap_or(i32::MAX))
+            .bind(cursor_time.as_ref().map(|(at, _)| *at))
+            .bind(cursor_time.as_ref().map(|(_, id)| *id))
+            .bind(PAGE_SIZE)
+            .fetch_all(database)
+            .await
+            .context("failed to read autopilot decision history")?;
+        if rows.is_empty() {
+            break;
+        }
+        let page_len = rows.len();
+        let page_end = rows.last().map(|(at, id, ..)| (*at, *id));
+        let decisions: Vec<RecordedDecision> = rows
+            .into_iter()
+            .map(
+                |(_, _, context_raw, confidence_bp, disposition_raw, snapshot)| RecordedDecision {
+                    context: AutopilotContext::from_storage(&context_raw),
+                    confidence_bp: u16::try_from(confidence_bp.clamp(0, i32::from(u16::MAX)))
+                        .unwrap_or(u16::MAX),
+                    recorded_disposition: DispositionCounts::parse(&disposition_raw)
+                        .map(DispositionCounts::label_of)
+                        .unwrap_or("deny"),
+                    minimum_confidence_bp: snapshot
+                        .get("minimum_confidence_basis_points")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|value| u16::try_from(value).ok())
+                        .unwrap_or(8_000),
+                },
+            )
+            .collect();
+        decision_count += decisions.len();
+        fold_counterfactual(&mut replays, &decisions);
+        cursor_time = page_end;
+        if page_len < usize::try_from(PAGE_SIZE).unwrap_or(usize::MAX) {
+            break;
+        }
+    }
 
     let action_rows = sqlx::query_as::<_, (String, i64)>(
         r#"
@@ -258,7 +304,7 @@ pub async fn run_replay(
         let document = serde_json::json!({
             "workspace": workspace_slug,
             "since_days": options.since_days,
-            "decision_count": decisions.len(),
+            "decision_count": decision_count,
             "postures": replays.iter().map(|replay| serde_json::json!({
                 "posture": replay.posture,
                 "dispositions": DISPOSITION_LABELS
@@ -286,7 +332,7 @@ pub async fn run_replay(
         "autopilot policy replay — workspace `{workspace_slug}`, last {} day(s)",
         options.since_days
     );
-    println!("decisions considered: {}", decisions.len());
+    println!("decisions considered: {decision_count}");
     println!();
     println!(
         "{:<12} {:>7} {:>9} {:>11} {:>10} {:>6} {:>8} {:>9}",

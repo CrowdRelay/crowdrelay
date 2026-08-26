@@ -1,10 +1,4 @@
-use std::{
-    env,
-    fs::File,
-    io::Read,
-    sync::{Mutex, PoisonError},
-    time::Duration,
-};
+use std::{env, fs::File, io::Read, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use reqwest::{Client, StatusCode, redirect::Policy};
@@ -151,9 +145,11 @@ pub struct PushProviders {
 struct FcmProvider {
     project_id: String,
     service_account: ServiceAccount,
-    /// Shared token cache so concurrent sends can take `&self`; a refresh
-    /// stampede after expiry is bounded by the claimed batch size and harmless.
-    cached_token: Mutex<Option<CachedToken>>,
+    /// Shared token cache so concurrent sends can take `&self`. The async
+    /// mutex is held ACROSS the refresh, making the first expired-token sender
+    /// single-flight: the rest of the batch awaits it and then reuses the
+    /// fresh token instead of each minting its own JWT and OAuth round trip.
+    cached_token: tokio::sync::Mutex<Option<CachedToken>>,
 }
 
 struct WebPushProvider {
@@ -182,7 +178,7 @@ impl PushProviders {
                 Some(FcmProvider {
                     project_id,
                     service_account,
-                    cached_token: Mutex::new(None),
+                    cached_token: tokio::sync::Mutex::new(None),
                 })
             }
             (None, None) => None,
@@ -372,11 +368,8 @@ impl PushProviders {
 impl FcmProvider {
     async fn access_token(&self, client: &Client) -> Result<String, TokenError> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        if let Some(token) = self
-            .cached_token
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
+        let mut cached = self.cached_token.lock().await;
+        if let Some(token) = cached.as_ref()
             && token.expires_at > now.saturating_add(90)
         {
             return Ok(token.value.clone());
@@ -436,13 +429,10 @@ impl FcmProvider {
                 "FCM OAuth returned invalid token metadata"
             )));
         }
-        self.cached_token
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(CachedToken {
-                value: token.access_token.clone(),
-                expires_at: now.saturating_add(token.expires_in),
-            });
+        cached.replace(CachedToken {
+            value: token.access_token.clone(),
+            expires_at: now.saturating_add(token.expires_in),
+        });
         Ok(token.access_token)
     }
 }

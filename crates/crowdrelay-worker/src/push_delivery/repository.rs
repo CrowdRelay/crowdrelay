@@ -641,26 +641,45 @@ impl PushDeliveryRepository {
         .await
         .context("complete terminal push campaigns")?;
 
-        for (campaign_id, recipients, delivered, failed) in completed {
+        if !completed.is_empty() {
+            // One set-based audit write per reconcile pass; a per-campaign
+            // loop would multiply statements inside the same transaction.
+            let (ids, counts): (Vec<Uuid>, Vec<(i64, i64, i64)>) = completed
+                .into_iter()
+                .map(|(id, recipients, delivered, failed)| (id, (recipients, delivered, failed)))
+                .unzip();
+            let mut recipients = Vec::with_capacity(counts.len());
+            let mut delivered = Vec::with_capacity(counts.len());
+            let mut failed = Vec::with_capacity(counts.len());
+            for (total, ok, bad) in counts {
+                recipients.push(total);
+                delivered.push(ok);
+                failed.push(bad);
+            }
             sqlx::query(
                 r#"
                 INSERT INTO audit_events (
                     workspace_id, actor_kind, action, target_type, target_id, metadata
-                ) VALUES (
-                    $1, 'system', 'communication.campaign.push.completed',
-                    'communication_campaign', $2,
-                    jsonb_build_object('recipient_count', $3, 'delivered_count', $4, 'failed_count', $5)
                 )
+                SELECT $1, 'system', 'communication.campaign.push.completed',
+                       'communication_campaign', completed.campaign_id::text,
+                       jsonb_build_object(
+                           'recipient_count', recipient_count,
+                           'delivered_count', delivered_count,
+                           'failed_count', failed_count
+                       )
+                FROM unnest($2::uuid[], $3::bigint[], $4::bigint[], $5::bigint[])
+                     AS completed(campaign_id, recipient_count, delivered_count, failed_count)
                 "#,
             )
             .bind(self.workspace_id)
-            .bind(campaign_id.to_string())
-            .bind(recipients)
-            .bind(delivered)
-            .bind(failed)
+            .bind(&ids)
+            .bind(&recipients)
+            .bind(&delivered)
+            .bind(&failed)
             .execute(&mut *transaction)
             .await
-            .context("audit completed push campaign")?;
+            .context("audit completed push campaigns")?;
         }
 
         transaction

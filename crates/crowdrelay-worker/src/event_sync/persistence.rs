@@ -31,11 +31,18 @@ async fn persist_success(
     .ok_or(EventSyncError::InvalidSource)?;
 
     let mut seen = HashSet::with_capacity(events.len());
+    // Cities repeat across a calendar batch; one deduped set-based upsert
+    // replaces a per-event INSERT that dominated the round-trip count of this
+    // transaction.
+    let city_ids = upsert_cities(&mut transaction, events).await?;
     for event in events {
         if !seen.insert(event.source_event_id.as_str()) {
             continue;
         }
-        let city_id = upsert_city(&mut transaction, event).await?;
+        let city_id = match &event.city_slug {
+            Some(slug) => city_ids.get(&(event.country_code.clone(), slug.clone())).copied(),
+            None => None,
+        };
         let copy_source_hash = event_copy_source_hash(event);
         let upserted = upsert_event(
             &mut transaction,
@@ -169,35 +176,82 @@ async fn persist_success(
     transaction.commit().await.map_err(EventSyncError::sqlx)?;
     Ok(())
 }
-async fn upsert_city(
+async fn upsert_cities(
     transaction: &mut Transaction<'_, Postgres>,
-    event: &NormalizedExternalEvent,
-) -> Result<Option<Uuid>, EventSyncError> {
-    let (Some(name), Some(slug)) = (&event.city_name, &event.city_slug) else {
-        return Ok(None);
-    };
-    let city_id = sqlx::query_scalar::<_, Uuid>(
+    events: &[NormalizedExternalEvent],
+) -> Result<HashMap<(String, String), Uuid>, EventSyncError> {
+    // Deduplicate on the conflict key first: one statement handles the whole
+    // batch, and duplicate calendar entries must not fight over one row.
+    let mut unique: HashMap<(String, String), &NormalizedExternalEvent> = HashMap::new();
+    for event in events {
+        // Mirror the previous per-event guard: a city row needs both parts.
+        if let Some(slug) = &event.city_slug
+            && event.city_name.is_some()
+        {
+            unique
+                .entry((event.country_code.clone(), slug.clone()))
+                .or_insert(event);
+        }
+    }
+    if unique.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Keep bind order stable and aligned across all six arrays.
+    // Key strings are borrowed straight from the event, whose data outlives
+    // this function; the deduped map's owned keys are discarded.
+    let mut selected: Vec<(&NormalizedExternalEvent, &str, &str)> = unique
+        .into_values()
+        .map(|event| {
+            (
+                event,
+                event.country_code.as_str(),
+                event.city_slug.as_deref().unwrap_or_default(),
+            )
+        })
+        .collect();
+    selected.sort_unstable_by(|a, b| (a.1, a.2).cmp(&(b.1, b.2)));
+    let mut slugs = Vec::with_capacity(selected.len());
+    let mut names = Vec::with_capacity(selected.len());
+    let mut countries = Vec::with_capacity(selected.len());
+    let mut regions = Vec::with_capacity(selected.len());
+    let mut latitudes = Vec::with_capacity(selected.len());
+    let mut longitudes = Vec::with_capacity(selected.len());
+    for (event, country, slug) in &selected {
+        slugs.push(slug);
+        names.push(event.city_name.as_deref().unwrap_or_default());
+        countries.push(country);
+        regions.push(event.region.as_deref());
+        latitudes.push(event.latitude);
+        longitudes.push(event.longitude);
+    }
+    let rows = sqlx::query_as::<_, (String, String, Uuid)>(
         r#"
         INSERT INTO cities (slug, name, country_code, region, latitude, longitude)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        SELECT slug, name, country_code, region, latitude, longitude
+        FROM unnest(
+            $1::text[], $2::text[], $3::text[], $4::text[], $5::float8[], $6::float8[]
+        ) AS city(slug, name, country_code, region, latitude, longitude)
         ON CONFLICT (country_code, slug) DO UPDATE
         SET name = EXCLUDED.name,
             region = COALESCE(EXCLUDED.region, cities.region),
             latitude = COALESCE(EXCLUDED.latitude, cities.latitude),
             longitude = COALESCE(EXCLUDED.longitude, cities.longitude)
-        RETURNING id
+        RETURNING btrim(country_code), slug, id
         "#,
     )
-    .bind(slug)
-    .bind(name)
-    .bind(&event.country_code)
-    .bind(&event.region)
-    .bind(event.latitude)
-    .bind(event.longitude)
-    .fetch_one(&mut **transaction)
+    .bind(&slugs)
+    .bind(&names)
+    .bind(&countries)
+    .bind(&regions)
+    .bind(&latitudes)
+    .bind(&longitudes)
+    .fetch_all(&mut **transaction)
     .await
     .map_err(EventSyncError::sqlx)?;
-    Ok(Some(city_id))
+    Ok(rows
+        .into_iter()
+        .map(|(country, slug, id)| ((country, slug), id))
+        .collect())
 }
 
 async fn upsert_event(
@@ -254,58 +308,72 @@ async fn upsert_event(
     .map_err(EventSyncError::sqlx)?;
 
     if let Some(previous) = previous {
-        sqlx::query(
+        // The CTE returns the post-update snapshot in the same round trip;
+        // a follow-up SELECT here would cost one extra query per event.
+        let current = sqlx::query_as::<_, PersistedEventSnapshot>(
             r#"
-            UPDATE events
-            SET city_id = CASE
-                    WHEN source_id IS NULL AND city_id IS NOT NULL THEN city_id
-                    ELSE COALESCE($3, city_id)
-                END,
-                title = CASE
-                    WHEN source_id IS NULL AND btrim(title) <> '' THEN title
-                    ELSE $4
-                END,
-                source_description = $5,
-                description = CASE
-                    WHEN description_origin = 'manual' THEN description
-                    WHEN description_origin = 'ai' AND description_source_hash = $16 THEN description
-                    ELSE COALESCE($5, description)
-                END,
-                description_origin = CASE
-                    WHEN description_origin = 'manual' THEN 'manual'
-                    WHEN description_origin = 'ai' AND description_source_hash = $16 THEN 'ai'
-                    ELSE 'provider'
-                END,
-                description_source_hash = CASE
-                    WHEN description_origin = 'manual' THEN description_source_hash
-                    ELSE $16
-                END,
-                description_language = CASE
-                    WHEN description_origin = 'manual' THEN description_language
-                    ELSE 'pl'
-                END,
-                venue = CASE
-                    WHEN source_id IS NULL AND venue IS NOT NULL THEN venue
-                    ELSE COALESCE($6, venue)
-                END,
-                venue_address = CASE
-                    WHEN source_id IS NULL AND venue_address IS NOT NULL THEN venue_address
-                    ELSE COALESCE($7, venue_address)
-                END,
-                timezone = CASE WHEN source_id IS NULL THEN timezone ELSE $8 END,
-                starts_at = $9,
-                ticket_url = COALESCE($10, ticket_url),
-                external_event_url = CASE
-                    WHEN source_id IS NULL AND external_event_url IS NOT NULL THEN external_event_url
-                    ELSE COALESCE($11, external_event_url)
-                END,
-                status = 'published',
-                published_at = COALESCE(published_at, now()),
-                source_id = $12,
-                source_provider = $13,
-                source_event_id = $14,
-                source_last_seen_at = $15
-            WHERE workspace_id = $1 AND id = $2
+            WITH updated AS (
+                UPDATE events
+                SET city_id = CASE
+                        WHEN source_id IS NULL AND city_id IS NOT NULL THEN city_id
+                        ELSE COALESCE($3, city_id)
+                    END,
+                    title = CASE
+                        WHEN source_id IS NULL AND btrim(title) <> '' THEN title
+                        ELSE $4
+                    END,
+                    source_description = $5,
+                    description = CASE
+                        WHEN description_origin = 'manual' THEN description
+                        WHEN description_origin = 'ai' AND description_source_hash = $16 THEN description
+                        ELSE COALESCE($5, description)
+                    END,
+                    description_origin = CASE
+                        WHEN description_origin = 'manual' THEN 'manual'
+                        WHEN description_origin = 'ai' AND description_source_hash = $16 THEN 'ai'
+                        ELSE 'provider'
+                    END,
+                    description_source_hash = CASE
+                        WHEN description_origin = 'manual' THEN description_source_hash
+                        ELSE $16
+                    END,
+                    description_language = CASE
+                        WHEN description_origin = 'manual' THEN description_language
+                        ELSE 'pl'
+                    END,
+                    venue = CASE
+                        WHEN source_id IS NULL AND venue IS NOT NULL THEN venue
+                        ELSE COALESCE($6, venue)
+                    END,
+                    venue_address = CASE
+                        WHEN source_id IS NULL AND venue_address IS NOT NULL THEN venue_address
+                        ELSE COALESCE($7, venue_address)
+                    END,
+                    timezone = CASE WHEN source_id IS NULL THEN timezone ELSE $8 END,
+                    starts_at = $9,
+                    ticket_url = COALESCE($10, ticket_url),
+                    external_event_url = CASE
+                        WHEN source_id IS NULL AND external_event_url IS NOT NULL THEN external_event_url
+                        ELSE COALESCE($11, external_event_url)
+                    END,
+                    status = 'published',
+                    published_at = COALESCE(published_at, now()),
+                    source_id = $12,
+                    source_provider = $13,
+                    source_event_id = $14,
+                    source_last_seen_at = $15
+                WHERE workspace_id = $1 AND id = $2
+                RETURNING events.id, events.city_id, events.slug, events.title,
+                          events.description, events.venue, events.venue_address,
+                          events.timezone, events.starts_at, events.ticket_url,
+                          events.external_event_url, events.status
+            )
+            SELECT updated.id, updated.city_id, city.name AS city_name,
+                   city.country_code, updated.slug, updated.title, updated.description,
+                   updated.venue, updated.venue_address, updated.timezone, updated.starts_at,
+                   updated.ticket_url, updated.external_event_url, updated.status
+            FROM updated
+            LEFT JOIN cities AS city ON city.id = updated.city_id
             "#,
         )
         .bind(source.workspace_id)
@@ -324,10 +392,9 @@ async fn upsert_event(
         .bind(&event.source_event_id)
         .bind(sync_started_at)
         .bind(copy_source_hash.as_slice())
-        .execute(&mut **transaction)
+        .fetch_one(&mut **transaction)
         .await
         .map_err(EventSyncError::sqlx)?;
-        let current = load_event_snapshot(transaction, source.workspace_id, previous.id).await?;
         let previous = meaningful_event_change(&previous, &current).then_some(previous);
         return Ok(EventUpsertResult {
             current,
@@ -336,55 +403,67 @@ async fn upsert_event(
         });
     }
 
-    let inserted = sqlx::query_as::<_, InsertedEventRow>(
+    // Same single-round-trip shape as the update path above: RETURNING carries
+    // the row identity and the snapshot join happens in one statement.
+    let inserted = sqlx::query_as::<_, InsertedEventSnapshotRow>(
         r#"
-        INSERT INTO events (
-            workspace_id, city_id, slug, title, description, source_description,
-            description_origin, description_source_hash, description_language,
-            venue, venue_address, timezone, starts_at, ticket_url,
-            external_event_url, status, published_at,
-            source_id, source_provider, source_event_id, source_last_seen_at
+        WITH ins AS (
+            INSERT INTO events (
+                workspace_id, city_id, slug, title, description, source_description,
+                description_origin, description_source_hash, description_language,
+                venue, venue_address, timezone, starts_at, ticket_url,
+                external_event_url, status, published_at,
+                source_id, source_provider, source_event_id, source_last_seen_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $5,
+                'provider', $16, 'pl',
+                $6, $7, $8, $9, $10,
+                $11, 'published', now(), $12, $13, $14, $15
+            )
+            ON CONFLICT (workspace_id, source_id, source_event_id)
+                WHERE source_id IS NOT NULL
+            DO UPDATE SET
+                city_id = EXCLUDED.city_id,
+                title = EXCLUDED.title,
+                source_description = EXCLUDED.source_description,
+                description = CASE
+                    WHEN events.description_origin = 'manual' THEN events.description
+                    WHEN events.description_origin = 'ai'
+                         AND events.description_source_hash = EXCLUDED.description_source_hash
+                        THEN events.description
+                    ELSE COALESCE(EXCLUDED.source_description, events.description)
+                END,
+                description_origin = CASE
+                    WHEN events.description_origin = 'manual' THEN 'manual'
+                    WHEN events.description_origin = 'ai'
+                         AND events.description_source_hash = EXCLUDED.description_source_hash
+                        THEN 'ai'
+                    ELSE 'provider'
+                END,
+                description_source_hash = CASE
+                    WHEN events.description_origin = 'manual' THEN events.description_source_hash
+                    ELSE EXCLUDED.description_source_hash
+                END,
+                venue = EXCLUDED.venue,
+                venue_address = COALESCE(EXCLUDED.venue_address, events.venue_address),
+                timezone = EXCLUDED.timezone,
+                starts_at = EXCLUDED.starts_at,
+                ticket_url = COALESCE(EXCLUDED.ticket_url, events.ticket_url),
+                external_event_url = COALESCE(EXCLUDED.external_event_url, events.external_event_url),
+                status = 'published',
+                published_at = COALESCE(events.published_at, now()),
+                source_last_seen_at = EXCLUDED.source_last_seen_at
+            RETURNING id, (xmax = 0) AS inserted, city_id, slug, title,
+                      description, venue, venue_address, timezone, starts_at,
+                      ticket_url, external_event_url, status
         )
-        VALUES (
-            $1, $2, $3, $4, $5, $5,
-            'provider', $16, 'pl',
-            $6, $7, $8, $9, $10,
-            $11, 'published', now(), $12, $13, $14, $15
-        )
-        ON CONFLICT (workspace_id, source_id, source_event_id)
-            WHERE source_id IS NOT NULL
-        DO UPDATE SET
-            city_id = EXCLUDED.city_id,
-            title = EXCLUDED.title,
-            source_description = EXCLUDED.source_description,
-            description = CASE
-                WHEN events.description_origin = 'manual' THEN events.description
-                WHEN events.description_origin = 'ai'
-                     AND events.description_source_hash = EXCLUDED.description_source_hash
-                    THEN events.description
-                ELSE COALESCE(EXCLUDED.source_description, events.description)
-            END,
-            description_origin = CASE
-                WHEN events.description_origin = 'manual' THEN 'manual'
-                WHEN events.description_origin = 'ai'
-                     AND events.description_source_hash = EXCLUDED.description_source_hash
-                    THEN 'ai'
-                ELSE 'provider'
-            END,
-            description_source_hash = CASE
-                WHEN events.description_origin = 'manual' THEN events.description_source_hash
-                ELSE EXCLUDED.description_source_hash
-            END,
-            venue = EXCLUDED.venue,
-            venue_address = COALESCE(EXCLUDED.venue_address, events.venue_address),
-            timezone = EXCLUDED.timezone,
-            starts_at = EXCLUDED.starts_at,
-            ticket_url = COALESCE(EXCLUDED.ticket_url, events.ticket_url),
-            external_event_url = COALESCE(EXCLUDED.external_event_url, events.external_event_url),
-            status = 'published',
-            published_at = COALESCE(events.published_at, now()),
-            source_last_seen_at = EXCLUDED.source_last_seen_at
-        RETURNING id, (xmax = 0) AS inserted
+        SELECT ins.id, ins.inserted, ins.city_id, city.name AS city_name,
+               city.country_code, ins.slug, ins.title, ins.description,
+               ins.venue, ins.venue_address, ins.timezone, ins.starts_at,
+               ins.ticket_url, ins.external_event_url, ins.status
+        FROM ins
+        LEFT JOIN cities AS city ON city.id = ins.city_id
         "#,
     )
     .bind(source.workspace_id)
@@ -406,9 +485,23 @@ async fn upsert_event(
     .fetch_one(&mut **transaction)
     .await
     .map_err(EventSyncError::sqlx)?;
-    let current = load_event_snapshot(transaction, source.workspace_id, inserted.id).await?;
     Ok(EventUpsertResult {
-        current,
+        current: PersistedEventSnapshot {
+            id: inserted.id,
+            city_id: inserted.city_id,
+            city_name: inserted.city_name,
+            country_code: inserted.country_code,
+            slug: inserted.slug,
+            title: inserted.title,
+            description: inserted.description,
+            venue: inserted.venue,
+            venue_address: inserted.venue_address,
+            timezone: inserted.timezone,
+            starts_at: inserted.starts_at,
+            ticket_url: inserted.ticket_url,
+            external_event_url: inserted.external_event_url,
+            status: inserted.status,
+        },
         previous: None,
         inserted: inserted.inserted,
     })
