@@ -23,6 +23,7 @@
 pub mod audience_graph;
 pub mod autopilot;
 pub mod bootstrap;
+pub mod discovery;
 pub mod draws;
 pub mod event_sync;
 pub mod operator_brief;
