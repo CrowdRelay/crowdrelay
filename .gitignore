@@ -40,13 +40,23 @@ docs/*
 # leave the production worktree dirty and the deploy preflight refuses it.
 ._*
 
-# Editor/recovery files must never enter source packages.
+# Editor/recovery files must never enter source packages. Manual pre-edit
+# snapshots on production are timestamped (`Caddyfile.bak-20260826T103002`),
+# not just `*.bak`, and left the deploy preflight refusing a clean worktree.
 *.bak
+*.bak-*
 *.orig
 *.rej
 *.tmp
 *~
 .recovery-backup
+
+# Edge Basic Auth credential material for the Control Plane. Generated once
+# on the production host; the bcrypt hash and env file are secrets, not
+# source, so they stay off disk here the same way deploy/*.production.json
+# does.
+ops/edge/control-plane-basic.bcrypt
+ops/edge/control-plane-basic.env
 
 # Local Claude Code context (not part of the product)
 CLAUDE.md
