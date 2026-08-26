@@ -179,3 +179,25 @@ control.virya.music {
     }
 }
 # END CROWDRELAY CONTROL PLANE
+
+# BEGIN KERN OPERATOR PANEL
+# Kern runs on virya-home (10.77.0.2 via WireGuard). The panel is
+# operator-only; the operator token gate is in the app itself.
+kern.wojciechbator.me {
+	encode zstd gzip
+	import security_headers
+
+	reverse_proxy 10.77.0.2:8090 {
+		header_up X-Real-IP {remote_host}
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 10s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+# END KERN OPERATOR PANEL
