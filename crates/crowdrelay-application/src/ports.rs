@@ -8,8 +8,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 use crowdrelay_domain::{
-    CitySignal, ClickEvent, FanSignup, FanSignupResult, ResolvedSmartLink, WorkspaceId,
-    WorkspaceSlug,
+    CampaignId, CitySignal, ClickEvent, FanId, FanSignup, FanSignupResult, ReferralCode,
+    ResolvedSmartLink, SmartLinkSlug, WorkspaceId, WorkspaceSlug,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
@@ -229,4 +229,52 @@ pub trait AcquisitionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         limit: u32,
     ) -> Result<Vec<CitySignal>, RepositoryError>;
+
+    /// Creates or updates a tracked smart link for a campaign channel.
+    /// Idempotent on slug: re-posting the same slug updates the destination
+    /// and channel fields rather than failing.
+    async fn upsert_smart_link<'a>(
+        &self,
+        command: &UpsertSmartLinkCommand<'a>,
+    ) -> Result<UpsertedSmartLink, RepositoryError>;
+
+    /// Lists all smart links for the workspace, with channel attribution.
+    async fn list_smart_links(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<UpsertedSmartLink>, RepositoryError>;
+
+    /// Returns the active referral code for a fan, creating one if none exists.
+    /// Idempotent: if the fan already has an active code, it is returned
+    /// unchanged.
+    async fn load_or_create_fan_referral_code(
+        &self,
+        workspace_id: WorkspaceId,
+        fan_id: FanId,
+    ) -> Result<ReferralCode, RepositoryError>;
+}
+
+/// A smart link as written or read by the repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpsertedSmartLink {
+    pub id: uuid::Uuid,
+    pub slug: SmartLinkSlug,
+    pub destination_url: String,
+    pub active: bool,
+    pub channel_source: Option<String>,
+    pub channel_community: Option<String>,
+    pub channel_creative: Option<String>,
+    pub campaign_id: Option<CampaignId>,
+}
+
+/// Command for creating or updating a tracked smart link.
+#[derive(Clone, Debug)]
+pub struct UpsertSmartLinkCommand<'a> {
+    pub workspace_id: WorkspaceId,
+    pub slug: &'a SmartLinkSlug,
+    pub destination_url: &'a str,
+    pub channel_source: Option<&'a str>,
+    pub channel_community: Option<&'a str>,
+    pub channel_creative: Option<&'a str>,
+    pub campaign_id: Option<CampaignId>,
 }

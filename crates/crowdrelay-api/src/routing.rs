@@ -458,6 +458,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(audience::remove_tag),
         )
         .route(
+            "/v1/admin/audience/fans/{fan_id}/referral-code",
+            post(acquisition::admin_create_fan_referral_code),
+        )
+        .route(
+            "/v1/admin/smart-links",
+            get(acquisition::admin_list_smart_links).post(acquisition::admin_create_smart_link),
+        )
+        .route(
             "/v1/admin/audience/segments",
             get(audience::list_segments).post(audience::create_segment),
         )

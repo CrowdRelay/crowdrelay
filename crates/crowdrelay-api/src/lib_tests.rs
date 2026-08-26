@@ -22,7 +22,8 @@ mod tests {
         ListCities, ListFanEventInterests, LoadAdmissionPass, LoadReferralProgress,
         RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, ReferralRepository,
         RegisterEventInterest, RegisterEventInterestCommand, RepositoryError, ResolveReferralCode,
-        RevokeAdmissionPass, SignupFan, SignupFanCommand, UnsubscribeFan,
+        RevokeAdmissionPass, SignupFan, SignupFanCommand, UnsubscribeFan, UpsertSmartLinkCommand,
+        UpsertedSmartLink,
     };
     use crowdrelay_domain::{
         AdmissionPassClaimed, AdmissionPassIssued, AdmissionPassView, AdmissionRedemptionResult,
@@ -124,6 +125,28 @@ mod tests {
             _limit: u32,
         ) -> Result<Vec<CitySignal>, RepositoryError> {
             self.cities_result.clone()
+        }
+
+        async fn upsert_smart_link<'a>(
+            &self,
+            _command: &UpsertSmartLinkCommand<'a>,
+        ) -> Result<UpsertedSmartLink, RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
+
+        async fn list_smart_links(
+            &self,
+            _workspace_id: WorkspaceId,
+        ) -> Result<Vec<UpsertedSmartLink>, RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
+
+        async fn load_or_create_fan_referral_code(
+            &self,
+            _workspace_id: WorkspaceId,
+            _fan_id: FanId,
+        ) -> Result<ReferralCode, RepositoryError> {
+            Err(RepositoryError::Unavailable)
         }
     }
 
@@ -328,11 +351,12 @@ mod tests {
             workspace_id,
             redirect_cache,
             signup_fan: SignupFan::new(Arc::clone(&repository)),
-            list_cities: ListCities::new(repository),
+            list_cities: ListCities::new(Arc::clone(&repository)),
             click_submitter,
             click_metrics_reader: Arc::new(super::ClickMetricsSnapshot::default),
             public_site_base_url: Url::parse("http://localhost:4321")?,
             secure_cookies: false,
+            acquisition_repository: repository,
         }))
     }
 
