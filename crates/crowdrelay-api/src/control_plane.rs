@@ -121,6 +121,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/tenant-settings/{key}",
             post(crate::tenant_settings_http::upsert_setting),
         )
+        .route(
+            "/v1/control-plane/fanbases",
+            get(crate::fanbase::list_fanbases).post(crate::fanbase::create_fanbase),
+        )
+        .route(
+            "/v1/control-plane/fanbases/{fanbase_id}/ingest",
+            post(crate::fanbase::ingest_fanbase),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher
