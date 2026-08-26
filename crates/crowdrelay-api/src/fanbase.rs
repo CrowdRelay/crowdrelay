@@ -1,0 +1,220 @@
+//! Operator surface for fanbases: addressable audience blocks fed by
+//! swappable providers. Protocol mapping only — statements live in
+//! `crowdrelay-infra::fanbase`, policy in `crowdrelay-domain::fanbase`.
+
+use axum::{
+    Json,
+    extract::{Path, State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
+    response::{IntoResponse, Response},
+};
+use crowdrelay_domain::fanbase::SourceKind;
+use crowdrelay_infra::fanbase::{FanbaseEntry, FanbaseError, PostgresFanbaseRepository};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{Problem, request_id};
+
+const PRIVATE_NO_STORE: &str = "private, no-store";
+const MAX_INGEST_ENTRIES: usize = 500;
+
+fn repository(state: &crate::AppState) -> PostgresFanbaseRepository {
+    PostgresFanbaseRepository::new(state.database.clone())
+}
+
+fn workspace(state: &crate::AppState) -> Uuid {
+    state.ticketing.workspace_id().into_uuid()
+}
+
+fn error_response(error: FanbaseError, request_id_value: Option<String>) -> Response {
+    match error {
+        FanbaseError::NotFound | FanbaseError::NameTaken => {
+            Problem::not_found(request_id_value).into_response()
+        }
+        FanbaseError::Database(_) => Problem::service_unavailable(request_id_value).into_response(),
+    }
+}
+
+#[derive(Serialize)]
+pub struct FanbaseResponse {
+    id: Uuid,
+    name: String,
+    source_kind: String,
+    fetch_url: Option<String>,
+    consent_attested_by: Option<String>,
+    enabled: bool,
+    members: Option<i64>,
+    last_status: Option<String>,
+    last_imported_pending: Option<i32>,
+}
+
+fn fanbase_response(row: crowdrelay_infra::fanbase::FanbaseRow) -> FanbaseResponse {
+    FanbaseResponse {
+        id: row.id,
+        name: row.name,
+        source_kind: row.source_kind,
+        fetch_url: row.fetch_url,
+        consent_attested_by: row.consent_attested_by,
+        enabled: row.enabled,
+        members: row.members,
+        last_status: row.last_status,
+        last_imported_pending: row.last_imported_pending,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateFanbaseRequest {
+    name: String,
+    source_kind: String,
+    fetch_url: Option<String>,
+    /// Required for origins that cannot carry per-candidate consent evidence
+    /// (manual imports and lists bought or scraped elsewhere are refused).
+    consent_attested_by: Option<String>,
+}
+
+pub async fn create_fanbase(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateFanbaseRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    let Some(source_kind) = SourceKind::from_storage(&request.source_kind) else {
+        return Problem::unprocessable(request_id_value).into_response();
+    };
+    if request.name.trim().is_empty() || request.name.len() > 200 {
+        return Problem::unprocessable(request_id_value).into_response();
+    }
+    // Origins without their own consent evidence need a named attestation:
+    // someone vouches the list was collected with permission.
+    let needs_attestation = !matches!(source_kind, SourceKind::HttpJsonPull)
+        && request
+            .consent_attested_by
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty);
+    if needs_attestation || request.fetch_url.as_deref().map(str::len).unwrap_or(0) > 512 {
+        return Problem::unprocessable(request_id_value).into_response();
+    }
+
+    match repository(&state)
+        .create_fanbase(
+            workspace(&state),
+            request.name.trim(),
+            source_kind,
+            request.fetch_url.as_deref(),
+            request.consent_attested_by.as_deref(),
+        )
+        .await
+    {
+        Ok(id) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "fanbaseId": id })),
+        )
+            .into_response(),
+        Err(FanbaseError::NameTaken) => Problem::conflict(request_id_value).into_response(),
+        Err(error) => error_response(error, request_id_value),
+    }
+}
+
+pub async fn list_fanbases(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let request_id_value = request_id(&headers);
+    match repository(&state).list_fanbases(workspace(&state)).await {
+        Ok(rows) => {
+            let items: Vec<FanbaseResponse> = rows.into_iter().map(fanbase_response).collect();
+            (
+                StatusCode::OK,
+                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+                Json(serde_json::json!({ "fanbases": items })),
+            )
+                .into_response()
+        }
+        Err(error) => error_response(error, request_id_value),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IngestFanbaseRequest {
+    entries: Vec<IngestEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IngestEntry {
+    external_id: String,
+    email: Option<String>,
+    display_name: Option<String>,
+    locale: Option<String>,
+}
+
+pub async fn ingest_fanbase(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(fanbase_id): Path<Uuid>,
+    payload: Result<Json<IngestFanbaseRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    if request.entries.is_empty() || request.entries.len() > MAX_INGEST_ENTRIES {
+        return Problem::unprocessable(request_id_value).into_response();
+    }
+    for entry in &request.entries {
+        if entry.external_id.trim().is_empty() || entry.external_id.len() > 200 {
+            return Problem::unprocessable(request_id_value).into_response();
+        }
+    }
+    let entries: Vec<FanbaseEntry> = request
+        .entries
+        .iter()
+        .map(|entry| FanbaseEntry {
+            external_id: entry.external_id.trim().to_owned(),
+            email: entry
+                .email
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned),
+            display_name: entry.display_name.clone(),
+            locale: entry.locale.clone(),
+        })
+        .collect();
+
+    match repository(&state)
+        .ingest_candidates(
+            workspace(&state),
+            fanbase_id,
+            &entries,
+            ACCESS_TOKEN_TTL_DAYS,
+            ACCESS_RESEND_COOLDOWN_SECONDS,
+        )
+        .await
+    {
+        Ok(counts) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({
+                "received": counts.received,
+                "importedPending": counts.imported_pending,
+                "confirmationResent": counts.confirmation_resent,
+                "alreadyActive": counts.already_active,
+                "skippedSuppressed": counts.skipped_suppressed,
+                "cooldownSkipped": counts.cooldown_skipped,
+                "invalid": counts.invalid,
+            })),
+        )
+            .into_response(),
+        Err(FanbaseError::NotFound) => Problem::not_found(request_id_value).into_response(),
+        Err(error) => error_response(error, request_id_value),
+    }
+}
+
+// Re-exported constants live in the interactive flow module; importing keeps
+// token TTL and resend cooldown identical across acquisition surfaces.
+use crate::fan_lifecycle::{ACCESS_RESEND_COOLDOWN_SECONDS, ACCESS_TOKEN_TTL_DAYS};

@@ -39,6 +39,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/fans/confirm", post(fan_lifecycle::confirm_fan))
         .route("/v1/fans/unsubscribe", post(fan_lifecycle::unsubscribe_fan))
         .route(
+            "/v1/admin/fanbases",
+            get(fanbase::list_fanbases).post(fanbase::create_fanbase),
+        )
+        .route(
+            "/v1/admin/fanbases/{fanbase_id}/ingest",
+            post(fanbase::ingest_fanbase),
+        )
+        .route(
             "/v1/beacon/invitations/exchange",
             post(beacon_signal::exchange_invite),
         )

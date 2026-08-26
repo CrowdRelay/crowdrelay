@@ -7,6 +7,7 @@
 //! database rather than mocks. Run via `just test-postgres`.
 
 use crowdrelay_domain::audience_graph::{OutreachStage, PlaceKind};
+use crowdrelay_domain::fanbase::SourceKind;
 use crowdrelay_domain::portfolio::ConsentStatus;
 use crowdrelay_infra::audience_graph::{
     AudienceGraphError, PostgresAudienceGraphRepository, UpsertPlaceInput,
@@ -348,5 +349,90 @@ async fn tenant_settings_default_to_the_shipped_constants_then_follow_overrides(
     // Untouched keys keep their defaults; overrides are per-key data.
     assert_eq!(after.member_area_path, "pl/latarnik");
     cleanup(&pool, &[workspace]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn fanbase_ingestion_is_consent_safe_idempotent_and_attributed()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::fanbase::{FanbaseEntry, PostgresFanbaseRepository};
+
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = PostgresFanbaseRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "fb").await;
+
+    // A suppressed address from an earlier era must never be resurrected.
+    sqlx::query("INSERT INTO fans (workspace_id, normalized_email, status) VALUES ($1,'old@x.test','unsubscribed')")
+        .bind(workspace)
+        .execute(&pool)
+        .await?;
+
+    let fanbase = repo
+        .create_fanbase(
+            workspace,
+            "Metal Hammer promo",
+            SourceKind::CsvInline,
+            None,
+            Some("operator@label"),
+        )
+        .await?;
+
+    let entries = vec![
+        FanbaseEntry {
+            external_id: "mh-1".into(),
+            email: Some("fresh@x.test".into()),
+            display_name: Some("Fresh".into()),
+            locale: Some("pl".into()),
+        },
+        FanbaseEntry {
+            external_id: "mh-2".into(),
+            email: Some("old@x.test".into()),
+            display_name: None,
+            locale: None,
+        },
+    ];
+    let counts = repo
+        .ingest_candidates(workspace, fanbase, &entries, 2, 60)
+        .await?;
+    assert_eq!(counts.imported_pending, 1);
+    assert_eq!(counts.skipped_suppressed, 1);
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM fans WHERE workspace_id=$1 AND normalized_email='fresh@x.test'",
+    )
+    .bind(workspace)
+    .fetch_one(&pool)
+    .await?;
+    eprintln!("step: status ok");
+    assert_eq!(status, "pending");
+
+    // Membership attribution is keyed by external id.
+    eprintln!("step: before member_fan");
+    let member_fan: Uuid = sqlx::query_scalar(
+        "SELECT fan_id FROM fanbase_members WHERE fanbase_id=$1 AND external_id='mh-1'",
+    )
+    .bind(fanbase)
+    .fetch_one(&pool)
+    .await?;
+
+    eprintln!("step: before re-ingest");
+    // Re-ingesting the same external id is idempotent and refreshes the
+    // member; the fresh address sits in its confirmation cooldown.
+    let again = repo
+        .ingest_candidates(workspace, fanbase, &entries, 2, 60)
+        .await?;
+    // Retry outcome: the fresh address sits in its confirmation cooldown, the
+    // suppressed one stays skipped.
+    assert_eq!(again.cooldown_skipped, 1);
+    assert_eq!(again.skipped_suppressed, 1);
+    let same_member: Uuid = sqlx::query_scalar(
+        "SELECT fan_id FROM fanbase_members WHERE fanbase_id=$1 AND external_id='mh-1'",
+    )
+    .bind(fanbase)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(member_fan, same_member);
     Ok(())
 }

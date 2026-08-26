@@ -5977,6 +5977,99 @@ paths:
           description: One JSON document describing the roster story.
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/fanbases:
+    get:
+      operationId: listFanbases
+      summary: Audience blocks with latest ingestion stats
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Fanbases ordered by creation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fanbases:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        source_kind:
+                          type: string
+                        members:
+                          type: integer
+                        last_imported_pending:
+                          type: integer
+    post:
+      operationId: createFanbase
+      summary: Register an audience block with its acquisition origin
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FanbaseCreate'
+      responses:
+        '200':
+          description: Fanbase id.
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+  /admin/fanbases/{fanbase_id}/ingest:
+    post:
+      operationId: ingestFanbaseCandidates
+      summary: Run one provider batch through admission (pending + double-opt-in)
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: fanbase_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              properties:
+                entries:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [external_id]
+                    properties:
+                      external_id:
+                        type: string
+                        maxLength: 200
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      locale:
+                        type: string
+      responses:
+        '200':
+          description: Per-outcome admission counters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FanbaseIngestionCounters'
   /admin/portfolio/organization:
     post:
       operationId: createPortfolioOrganization
@@ -11455,6 +11548,39 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PhysicalRewardGrant'
+    FanbaseCreate:
+      type: object
+      required: [name, source_kind]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        source_kind:
+          type: string
+          enum: [http_json_pull, csv_inline, manual_import, meta_lead_ads, bandsintown_followers, google_customer_match, reddit_community]
+        fetch_url:
+          type: string
+          maxLength: 512
+        consent_attested_by:
+          type: string
+          maxLength: 200
+    FanbaseIngestionCounters:
+      type: object
+      properties:
+        received:
+          type: integer
+        importedPending:
+          type: integer
+        confirmationResent:
+          type: integer
+        alreadyActive:
+          type: integer
+        skippedSuppressed:
+          type: integer
+        cooldownSkipped:
+          type: integer
+        invalid:
+          type: integer
     AudienceGraphPlaceUpsert:
       type: object
       required: [place_kind, platform, name, url]
