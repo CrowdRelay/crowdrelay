@@ -912,6 +912,8 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/me/pass/qr", get(admission::my_pass_qr))
         .route("/v1/staff/admission/redeem", post(admission::redeem_pass))
         .merge(growth_routes())
+        .merge(audience_graph::admin_routes())
+        .merge(portfolio::admin_routes())
         .layer(DefaultBodyLimit::max(MAX_PUBLIC_BODY_BYTES))
         .with_state(state)
 }

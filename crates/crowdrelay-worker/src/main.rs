@@ -24,6 +24,7 @@ use crowdrelay_infra::{
     autopilot::PostgresAutopilotRepository, config::Config, database, observability,
 };
 use crowdrelay_worker::{
+    audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
@@ -51,6 +52,8 @@ const OPS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// whether a day has passed. Cheap, and it means a restart cannot push the
 /// brief a whole cycle late.
 const OPERATOR_BRIEF_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// The graph changes at human speed; an hour of decay lag is invisible.
+const AUDIENCE_GRAPH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const WEBHOOK_SECRETS_FILE_KEY: &str = "CROWDRELAY_WEBHOOK_SECRETS_FILE";
 const BOOTSTRAP_JSON_KEY: &str = "CROWDRELAY_BOOTSTRAP_JSON";
 const BOOTSTRAP_FILE_KEY: &str = "CROWDRELAY_BOOTSTRAP_FILE";
@@ -305,6 +308,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         OPERATOR_BRIEF_INTERVAL,
         config.database.operation_timeout,
     );
+    let audience_graph_sweeper = AudienceGraphSweeper::new(
+        database.clone(),
+        workspace_id,
+        AUDIENCE_GRAPH_SWEEP_INTERVAL,
+        config.database.operation_timeout,
+    );
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
@@ -315,6 +324,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
     let operator_brief_shutdown = shutdown_receiver.clone();
+    let audience_graph_shutdown = shutdown_receiver.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -364,6 +374,10 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     runtime_tasks.spawn(async move {
         operator_brief.run(operator_brief_shutdown).await;
         "CrowdRelay operator brief"
+    });
+    runtime_tasks.spawn(async move {
+        audience_graph_sweeper.run(audience_graph_shutdown).await;
+        "audience graph sweeper"
     });
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);

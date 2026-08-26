@@ -23,6 +23,7 @@
 pub mod acquisition;
 pub mod admission;
 pub mod area_admin;
+pub mod audience_graph;
 pub mod autopilot;
 pub mod commerce;
 pub mod config;
@@ -33,6 +34,7 @@ pub mod fan_lifecycle;
 pub mod fan_privacy;
 pub mod mobile_fan;
 pub mod observability;
+pub mod portfolio;
 pub mod proofs;
 pub mod push_preferences;
 pub mod referrals;

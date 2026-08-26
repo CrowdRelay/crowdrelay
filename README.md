@@ -1,8 +1,10 @@
 # CrowdRelay
 
-**A deterministic operations engine that runs a metal band's growth autonomously.**
+**A deterministic growth-operations platform for labels, artist rosters and festivals.**
 
 CrowdRelay owns the durable business state behind audience growth and live operations: fans and consent, events, tickets, admission, merch, referrals, venue relationships, community outreach and every action taken around them. It decides what to do within explicit authority limits, executes through external systems, measures what happened and feeds results into the next decision cycle.
+
+It is built to run **a whole roster from one seat**: each artist is a workspace inside a label organization, and the portfolio layer lets a roster's audiences amplify each other through explicit, revocable, capped consent edges — the one capability that only exists when one platform holds every artist's fan graph. The first tenant running it in production is Virya; everything multi-tenant is designed so onboarding another act or festival is workspace provisioning, not a fork.
 
 The core idea: **business state and business decisions stay in CrowdRelay; external services only execute the work they are asked to do.** Email, n8n, Stripe, Calendar, Bandsintown and LLM-assisted copy are adapters, not sources of truth.
 
@@ -65,6 +67,15 @@ Executed actions settle against benchmarks after their horizon. Effects are labe
 
 The daily brief breaks silence only for things that lie when quiet: halted ceilings, stale approvals, dead executors, pending withdrawals. Everything else waits for somebody to look at the panel.
 
+## Label Portfolio Mode
+
+One organization, many artist workspaces, one operator view:
+
+- roster-wide audience KPIs (active fans, 30-day growth, live amplification edges);
+- consent edges between artists with purpose (`cross_promote`, `release_feature`, `event_crossbill`), monthly campaign caps and per-fan cooldowns;
+- amplification campaigns that enqueue through the audience owner's own outbox — reach numbers for the beneficiary, no identities ever leave home;
+- revocable edges with an approval paper trail; paused edges stop producing audience instantly.
+
 ## Features
 
 - tracked smart links with channel/community/creative attribution;
@@ -78,6 +89,7 @@ The daily brief breaks silence only for things that lie when quiet: halted ceili
 - ticket inventory, Stripe Checkout holds, refunds and paid-pass issuance;
 - merch inventory, variants, stocktakes and Stripe order reservations;
 - venue/promoter discovery with screened-on-write candidates;
+- audience graph: prospecting map of communities (subreddits, Discords, forums, playlists) with each place's own promotion rules, evidence ledger and outreach pipeline;
 - booking negotiation with computed cost floors and terms ladder;
 - free-reach pitching waves with evidence packets and placement verification;
 - beacon network: scene-partner discovery, local amplification, invite batches;
