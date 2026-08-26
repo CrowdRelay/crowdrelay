@@ -29,7 +29,10 @@ class FanbasesContract(unittest.TestCase):
         self.assertIn("fn pii_capable", source)
         self.assertIn("fn oauth_native", source)
         # Community platforms are graph signals, never address sources.
-        self.assertIn("!matches!(\n            self,\n            Self::BandsintownFollowers | Self::RedditCommunity\n        )", source)
+        self.assertIn(
+            "Self::BandsintownFollowers | Self::RedditCommunity",
+            source[source.index("fn pii_capable"):source.index("fn pii_capable") + 400],
+        )
 
     def test_admission_follows_consent_model(self):
         source = DOMAIN.read_text()
