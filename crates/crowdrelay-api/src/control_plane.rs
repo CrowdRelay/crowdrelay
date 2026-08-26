@@ -8,11 +8,13 @@ use axum::{
     Router,
     body::Body,
     extract::{DefaultBodyLimit, State},
-    http::Request,
+    http::{HeaderMap, Request, header::CACHE_CONTROL},
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use serde::Serialize;
+use uuid::Uuid;
 
 const MAX_CONTROL_BODY_BYTES: usize = 8 * 1024;
 
@@ -129,6 +131,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/fanbases/{fanbase_id}/ingest",
             post(crate::fanbase::ingest_fanbase),
         )
+        .route(
+            "/v1/control-plane/webhook-endpoints",
+            get(list_webhook_endpoints),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher
@@ -153,4 +159,82 @@ async fn require_control_plane(
             .into_response();
     }
     next.run(request).await
+}
+
+/// Read-only list of the tenant's configured outbound webhook endpoints.
+/// The Control Plane surfaces these in its Notifiers tab so operators see
+/// which CrowdRelay-owned delivery targets already exist before adding a
+/// parallel notifier channel.
+async fn list_webhook_endpoints(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = crate::request_id(&headers);
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match sqlx::query_as::<_, WebhookEndpointRow>(
+        r#"
+        SELECT id, name, url, active
+        FROM webhook_endpoints
+        WHERE workspace_id = $1
+        ORDER BY created_at, name
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&state.database)
+    .await
+    {
+        Ok(rows) => {
+            let items: Vec<WebhookEndpointSummary> = rows
+                .into_iter()
+                .map(|row| WebhookEndpointSummary {
+                    id: row.id,
+                    name: row.name,
+                    url_host: url_host(&row.url),
+                    active: row.active,
+                })
+                .collect();
+            (
+                [(CACHE_CONTROL, "private, no-store")],
+                axum::Json(serde_json::json!({ "endpoints": items })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "control-plane webhook-endpoints read failed");
+            crate::Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WebhookEndpointRow {
+    id: Uuid,
+    name: String,
+    url: String,
+    active: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WebhookEndpointSummary {
+    id: Uuid,
+    name: String,
+    url_host: String,
+    active: bool,
+}
+
+/// Reduce a full URL to its origin so the control plane never receives a
+/// signed-webhook target path or query string.
+fn url_host(raw: &str) -> String {
+    url::Url::parse(raw)
+        .ok()
+        .map(|parsed| {
+            format!(
+                "{}://{}",
+                parsed.scheme(),
+                parsed.host_str().unwrap_or_default()
+            )
+        })
+        .unwrap_or_else(|| raw.to_owned())
 }
