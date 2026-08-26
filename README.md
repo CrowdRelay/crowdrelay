@@ -90,6 +90,7 @@ One organization, many artist workspaces, one operator view:
 - merch inventory, variants, stocktakes and Stripe order reservations;
 - venue/promoter discovery with screened-on-write candidates;
 - audience graph: prospecting map of communities (subreddits, Discords, forums, playlists) with each place's own promotion rules, evidence ledger and outreach pipeline;
+- fanbases: addressable audience blocks with swappable origins (Meta lead ads, Bandsintown, Google, Reddit, CSV/HTTP pull), consent-safe ingestion and per-source attribution;
 - booking negotiation with computed cost floors and terms ladder;
 - free-reach pitching waves with evidence packets and placement verification;
 - beacon network: scene-partner discovery, local amplification, invite batches;
@@ -98,6 +99,7 @@ One organization, many artist workspaces, one operator view:
 - momentum-pullback and core-beta strategies with benchmark-settled outcomes;
 - strategy standings that narrow allocation before retiring;
 - daily operator brief with silence-default rules;
+- portfolio case-study export: one JSON with roster KPIs and every live amplification edge;
 - transactional outbox delivery with bounded retries and dead-state inspection;
 - optional Sigstore Rekor anchoring for audit and draw receipts;
 - health, readiness, metrics, structured logging, migrations and graceful shutdown.
