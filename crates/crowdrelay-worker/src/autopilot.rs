@@ -7,8 +7,8 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository,
         AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementRepository,
-        AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, EvaluateAutopilot,
-        assess_measurement_effect, assess_play_claim,
+        AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotWaveOutcomeRepository,
+        EvaluateAutopilot, assess_measurement_effect, assess_play_claim, assess_wave_claim,
     },
 };
 use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
@@ -25,6 +25,10 @@ const MEASUREMENT_BATCH_SIZE: u32 = 16;
 /// batch is right: there is never a backlog unless something has been broken
 /// for a month, and in that case draining it slowly is the safer failure.
 const PLAY_OUTCOME_BATCH_SIZE: u32 = 8;
+/// Wave outcomes settle once per wave, three weeks after the pitches were
+/// released. Same small batch: a backlog means something has been broken for
+/// weeks, and draining it slowly is the safer failure.
+const WAVE_OUTCOME_BATCH_SIZE: u32 = 8;
 
 #[derive(Clone, Debug)]
 pub struct AutopilotWorker {
@@ -310,6 +314,64 @@ impl AutopilotWorker {
             Err(error) => {
                 phase_failed = true;
                 tracing::warn!(error = %error, "ViryaOS play outcome claim failed");
+            }
+        }
+
+        // Wave outcomes settle last, and settle even when the outreach context
+        // is switched off — for the same reason play outcomes do: measuring
+        // what already happened is not acting on it.
+        match self
+            .repository
+            .claim_due_wave_outcomes(self.workspace_id, WAVE_OUTCOME_BATCH_SIZE, now)
+            .await
+        {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let settled_at = OffsetDateTime::now_utc();
+                    let result = async {
+                        let observation = self
+                            .repository
+                            .observe_wave_outcome(self.workspace_id, &outcome, settled_at)
+                            .await?;
+                        let verdict = assess_wave_claim(&outcome, &observation);
+                        self.repository
+                            .complete_wave_outcome(
+                                self.workspace_id,
+                                &outcome,
+                                &observation,
+                                verdict,
+                                settled_at,
+                            )
+                            .await
+                    }
+                    .await;
+
+                    if let Err(error) = result {
+                        phase_failed = true;
+                        let error_kind = repository_error_kind(error);
+                        let retryable = repository_error_retryable(error);
+                        tracing::warn!(
+                            wave_id = %outcome.wave_id,
+                            target_kind = outcome.target_kind.as_str(),
+                            error_kind,
+                            "ViryaOS wave outcome measurement failed"
+                        );
+                        let _ = self
+                            .repository
+                            .fail_wave_outcome(
+                                self.workspace_id,
+                                outcome.id,
+                                error_kind,
+                                retryable,
+                                OffsetDateTime::now_utc(),
+                            )
+                            .await;
+                    }
+                }
+            }
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS wave outcome claim failed");
             }
         }
 

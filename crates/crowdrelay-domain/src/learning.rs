@@ -266,6 +266,101 @@ pub fn effective_wave_ceiling(max_pitches_per_wave: u32, standing: OutreachKindS
     effective_recipient_ceiling(max_pitches_per_wave, standing)
 }
 
+// ---------------------------------------------------------------------------
+// Wave outcome assessment
+//
+// A wave's effect is simpler than a play's: no metric series, no baseline, no
+// trend. The targets replied or they did not, and what they said is already
+// classified. The assessment turns those classified replies into the same
+// `EffectAssessment` the play learning record consumes.
+// ---------------------------------------------------------------------------
+
+/// The raw counts a wave outcome worker reads from the reply table.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WaveReplyCounts {
+    pub positive: u32,
+    pub declined: u32,
+    pub do_not_contact: u32,
+    pub total: u32,
+}
+
+/// The verdict for one wave: measured (with an assessment) or insufficient.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaveOutcomeVerdict {
+    /// Enough replies to judge the kind. The assessment folds into the record.
+    Measured { assessment: EffectAssessment },
+    /// Not enough replies to judge. Folds into the record as `insufficient` —
+    /// counts neither for nor against, same as a play whose metric could not be
+    /// read.
+    Insufficient { reason: InsufficientReason },
+}
+
+/// Why a wave's outcome could not be measured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsufficientReason {
+    /// No replies at all. Being ignored is a reason to fix the pitch, not to
+    /// retire the kind.
+    NoReplies,
+    /// Too few replies relative to pitches sent. Two replies from thirty
+    /// pitches is noise, not signal.
+    BelowQuorum,
+}
+
+impl InsufficientReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoReplies => "no_replies",
+            Self::BelowQuorum => "below_quorum",
+        }
+    }
+}
+
+/// The minimum fraction of pitches that must reply for the outcome to count.
+/// Below this the verdict is `Insufficient::BelowQuorum`.
+const REPLY_QUORUM_BASIS_POINTS: u32 = 2000; // 20%
+
+/// Assesses a wave's reply counts into a verdict.
+///
+/// Rules:
+/// - Zero replies → `Insufficient::NoReplies`.
+/// - Replies below the quorum (20% of pitches sent) → `Insufficient::BelowQuorum`.
+/// - Otherwise `Measured`: `Improved` if positive replies outnumber
+///   `do_not_contact` by 2:1 or more, `Worsened` if `do_not_contact` outnumbers
+///   positive by 2:1 or more, `Neutral` otherwise.
+///
+/// The 2:1 ratio stops a wave with 3 positive and 2 declined from counting as
+/// improved — that is noise, not signal. A `do_not_contact` is weighted harder
+/// than a decline because it is a request to stop, not a refusal of one pitch.
+#[must_use]
+pub fn assess_wave_outcome(counts: WaveReplyCounts, pitches_sent: u32) -> WaveOutcomeVerdict {
+    if counts.total == 0 {
+        return WaveOutcomeVerdict::Insufficient {
+            reason: InsufficientReason::NoReplies,
+        };
+    }
+    // The quorum is a fraction of pitches sent, not a fixed number. A wave of
+    // 3 needs 1 reply; a wave of 30 needs 6.
+    let quorum = (u64::from(pitches_sent) * u64::from(REPLY_QUORUM_BASIS_POINTS) / 10_000)
+        .min(u64::from(u32::MAX)) as u32;
+    if counts.total < quorum.max(1) {
+        return WaveOutcomeVerdict::Insufficient {
+            reason: InsufficientReason::BelowQuorum,
+        };
+    }
+    // do_not_contact counts double: it is a request to stop, not just a "no".
+    let weighted_negative = u64::from(counts.declined) + u64::from(counts.do_not_contact) * 2;
+    let positive = u64::from(counts.positive);
+    let assessment = if positive >= weighted_negative * 2 && positive > 0 {
+        EffectAssessment::Improved
+    } else if weighted_negative >= positive * 2 && weighted_negative > 0 {
+        EffectAssessment::Worsened
+    } else {
+        EffectAssessment::Neutral
+    };
+    WaveOutcomeVerdict::Measured { assessment }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +510,188 @@ mod tests {
         ] {
             assert_eq!(RetirementReason::parse(reason.as_str()), Some(reason));
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Outreach kind learning — same discipline, keyed on OutreachTargetKind.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn an_outreach_kind_with_no_record_runs_at_full_wave_size() {
+        let standing = assess_play_standing(OutreachKindRecord::default(), policy());
+        assert_eq!(standing.weight_basis_points(), 10_000);
+        assert_eq!(effective_wave_ceiling(50, standing), 50);
+    }
+
+    #[test]
+    fn a_worsened_outreach_kind_record_narrows_the_wave_ceiling() {
+        let record = OutreachKindRecord {
+            improved: 0,
+            neutral: 1,
+            worsened: 4,
+            ..OutreachKindRecord::default()
+        };
+        let standing = assess_play_standing(record, policy());
+        // Below 10_000 but above the floor (2_500).
+        assert!(standing.weight_basis_points() < 10_000);
+        assert!(standing.weight_basis_points() >= 2_500);
+        let ceiling = effective_wave_ceiling(50, standing);
+        assert!(ceiling < 50, "a bad record narrows the wave");
+        assert!(ceiling >= 1, "but never to nothing");
+    }
+
+    #[test]
+    fn a_retired_outreach_kind_reaches_zero_pitches() {
+        let record = OutreachKindRecord {
+            worsened: 3,
+            consecutive_worsened: 3,
+            ..OutreachKindRecord::default()
+        };
+        let standing = assess_play_standing(record, policy());
+        assert!(standing.is_retired());
+        assert_eq!(effective_wave_ceiling(50, standing), 0);
+    }
+
+    #[test]
+    fn an_operator_zero_wave_size_stays_zero_regardless_of_record() {
+        // A configured zero is a deliberate choice, not a floor to override.
+        let standing = PlayStanding::Untested { measured: 0 };
+        assert_eq!(effective_wave_ceiling(0, standing), 0);
+    }
+
+    #[test]
+    fn every_outreach_target_kind_round_trips_through_parse() {
+        for kind in [
+            crate::outreach::OutreachTargetKind::Playlist,
+            crate::outreach::OutreachTargetKind::Radio,
+            crate::outreach::OutreachTargetKind::Press,
+            crate::outreach::OutreachTargetKind::Creator,
+            crate::outreach::OutreachTargetKind::SupportSlot,
+            crate::outreach::OutreachTargetKind::Endorsement,
+            crate::outreach::OutreachTargetKind::MediaPatronage,
+        ] {
+            assert_eq!(
+                crate::outreach::OutreachTargetKind::parse(kind.as_str()),
+                Some(kind)
+            );
+        }
+        assert_eq!(crate::outreach::OutreachTargetKind::all().len(), 7);
+    }
+
+    // ---------------------------------------------------------------------
+    // Wave outcome assessment
+    // ---------------------------------------------------------------------
+
+    fn counts(positive: u32, declined: u32, dnc: u32) -> WaveReplyCounts {
+        WaveReplyCounts {
+            positive,
+            declined,
+            do_not_contact: dnc,
+            total: positive + declined + dnc,
+        }
+    }
+
+    #[test]
+    fn a_wave_with_no_replies_is_insufficient_not_worsened() {
+        let verdict = assess_wave_outcome(counts(0, 0, 0), 10);
+        assert_eq!(
+            verdict,
+            WaveOutcomeVerdict::Insufficient {
+                reason: InsufficientReason::NoReplies
+            }
+        );
+    }
+
+    #[test]
+    fn a_wave_below_quorum_is_insufficient() {
+        // 1 reply from 30 pitches is 3.3% — below the 20% quorum.
+        let verdict = assess_wave_outcome(counts(1, 0, 0), 30);
+        assert_eq!(
+            verdict,
+            WaveOutcomeVerdict::Insufficient {
+                reason: InsufficientReason::BelowQuorum
+            }
+        );
+    }
+
+    #[test]
+    fn a_wave_at_quorum_is_measured() {
+        // 6 replies from 30 pitches is 20% — at the quorum.
+        let verdict = assess_wave_outcome(counts(6, 0, 0), 30);
+        assert!(matches!(verdict, WaveOutcomeVerdict::Measured { .. }));
+    }
+
+    #[test]
+    fn a_wave_with_strong_positive_replies_is_improved() {
+        // 10 positive, 2 declined, 0 dnc: positive outnumbers weighted_negative
+        // (2) by 5:1, which is above 2:1.
+        let verdict = assess_wave_outcome(counts(10, 2, 0), 30);
+        assert_eq!(
+            verdict,
+            WaveOutcomeVerdict::Measured {
+                assessment: EffectAssessment::Improved
+            }
+        );
+    }
+
+    #[test]
+    fn a_wave_with_do_not_contact_replies_is_worsened() {
+        // do_not_contact counts double: 0 positive, 0 declined, 7 dnc = 14
+        // weighted negative, which outnumbers 0 positive by more than 2:1.
+        // 7 replies from 30 pitches = 23%, above the 20% quorum.
+        let verdict = assess_wave_outcome(counts(0, 0, 7), 30);
+        assert_eq!(
+            verdict,
+            WaveOutcomeVerdict::Measured {
+                assessment: EffectAssessment::Worsened
+            }
+        );
+    }
+
+    #[test]
+    fn a_wave_with_balanced_replies_is_neutral() {
+        // 5 positive, 3 declined, 1 dnc: weighted_negative = 3 + 2 = 5.
+        // positive (5) vs weighted_negative (5) is 1:1, not 2:1 either way.
+        let verdict = assess_wave_outcome(counts(5, 3, 1), 30);
+        assert_eq!(
+            verdict,
+            WaveOutcomeVerdict::Measured {
+                assessment: EffectAssessment::Neutral
+            }
+        );
+    }
+
+    #[test]
+    fn do_not_contact_counts_double_against_the_kind() {
+        // 4 positive, 0 declined, 2 dnc: weighted_negative = 0 + 4 = 4.
+        // positive (4) vs weighted_negative (4) is 1:1 — neutral, not improved.
+        // Without the double weight this would be 4:2 = 2:1 = improved.
+        let verdict = assess_wave_outcome(counts(4, 0, 2), 30);
+        assert_eq!(
+            verdict,
+            WaveOutcomeVerdict::Measured {
+                assessment: EffectAssessment::Neutral
+            }
+        );
+    }
+
+    #[test]
+    fn a_small_wave_needs_only_one_reply_to_be_measured() {
+        // 3 pitches, quorum = max(3 * 20 / 100, 1) = max(0, 1) = 1.
+        // 1 reply meets the quorum.
+        let verdict = assess_wave_outcome(counts(1, 0, 0), 3);
+        assert!(matches!(verdict, WaveOutcomeVerdict::Measured { .. }));
+    }
+
+    #[test]
+    fn insufficient_reason_round_trips() {
+        for reason in [
+            InsufficientReason::NoReplies,
+            InsufficientReason::BelowQuorum,
+        ] {
+            assert_eq!(reason.as_str(), reason.as_str());
+        }
+        assert_eq!(InsufficientReason::NoReplies.as_str(), "no_replies");
+        assert_eq!(InsufficientReason::BelowQuorum.as_str(), "below_quorum");
     }
 }

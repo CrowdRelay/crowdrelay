@@ -353,6 +353,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                     do_not_contact = CASE WHEN $4 = 'do_not_contact' THEN true ELSE do_not_contact END,
                     accepts_outreach = CASE WHEN $4 = 'do_not_contact' THEN false ELSE accepts_outreach END,
                     relationship_score = GREATEST(0, LEAST(100, relationship_score + $5)),
+                    contact_verified_at = CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END,
                     version = version + 1
                 WHERE workspace_id = $1 AND id = $2
                 RETURNING version

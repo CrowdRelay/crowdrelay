@@ -21,7 +21,8 @@
     "crates/crowdrelay-worker/src/event_sync.rs": 1823,
     "crates/crowdrelay-worker/src/retention.rs": 1419,
     "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1358,
-    "crates/crowdrelay-domain/src/plays.rs": 1320,
-    "crates/crowdrelay-api/src/routing.rs": 920
+    "crates/crowdrelay-domain/src/plays.rs": 1532,
+    "crates/crowdrelay-api/src/routing.rs": 920,
+    "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs": 1353
   }
 }
