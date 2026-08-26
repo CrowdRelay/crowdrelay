@@ -57,8 +57,10 @@ pub(super) struct BatchInviteResponse {
     pub(super) invitations: Vec<BatchInviteItem>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn mint_invite_batch_tx(
     tx: &mut Transaction<'_, Postgres>,
+    brand: &crowdrelay_infra::tenant_settings::TenantBrandSettings,
     workspace_id: Uuid,
     beacon_ids: &[Uuid],
     ttl_days: i64,
@@ -94,11 +96,6 @@ pub(super) async fn mint_invite_batch_tx(
     })?;
 
     let expires_at = OffsetDateTime::now_utc() + Duration::days(ttl_days);
-    let path = if locale.starts_with("pl") {
-        "pl/latarnik"
-    } else {
-        "latarnik"
-    };
     let mut invitations = Vec::with_capacity(eligible.len());
     let mut invited_ids = Vec::with_capacity(eligible.len());
     for (beacon_id, display_name, contact_email) in eligible {
@@ -134,7 +131,7 @@ pub(super) async fn mint_invite_batch_tx(
         match result {
             Ok(result) if result.rows_affected() == 1 => {
                 invited_ids.push(beacon_id);
-                let invite_url = format!("https://virya.music/{path}?invite={invite_token}");
+                let invite_url = brand.invite_url(locale, &invite_token);
                 let delivery = invite_delivery_copy(locale, &display_name, &invite_url);
                 invitations.push(BatchInviteItem {
                     beacon_id,

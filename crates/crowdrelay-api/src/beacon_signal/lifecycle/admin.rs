@@ -35,8 +35,21 @@ pub async fn create_invite_batch(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
+    let brand = match crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(
+        state.database.clone(),
+    )
+    .brand_settings(workspace_id)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Tenant brand settings lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
     let response = match mint_invite_batch_tx(
         &mut tx,
+        &brand,
         workspace_id,
         &beacon_ids,
         payload.ttl_days,

@@ -40,3 +40,4 @@ pub mod push_preferences;
 pub mod referrals;
 pub mod regional;
 pub mod sensitive_response;
+pub mod tenant_settings;

@@ -436,8 +436,21 @@ pub async fn internal_claim_invite_delivery_job(
     let Some(claim_token) = random_token::<24>() else {
         return BeaconSignalError::Unavailable.response(request_id_value);
     };
+    let brand = match crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(
+        state.database.clone(),
+    )
+    .brand_settings(workspace_id)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Tenant brand settings lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
     let batch = match lifecycle::mint_invite_batch_tx(
         &mut tx,
+        &brand,
         workspace_id,
         &job.0,
         i64::from(job.1),
