@@ -72,6 +72,75 @@ impl SourceKind {
     }
 }
 
+/// External platforms a fanbase connection can link to. The DB CHECK
+/// constraint is the authority; this enum mirrors it for type safety.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Platform {
+    Meta,
+    Tiktok,
+    GoogleAds,
+    Reddit,
+    Bandsintown,
+    Spotify,
+}
+
+impl Platform {
+    pub const ALL: [Platform; 6] = [
+        Platform::Meta,
+        Platform::Tiktok,
+        Platform::GoogleAds,
+        Platform::Reddit,
+        Platform::Bandsintown,
+        Platform::Spotify,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Meta => "meta",
+            Self::Tiktok => "tiktok",
+            Self::GoogleAds => "google_ads",
+            Self::Reddit => "reddit",
+            Self::Bandsintown => "bandsintown",
+            Self::Spotify => "spotify",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|platform| platform.as_str() == value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionStatus {
+    Connected,
+    Expired,
+    Disconnected,
+}
+
+impl ConnectionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Expired => "expired",
+            Self::Disconnected => "disconnected",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "connected" => Some(Self::Connected),
+            "expired" => Some(Self::Expired),
+            "disconnected" => Some(Self::Disconnected),
+            _ => None,
+        }
+    }
+}
+
 /// What admission does with one candidate given the known state of that
 /// address in the workspace. Counters mirror the pilot import so reporting
 /// stays uniform across acquisition surfaces.
@@ -126,6 +195,29 @@ mod tests {
         assert!(SourceKind::GoogleCustomerMatch.oauth_native());
         assert!(!SourceKind::ManualImport.oauth_native());
         assert!(!SourceKind::CsvInline.oauth_native());
+    }
+
+    #[test]
+    fn platform_storage_round_trip_is_total() {
+        for platform in Platform::ALL {
+            assert_eq!(Platform::from_storage(platform.as_str()), Some(platform));
+        }
+        assert_eq!(Platform::from_storage("myspace"), None);
+    }
+
+    #[test]
+    fn connection_status_round_trip_is_total() {
+        for status in [
+            ConnectionStatus::Connected,
+            ConnectionStatus::Expired,
+            ConnectionStatus::Disconnected,
+        ] {
+            assert_eq!(
+                ConnectionStatus::from_storage(status.as_str()),
+                Some(status)
+            );
+        }
+        assert_eq!(ConnectionStatus::from_storage("pending"), None);
     }
 
     #[test]
