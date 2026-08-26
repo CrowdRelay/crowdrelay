@@ -10,6 +10,7 @@ permissions:
   packages: write
   attestations: write
   id-token: write
+  actions: write
 
 concurrency:
   group: publish-images-${{ github.event.workflow_run.head_sha }}
@@ -191,10 +192,27 @@ jobs:
           sha256sum image-digests/images.env > image-digests/images.env.sha256
           cat image-digests/images.env
 
+      - name: Purge stale artifacts before upload
+        # Account-wide Actions storage quota is tight; old dockerbuild
+        # and digest artifacts from previous runs linger until retention
+        # expires. Delete them before uploading the current run's artifact.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t ids < <(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.workflow_run.id != ${GITHUB_RUN_ID}) | .id" 2>/dev/null || true)
+          for id in "${ids[@]}"; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" 2>/dev/null || true
+          done
+          echo "Purged ${#ids[@]} stale artifact(s)"
+
       - name: Upload immutable digest manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: crowdrelay-image-digests-${{ env.IMAGE_SHA }}
           path: image-digests/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7

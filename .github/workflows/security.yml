@@ -30,7 +30,7 @@ jobs:
           name: crowdrelay-sbom-${{ github.sha }}
           path: artifacts/crowdrelay-sbom.cdx.json
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 30
       # Prebuilt release binary instead of compiling cargo-audit from source;
       # the version pin and the action SHA together fix the supply chain.
       - name: Install pinned cargo-audit
