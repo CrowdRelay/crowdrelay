@@ -396,3 +396,140 @@ impl PostgresFanbaseRepository {
         Ok(counts)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fanbase connections — OAuth-linked platform accounts.
+//
+// A connection records that a workspace has authorized access to an external
+// platform account. The credential itself lives outside this database (in
+// n8n's encrypted credential store for Path B); `credential_ref` is the
+// opaque handle the sync layer uses to resolve it at runtime.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ConnectionRow {
+    pub id: Uuid,
+    pub platform: String,
+    pub external_account_ref: String,
+    pub credential_ref: String,
+    pub status: String,
+    pub label: String,
+    pub last_sync_at: Option<time::OffsetDateTime>,
+    pub created_at: time::OffsetDateTime,
+}
+
+impl PostgresFanbaseRepository {
+    pub async fn list_connections(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<ConnectionRow>, FanbaseError> {
+        sqlx::query_as::<_, ConnectionRow>(
+            r#"
+            SELECT id, platform, external_account_ref, credential_ref,
+                   status, label, last_sync_at, created_at
+            FROM fanbase_connections
+            WHERE workspace_id = $1
+            ORDER BY created_at, label
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Self::unexpected)
+    }
+
+    pub async fn create_connection(
+        &self,
+        workspace_id: Uuid,
+        platform: &str,
+        external_account_ref: &str,
+        credential_ref: &str,
+        label: &str,
+    ) -> Result<Uuid, FanbaseError> {
+        let id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status
+            )
+            VALUES ($1, $2, $3, $4, $5, 'connected')
+            ON CONFLICT (workspace_id, platform, external_account_ref) DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(platform)
+        .bind(external_account_ref.trim())
+        .bind(credential_ref.trim())
+        .bind(label.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Self::unexpected)?
+        .ok_or(FanbaseError::NameTaken)?;
+        Ok(id)
+    }
+
+    pub async fn update_connection_status(
+        &self,
+        workspace_id: Uuid,
+        connection_id: Uuid,
+        status: &str,
+    ) -> Result<(), FanbaseError> {
+        let affected = sqlx::query(
+            r#"
+            UPDATE fanbase_connections
+            SET status = $3, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(connection_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        if affected.rows_affected() == 0 {
+            return Err(FanbaseError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn delete_connection(
+        &self,
+        workspace_id: Uuid,
+        connection_id: Uuid,
+    ) -> Result<(), FanbaseError> {
+        let affected = sqlx::query(
+            "DELETE FROM fanbase_connections WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(connection_id)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        if affected.rows_affected() == 0 {
+            return Err(FanbaseError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub async fn touch_connection_sync(
+        &self,
+        workspace_id: Uuid,
+        connection_id: Uuid,
+    ) -> Result<(), FanbaseError> {
+        sqlx::query(
+            r#"
+            UPDATE fanbase_connections
+            SET last_sync_at = now(), updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(connection_id)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        Ok(())
+    }
+}
