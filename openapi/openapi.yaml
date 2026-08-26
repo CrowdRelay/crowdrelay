@@ -5966,6 +5966,17 @@ paths:
           description: The effective value after the write.
         '422':
           $ref: '#/components/responses/Problem'
+  /admin/portfolio/case-study:
+    get:
+      operationId: exportPortfolioCaseStudy
+      summary: Sales-ready roster snapshot (KPIs and amplification edges)
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: One JSON document describing the roster story.
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/portfolio/organization:
     post:
       operationId: createPortfolioOrganization
