@@ -9,277 +9,323 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
     ) -> Result<AutopilotControlOverview, RepositoryError> {
         self.bounded(async {
-            let policies = sqlx::query_as::<_, PolicyRow>(
-                r#"
-                SELECT context, enabled, autonomy_level,
-                       minimum_confidence_basis_points, max_actions_24h, config, version,
-                       guarded_until, guardrail_reason
-                FROM viryaos_autopilot_policies
-                WHERE workspace_id = $1
-                ORDER BY context
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(policy_summary)
-            .collect::<Result<Vec<_>, _>>()?;
+            let workspace_uuid = workspace_id.into_uuid();
 
-            let promotion_budget_guardrails = sqlx::query_as::<_, PromotionBudgetGuardrailRow>(
-                r#"
-                SELECT currency, maximum_total_daily_budget_minor, maximum_monthly_spend_minor, version
-                FROM viryaos_promotion_budget_guardrails
-                WHERE workspace_id = $1
-                ORDER BY currency
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(|row| PromotionBudgetGuardrailSummary {
-                currency: row.currency,
-                maximum_total_daily_budget_minor: row.maximum_total_daily_budget_minor,
-                maximum_monthly_spend_minor: row.maximum_monthly_spend_minor,
-                version: row.version,
-            })
-            .collect();
+            // Eleven independent reads. Running them sequentially made the
+            // read model's tail latency the sum of eleven round trips; the
+            // staff overview is the hottest admin surface. Group them into
+            // four balanced branches so the tail is the slowest branch, not
+            // the sum. Each branch holds one pool connection at a time, so
+            // the concurrent connection count stays at four — well within
+            // the default pool of ten.
+            //
+            // The only data dependency is `needs_you` → `live_capabilities`
+            // (a pure mapping step), so those two stay sequential within
+            // branch C.
+            let (
+                (policies, promotion_budget_guardrails, available_assignees, recent_decisions),
+                (recent_actions, recent_effects),
+                (needs_you_rows, live_capabilities),
+                (stats, release_ledger, rum_metrics_24h),
+            ) = tokio::try_join!(
+                // Branch A: light config + assignee lookups.
+                async {
+                    let policies = sqlx::query_as::<_, PolicyRow>(
+                        r#"
+                        SELECT context, enabled, autonomy_level,
+                               minimum_confidence_basis_points, max_actions_24h, config, version,
+                               guarded_until, guardrail_reason
+                        FROM viryaos_autopilot_policies
+                        WHERE workspace_id = $1
+                        ORDER BY context
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
 
-            let needs_you = sqlx::query_as::<_, PendingActionRow>(
-                r#"
-                SELECT action.id, action.context, action.action_kind, action.subject_kind,
-                       action.subject_id, action.payload, action.created_at,
-                       action.approval_expires_at,
-                       assignment.assignee_member_id,
-                       profile.member_key AS assignee_member_key,
-                       member.display_name AS assignee_display_name,
-                       assignment.due_at AS assignment_due_at
-                FROM viryaos_autopilot_actions action
-                LEFT JOIN viryaos_team_assignments assignment
-                  ON assignment.workspace_id=action.workspace_id
-                 AND assignment.action_id=action.id
-                 AND assignment.status='open'
-                LEFT JOIN viryaos_team_profiles profile
-                  ON profile.workspace_id=assignment.workspace_id
-                 AND profile.member_id=assignment.assignee_member_id
-                LEFT JOIN workspace_members member
-                  ON member.workspace_id=assignment.workspace_id
-                 AND member.id=assignment.assignee_member_id
-                WHERE action.workspace_id = $1
-                  AND action.status = 'awaiting_approval'
-                  AND (action.approval_expires_at IS NULL OR action.approval_expires_at > now())
-                ORDER BY action.created_at, action.id
-                LIMIT 50
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
+                    let promotion_budget_guardrails = sqlx::query_as::<_, PromotionBudgetGuardrailRow>(
+                        r#"
+                        SELECT currency, maximum_total_daily_budget_minor, maximum_monthly_spend_minor, version
+                        FROM viryaos_promotion_budget_guardrails
+                        WHERE workspace_id = $1
+                        ORDER BY currency
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                    .into_iter()
+                    .map(|row| PromotionBudgetGuardrailSummary {
+                        currency: row.currency,
+                        maximum_total_daily_budget_minor: row.maximum_total_daily_budget_minor,
+                        maximum_monthly_spend_minor: row.maximum_monthly_spend_minor,
+                        version: row.version,
+                    })
+                    .collect::<Vec<_>>();
 
-            // Read once for the whole queue rather than per row: the answer is
-            // the same for every action, and asking fifty times would make an
-            // exception screen the most expensive query in the cockpit.
-            let live_capabilities = sqlx::query_scalar::<_, String>(
-                r#"
-                SELECT DISTINCT capability_row.capability
-                FROM viryaos_executor_capabilities capability_row
-                JOIN viryaos_executor_instances executor
-                  ON executor.workspace_id=capability_row.workspace_id
-                 AND executor.executor_id=capability_row.executor_id
-                LEFT JOIN viryaos_executor_circuit_breakers breaker
-                  ON breaker.workspace_id=executor.workspace_id
-                 AND breaker.executor_id=executor.executor_id
-                WHERE capability_row.workspace_id=$1
-                  AND capability_row.expires_at>now()
-                  AND executor.expires_at>now()
-                  AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
+                    let available_assignees = sqlx::query_as::<_, (Uuid, String, String)>(
+                        r#"
+                        SELECT profile.member_id, profile.member_key, member.display_name
+                        FROM viryaos_team_profiles profile
+                        JOIN workspace_members member
+                          ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
+                        WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
+                        ORDER BY member.display_name, profile.member_key
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                    .into_iter()
+                    .map(|(member_id, member_key, display_name)| TeamAssigneeSummary {
+                        member_id,
+                        member_key,
+                        display_name,
+                    })
+                    .collect::<Vec<_>>();
 
-            let needs_you = needs_you
+                    let recent_decisions = sqlx::query_as::<_, RecentDecisionRow>(
+                        r#"
+                        SELECT id, context, decision_kind, confidence_basis_points,
+                               disposition, reason, evaluated_at
+                        FROM viryaos_autopilot_decisions
+                        WHERE workspace_id = $1
+                        ORDER BY evaluated_at DESC, id DESC
+                        LIMIT 50
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                    .into_iter()
+                    .map(recent_decision)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                    Ok::<_, RepositoryError>((
+                        policies,
+                        promotion_budget_guardrails,
+                        available_assignees,
+                        recent_decisions,
+                    ))
+                },
+                // Branch B: heavy recent-activity reads.
+                async {
+                    let recent_actions = sqlx::query_as::<_, RecentActionRow>(
+                        r#"
+                        SELECT action.id, action.context, action.action_kind, action.subject_kind, action.subject_id, action.status,
+                               action.attempt_count, action.created_at, action.finished_at, action.last_error_kind,
+                               latest_report.status AS executor_status,
+                               latest_report.executor_id,
+                               latest_report.provider_reference,
+                               latest_report.occurred_at AS executor_reported_at,
+                               latest_report.metadata AS executor_metadata
+                        FROM viryaos_autopilot_actions action
+                        LEFT JOIN LATERAL (
+                            SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at, report.metadata
+                            FROM viryaos_autopilot_execution_reports report
+                            WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
+                            ORDER BY report.occurred_at DESC, report.id DESC
+                            LIMIT 1
+                        ) latest_report ON true
+                        WHERE action.workspace_id = $1
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 50
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                    .into_iter()
+                    .map(recent_action)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                    let recent_effects = sqlx::query_as::<_, RecentEffectRow>(
+                        r#"
+                        SELECT outcome.measurement_id, outcome.action_id, action.context,
+                               measurement.measurement_kind, outcome.effect_assessment,
+                               outcome.delta_basis_points, outcome.baseline_value,
+                               outcome.observed_value, outcome.observed_at
+                        FROM viryaos_autopilot_outcomes AS outcome
+                        JOIN viryaos_autopilot_measurements AS measurement
+                          ON measurement.workspace_id = outcome.workspace_id
+                         AND measurement.id = outcome.measurement_id
+                        JOIN viryaos_autopilot_actions AS action
+                          ON action.workspace_id = outcome.workspace_id
+                         AND action.id = outcome.action_id
+                        WHERE outcome.workspace_id = $1
+                          AND outcome.measurement_id IS NOT NULL
+                        ORDER BY outcome.observed_at DESC, outcome.id DESC
+                        LIMIT 20
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                    .into_iter()
+                    .map(recent_effect)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                    Ok::<_, RepositoryError>((recent_actions, recent_effects))
+                },
+                // Branch C: pending actions + executor capabilities (sequential
+                // pair — capabilities feed the pending_action mapping).
+                async {
+                    let needs_you_rows = sqlx::query_as::<_, PendingActionRow>(
+                        r#"
+                        SELECT action.id, action.context, action.action_kind, action.subject_kind,
+                               action.subject_id, action.payload, action.created_at,
+                               action.approval_expires_at,
+                               assignment.assignee_member_id,
+                               profile.member_key AS assignee_member_key,
+                               member.display_name AS assignee_display_name,
+                               assignment.due_at AS assignment_due_at
+                        FROM viryaos_autopilot_actions action
+                        LEFT JOIN viryaos_team_assignments assignment
+                          ON assignment.workspace_id=action.workspace_id
+                         AND assignment.action_id=action.id
+                         AND assignment.status='open'
+                        LEFT JOIN viryaos_team_profiles profile
+                          ON profile.workspace_id=assignment.workspace_id
+                         AND profile.member_id=assignment.assignee_member_id
+                        LEFT JOIN workspace_members member
+                          ON member.workspace_id=assignment.workspace_id
+                         AND member.id=assignment.assignee_member_id
+                        WHERE action.workspace_id = $1
+                          AND action.status = 'awaiting_approval'
+                          AND (action.approval_expires_at IS NULL OR action.approval_expires_at > now())
+                        ORDER BY action.created_at, action.id
+                        LIMIT 50
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+
+                    // Read once for the whole queue rather than per row: the answer is
+                    // the same for every action, and asking fifty times would make an
+                    // exception screen the most expensive query in the cockpit.
+                    let live_capabilities = sqlx::query_scalar::<_, String>(
+                        r#"
+                        SELECT DISTINCT capability_row.capability
+                        FROM viryaos_executor_capabilities capability_row
+                        JOIN viryaos_executor_instances executor
+                          ON executor.workspace_id=capability_row.workspace_id
+                         AND executor.executor_id=capability_row.executor_id
+                        LEFT JOIN viryaos_executor_circuit_breakers breaker
+                          ON breaker.workspace_id=executor.workspace_id
+                         AND breaker.executor_id=executor.executor_id
+                        WHERE capability_row.workspace_id=$1
+                          AND capability_row.expires_at>now()
+                          AND executor.expires_at>now()
+                          AND (breaker.guarded_until IS NULL OR breaker.guarded_until<=now())
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+
+                    Ok::<_, RepositoryError>((needs_you_rows, live_capabilities))
+                },
+                // Branch D: aggregate stats + runtime read models.
+                async {
+                    let stats = sqlx::query_as::<_, ControlStatsRow>(
+                        r#"
+                        SELECT
+                            count(*) FILTER (WHERE action.status = 'queued') AS queued_actions,
+                            count(*) FILTER (WHERE action.status = 'processing') AS processing_actions,
+                            count(*) FILTER (
+                                WHERE action.status = 'succeeded'
+                                  AND action.finished_at >= now() - INTERVAL '24 hours'
+                                  AND (
+                                      NOT EXISTS (
+                                          SELECT 1 FROM viryaos_autopilot_action_emissions emission
+                                          WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
+                                      )
+                                      OR EXISTS (
+                                          SELECT 1 FROM viryaos_autopilot_execution_reports report
+                                          WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
+                                            AND report.status='succeeded'
+                                      )
+                                  )
+                            ) AS succeeded_24h,
+                            count(*) FILTER (
+                                WHERE action.status = 'failed'
+                                  AND action.finished_at >= now() - INTERVAL '24 hours'
+                            ) AS failed_24h,
+                            (SELECT count(DISTINCT report.action_id)::bigint
+                             FROM viryaos_autopilot_execution_reports report
+                             WHERE report.workspace_id=$1 AND report.status='succeeded'
+                               AND report.occurred_at >= now() - INTERVAL '24 hours') AS executor_confirmed_24h,
+                            (SELECT count(DISTINCT report.action_id)::bigint
+                             FROM viryaos_autopilot_execution_reports report
+                             WHERE report.workspace_id=$1 AND report.status='failed'
+                               AND report.occurred_at >= now() - INTERVAL '24 hours'
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM viryaos_autopilot_execution_reports success
+                                   WHERE success.workspace_id=report.workspace_id
+                                     AND success.action_id=report.action_id AND success.status='succeeded'
+                               )) AS executor_failed_24h,
+                            (SELECT count(*)::bigint
+                             FROM viryaos_autopilot_action_emissions emission
+                             JOIN viryaos_autopilot_actions emitted_action
+                               ON emitted_action.workspace_id=emission.workspace_id AND emitted_action.id=emission.action_id
+                             WHERE emission.workspace_id=$1 AND emitted_action.status='succeeded'
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM viryaos_autopilot_execution_reports report
+                                   WHERE report.workspace_id=emission.workspace_id AND report.action_id=emission.action_id
+                                     AND report.status IN ('succeeded','failed')
+                               )) AS awaiting_executor
+                        FROM viryaos_autopilot_actions action
+                        WHERE action.workspace_id = $1
+                          AND (
+                              action.status IN ('queued','processing')
+                              OR (action.status IN ('succeeded','failed')
+                                  AND action.finished_at >= now() - INTERVAL '24 hours')
+                          )
+                        "#,
+                    )
+                    .bind(workspace_uuid)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+
+                    let runtime_now = OffsetDateTime::now_utc();
+                    let release_ledger = AutopilotRuntimeRepository::load_release_ledger(
+                        self,
+                        workspace_id,
+                        runtime_now,
+                    )
+                    .await?;
+                    let rum_metrics_24h = AutopilotRuntimeRepository::load_rum_summaries(
+                        self,
+                        workspace_id,
+                        runtime_now,
+                    )
+                    .await?;
+
+                    Ok::<_, RepositoryError>((stats, release_ledger, rum_metrics_24h))
+                }
+            )?;
+
+            // Map raw rows to domain types after all branches complete.
+            let policies = policies
+                .into_iter()
+                .map(policy_summary)
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let needs_you = needs_you_rows
                 .into_iter()
                 .map(|row| pending_action(row, &live_capabilities))
                 .collect::<Result<Vec<_>, _>>()?;
-
-            let available_assignees = sqlx::query_as::<_, (Uuid, String, String)>(
-                r#"
-                SELECT profile.member_id, profile.member_key, member.display_name
-                FROM viryaos_team_profiles profile
-                JOIN workspace_members member
-                  ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
-                WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
-                ORDER BY member.display_name, profile.member_key
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(|(member_id, member_key, display_name)| TeamAssigneeSummary {
-                member_id,
-                member_key,
-                display_name,
-            })
-            .collect::<Vec<_>>();
-
-            let recent_decisions = sqlx::query_as::<_, RecentDecisionRow>(
-                r#"
-                SELECT id, context, decision_kind, confidence_basis_points,
-                       disposition, reason, evaluated_at
-                FROM viryaos_autopilot_decisions
-                WHERE workspace_id = $1
-                ORDER BY evaluated_at DESC, id DESC
-                LIMIT 50
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(recent_decision)
-            .collect::<Result<Vec<_>, _>>()?;
-
-            let recent_actions = sqlx::query_as::<_, RecentActionRow>(
-                r#"
-                SELECT action.id, action.context, action.action_kind, action.subject_kind, action.subject_id, action.status,
-                       action.attempt_count, action.created_at, action.finished_at, action.last_error_kind,
-                       latest_report.status AS executor_status,
-                       latest_report.executor_id,
-                       latest_report.provider_reference,
-                       latest_report.occurred_at AS executor_reported_at,
-                       latest_report.metadata AS executor_metadata
-                FROM viryaos_autopilot_actions action
-                LEFT JOIN LATERAL (
-                    SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at, report.metadata
-                    FROM viryaos_autopilot_execution_reports report
-                    WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
-                    ORDER BY report.occurred_at DESC, report.id DESC
-                    LIMIT 1
-                ) latest_report ON true
-                WHERE action.workspace_id = $1
-                ORDER BY created_at DESC, id DESC
-                LIMIT 50
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(recent_action)
-            .collect::<Result<Vec<_>, _>>()?;
-
-            let recent_effects = sqlx::query_as::<_, RecentEffectRow>(
-                r#"
-                SELECT outcome.measurement_id, outcome.action_id, action.context,
-                       measurement.measurement_kind, outcome.effect_assessment,
-                       outcome.delta_basis_points, outcome.baseline_value,
-                       outcome.observed_value, outcome.observed_at
-                FROM viryaos_autopilot_outcomes AS outcome
-                JOIN viryaos_autopilot_measurements AS measurement
-                  ON measurement.workspace_id = outcome.workspace_id
-                 AND measurement.id = outcome.measurement_id
-                JOIN viryaos_autopilot_actions AS action
-                  ON action.workspace_id = outcome.workspace_id
-                 AND action.id = outcome.action_id
-                WHERE outcome.workspace_id = $1
-                  AND outcome.measurement_id IS NOT NULL
-                ORDER BY outcome.observed_at DESC, outcome.id DESC
-                LIMIT 20
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx)?
-            .into_iter()
-            .map(recent_effect)
-            .collect::<Result<Vec<_>, _>>()?;
-
-            let stats = sqlx::query_as::<_, ControlStatsRow>(
-                r#"
-                SELECT
-                    count(*) FILTER (WHERE action.status = 'queued') AS queued_actions,
-                    count(*) FILTER (WHERE action.status = 'processing') AS processing_actions,
-                    count(*) FILTER (
-                        WHERE action.status = 'succeeded'
-                          AND action.finished_at >= now() - INTERVAL '24 hours'
-                          AND (
-                              NOT EXISTS (
-                                  SELECT 1 FROM viryaos_autopilot_action_emissions emission
-                                  WHERE emission.workspace_id=action.workspace_id AND emission.action_id=action.id
-                              )
-                              OR EXISTS (
-                                  SELECT 1 FROM viryaos_autopilot_execution_reports report
-                                  WHERE report.workspace_id=action.workspace_id AND report.action_id=action.id
-                                    AND report.status='succeeded'
-                              )
-                          )
-                    ) AS succeeded_24h,
-                    count(*) FILTER (
-                        WHERE action.status = 'failed'
-                          AND action.finished_at >= now() - INTERVAL '24 hours'
-                    ) AS failed_24h,
-                    (SELECT count(DISTINCT report.action_id)::bigint
-                     FROM viryaos_autopilot_execution_reports report
-                     WHERE report.workspace_id=$1 AND report.status='succeeded'
-                       AND report.occurred_at >= now() - INTERVAL '24 hours') AS executor_confirmed_24h,
-                    (SELECT count(DISTINCT report.action_id)::bigint
-                     FROM viryaos_autopilot_execution_reports report
-                     WHERE report.workspace_id=$1 AND report.status='failed'
-                       AND report.occurred_at >= now() - INTERVAL '24 hours'
-                       AND NOT EXISTS (
-                           SELECT 1 FROM viryaos_autopilot_execution_reports success
-                           WHERE success.workspace_id=report.workspace_id
-                             AND success.action_id=report.action_id AND success.status='succeeded'
-                       )) AS executor_failed_24h,
-                    (SELECT count(*)::bigint
-                     FROM viryaos_autopilot_action_emissions emission
-                     JOIN viryaos_autopilot_actions emitted_action
-                       ON emitted_action.workspace_id=emission.workspace_id AND emitted_action.id=emission.action_id
-                     WHERE emission.workspace_id=$1 AND emitted_action.status='succeeded'
-                       AND NOT EXISTS (
-                           SELECT 1 FROM viryaos_autopilot_execution_reports report
-                           WHERE report.workspace_id=emission.workspace_id AND report.action_id=emission.action_id
-                             AND report.status IN ('succeeded','failed')
-                       )) AS awaiting_executor
-                FROM viryaos_autopilot_actions action
-                WHERE action.workspace_id = $1
-                  AND (
-                      action.status IN ('queued','processing')
-                      OR (action.status IN ('succeeded','failed')
-                          AND action.finished_at >= now() - INTERVAL '24 hours')
-                  )
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_sqlx)?;
-
-            let runtime_now = OffsetDateTime::now_utc();
-            let release_ledger = AutopilotRuntimeRepository::load_release_ledger(
-                self,
-                workspace_id,
-                runtime_now,
-            )
-            .await?;
-            let rum_metrics_24h = AutopilotRuntimeRepository::load_rum_summaries(
-                self,
-                workspace_id,
-                runtime_now,
-            )
-            .await?;
 
             Ok(AutopilotControlOverview {
                 policies,
