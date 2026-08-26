@@ -119,10 +119,6 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/me/events/{slug}/context",
             get(fan_context::fan_event_context),
         )
-        .route(
-            "/v1/me/synesthesia/link",
-            post(synesthesia::link_completed_run_to_fan),
-        )
         .route("/v1/internal/area/players", post(area::link_player))
         .route(
             "/v1/internal/area/players/{player_id}",
@@ -186,39 +182,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route("/v1/public/cities/requests", post(mobile_fan::request_city))
         .route("/v1/public/events", get(events::list_events))
-        .route("/v1/public/synesthesia/runs", post(synesthesia::start_run))
-        .route(
-            "/v1/public/synesthesia/leaderboard",
-            get(synesthesia::list_leaderboard),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/leaderboard",
-            post(synesthesia::publish_leaderboard),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}",
-            post(synesthesia::record_room),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/complete",
-            post(synesthesia::complete_run),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/recover",
-            post(synesthesia::recover_run),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/context",
-            get(synesthesia::completion_context),
-        )
-        .route(
-            "/v1/public/synesthesia/runs/{run_id}/handoff",
-            post(synesthesia::issue_handoff),
-        )
-        .route(
-            "/v1/public/synesthesia/reward-claims",
-            post(synesthesia::enter_reward_draw),
-        )
+        .merge(synesthesia::gated_public_router(&state))
         .route("/v1/public/merch/catalog", get(commerce::public_catalog))
         .route(
             "/v1/internal/merch/inventory/activation",

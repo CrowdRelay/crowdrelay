@@ -62,6 +62,7 @@ check: fmt lint test
     python3 scripts/test_label_portfolio_v1.py
     python3 scripts/test_tenant_settings_v1.py
     python3 scripts/test_pilot_import_v1.py
+    python3 scripts/test_synesthesia_module_v1.py
     python3 scripts/check-postgres-major.py
     python3 scripts/postgres18_runtime_contract.py
     python3 scripts/area_wallet_authority_v2_contract.py

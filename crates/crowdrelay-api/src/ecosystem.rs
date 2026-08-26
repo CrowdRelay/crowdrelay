@@ -31,12 +31,53 @@ use uuid::Uuid;
 use crate::{IDEMPOTENCY_KEY, Problem, request_id, ticket_qr::encode_ticket_qr};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
+/// Cached module gate: mirrors FLAG_KEYS defaults but treats a MISSING row as
+/// disabled, so an optional module stays dark until explicitly switched on.
+pub(crate) async fn module_gate_enabled(state: &crate::AppState, key: &'static str) -> bool {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    {
+        let cache = flag_cache().read().await;
+        if let Some(cached) = cache.get(&(workspace_id, key))
+            && cached.expires_at > Instant::now()
+        {
+            return cached.enabled;
+        }
+    }
+    let enabled = match sqlx::query_as::<_, (bool,)>(
+        "SELECT enabled FROM ecosystem_feature_flags WHERE workspace_id = $1 AND key = $2",
+    )
+    .bind(workspace_id)
+    .bind(key)
+    .fetch_optional(&state.database)
+    .await
+    {
+        Ok(Some((enabled,))) => enabled,
+        // A missing row means the module was never provisioned here.
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "module gate lookup failed; failing closed");
+            false
+        }
+    };
+    {
+        let mut cache = flag_cache().write().await;
+        cache.insert(
+            (workspace_id, key),
+            CachedFlag {
+                enabled,
+                expires_at: Instant::now() + StdDuration::from_secs(30),
+            },
+        );
+    }
+    enabled
+}
+
 pub(crate) const SHOW_SNAPSHOT_SCHEMA: u32 = 1;
 const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
 const MAX_FLAG_CACHE_ENTRIES: usize = 256;
-const FLAG_KEYS: [(&str, bool); 16] = [
+const FLAG_KEYS: [(&str, bool); 17] = [
     ("ticket_sales_enabled", true),
     ("ticket_delivery_enabled", true),
     ("gate_redemption_enabled", true),
@@ -53,6 +94,10 @@ const FLAG_KEYS: [(&str, bool); 16] = [
     ("reward_campaigns_enabled", false),
     ("merch_inventory_writes_enabled", false),
     ("area_legacy_imports_enabled", true),
+    // Optional per-tenant module. Default OFF so a fresh label workspace does
+    // not expose Virya's album surface; migration 0112 enabled it for every
+    // workspace that existed before gating, which keeps rollout a no-op.
+    ("synesthesia_module", false),
 ];
 
 #[derive(Clone, Copy)]
