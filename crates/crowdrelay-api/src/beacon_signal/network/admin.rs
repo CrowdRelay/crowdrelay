@@ -504,12 +504,19 @@ async fn preview_invites(
     let by_kind = rows
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
-    let path = if locale.starts_with("pl") {
-        "pl/latarnik"
-    } else {
-        "latarnik"
+    let brand = match crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(
+        state.database.clone(),
+    )
+    .brand_settings(state.ticketing.workspace_id().into_uuid())
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Tenant brand settings lookup failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
     };
-    let placeholder_url = format!("https://virya.music/{path}?invite=<jednorazowy-link>");
+    let placeholder_url = brand.invite_url(&locale, "<jednorazowy-link>");
     let delivery = invite_delivery_copy(&locale, "{{displayName}}", &placeholder_url);
     private_json(
         StatusCode::OK,

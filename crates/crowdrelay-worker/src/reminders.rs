@@ -15,7 +15,8 @@ use tokio::{
 use uuid::Uuid;
 
 const DEFAULT_BATCH_SIZE: i64 = 100;
-const RELEASE_MEMBER_URL: &str = "https://virya.music/pl/latarnik/#wydania";
+// The member URL is per-tenant data now (see crowdrelay-infra::tenant_settings);
+// the scheduler resolves it once per pass and threads it into every copy.
 
 /// Periodic scheduler that enqueues event reminder outbox events.
 #[derive(Clone, Debug)]
@@ -170,7 +171,8 @@ impl EventReminderScheduler {
 
         let checklist_emissions = enqueue_due_show_checklists(&mut transaction).await?;
         let activation_emissions =
-            enqueue_due_beacon_release_activations(&mut transaction, self.batch_size).await?;
+            enqueue_due_beacon_release_activations(&self.pool, &mut transaction, self.batch_size)
+                .await?;
 
         transaction
             .commit()
@@ -197,6 +199,7 @@ struct DueBeaconReleaseActivationRow {
 }
 
 async fn enqueue_due_beacon_release_activations(
+    pool: &PgPool,
     transaction: &mut Transaction<'_, Postgres>,
     batch_size: i64,
 ) -> Result<u64, ReminderSchedulerError> {
@@ -296,11 +299,19 @@ async fn enqueue_due_beacon_release_activations(
                 .unwrap_or_default()
                 .trim()
                 .to_owned();
+            // Brand is resolved per owning workspace through the cached port;
+            // repeat calls in one pass hit the 60 s process cache.
+            let brand =
+                crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone())
+                    .brand_settings(row.workspace_id)
+                    .await
+                    .map_err(ReminderSchedulerError::Database)?;
+            let member_url = brand.member_releases_url();
             let copy = beacon_release_activation_copy(
                 &row.locale,
                 &row.display_name,
                 &row.release_title,
-                RELEASE_MEMBER_URL,
+                &member_url,
             );
             payloads.push(json!({
                 "campaign_id": row.campaign_id,
@@ -308,7 +319,7 @@ async fn enqueue_due_beacon_release_activations(
                 "beacon_id": row.beacon_id,
                 "display_name": row.display_name,
                 "contact_email": contact_email,
-                "member_url": RELEASE_MEMBER_URL,
+                "member_url": member_url,
                 "message_kind": "activation_followup",
                 "template": "beacon_physical_release_activation_v1",
                 "subject": copy.subject,
