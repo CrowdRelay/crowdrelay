@@ -830,6 +830,17 @@ pub struct PlayKindStanding {
     pub effective_max_recipients_per_step: u32,
 }
 
+/// One kind of outreach target, its measured record and what that record is
+/// allowed to change about wave sizing for that kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct OutreachKindStanding {
+    pub kind: OutreachTargetKind,
+    pub record: PlayRecord,
+    pub standing: PlayStanding,
+    /// The operator's wave-size ceiling narrowed by the record.
+    pub effective_max_pitches_per_wave: u32,
+}
+
 /// A fact the agent could hang a campaign on, before any play exists for it.
 ///
 /// Read separately from running plays because there is no state machine yet:

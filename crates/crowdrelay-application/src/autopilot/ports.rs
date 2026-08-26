@@ -39,10 +39,10 @@ use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
 
 use super::model::{
     AutopilotPolicy, CandidatePersistence, ClaimedAutopilotAction, ClaimedPlayOutcome,
-    DecisionCandidate, LiveTermsSnapshot, OutreachWaveAnchor, OutreachWaveSnapshot,
-    OutreachWaveStart, OutreachWaveTransition, PlacementSettlement, PlayAnchor, PlayKindStanding,
-    PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
-    PlaylistPlacementSnapshot, TermsSettlement,
+    DecisionCandidate, LiveTermsSnapshot, OutreachKindStanding, OutreachWaveAnchor,
+    OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition, PlacementSettlement,
+    PlayAnchor, PlayKindStanding, PlayOutcomeObservation, PlayRunSnapshot, PlayStart,
+    PlayStepSettlement, PlaylistPlacementSnapshot, TermsSettlement,
 };
 use crate::RepositoryError;
 
@@ -311,6 +311,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         policy: PlayPolicy,
     ) -> Result<Vec<PlayKindStanding>, RepositoryError>;
+
+    /// The outreach kind standings, with the operator's wave-size ceiling.
+    /// Read once per cycle: a standing is a property of the target kind, and
+    /// re-reading it for every wave would be a query per kind for an answer
+    /// that cannot change mid-cycle.
+    async fn load_outreach_kind_standings(
+        &self,
+        workspace_id: WorkspaceId,
+        max_pitches_per_wave: u32,
+    ) -> Result<Vec<OutreachKindStanding>, RepositoryError>;
 
     /// Creates the play and its whole step schedule in one transaction.
     ///

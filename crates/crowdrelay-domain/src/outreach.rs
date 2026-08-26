@@ -24,6 +24,48 @@ pub enum OutreachTargetKind {
     MediaPatronage,
 }
 
+impl OutreachTargetKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Playlist => "playlist",
+            Self::Radio => "radio",
+            Self::Press => "press",
+            Self::Creator => "creator",
+            Self::SupportSlot => "support_slot",
+            Self::Endorsement => "endorsement",
+            Self::MediaPatronage => "media_patronage",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "playlist" => Some(Self::Playlist),
+            "radio" => Some(Self::Radio),
+            "press" => Some(Self::Press),
+            "creator" => Some(Self::Creator),
+            "support_slot" => Some(Self::SupportSlot),
+            "endorsement" => Some(Self::Endorsement),
+            "media_patronage" => Some(Self::MediaPatronage),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 7] {
+        [
+            Self::Playlist,
+            Self::Radio,
+            Self::Press,
+            Self::Creator,
+            Self::SupportSlot,
+            Self::Endorsement,
+            Self::MediaPatronage,
+        ]
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutreachReplyDisposition {

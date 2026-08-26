@@ -876,3 +876,79 @@ impl PostgresAutopilotRepository {
         .await
     }
 }
+
+// ---------------------------------------------------------------------------
+// Outreach kind learning — same discipline, keyed on OutreachTargetKind.
+// ---------------------------------------------------------------------------
+
+#[derive(sqlx::FromRow)]
+struct OutreachKindLearningRow {
+    target_kind: String,
+    improved_count: i32,
+    neutral_count: i32,
+    worsened_count: i32,
+    insufficient_count: i32,
+    consecutive_worsened: i32,
+    retired_reason: Option<String>,
+}
+
+fn outreach_kind_record(row: &OutreachKindLearningRow) -> Result<PlayRecord, RepositoryError> {
+    let count = |value: i32| u32::try_from(value).map_err(|_| RepositoryError::Unexpected);
+    Ok(PlayRecord {
+        improved: count(row.improved_count)?,
+        neutral: count(row.neutral_count)?,
+        worsened: count(row.worsened_count)?,
+        insufficient: count(row.insufficient_count)?,
+        consecutive_worsened: count(row.consecutive_worsened)?,
+        operator_retired: row.retired_reason.as_deref()
+            == Some(RetirementReason::OperatorRetired.as_str()),
+    })
+}
+
+impl PostgresAutopilotRepository {
+    /// All outreach kind standings, with every kind reported even if it has no
+    /// record yet — a kind missing from the read would be a wave with no
+    /// standing, and the caller would have to invent one.
+    pub(super) async fn load_outreach_kind_standings_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        max_pitches_per_wave: u32,
+    ) -> Result<Vec<OutreachKindStanding>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, OutreachKindLearningRow>(
+                r#"
+                SELECT target_kind, improved_count, neutral_count, worsened_count,
+                       insufficient_count, consecutive_worsened, retired_reason
+                FROM viryaos_outreach_kind_learning
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            OutreachTargetKind::all()
+                .into_iter()
+                .map(|kind| {
+                    let record = rows
+                        .iter()
+                        .find(|row| row.target_kind == kind.as_str())
+                        .map(outreach_kind_record)
+                        .transpose()?
+                        .unwrap_or_default();
+                    let standing = assess_play_standing(record, LearningPolicy::default());
+                    Ok(OutreachKindStanding {
+                        kind,
+                        record,
+                        standing,
+                        effective_max_pitches_per_wave: effective_wave_ceiling(
+                            max_pitches_per_wave,
+                            standing,
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .await
+    }
+}

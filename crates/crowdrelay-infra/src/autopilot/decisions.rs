@@ -346,6 +346,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         self.load_play_standings_impl(workspace_id, policy).await
     }
 
+    async fn load_outreach_kind_standings(
+        &self,
+        workspace_id: WorkspaceId,
+        max_pitches_per_wave: u32,
+    ) -> Result<Vec<OutreachKindStanding>, RepositoryError> {
+        self.load_outreach_kind_standings_impl(workspace_id, max_pitches_per_wave)
+            .await
+    }
+
     async fn start_play(
         &self,
         workspace_id: WorkspaceId,
