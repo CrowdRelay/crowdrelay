@@ -657,7 +657,7 @@ async fn request_bandsintown_sync(
     };
     if queued {
         sqlx::query(
-            "INSERT INTO audit_events (workspace_id, actor_kind, action, target_type, target_id, request_id, metadata) VALUES ($1,'staff','event_source.sync_requested','event_source',$2,$3,$4)",
+            "INSERT INTO audit_events (workspace_id, actor_kind, action, target_type, target_id, request_id, metadata) VALUES ($1,'service','event_source.sync_requested','event_source',$2,$3,$4)",
         )
         .bind(workspace_id)
         .bind(source_id.to_string())

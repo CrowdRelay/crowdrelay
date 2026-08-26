@@ -113,6 +113,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/portfolio/amplification/{consent_id}/decide",
             post(crate::portfolio::decide_amplification),
         )
+        .route(
+            "/v1/control-plane/tenant-settings",
+            get(crate::tenant_settings_http::get_brand_settings),
+        )
+        .route(
+            "/v1/control-plane/tenant-settings/{key}",
+            post(crate::tenant_settings_http::upsert_setting),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher

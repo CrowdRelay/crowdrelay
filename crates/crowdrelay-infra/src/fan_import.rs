@@ -209,7 +209,7 @@ impl PostgresFanImportRepository {
             r#"
             INSERT INTO audit_events (
                 workspace_id, actor_kind, action, target_type, target_id, metadata
-            ) VALUES ($1, 'operator', 'fans.imported', 'workspace', $2, $3)
+            ) VALUES ($1, 'service', 'fans.imported', 'workspace', $2, $3)
             "#,
         )
         .bind(workspace_id)

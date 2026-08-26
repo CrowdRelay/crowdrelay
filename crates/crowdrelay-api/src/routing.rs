@@ -531,6 +531,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/proofs/audit-batches",
             post(proofs::admin_create_audit_batch),
         )
+        .route(
+            "/v1/admin/tenant-settings",
+            get(tenant_settings_http::get_brand_settings),
+        )
+        .route(
+            "/v1/admin/tenant-settings/{key}",
+            put(tenant_settings_http::upsert_setting),
+        )
         .route("/v1/admin/signal/overview", get(ops::signal_overview))
         .route("/v1/public/telemetry/rum", post(autopilot::rum))
         .route(

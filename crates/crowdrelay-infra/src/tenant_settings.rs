@@ -24,6 +24,14 @@ pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "https://virya.music";
 pub const DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik";
 pub const DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
 
+/// The keys an operator may edit. Anything else stays internal even if a row
+/// somehow appears, so the HTTP surface cannot be used to smuggle state.
+pub const EDITABLE_KEYS: [&str; 3] = [
+    KEY_MEMBER_SITE_BASE_URL,
+    KEY_MEMBER_AREA_PATH,
+    KEY_SYNESTHESIA_CAMPAIGN_SLUG,
+];
+
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
 const KEY_MEMBER_AREA_PATH: &str = "member_area_path";
 const KEY_SYNESTHESIA_CAMPAIGN_SLUG: &str = "synesthesia_campaign_slug";
@@ -141,6 +149,21 @@ impl TenantSettingsRepository {
             cache.insert(workspace_id, (Instant::now(), Arc::clone(&shared)));
         }
         Ok(shared)
+    }
+
+    /// Raw overrides for the workspace (may be empty). The caller merges them
+    /// over [`TenantBrandSettings::default`] to present effective values plus
+    /// an "is overridden" marker per key.
+    pub async fn list_overrides(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<HashMap<String, String>, sqlx::Error> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM tenant_settings WHERE workspace_id = $1")
+                .bind(workspace_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Upserts one override and drops the workspace's cache entry so the next

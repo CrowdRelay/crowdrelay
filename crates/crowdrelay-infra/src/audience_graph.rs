@@ -19,18 +19,22 @@ pub struct PostgresAudienceGraphRepository {
     pool: PgPool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AudienceGraphError {
+    #[error("place or pipeline not found")]
     NotFound,
     /// The requested stage move is not part of the pipeline.
+    #[error("pipeline move {current:?} -> {target:?} does not exist")]
     InvalidTransition {
         current: OutreachStage,
         target: OutreachStage,
     },
     /// The place's cooldown has not lapsed yet.
+    #[error("place cooldown runs until {next_eligible_at}")]
     CooldownActive {
         next_eligible_at: time::OffsetDateTime,
     },
+    #[error("audience graph database operation failed")]
     Database(sqlx::Error),
 }
 

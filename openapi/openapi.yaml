@@ -5909,6 +5909,63 @@ paths:
                     type: integer
         '401':
           $ref: '#/components/responses/Problem'
+  /admin/tenant-settings:
+    get:
+      operationId: getTenantBrandSettings
+      summary: Effective brand settings merged over shipped defaults
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Settings, the overridden key list and editable keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings:
+                    type: object
+                    additionalProperties:
+                      type: string
+                  overridden:
+                    type: array
+                    items:
+                      type: string
+                  editable_keys:
+                    type: array
+                    items:
+                      type: string
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/tenant-settings/{key}:
+    put:
+      operationId: upsertTenantBrandSetting
+      summary: Upsert one override; invalidates the read cache immediately
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: key
+        required: true
+        schema:
+          type: string
+          enum: [member_site_base_url, member_area_path, synesthesia_campaign_slug]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  type: string
+                  maxLength: 512
+      responses:
+        '200':
+          description: The effective value after the write.
+        '422':
+          $ref: '#/components/responses/Problem'
   /admin/portfolio/organization:
     post:
       operationId: createPortfolioOrganization
