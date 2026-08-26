@@ -499,14 +499,13 @@ impl PostgresFanbaseRepository {
         workspace_id: Uuid,
         connection_id: Uuid,
     ) -> Result<(), FanbaseError> {
-        let affected = sqlx::query(
-            "DELETE FROM fanbase_connections WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace_id)
-        .bind(connection_id)
-        .execute(&self.pool)
-        .await
-        .map_err(Self::unexpected)?;
+        let affected =
+            sqlx::query("DELETE FROM fanbase_connections WHERE workspace_id = $1 AND id = $2")
+                .bind(workspace_id)
+                .bind(connection_id)
+                .execute(&self.pool)
+                .await
+                .map_err(Self::unexpected)?;
         if affected.rows_affected() == 0 {
             return Err(FanbaseError::NotFound);
         }
