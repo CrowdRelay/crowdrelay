@@ -30,6 +30,7 @@ pub mod config;
 pub mod database;
 pub mod ecosystem;
 pub mod events;
+pub mod fan_import;
 pub mod fan_lifecycle;
 pub mod fan_privacy;
 pub mod mobile_fan;
