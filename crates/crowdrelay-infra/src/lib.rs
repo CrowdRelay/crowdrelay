@@ -33,6 +33,7 @@ pub mod events;
 pub mod fan_import;
 pub mod fan_lifecycle;
 pub mod fan_privacy;
+pub mod fanbase;
 pub mod mobile_fan;
 pub mod observability;
 pub mod portfolio;

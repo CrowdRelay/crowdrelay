@@ -71,6 +71,7 @@ mod events;
 mod fan_context;
 mod fan_lifecycle;
 mod fan_privacy;
+mod fanbase;
 mod http_metrics;
 mod meta;
 mod mobile_fan;

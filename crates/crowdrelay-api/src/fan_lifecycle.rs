@@ -22,8 +22,8 @@ use crate::{Problem, X_REQUEST_ID, request_id};
 const FAN_SESSION_COOKIE: &str = "crowdrelay_fan";
 const FAN_SESSION_COOKIE_MAX_AGE_SECONDS: u32 = 90 * 24 * 60 * 60;
 const PRIVATE_NO_STORE: &str = "private, no-store";
-const ACCESS_RESEND_COOLDOWN_SECONDS: i64 = 60;
-const ACCESS_TOKEN_TTL_DAYS: i64 = 2;
+pub(crate) const ACCESS_RESEND_COOLDOWN_SECONDS: i64 = 60;
+pub(crate) const ACCESS_TOKEN_TTL_DAYS: i64 = 2;
 
 /// Dependencies for fan confirmation and unsubscribe routes.
 #[derive(Clone)]
