@@ -204,6 +204,7 @@ impl PostgresAutopilotRepository {
                 "record_autopilot_playlist_placement",
                 "outreach_opportunity",
                 command.opportunity_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &json!({

@@ -54,9 +54,9 @@ impl AutopilotBookingStateRepository for PostgresAutopilotRepository {
             let inserted_operation = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 INSERT INTO operator_actions (
-                    id, workspace_id, action, target_type, target_id,
+                    id, workspace_id, action, target_type, target_id, actor_type,
                     idempotency_key, request_id, details
-                ) VALUES ($1,$2,'upsert_autopilot_booking_target','booking_target',$3,$4,$5,$6)
+                ) VALUES ($1,$2,'upsert_autopilot_booking_target','booking_target',$3,'executor',$4,$5,$6)
                 ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
                 RETURNING id
                 "#,
@@ -222,6 +222,7 @@ impl AutopilotMerchStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_merch_product_economics",
                 "merch_product",
                 command.product_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -365,6 +366,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_promotion_budget_guardrail",
                 "promotion_budget_guardrail",
                 workspace_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -507,6 +509,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_promotion_state",
                 "promotion_campaign",
                 campaign_id,
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -660,6 +663,7 @@ impl AutopilotMarketStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_city_market_signal",
                 "city_market_signal",
                 signal_id,
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -759,6 +763,7 @@ impl AutopilotTicketStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_ticket_allocation_guardrail",
                 "ticket_type",
                 command.ticket_type_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,

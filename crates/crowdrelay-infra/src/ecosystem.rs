@@ -439,9 +439,9 @@ async fn append_action(
     sqlx::query(
         r#"
         INSERT INTO operator_actions (
-            workspace_id, action, target_type, target_id,
+            workspace_id, action, target_type, target_id, actor_type,
             idempotency_key, request_id, details
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ) VALUES ($1, $2, $3, $4, 'admin_api_key', $5, $6, $7)
         "#,
     )
     .bind(workspace_id)

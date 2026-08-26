@@ -195,5 +195,6 @@ fn anchor_subject(anchor: PlayAnchorRef) -> ActionSubject {
     match anchor {
         PlayAnchorRef::Event { event_id } => ActionSubject::Event(event_id),
         PlayAnchorRef::Fan { fan_id } => ActionSubject::Fan(fan_id),
+        PlayAnchorRef::Release { release_plan_id } => ActionSubject::ReleasePlan(release_plan_id),
     }
 }

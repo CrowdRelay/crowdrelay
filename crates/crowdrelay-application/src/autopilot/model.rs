@@ -844,6 +844,7 @@ pub struct PlayKindStanding {
 pub enum PlayAnchorRef {
     Event { event_id: EventId },
     Fan { fan_id: FanId },
+    Release { release_plan_id: ReleasePlanId },
 }
 
 impl PlayAnchorRef {
@@ -852,6 +853,7 @@ impl PlayAnchorRef {
         match self {
             Self::Event { .. } => PlayAnchorKind::Event,
             Self::Fan { .. } => PlayAnchorKind::Fan,
+            Self::Release { .. } => PlayAnchorKind::Release,
         }
     }
 
@@ -860,6 +862,7 @@ impl PlayAnchorRef {
         match self {
             Self::Event { event_id } => event_id.into_uuid(),
             Self::Fan { fan_id } => fan_id.into_uuid(),
+            Self::Release { release_plan_id } => release_plan_id.into_uuid(),
         }
     }
 
@@ -868,7 +871,7 @@ impl PlayAnchorRef {
     pub const fn event_id(self) -> Option<EventId> {
         match self {
             Self::Event { event_id } => Some(event_id),
-            Self::Fan { .. } => None,
+            Self::Fan { .. } | Self::Release { .. } => None,
         }
     }
 }

@@ -238,6 +238,34 @@ pub fn effective_recipient_ceiling(max_recipients_per_step: u32, standing: PlayS
         .max(1)
 }
 
+// ---------------------------------------------------------------------------
+// Outreach kind learning
+//
+// The same discipline as play learning, applied to outreach target kinds.
+// A wave of playlist pitches that measures `worsened` three times running is
+// proposed less, and eventually retires itself. The weight scales one number
+// — how many pitches a wave of this kind may carry — and only downward.
+// ---------------------------------------------------------------------------
+
+/// The record one kind of outreach target has accumulated. Identical in shape
+/// to [`PlayRecord`] because the discipline is the same: counts not a score,
+/// `insufficient` carried but never counted, and a run of `worsened` that
+/// resets on any measured result that is not.
+pub type OutreachKindRecord = PlayRecord;
+
+/// The standing of one kind of outreach target. Same shape as [`PlayStanding`]
+/// for the same reasons.
+pub type OutreachKindStanding = PlayStanding;
+
+/// How many pitches a wave of this kind may carry, given its standing.
+///
+/// The only thing a record is allowed to change. It scales the operator's own
+/// wave-size ceiling downward and can never raise it.
+#[must_use]
+pub fn effective_wave_ceiling(max_pitches_per_wave: u32, standing: OutreachKindStanding) -> u32 {
+    effective_recipient_ceiling(max_pitches_per_wave, standing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

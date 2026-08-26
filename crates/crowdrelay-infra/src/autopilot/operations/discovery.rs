@@ -201,6 +201,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                 // identical across a replay, or the idempotency check reads a
                 // retry as a different operation and refuses it.
                 workspace_id.into_uuid(),
+                "executor",
                 idempotency_key,
                 request_id,
                 &json!({}),
@@ -405,6 +406,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                 "confirm_autopilot_outreach_candidate",
                 "outreach_candidate",
                 candidate_id,
+                "executor",
                 idempotency_key,
                 request_id,
                 &json!({ "candidate_id": candidate_id }),
@@ -547,6 +549,7 @@ impl AutopilotTargetDiscoveryRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_submission_channel",
                 "outreach_submission_channel",
                 workspace_id.into_uuid(),
+                "executor",
                 idempotency_key,
                 request_id,
                 &details,
