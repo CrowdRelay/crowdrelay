@@ -5,13 +5,15 @@
 //! not collect shipping data and does not alter the existing fan mail flow.
 
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL},
     },
+    middleware,
     response::{IntoResponse, Response},
+    routing::{get as axum_get, post as axum_post},
 };
 use crowdrelay_domain::NormalizedEmail;
 use getrandom::fill as fill_random;
@@ -173,6 +175,54 @@ impl SynesthesiaError {
         tracing::warn!(%error, "synesthesia persistence failed");
         Self::Unavailable
     }
+}
+
+/// The fan-facing synesthesia surface behind the module gate. Admin routes and
+/// fan privacy actions stay outside this layer on purpose: operators must be
+/// able to configure (and data rights to erase) regardless of module state.
+pub(crate) fn gated_public_router(state: &crate::AppState) -> Router<crate::AppState> {
+    Router::new()
+        .route("/v1/public/synesthesia/runs", axum_post(start_run))
+        .route(
+            "/v1/public/synesthesia/leaderboard",
+            axum_get(list_leaderboard),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/leaderboard",
+            axum_post(publish_leaderboard),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/rooms/{room_id}",
+            axum_post(record_room),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/complete",
+            axum_post(complete_run),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/recover",
+            axum_post(recover_run),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/context",
+            axum_get(completion_context),
+        )
+        .route(
+            "/v1/public/synesthesia/runs/{run_id}/handoff",
+            axum_post(issue_handoff),
+        )
+        .route(
+            "/v1/public/synesthesia/reward-claims",
+            axum_post(enter_reward_draw),
+        )
+        .route(
+            "/v1/me/synesthesia/link",
+            axum_post(link_completed_run_to_fan),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::synesthesia_gate::require_synesthesia_module,
+        ))
 }
 
 include!("synesthesia/run_lifecycle.rs");

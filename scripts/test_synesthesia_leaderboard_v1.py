@@ -48,7 +48,12 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("DROP INDEX IF EXISTS synesthesia_runs_leaderboard_fan_best_idx", migration)
 
     def test_routes_openapi_and_meta_ship_together(self):
-        routes = (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
+        # The public synesthesia routes moved behind the module gate inside
+        # the synesthesia module; search both mount points.
+        routes = (
+            (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
+            + (ROOT / "crates/crowdrelay-api/src/synesthesia.rs").read_text()
+        )
         spec = (ROOT / "openapi/openapi.yaml").read_text()
         meta = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
         self.assertIn('"/v1/public/synesthesia/leaderboard"', routes)

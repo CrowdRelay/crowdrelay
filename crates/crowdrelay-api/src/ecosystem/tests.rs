@@ -70,7 +70,10 @@ fn email_masking_never_exposes_the_local_part() {
 
 #[test]
 fn all_expected_feature_flags_have_safe_defaults() {
-    assert_eq!(FLAG_KEYS.len(), 16);
+    assert_eq!(FLAG_KEYS.len(), 17);
+    // The optional synesthesia module is the one deliberately-dark default:
+    // a fresh tenant does not expose Virya's album surface until enabled.
+    assert_eq!(flag_default("synesthesia_module"), Some(false));
     assert_eq!(flag_default("ticket_sales_enabled"), Some(true));
     assert_eq!(flag_default("unknown"), None);
 }

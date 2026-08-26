@@ -88,6 +88,7 @@ mod security;
 pub use rate_limit::{RateLimitPolicy, RateLimiter};
 mod staff_sessions;
 mod synesthesia;
+mod synesthesia_gate;
 pub mod tenant;
 mod ticket_qr;
 mod ticketing;
