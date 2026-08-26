@@ -171,7 +171,6 @@ impl PostgresFanbaseRepository {
         let mut tx = self.pool.begin().await.map_err(Self::unexpected)?;
         Self::assert_fanbase(&mut tx, workspace_id, fanbase_id).await?;
 
-        eprintln!("ingest enter");
         let run_id = match sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO fanbase_ingestions (workspace_id, fanbase_id, status)
@@ -189,7 +188,6 @@ impl PostgresFanbaseRepository {
             Err(e) => return Err(FanbaseError::Database(e)),
         };
 
-        eprintln!("ledger created");
         let mut counts = IngestionCounts {
             received: entries.len() as u32,
             ..Default::default()
@@ -211,7 +209,6 @@ impl PostgresFanbaseRepository {
                 continue;
             };
 
-            eprintln!("entry {}", entry.external_id);
             let existing = sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT status FROM fans
@@ -248,7 +245,6 @@ impl PostgresFanbaseRepository {
                 AdmissionAction::ResendPending => counts.confirmation_resent += 1,
             }
 
-            eprintln!("fan_id fetch");
             let fan_id = sqlx::query_scalar::<_, Uuid>(
                 "SELECT id FROM fans WHERE workspace_id = $1 AND normalized_email = $2",
             )
