@@ -37,7 +37,7 @@ use axum::{
     },
     middleware::{Next, from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use crowdrelay_infra::{
     area_admin::PostgresAreaAdminRepository, autopilot::PostgresAutopilotRepository, database,
@@ -90,6 +90,7 @@ mod staff_sessions;
 mod synesthesia;
 mod synesthesia_gate;
 pub mod tenant;
+mod tenant_settings_http;
 mod ticket_qr;
 mod ticketing;
 

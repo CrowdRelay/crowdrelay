@@ -16,15 +16,20 @@ pub struct PostgresPortfolioRepository {
     pool: PgPool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PortfolioError {
+    #[error("resource not found")]
     NotFound,
     /// The requested lifecycle move does not exist for the edge's state.
+    #[error("decision does not apply to the current state")]
     InvalidDecision,
     /// The monthly campaign cap for this edge is already spent.
+    #[error("monthly campaign cap reached for this edge")]
     CapReached,
     /// Both workspaces must belong to the same organization.
+    #[error("workspaces are not in the same organization")]
     NotInSameOrganization,
+    #[error("label portfolio repository failed unexpectedly")]
     Database(sqlx::Error),
 }
 
@@ -325,6 +330,12 @@ impl PostgresPortfolioRepository {
                   ON fan.workspace_id = edge.from_workspace_id
                  AND fan.status = 'active'
                 WHERE NOT EXISTS (
+                    SELECT 1 FROM amplification_deliveries AS prior
+                    WHERE prior.consent_id = edge.id
+                      AND prior.fan_id = fan.id
+                      AND prior.campaign_reference = $3
+                )
+                AND NOT EXISTS (
                     SELECT 1 FROM amplification_deliveries AS prior
                     WHERE prior.consent_id = edge.id
                       AND prior.fan_id = fan.id
