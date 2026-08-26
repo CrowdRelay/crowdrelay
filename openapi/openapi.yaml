@@ -5853,6 +5853,62 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/portfolio/import-fans:
+    post:
+      operationId: importPortfolioFans
+      summary: Bulk-import an existing mailing list as pending fans with double-opt-in emails
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, entries]
+              properties:
+                source:
+                  type: string
+                  maxLength: 200
+                  description: Provenance label stored in the audit event.
+                entries:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [email]
+                    properties:
+                      email:
+                        type: string
+                        maxLength: 320
+                      displayName:
+                        type: string
+                        maxLength: 160
+                      locale:
+                        type: string
+      responses:
+        '200':
+          description: Per-outcome counters; suppressed addresses are never resurrected.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported_pending:
+                    type: integer
+                  confirmation_resent:
+                    type: integer
+                  already_active:
+                    type: integer
+                  skipped_suppressed:
+                    type: integer
+                  cooldown_skipped:
+                    type: integer
+                  invalid:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Problem'
   /admin/portfolio/organization:
     post:
       operationId: createPortfolioOrganization

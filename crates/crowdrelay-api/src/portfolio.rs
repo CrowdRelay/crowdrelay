@@ -398,4 +398,8 @@ pub(super) fn admin_routes() -> Router<crate::AppState> {
             "/v1/admin/portfolio/amplification/{consent_id}/campaign",
             post(run_campaign),
         )
+        .route(
+            "/v1/admin/portfolio/import-fans",
+            post(crate::fan_lifecycle::import_fans_admin),
+        )
 }
