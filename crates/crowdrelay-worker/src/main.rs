@@ -27,6 +27,7 @@ use crowdrelay_worker::{
     audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
+    discovery::{DiscoveryConfig, RedditDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     operator_brief::OperatorBriefWorker,
@@ -48,6 +49,8 @@ use uuid::Uuid;
 
 const DATABASE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OPS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Reddit public search tolerates slow, sparse polling.
+const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// The brief itself is once a day; this is only how often the rule is asked
 /// whether a day has passed. Cheap, and it means a restart cannot push the
 /// brief a whole cycle late.
@@ -314,6 +317,21 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         AUDIENCE_GRAPH_SWEEP_INTERVAL,
         config.database.operation_timeout,
     );
+    // Discovery sweeps stay dark until an operator configures queries; the
+    // adapter then runs on the same polite cadence as every other worker.
+    let discovery_config = DiscoveryConfig::from_env();
+    let reddit_discovery = if discovery_config.enabled() {
+        Some(RedditDiscoveryWorker::new(
+            database.clone(),
+            workspace_id,
+            discovery_config,
+            DISCOVERY_SWEEP_INTERVAL,
+            config.database.operation_timeout,
+        )?)
+    } else {
+        tracing::info!("reddit discovery disabled; CROWDRELAY_DISCOVERY_REDDIT_QUERIES not set");
+        None
+    };
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
@@ -324,6 +342,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
     let operator_brief_shutdown = shutdown_receiver.clone();
+    let discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
@@ -379,6 +398,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         audience_graph_sweeper.run(audience_graph_shutdown).await;
         "audience graph sweeper"
     });
+    if let Some(worker) = reddit_discovery {
+        runtime_tasks.spawn(async move {
+            worker.run(discovery_shutdown).await;
+            "reddit discovery"
+        });
+    }
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
     checks.set_missed_tick_behavior(MissedTickBehavior::Skip);
