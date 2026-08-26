@@ -572,8 +572,9 @@ impl PlayStepKind {
             // own links, reaching nobody outside the workspace.
             Self::ReleasePresaveLive => ActionClass::FirstPartyReversible,
             // The audience announce and release-day push go to consented fans.
-            Self::ReleaseAudienceAnnounce | Self::ReleaseDayPush
-                | Self::ReleaseSustainAsk => ActionClass::OwnedAudience,
+            Self::ReleaseAudienceAnnounce | Self::ReleaseDayPush | Self::ReleaseSustainAsk => {
+                ActionClass::OwnedAudience
+            }
             // A curator wave is third-party outreach: free, but it contacts
             // people outside the workspace and is therefore approval-gated at
             // the current posture.
@@ -600,9 +601,9 @@ impl PlayStepKind {
             // surface, and the curator wave is a trigger that queues a separate
             // outreach wave rather than contacting curators directly from the
             // play step.
-            Self::ListingSweep
-            | Self::ReleasePresaveLive
-            | Self::ReleaseCuratorWave => StepAudience::None,
+            Self::ListingSweep | Self::ReleasePresaveLive | Self::ReleaseCuratorWave => {
+                StepAudience::None
+            }
         }
     }
 }
