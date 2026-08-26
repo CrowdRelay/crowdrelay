@@ -9,6 +9,8 @@
         /v1/control-plane/portfolio/overview \
         /v1/control-plane/portfolio/amplification \
         /v1/control-plane/portfolio/amplification/* \
+        /v1/control-plane/tenant-settings \
+        /v1/control-plane/tenant-settings/* \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
