@@ -98,6 +98,21 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/decisions/{decision_id}/handled-externally",
             post(crate::autopilot::mark_decision_handled_externally),
         )
+        // Label portfolio: roster KPIs and the consent-edge decisions. Same
+        // handlers as the admin surface, so the control plane grows no
+        // authority path of its own.
+        .route(
+            "/v1/control-plane/portfolio/overview",
+            get(crate::portfolio::portfolio_overview),
+        )
+        .route(
+            "/v1/control-plane/portfolio/amplification",
+            get(crate::portfolio::list_amplification),
+        )
+        .route(
+            "/v1/control-plane/portfolio/amplification/{consent_id}/decide",
+            post(crate::portfolio::decide_amplification),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher
