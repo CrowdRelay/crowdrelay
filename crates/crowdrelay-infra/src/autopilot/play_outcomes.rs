@@ -677,6 +677,53 @@ impl AutopilotPlayOutcomeRepository for PostgresAutopilotRepository {
     }
 }
 
+#[async_trait]
+impl AutopilotWaveOutcomeRepository for PostgresAutopilotRepository {
+    async fn claim_due_wave_outcomes(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedWaveOutcome>, RepositoryError> {
+        self.claim_due_wave_outcomes_impl(workspace_id, limit, now)
+            .await
+    }
+
+    async fn observe_wave_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedWaveOutcome,
+        now: OffsetDateTime,
+    ) -> Result<WaveOutcomeObservation, RepositoryError> {
+        self.observe_wave_outcome_impl(workspace_id, outcome, now)
+            .await
+    }
+
+    async fn complete_wave_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedWaveOutcome,
+        observation: &WaveOutcomeObservation,
+        verdict: WaveOutcomeVerdict,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.complete_wave_outcome_impl(workspace_id, outcome, observation, verdict, now)
+            .await
+    }
+
+    async fn fail_wave_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_id: Uuid,
+        error_kind: &'static str,
+        retryable: bool,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.fail_wave_outcome_impl(workspace_id, outcome_id, error_kind, retryable, now)
+            .await
+    }
+}
+
 /// Folds one play's measured verdict into the record for its kind.
 ///
 /// `None` is an outcome nobody could measure. It is counted so the record is
@@ -951,4 +998,356 @@ impl PostgresAutopilotRepository {
         })
         .await
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave outcome settlement — same lifecycle as play outcomes, simpler
+// observation: count replies by disposition, assess, fold into the per-kind
+// learning record.
+// ---------------------------------------------------------------------------
+
+/// How long after a wave is approved before its outcome becomes due. Matches
+/// the reply horizon the growth-debt detector uses for stale interactions: a
+/// reply that has not arrived in three weeks is not coming.
+const WAVE_OUTCOME_WINDOW_DAYS: i64 = 21;
+
+/// Creates a pending wave outcome row when a wave is approved. Called from the
+/// wave approval path so the outcome is scheduled in the same transaction that
+/// releases the pitches — a crash between the two would lose the outcome, not
+/// the pitches, and a wave without an outcome is a wave that never learns.
+pub(super) async fn create_wave_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    wave_id: Uuid,
+    target_kind: &str,
+    pitches_sent: u32,
+    approved_at: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let window_end = approved_at + time::Duration::days(WAVE_OUTCOME_WINDOW_DAYS);
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_outreach_wave_outcomes (
+            workspace_id, wave_id, target_kind,
+            window_start, window_end, pitches_sent,
+            available_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $5)
+        ON CONFLICT (workspace_id, wave_id) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(wave_id)
+    .bind(target_kind)
+    .bind(approved_at)
+    .bind(window_end)
+    .bind(i32::try_from(pitches_sent).unwrap_or(i32::MAX))
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct WaveOutcomeRow {
+    id: Uuid,
+    wave_id: Uuid,
+    target_kind: String,
+    pitches_sent: i32,
+    window_start: OffsetDateTime,
+    window_end: OffsetDateTime,
+    attempt_count: i32,
+}
+
+impl PostgresAutopilotRepository {
+    pub(super) async fn claim_due_wave_outcomes_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedWaveOutcome>, RepositoryError> {
+        self.bounded(async {
+            let rows = sqlx::query_as::<_, WaveOutcomeRow>(
+                r#"
+                WITH due AS (
+                    SELECT outcome.id
+                    FROM viryaos_outreach_wave_outcomes AS outcome
+                    WHERE outcome.workspace_id = $1
+                      AND outcome.status = 'pending'
+                      AND outcome.window_end <= $2
+                    ORDER BY outcome.available_at
+                    LIMIT $3
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE viryaos_outreach_wave_outcomes AS outcome
+                SET status = 'processing',
+                    attempt_count = outcome.attempt_count + 1,
+                    started_at = $2
+                FROM due
+                WHERE outcome.workspace_id = $1 AND outcome.id = due.id
+                RETURNING
+                    outcome.id, outcome.wave_id, outcome.target_kind,
+                    outcome.pitches_sent, outcome.window_start, outcome.window_end,
+                    outcome.attempt_count
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            rows.into_iter()
+                .map(|row| {
+                    Ok(ClaimedWaveOutcome {
+                        id: row.id,
+                        wave_id: row.wave_id,
+                        target_kind: OutreachTargetKind::parse(&row.target_kind)
+                            .ok_or(RepositoryError::Unexpected)?,
+                        pitches_sent: u32::try_from(row.pitches_sent)
+                            .map_err(|_| RepositoryError::Unexpected)?,
+                        window_start: row.window_start,
+                        window_end: row.window_end,
+                        attempt_number: u32::try_from(row.attempt_count)
+                            .map_err(|_| RepositoryError::Unexpected)?,
+                    })
+                })
+                .collect()
+        })
+        .await
+    }
+
+    pub(super) async fn observe_wave_outcome_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedWaveOutcome,
+        now: OffsetDateTime,
+    ) -> Result<WaveOutcomeObservation, RepositoryError> {
+        self.bounded(async {
+            // Count replies by disposition for the wave's targets in the
+            // window. A reply outside the window is a late reply to a
+            // different wave's pitch, not this one's evidence.
+            let row = sqlx::query_as::<_, WaveReplyRow>(
+                r#"
+                SELECT
+                    count(*) FILTER (WHERE interaction.disposition = 'positive')::bigint AS positive,
+                    count(*) FILTER (WHERE interaction.disposition = 'declined')::bigint AS declined,
+                    count(*) FILTER (WHERE interaction.disposition = 'do_not_contact')::bigint AS do_not_contact,
+                    count(*)::bigint AS total
+                FROM viryaos_outreach_interactions AS interaction
+                WHERE interaction.workspace_id = $1
+                  AND interaction.direction = 'inbound'
+                  AND interaction.occurred_at >= $2
+                  AND interaction.occurred_at <= $3
+                  AND interaction.target_id IN (
+                      SELECT (payload->>'target_id')::uuid
+                      FROM viryaos_autopilot_actions AS action
+                      WHERE action.workspace_id = $1
+                        AND action.context = 'outreach'
+                        AND action.payload->>'wave_id' = $4::text
+                  )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(outcome.window_start)
+            .bind(outcome.window_end)
+            .bind(outcome.wave_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(WaveOutcomeObservation {
+                positive_replies: u32::try_from(row.positive).unwrap_or(0),
+                declined_replies: u32::try_from(row.declined).unwrap_or(0),
+                do_not_contact_replies: u32::try_from(row.do_not_contact).unwrap_or(0),
+                total_replies: u32::try_from(row.total).unwrap_or(0),
+                observed_at: now,
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn complete_wave_outcome_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedWaveOutcome,
+        observation: &WaveOutcomeObservation,
+        verdict: WaveOutcomeVerdict,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(async {
+            let (evidence, assessment) = match verdict {
+                WaveOutcomeVerdict::Measured { assessment } => {
+                    ("measured", Some(effect_assessment_str(assessment)))
+                }
+                WaveOutcomeVerdict::Insufficient { .. } => ("insufficient", None),
+            };
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let updated = sqlx::query(
+                r#"
+                UPDATE viryaos_outreach_wave_outcomes
+                SET status = 'succeeded',
+                    finished_at = $3,
+                    observed_at = $4,
+                    positive_replies = $5,
+                    declined_replies = $6,
+                    do_not_contact_replies = $7,
+                    total_replies = $8,
+                    evidence = $9,
+                    effect_assessment = $10,
+                    last_error_kind = NULL
+                WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(outcome.id)
+            .bind(now)
+            .bind(observation.observed_at)
+            .bind(i32::try_from(observation.positive_replies).unwrap_or(i32::MAX))
+            .bind(i32::try_from(observation.declined_replies).unwrap_or(i32::MAX))
+            .bind(i32::try_from(observation.do_not_contact_replies).unwrap_or(i32::MAX))
+            .bind(i32::try_from(observation.total_replies).unwrap_or(i32::MAX))
+            .bind(evidence)
+            .bind(assessment)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if updated.rows_affected() != 1 {
+                return Err(RepositoryError::Conflict);
+            }
+            // Fold the verdict into the per-kind learning record, in the same
+            // transaction. Two writes would let a crash leave a wave scored
+            // and unlearned from.
+            record_outreach_kind_outcome(
+                &mut transaction,
+                workspace_id,
+                outcome.target_kind,
+                match verdict {
+                    WaveOutcomeVerdict::Measured { assessment } => Some(assessment),
+                    WaveOutcomeVerdict::Insufficient { .. } => None,
+                },
+            )
+            .await?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(super) async fn fail_wave_outcome_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_id: Uuid,
+        error_kind: &'static str,
+        retryable: bool,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(async {
+            sqlx::query(
+                r#"
+                UPDATE viryaos_outreach_wave_outcomes
+                SET status = CASE WHEN $4 THEN 'pending' ELSE 'failed' END,
+                    last_error_kind = $3,
+                    last_error_retryable = $4,
+                    finished_at = CASE WHEN $4 THEN NULL ELSE $5 END
+                WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(outcome_id)
+            .bind(error_kind)
+            .bind(retryable)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct WaveReplyRow {
+    positive: i64,
+    declined: i64,
+    do_not_contact: i64,
+    total: i64,
+}
+
+/// Folds one wave's outcome into the per-kind learning record.
+///
+/// Same discipline as `record_play_outcome`: counts not a score, a record that
+/// may only narrow, retirement is a stated fact. The weight scales one number —
+/// how many pitches a wave of this kind may carry — and only downward.
+async fn record_outreach_kind_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    kind: OutreachTargetKind,
+    assessment: Option<EffectAssessment>,
+) -> Result<(), RepositoryError> {
+    let existing = sqlx::query_as::<_, OutreachKindLearningRow>(
+        r#"
+        SELECT target_kind, improved_count, neutral_count, worsened_count,
+               insufficient_count, consecutive_worsened, retired_reason
+        FROM viryaos_outreach_kind_learning
+        WHERE workspace_id = $1 AND target_kind = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(kind.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let record = existing
+        .as_ref()
+        .map(outreach_kind_record)
+        .transpose()?
+        .unwrap_or_default()
+        .observe(assessment);
+
+    let standing = assess_play_standing(record, LearningPolicy::default());
+    let (retired_reason, weight) = match standing {
+        PlayStanding::Retired { reason } => (Some(reason.as_str()), 0_i32),
+        PlayStanding::Untested { .. } | PlayStanding::Weighted { .. } => {
+            (None, i32::from(standing.weight_basis_points()))
+        }
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_outreach_kind_learning (
+            workspace_id, target_kind, improved_count, neutral_count, worsened_count,
+            insufficient_count, consecutive_worsened, weight_basis_points,
+            retired_at, retired_reason
+        )
+        VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,
+            CASE WHEN $9::text IS NULL THEN NULL ELSE now() END, $9
+        )
+        ON CONFLICT (workspace_id, target_kind) DO UPDATE SET
+            improved_count = EXCLUDED.improved_count,
+            neutral_count = EXCLUDED.neutral_count,
+            worsened_count = EXCLUDED.worsened_count,
+            insufficient_count = EXCLUDED.insufficient_count,
+            consecutive_worsened = EXCLUDED.consecutive_worsened,
+            weight_basis_points = EXCLUDED.weight_basis_points,
+            retired_at = CASE
+                WHEN EXCLUDED.retired_reason IS NULL THEN NULL
+                ELSE COALESCE(viryaos_outreach_kind_learning.retired_at, now())
+            END,
+            retired_reason = EXCLUDED.retired_reason
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(kind.as_str())
+    .bind(i32::try_from(record.improved).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.neutral).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.worsened).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.insufficient).unwrap_or(i32::MAX))
+    .bind(i32::try_from(record.consecutive_worsened).unwrap_or(i32::MAX))
+    .bind(weight)
+    .bind(retired_reason)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }

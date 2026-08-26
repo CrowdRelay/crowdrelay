@@ -128,7 +128,7 @@ pub(in crate::autopilot) async fn record_outreach_sent(
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let followup = matches!(phase, crowdrelay_domain::outreach::OutreachPhase::FollowUp);
-    sqlx::query("UPDATE viryaos_outreach_targets SET last_outreach_at=$3,followup_count=CASE WHEN $4 THEN followup_count+1 ELSE 0 END WHERE workspace_id=$1 AND id=$2")
+    sqlx::query("UPDATE viryaos_outreach_targets SET last_outreach_at=$3,followup_count=CASE WHEN $4 THEN followup_count+1 ELSE 0 END,contact_verified_at=CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $3 THEN $3 ELSE contact_verified_at END WHERE workspace_id=$1 AND id=$2")
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(now).bind(followup).execute(&mut **tx).await.map_err(map_sqlx)?;
     sqlx::query(r#"INSERT INTO viryaos_outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,$3,'outbound',$4,$5,$6) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(opportunity_id.into_uuid()).bind(outreach_phase_str(phase)).bind(format!("autopilot:{}",action_id)).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;

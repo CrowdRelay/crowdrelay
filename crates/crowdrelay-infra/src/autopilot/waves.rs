@@ -375,11 +375,11 @@ impl PostgresAutopilotRepository {
             // Only a sealed wave. A drafting one is still growing, and
             // approving something that grows afterwards is approving something
             // nobody read.
-            let sealed = sqlx::query_scalar::<_, Uuid>(
+            let sealed = sqlx::query_as::<_, WaveApprovalRow>(
                 "UPDATE viryaos_outreach_waves \
                  SET state='approved', settled_at=$3 \
                  WHERE workspace_id=$1 AND id=$2 AND state='sealed' \
-                 RETURNING id",
+                 RETURNING target_kind",
             )
             .bind(workspace_id.into_uuid())
             .bind(wave_id)
@@ -387,9 +387,9 @@ impl PostgresAutopilotRepository {
             .fetch_optional(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
-            if sealed.is_none() {
+            let Some(sealed) = sealed else {
                 return Err(RepositoryError::Conflict);
-            }
+            };
             let released = sqlx::query(
                 "UPDATE viryaos_autopilot_actions \
                  SET status='queued', approved_at=$3, approved_by='operator:admin_api_key' \
@@ -404,11 +404,30 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            let pitches_sent = u32::try_from(released.rows_affected()).unwrap_or(u32::MAX);
+            // Schedule the wave's outcome settlement. The window closes 21 days
+            // after approval — a reply that has not arrived by then is not
+            // coming. ON CONFLICT DO NOTHING: a re-approval after a crash would
+            // otherwise schedule the same wave twice.
+            super::play_outcomes::create_wave_outcome(
+                &mut transaction,
+                workspace_id,
+                wave_id,
+                &sealed.target_kind,
+                pitches_sent,
+                now,
+            )
+            .await?;
             transaction.commit().await.map_err(map_sqlx)?;
-            Ok(u32::try_from(released.rows_affected()).unwrap_or(u32::MAX))
+            Ok(pitches_sent)
         })
         .await
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct WaveApprovalRow {
+    target_kind: String,
 }
 
 fn parse_wave_anchor(kind: &str, anchor_id: Uuid) -> Result<WaveAnchor, RepositoryError> {

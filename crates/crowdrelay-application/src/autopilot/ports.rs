@@ -15,10 +15,11 @@ use crowdrelay_domain::{
     growth_debt::GrowthDebtObservation,
     growth_envelope::{EnvelopeUsage, GrowthEnvelope},
     growth_metrics::GrowthMetricSnapshot,
+    learning::{WaveOutcomeVerdict, WaveReplyCounts, assess_wave_outcome},
     live_opportunities::LiveOpportunitySnapshot,
     merch_bundle::MerchBundleSnapshot,
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
-    outreach::OutreachSnapshot,
+    outreach::{OutreachSnapshot, OutreachTargetKind},
     performance::{EffectDirection, EffectResult, assess_effect},
     play_measurement::{
         PlayMeasurementPolicy, PlayOutcomeInput, PlayOutcomeVerdict, assess_play_outcome,
@@ -472,12 +473,101 @@ pub trait AutopilotPlayOutcomeRepository: Send + Sync {
     ) -> Result<(), RepositoryError>;
 }
 
-/// Turns one observation into the verdict that will be stored.
+/// A wave outcome that is due for settlement.
+#[derive(Clone, Debug)]
+pub struct ClaimedWaveOutcome {
+    pub id: uuid::Uuid,
+    pub wave_id: uuid::Uuid,
+    pub target_kind: OutreachTargetKind,
+    pub pitches_sent: u32,
+    pub window_start: OffsetDateTime,
+    pub window_end: OffsetDateTime,
+    pub attempt_number: u32,
+}
+
+/// The reply counts read from the interaction table for one wave.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WaveOutcomeObservation {
+    pub positive_replies: u32,
+    pub declined_replies: u32,
+    pub do_not_contact_replies: u32,
+    pub total_replies: u32,
+    pub observed_at: OffsetDateTime,
+}
+
+/// Settling what a wave did, one wave at a time.
+///
+/// Kept apart from [`AutopilotPlayOutcomeRepository`] because a wave measures
+/// replies directly — no metric series, no baseline, no trend — and confusing
+/// the two would make a wave read a play's series or vice versa.
+#[async_trait]
+pub trait AutopilotWaveOutcomeRepository: Send + Sync {
+    /// Claims due wave outcomes for settlement. Same `FOR UPDATE SKIP LOCKED`
+    /// pattern as play outcomes: two workers never settle the same wave.
+    async fn claim_due_wave_outcomes(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedWaveOutcome>, RepositoryError>;
+
+    /// Reads the reply counts for the wave's targets in the window. Never
+    /// writes, and never fills a gap: a wave with no replies is `NoReplies`,
+    /// not zero-against-a-baseline.
+    async fn observe_wave_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedWaveOutcome,
+        now: OffsetDateTime,
+    ) -> Result<WaveOutcomeObservation, RepositoryError>;
+
+    /// Completes the outcome and folds the verdict into the per-kind learning
+    /// record, in one transaction.
+    async fn complete_wave_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &ClaimedWaveOutcome,
+        observation: &WaveOutcomeObservation,
+        verdict: WaveOutcomeVerdict,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    async fn fail_wave_outcome(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_id: uuid::Uuid,
+        error_kind: &'static str,
+        retryable: bool,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+}
+
+/// Turns one wave observation into the verdict that will be stored.
 ///
 /// A free function rather than a method so the rule stays testable without a
 /// database, and so the worker cannot reach a different answer than the one the
 /// domain would give.
 #[must_use]
+pub fn assess_wave_claim(
+    outcome: &ClaimedWaveOutcome,
+    observation: &WaveOutcomeObservation,
+) -> WaveOutcomeVerdict {
+    assess_wave_outcome(
+        WaveReplyCounts {
+            positive: observation.positive_replies,
+            declined: observation.declined_replies,
+            do_not_contact: observation.do_not_contact_replies,
+            total: observation.total_replies,
+        },
+        outcome.pitches_sent,
+    )
+}
+
+/// Turns one play's observation into the verdict that will be stored.
+///
+/// A free function rather than a method so the rule stays testable without a
+/// database, and so the worker cannot reach a different answer than the one the
+/// domain would give.
 pub fn assess_play_claim(
     outcome: &ClaimedPlayOutcome,
     observation: &PlayOutcomeObservation,

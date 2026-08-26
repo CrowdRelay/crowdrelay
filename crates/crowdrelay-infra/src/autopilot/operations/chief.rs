@@ -33,6 +33,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
                     ELSE accepts_booking
                 END,
                 relationship_score = GREATEST(0, LEAST(100, relationship_score + $4)),
+                contact_verified_at = CASE WHEN contact_verified_at IS NULL OR contact_verified_at < $5 THEN $5 ELSE contact_verified_at END,
                 version = version + 1
             WHERE workspace_id = $1 AND id = $2
             RETURNING version
@@ -42,6 +43,7 @@ pub(in crate::autopilot) async fn record_booking_reply(
         .bind(command.target_id.into_uuid())
         .bind(disposition)
         .bind(relationship_delta)
+        .bind(command.occurred_at)
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx)?

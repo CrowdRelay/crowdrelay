@@ -1317,4 +1317,216 @@ mod tests {
         );
         assert!(post_due > anchor(), "the thanks follows the show");
     }
+
+    #[test]
+    fn the_release_runway_has_five_steps_across_six_weeks() {
+        let steps = PlayKind::ReleaseRunway.steps();
+        assert_eq!(steps.len(), 5);
+        // The first step is four weeks before release, the last is two weeks
+        // after. A runway shorter than this does not give curators lead time;
+        // one longer spreads the asks too thin to compound.
+        assert_eq!(steps[0].offset_hours, -28 * 24);
+        assert_eq!(steps[4].offset_hours, 14 * 24);
+        // Every step is in order and no two share a due time.
+        for window in steps.windows(2) {
+            assert!(
+                window[0].offset_hours < window[1].offset_hours,
+                "steps are ordered by offset"
+            );
+        }
+    }
+
+    #[test]
+    fn the_release_runway_is_anchored_on_a_release() {
+        assert_eq!(
+            PlayKind::ReleaseRunway.anchor_kind(),
+            PlayAnchorKind::Release
+        );
+    }
+
+    #[test]
+    fn the_runway_has_one_third_party_step_and_four_owned_or_first_party() {
+        let steps = PlayKind::ReleaseRunway.steps();
+        let third_party = steps
+            .iter()
+            .filter(|s| s.class == ActionClass::ThirdParty)
+            .count();
+        assert_eq!(third_party, 1, "exactly one curator wave");
+        assert_eq!(
+            steps[2].kind,
+            PlayStepKind::ReleaseCuratorWave,
+            "the curator wave is the third step"
+        );
+        // The rest are first-party or owned audience.
+        for spec in steps
+            .iter()
+            .filter(|s| s.kind != PlayStepKind::ReleaseCuratorWave)
+        {
+            assert!(
+                spec.class == ActionClass::OwnedAudience
+                    || spec.class == ActionClass::FirstPartyReversible,
+                "non-curator steps are owned or first-party"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_save_and_curator_wave_reach_nobody() {
+        // Pre-save is work on the band's own surface. The curator wave queues
+        // a separate outreach wave rather than contacting curators directly.
+        // Both are StepAudience::None, so they run once for their anchor and
+        // are never skipped for want of fans.
+        for spec in PlayKind::ReleaseRunway.steps() {
+            match spec.kind {
+                PlayStepKind::ReleasePresaveLive | PlayStepKind::ReleaseCuratorWave => {
+                    assert_eq!(spec.kind.audience(), StepAudience::None);
+                }
+                _ => {
+                    assert_eq!(spec.kind.audience(), StepAudience::Fans);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_runway_starts_when_there_is_enough_lead_for_the_pre_save() {
+        // The pre-save is 28 days out, so a release closer than the minimum
+        // lead cannot run it. The minimum lead is the operator's floor; the
+        // play's own floor is the first step that would close before it opens.
+        let policy = PlayPolicy::default();
+        // 30 days out: enough lead for the pre-save at -28d with the default
+        // 7-day minimum lead.
+        assert!(play_is_worth_starting(
+            PlayKind::ReleaseRunway,
+            true,
+            30 * 24,
+            policy
+        ));
+        // 3 days out: the minimum lead (168h = 7d) refuses it because the
+        // pre-save step at -28d would be scheduled into the past. This is
+        // correct: a runway without its pre-save is not a runway.
+        assert!(!play_is_worth_starting(
+            PlayKind::ReleaseRunway,
+            true,
+            3 * 24,
+            policy
+        ));
+        // 8 days out: past the minimum lead, and the release-day push (T+0,
+        // 72h window) and sustain ask (T+14d, 7d window) still have open
+        // windows. The pre-release steps have closed, but the play still has
+        // work to do — so it is worth starting.
+        assert!(play_is_worth_starting(
+            PlayKind::ReleaseRunway,
+            true,
+            8 * 24,
+            policy
+        ));
+        // An inactive release plan is never a reason to start.
+        assert!(!play_is_worth_starting(
+            PlayKind::ReleaseRunway,
+            false,
+            30 * 24,
+            policy
+        ));
+    }
+
+    #[test]
+    fn the_runway_is_judged_on_spotify_followers() {
+        // Spotify followers are the number a release runway is supposed to
+        // move. The measurement layer reports this as correlational, which is
+        // what it is.
+        assert_eq!(
+            PlayKind::ReleaseRunway.success_metric(),
+            ("spotify", "followers")
+        );
+    }
+
+    #[test]
+    fn a_pre_save_step_runs_once_without_needing_an_audience() {
+        // Like the listing sweep, a pre-save step reaches nobody and must not
+        // be skipped for want of fans. It runs once and then holds.
+        let spec = PlayKind::ReleaseRunway.steps()[0];
+        assert_eq!(spec.kind, PlayStepKind::ReleasePresaveLive);
+        let (due_at, expires_at) = step_schedule(spec, anchor());
+        let mut snapshot = PlaySnapshot {
+            play_id: PlayId::new(),
+            kind: PlayKind::ReleaseRunway,
+            anchor_at: anchor(),
+            anchor_active: true,
+            steps: vec![PlayStepState {
+                index: 0,
+                kind: spec.kind,
+                class: spec.class,
+                due_at,
+                expires_at,
+                settled: false,
+                recipients_emitted: 0,
+            }],
+            eligible_recipients: 0,
+        };
+        let due = due_at + Duration::hours(1);
+        assert!(matches!(
+            evaluate_play(&snapshot, PlayPolicy::default(), due),
+            PlayDecision::RunStep {
+                kind: PlayStepKind::ReleasePresaveLive,
+                class: ActionClass::FirstPartyReversible,
+                ..
+            }
+        ));
+        // Once is enough: a second pre-save check is noise.
+        if let Some(step) = snapshot.steps.first_mut() {
+            step.recipients_emitted = 1;
+        }
+        assert_eq!(
+            evaluate_play(&snapshot, PlayPolicy::default(), due),
+            PlayDecision::Hold(PlayHold::StepSaturated)
+        );
+    }
+
+    #[test]
+    fn the_runway_announce_step_reaches_consented_fans() {
+        // The audience announce is the first owned-audience step. It behaves
+        // like any fan-reaching step: it runs when there are eligible fans and
+        // holds when there are none.
+        let spec = PlayKind::ReleaseRunway.steps()[1];
+        assert_eq!(spec.kind, PlayStepKind::ReleaseAudienceAnnounce);
+        let (due_at, expires_at) = step_schedule(spec, anchor());
+        let snapshot = PlaySnapshot {
+            play_id: PlayId::new(),
+            kind: PlayKind::ReleaseRunway,
+            anchor_at: anchor(),
+            anchor_active: true,
+            steps: vec![PlayStepState {
+                index: 1,
+                kind: spec.kind,
+                class: spec.class,
+                due_at,
+                expires_at,
+                settled: false,
+                recipients_emitted: 0,
+            }],
+            eligible_recipients: 30,
+        };
+        let due = due_at + Duration::hours(1);
+        assert!(matches!(
+            evaluate_play(&snapshot, PlayPolicy::default(), due),
+            PlayDecision::RunStep {
+                kind: PlayStepKind::ReleaseAudienceAnnounce,
+                class: ActionClass::OwnedAudience,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_sustain_ask_is_the_last_rung_and_follows_the_release() {
+        let steps = PlayKind::ReleaseRunway.steps();
+        let last = steps.last().expect("the runway has steps");
+        assert_eq!(last.kind, PlayStepKind::ReleaseSustainAsk);
+        let (due, _) = step_schedule(*last, anchor());
+        assert!(
+            due > anchor(),
+            "the sustain ask follows the release, not before it"
+        );
+    }
 }
