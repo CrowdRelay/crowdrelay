@@ -133,6 +133,7 @@ impl PostgresAutopilotRepository {
                 "record_autopilot_delivery_fault",
                 "outreach_target",
                 target_id.into_uuid(),
+                "executor",
                 idempotency_key,
                 request_id,
                 &json!({

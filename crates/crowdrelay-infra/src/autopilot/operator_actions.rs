@@ -15,6 +15,7 @@ pub(super) async fn insert_operator_action(
     action: &'static str,
     target_type: &'static str,
     target_id: Uuid,
+    actor_type: &str,
     idempotency_key: &IdempotencyKey,
     request_id: Option<&RequestId>,
     details: &Value,
@@ -22,9 +23,9 @@ pub(super) async fn insert_operator_action(
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO operator_actions (
-            id, workspace_id, action, target_type, target_id,
+            id, workspace_id, action, target_type, target_id, actor_type,
             idempotency_key, request_id, details
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
         RETURNING id
         "#,
@@ -34,6 +35,7 @@ pub(super) async fn insert_operator_action(
     .bind(action)
     .bind(target_type)
     .bind(target_id)
+    .bind(actor_type)
     .bind(idempotency_key.as_str())
     .bind(request_id.map(RequestId::as_str))
     .bind(details)

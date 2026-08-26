@@ -64,7 +64,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             });
             if let Some(existing) = super::insert_operator_action(
                 &mut tx, workspace_id, operation_id, "upsert_autopilot_outreach_target",
-                "outreach_target", target_id.into_uuid(), idempotency_key, request_id, &details,
+                "outreach_target", target_id.into_uuid(), "admin_api_key", idempotency_key, request_id, &details,
             ).await? {
                 tx.commit().await.map_err(map_sqlx)?;
                 return Ok(OutreachTargetMutation {
@@ -197,6 +197,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_outreach_opportunity",
                 "outreach_opportunity",
                 opportunity_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -301,6 +302,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 "record_autopilot_outreach_reply",
                 "outreach_target",
                 command.target_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -496,6 +498,7 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_content_source",
                 "content_source",
                 source_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -654,6 +657,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
                 "create_autopilot_experiment",
                 "experiment",
                 experiment_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -742,6 +746,7 @@ impl AutopilotExperimentStateRepository for PostgresAutopilotRepository {
                 "record_autopilot_experiment_observation",
                 "experiment",
                 command.experiment_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,

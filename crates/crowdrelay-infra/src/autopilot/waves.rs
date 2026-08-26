@@ -328,6 +328,7 @@ impl PostgresAutopilotRepository {
             "approve_autopilot_outreach_wave",
             "outreach_wave",
             wave_id,
+            "admin_api_key",
             idempotency_key,
             request_id,
             &json!({"requested_status": "approved"}),

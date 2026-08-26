@@ -234,6 +234,54 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
               AND plan.active
               AND plan.release_at > $2
               AND (plan.listen_url IS NULL OR NOT plan.assets_ready)
+        ),
+        stale_contacts AS (
+            -- Contact routes that have not been verified within the policy
+            -- window. `contact_verified_at` is set only by a reply, a
+            -- successful send, or an operator's explicit verification — never
+            -- by an edit — so its age is the truest signal of whether the
+            -- route still works. NULL means never verified, which reads as
+            -- stale from `created_at`.
+            SELECT
+                'stale_contact_data' AS debt_kind,
+                'outreach_target' AS subject_kind,
+                target.id AS subject_id,
+                GREATEST(
+                    0,
+                    FLOOR(EXTRACT(EPOCH FROM (
+                        $2 - COALESCE(target.contact_verified_at, target.created_at)
+                    )) / 3600)
+                )::bigint AS idle_hours,
+                1::bigint AS outstanding_items,
+                1::bigint AS tracked_items,
+                target.relationship_score,
+                NULL::bigint AS hours_until_deadline
+            FROM viryaos_outreach_targets AS target
+            WHERE target.workspace_id = $1
+              AND target.active
+              AND target.accepts_outreach
+              AND NOT target.do_not_contact
+
+            UNION ALL
+
+            SELECT
+                'stale_contact_data',
+                'booking_target',
+                target.id,
+                GREATEST(
+                    0,
+                    FLOOR(EXTRACT(EPOCH FROM (
+                        $2 - COALESCE(target.contact_verified_at, target.created_at)
+                    )) / 3600)
+                )::bigint,
+                1::bigint,
+                1::bigint,
+                target.relationship_score,
+                NULL::bigint
+            FROM viryaos_booking_targets AS target
+            WHERE target.workspace_id = $1
+              AND target.active
+              AND target.accepts_booking
         )
         SELECT * FROM quiet_relationships
         UNION ALL
@@ -242,6 +290,8 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         SELECT * FROM missed_milestones
         UNION ALL
         SELECT * FROM missing_assets
+        UNION ALL
+        SELECT * FROM stale_contacts
         ORDER BY idle_hours DESC, subject_id
         LIMIT $4
         "#,

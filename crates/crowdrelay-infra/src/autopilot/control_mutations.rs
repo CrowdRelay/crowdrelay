@@ -27,6 +27,7 @@ impl PostgresAutopilotRepository {
                 operator_action,
                 "autopilot_action",
                 action_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &details,
@@ -184,6 +185,7 @@ impl PostgresAutopilotRepository {
                 "handle_autopilot_decision_externally",
                 "autopilot_decision",
                 decision_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &json!({"decision_id": decision_id, "outcome": "handled_by_human"}),
@@ -275,6 +277,7 @@ impl PostgresAutopilotRepository {
                 "set_growth_autonomy_posture",
                 "growth_posture",
                 workspace_id.into_uuid(),
+                "admin_api_key",
                 idempotency_key,
                 request_id,
                 &json!({

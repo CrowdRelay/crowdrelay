@@ -244,6 +244,34 @@ ORDER BY fan.id
 LIMIT $4
 "#;
 
+/// Active release plans with no release runway play yet.
+///
+/// A release is the anchor when it is ahead and active. The anchor moment is
+/// `release_at`, so steps schedule relative to the release date: pre-save
+/// four weeks before, announce two weeks before, curator wave one week
+/// before, release-day push at zero, sustain ask two weeks after.
+const PLAY_RELEASE_ANCHORS_SQL: &str = r#"
+SELECT
+    plan.id AS anchor_id,
+    plan.release_at AS anchor_at,
+    plan.active AS active,
+    FLOOR(EXTRACT(EPOCH FROM (plan.release_at - $3)) / 3600)::bigint AS hours_until
+FROM viryaos_release_plans AS plan
+WHERE plan.workspace_id = $1
+  AND plan.active
+  AND plan.release_at > $3
+  AND NOT EXISTS (
+      SELECT 1
+      FROM viryaos_plays AS play
+      WHERE play.workspace_id = plan.workspace_id
+        AND play.play_kind = $2
+        AND play.anchor_kind = 'release'
+        AND play.anchor_id = plan.id
+  )
+ORDER BY plan.release_at
+LIMIT $4
+"#;
+
 /// The statement that finds anchors for one play, and whether it reads the
 /// follow-ask link slug.
 ///
@@ -258,6 +286,7 @@ const fn anchor_statement(kind: PlayKind) -> (&'static str, bool) {
         }
         PlayKind::FollowAskLadder => (PLAY_FAN_ANCHORS_SQL, true),
         PlayKind::DormantRevival => (PLAY_DORMANT_ANCHORS_SQL, false),
+        PlayKind::ReleaseRunway => (PLAY_RELEASE_ANCHORS_SQL, false),
     }
 }
 
@@ -387,6 +416,56 @@ eligible AS (
 )
 SELECT fan_id, count(*) OVER ()::bigint AS remaining
 FROM eligible
+LIMIT 1
+"#;
+
+/// The audience of a release-anchored play: every consented fan, because a
+/// release is the one thing the whole list should hear about.
+///
+/// Unlike a fan-anchored play (one person) or an event-anchored play (fans
+/// near one show), a release has no geographic or per-fan filter. The only
+/// gate is consent and the step's own eligibility — the same action-ledger
+/// check that stops any other play re-offering the same fan.
+const PLAY_RELEASE_AUDIENCE_SQL: &str = r#"
+WITH open_step AS (
+    SELECT step.id, step.step_index
+    FROM viryaos_play_steps AS step
+    WHERE step.workspace_id = $1
+      AND step.play_id = $2
+      AND step.settled_at IS NULL
+    ORDER BY step.step_index
+    LIMIT 1
+),
+eligible AS (
+    SELECT fan.id AS fan_id
+    FROM open_step
+    CROSS JOIN fans AS fan
+    JOIN LATERAL (
+        SELECT consent.granted
+        FROM fan_consents AS consent
+        WHERE consent.workspace_id = fan.workspace_id
+          AND consent.fan_id = fan.id
+          AND consent.purpose = 'marketing'
+        ORDER BY consent.recorded_at DESC, consent.id DESC
+        LIMIT 1
+    ) AS latest_consent ON latest_consent.granted
+    WHERE fan.workspace_id = $1
+      AND fan.status = 'active'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM viryaos_autopilot_actions AS action
+          WHERE action.workspace_id = fan.workspace_id
+            AND action.context = 'plays'
+            AND action.action_kind = 'play.step.run'
+            AND action.status <> 'cancelled'
+            AND action.subject_id = fan.id
+            AND action.payload->>'play_id' = $2::text
+            AND (action.payload->>'step_index')::integer = open_step.step_index
+      )
+)
+SELECT fan_id, count(*) OVER ()::bigint AS remaining
+FROM eligible
+ORDER BY fan_id
 LIMIT 1
 "#;
 
@@ -681,6 +760,7 @@ impl PostgresAutopilotRepository {
         let row = sqlx::query_as::<_, PlayAudienceRow>(match anchor_kind {
             PlayAnchorKind::Event => PLAY_AUDIENCE_SQL,
             PlayAnchorKind::Fan => PLAY_FAN_AUDIENCE_SQL,
+            PlayAnchorKind::Release => PLAY_RELEASE_AUDIENCE_SQL,
         })
         .bind(workspace_id.into_uuid())
         .bind(play_id)
@@ -775,6 +855,9 @@ pub(super) fn anchor_ref(kind: PlayAnchorKind, anchor_id: Uuid) -> PlayAnchorRef
         },
         PlayAnchorKind::Fan => PlayAnchorRef::Fan {
             fan_id: FanId::from_uuid(anchor_id),
+        },
+        PlayAnchorKind::Release => PlayAnchorRef::Release {
+            release_plan_id: ReleasePlanId::from_uuid(anchor_id),
         },
     }
 }
@@ -934,9 +1017,10 @@ pub(super) async fn execute_play_step(
     // withdrawn consent does: the world changed after the decision.
     let follow_link = match play_kind {
         PlayKind::FollowAskLadder => Some(follow_ask_link(transaction, workspace_id).await?),
-        PlayKind::TrackUsAsk | PlayKind::ListingCompletenessSweep | PlayKind::DormantRevival => {
-            None
-        }
+        PlayKind::TrackUsAsk
+        | PlayKind::ListingCompletenessSweep
+        | PlayKind::DormantRevival
+        | PlayKind::ReleaseRunway => None,
     };
 
     emit_external_action(

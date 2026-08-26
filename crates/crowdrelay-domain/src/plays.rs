@@ -46,6 +46,10 @@ pub enum PlayAnchorKind {
     /// One fan. The anchor moment is when they qualified, so every step of such
     /// a play follows it.
     Fan,
+    /// A release plan. The anchor moment is `release_at`; steps may precede it
+    /// (pre-save, announce, curator wave) or follow it (release-day push,
+    /// sustain ask).
+    Release,
 }
 
 impl PlayAnchorKind {
@@ -54,6 +58,7 @@ impl PlayAnchorKind {
         match self {
             Self::Event => "event",
             Self::Fan => "fan",
+            Self::Release => "release",
         }
     }
 
@@ -62,6 +67,7 @@ impl PlayAnchorKind {
         match value {
             "event" => Some(Self::Event),
             "fan" => Some(Self::Fan),
+            "release" => Some(Self::Release),
             _ => None,
         }
     }
@@ -107,6 +113,11 @@ pub enum PlayKind {
     /// cheapest audience the band has left, and the only one it currently does
     /// nothing with. Two messages, then the agent stops.
     DormantRevival,
+    /// The release runway: pre-save surface, owned-audience announce, curator
+    /// wave, release-day push, and a sustain ask. A release is the biggest
+    /// organic growth moment the band gets, and the runway is the sequence
+    /// that makes it compound rather than spike and fade.
+    ReleaseRunway,
 }
 
 impl PlayKind {
@@ -117,6 +128,7 @@ impl PlayKind {
             Self::ListingCompletenessSweep => "listing_completeness_sweep",
             Self::FollowAskLadder => "follow_ask_ladder",
             Self::DormantRevival => "dormant_revival",
+            Self::ReleaseRunway => "release_runway",
         }
     }
 
@@ -127,17 +139,19 @@ impl PlayKind {
             "listing_completeness_sweep" => Some(Self::ListingCompletenessSweep),
             "follow_ask_ladder" => Some(Self::FollowAskLadder),
             "dormant_revival" => Some(Self::DormantRevival),
+            "release_runway" => Some(Self::ReleaseRunway),
             _ => None,
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 4] {
+    pub const fn all() -> [Self; 5] {
         [
             Self::TrackUsAsk,
             Self::ListingCompletenessSweep,
             Self::FollowAskLadder,
             Self::DormantRevival,
+            Self::ReleaseRunway,
         ]
     }
 
@@ -147,6 +161,7 @@ impl PlayKind {
         match self {
             Self::TrackUsAsk | Self::ListingCompletenessSweep => PlayAnchorKind::Event,
             Self::FollowAskLadder | Self::DormantRevival => PlayAnchorKind::Fan,
+            Self::ReleaseRunway => PlayAnchorKind::Release,
         }
     }
 
@@ -172,6 +187,11 @@ impl PlayKind {
                 "a fan who came once and went quiet will come back when there is a date near them \
                  and somebody remembers to tell them, so the count of fans active in a month rises"
             }
+            Self::ReleaseRunway => {
+                "a release runway — pre-save, announce, curator wave, release-day push and sustain \
+                 — compounds the biggest organic growth moment the band gets, raising followers and \
+                 saves beyond what a single release-day post achieves"
+            }
         }
     }
 
@@ -196,6 +216,12 @@ impl PlayKind {
             // is a fan who became active again. Unlike a tracker count, this is
             // a number the workspace owns and observes directly.
             Self::DormantRevival => ("signal", "activated_fans_30d"),
+            // Spotify followers are the number a release runway is supposed to
+            // move, and the feed adapter (Phase 11) makes them observable. The
+            // measurement layer reports this as correlational, which is what it
+            // is — a release week and a show announcement land in the same
+            // fortnight.
+            Self::ReleaseRunway => ("spotify", "followers"),
         }
     }
 
@@ -207,6 +233,7 @@ impl PlayKind {
             Self::ListingCompletenessSweep => &LISTING_SWEEP_STEPS,
             Self::FollowAskLadder => &FOLLOW_ASK_LADDER_STEPS,
             Self::DormantRevival => &DORMANT_REVIVAL_STEPS,
+            Self::ReleaseRunway => &RELEASE_RUNWAY_STEPS,
         }
     }
 }
@@ -308,6 +335,55 @@ const DORMANT_REVIVAL_STEPS: [PlayStepSpec; 2] = [
     },
 ];
 
+// The release runway. Five steps, anchored on `release_at`:
+//
+//   T-28d  pre-save surface live     (first-party, reaches nobody)
+//   T-14d  owned-audience announce   (free, to consented fans)
+//   T-7d   curator wave queued        (third-party, approval-gated)
+//   T+0    release-day push           (free, to consented fans)
+//   T+14d  sustain ask                (free, to consented fans)
+//
+// The curator wave is the only third-party step; everything else is owned
+// audience or first-party work, so the runway runs autonomously except for
+// the one step that contacts outsiders.
+const RELEASE_RUNWAY_STEPS: [PlayStepSpec; 5] = [
+    PlayStepSpec {
+        index: 0,
+        kind: PlayStepKind::ReleasePresaveLive,
+        class: PlayStepKind::ReleasePresaveLive.action_class(),
+        offset_hours: -28 * 24,
+        window_hours: 7 * 24,
+    },
+    PlayStepSpec {
+        index: 1,
+        kind: PlayStepKind::ReleaseAudienceAnnounce,
+        class: PlayStepKind::ReleaseAudienceAnnounce.action_class(),
+        offset_hours: -14 * 24,
+        window_hours: 7 * 24,
+    },
+    PlayStepSpec {
+        index: 2,
+        kind: PlayStepKind::ReleaseCuratorWave,
+        class: PlayStepKind::ReleaseCuratorWave.action_class(),
+        offset_hours: -7 * 24,
+        window_hours: 4 * 24,
+    },
+    PlayStepSpec {
+        index: 3,
+        kind: PlayStepKind::ReleaseDayPush,
+        class: PlayStepKind::ReleaseDayPush.action_class(),
+        offset_hours: 0,
+        window_hours: 3 * 24,
+    },
+    PlayStepSpec {
+        index: 4,
+        kind: PlayStepKind::ReleaseSustainAsk,
+        class: PlayStepKind::ReleaseSustainAsk.action_class(),
+        offset_hours: 14 * 24,
+        window_hours: 7 * 24,
+    },
+];
+
 /// Who a step is sent to.
 ///
 /// Not every step has recipients. A listing sweep is work on the band's own
@@ -334,6 +410,11 @@ pub enum PlayStepKind {
     FollowAskFinal,
     DormantRevivalFirst,
     DormantRevivalFinal,
+    ReleasePresaveLive,
+    ReleaseAudienceAnnounce,
+    ReleaseCuratorWave,
+    ReleaseDayPush,
+    ReleaseSustainAsk,
 }
 
 impl PlayStepKind {
@@ -348,6 +429,11 @@ impl PlayStepKind {
             Self::FollowAskFinal => "follow_ask_final",
             Self::DormantRevivalFirst => "dormant_revival_first",
             Self::DormantRevivalFinal => "dormant_revival_final",
+            Self::ReleasePresaveLive => "release_presave_live",
+            Self::ReleaseAudienceAnnounce => "release_audience_announce",
+            Self::ReleaseCuratorWave => "release_curator_wave",
+            Self::ReleaseDayPush => "release_day_push",
+            Self::ReleaseSustainAsk => "release_sustain_ask",
         }
     }
 
@@ -362,6 +448,11 @@ impl PlayStepKind {
             "follow_ask_final" => Some(Self::FollowAskFinal),
             "dormant_revival_first" => Some(Self::DormantRevivalFirst),
             "dormant_revival_final" => Some(Self::DormantRevivalFinal),
+            "release_presave_live" => Some(Self::ReleasePresaveLive),
+            "release_audience_announce" => Some(Self::ReleaseAudienceAnnounce),
+            "release_curator_wave" => Some(Self::ReleaseCuratorWave),
+            "release_day_push" => Some(Self::ReleaseDayPush),
+            "release_sustain_ask" => Some(Self::ReleaseSustainAsk),
             _ => None,
         }
     }
@@ -383,6 +474,11 @@ impl PlayStepKind {
             Self::FollowAskFinal => "play.follow_ask.final",
             Self::DormantRevivalFirst => "play.dormant_revival.first",
             Self::DormantRevivalFinal => "play.dormant_revival.final",
+            Self::ReleasePresaveLive => "play.release_runway.presave_live",
+            Self::ReleaseAudienceAnnounce => "play.release_runway.audience_announce",
+            Self::ReleaseCuratorWave => "play.release_runway.curator_wave",
+            Self::ReleaseDayPush => "play.release_runway.release_day_push",
+            Self::ReleaseSustainAsk => "play.release_runway.sustain_ask",
         }
     }
 
@@ -423,6 +519,27 @@ impl PlayStepKind {
                 "six weeks on and no sign of life. This is the last message, and after it the \
                  agent leaves them alone"
             }
+            Self::ReleasePresaveLive => {
+                "the pre-save surface must be live before anybody is asked to use it, and a \
+                 release four weeks out is the moment to check"
+            }
+            Self::ReleaseAudienceAnnounce => {
+                "the band's own audience is the first place a release should be heard, and two \
+                 weeks out is early enough to act on it and late enough that it is real"
+            }
+            Self::ReleaseCuratorWave => {
+                "independent curators need lead time to listen, so a wave queued a week before \
+                 release is the latest that still gives them one"
+            }
+            Self::ReleaseDayPush => {
+                "the release is out today, and the one message that says so is the single \
+                 highest-reach moment in the runway"
+            }
+            Self::ReleaseSustainAsk => {
+                "two weeks after release, one more ask to the audience that did not act on day \
+                 one — the last rung of the runway and the one that catches the people who meant \
+                 to come back"
+            }
         }
     }
 
@@ -451,6 +568,16 @@ impl PlayStepKind {
             // Quiet is not withdrawn consent. A fan who stopped turning up is
             // still a fan of this workspace who agreed to hear from it.
             Self::DormantRevivalFirst | Self::DormantRevivalFinal => ActionClass::OwnedAudience,
+            // Pre-save and listing work are first-party: our own surfaces, our
+            // own links, reaching nobody outside the workspace.
+            Self::ReleasePresaveLive => ActionClass::FirstPartyReversible,
+            // The audience announce and release-day push go to consented fans.
+            Self::ReleaseAudienceAnnounce | Self::ReleaseDayPush
+                | Self::ReleaseSustainAsk => ActionClass::OwnedAudience,
+            // A curator wave is third-party outreach: free, but it contacts
+            // people outside the workspace and is therefore approval-gated at
+            // the current posture.
+            Self::ReleaseCuratorWave => ActionClass::ThirdParty,
         }
     }
 
@@ -464,8 +591,18 @@ impl PlayStepKind {
             | Self::FollowAskSecond
             | Self::FollowAskFinal
             | Self::DormantRevivalFirst
-            | Self::DormantRevivalFinal => StepAudience::Fans,
-            Self::ListingSweep => StepAudience::None,
+            | Self::DormantRevivalFinal
+            | Self::ReleaseAudienceAnnounce
+            | Self::ReleaseDayPush
+            | Self::ReleaseSustainAsk => StepAudience::Fans,
+            // Steps that run once for their anchor: listing sweep is work on
+            // the band's own listing, pre-save live is work on the band's own
+            // surface, and the curator wave is a trigger that queues a separate
+            // outreach wave rather than contacting curators directly from the
+            // play step.
+            Self::ListingSweep
+            | Self::ReleasePresaveLive
+            | Self::ReleaseCuratorWave => StepAudience::None,
         }
     }
 }
