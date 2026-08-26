@@ -373,6 +373,54 @@ pub async fn portfolio_overview(
     }
 }
 
+/// Sales-ready snapshot of the roster story: one JSON document an operator
+/// can attach to a partner conversation without touching psql.
+pub async fn export_case_study(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let repository = repository(&state);
+    let workspace = workspace_id(&state);
+    let overview = match repository.org_overview(workspace).await {
+        Ok(value) => value,
+        Err(error) => return error_response(error, request_id_value),
+    };
+    let edges = match repository.list_consents(workspace).await {
+        Ok(value) => value,
+        Err(error) => return error_response(error, request_id_value),
+    };
+    let edges_json: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|edge| {
+            serde_json::json!({
+                "purpose": edge.purpose,
+                "status": edge.status,
+                "maxCampaignsPerMonth": edge.max_campaigns_per_month,
+                "campaignsThisMonth": edge.campaigns_this_month,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+        Json(serde_json::json!({
+            "generatedAt": time::OffsetDateTime::now_utc(),
+            "roster": {
+                "workspaceCount": overview.workspace_count,
+                "activeFans": overview.active_fans,
+                "fansLast30d": overview.fans_last_30d,
+            },
+            "amplification": {
+                "activeEdges": overview.active_edges,
+                "deliveriesLast30d": overview.deliveries_last_30d,
+                "edges": edges_json,
+            },
+        })),
+    )
+        .into_response()
+}
+
 /// All portfolio surfaces sit under the privileged admin namespace; auth and
 /// rate limiting come from the central middleware.
 pub(super) fn admin_routes() -> Router<crate::AppState> {
@@ -402,4 +450,5 @@ pub(super) fn admin_routes() -> Router<crate::AppState> {
             "/v1/admin/portfolio/import-fans",
             post(crate::fan_lifecycle::import_fans_admin),
         )
+        .route("/v1/admin/portfolio/case-study", get(export_case_study))
 }

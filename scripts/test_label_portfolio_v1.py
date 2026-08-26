@@ -68,6 +68,13 @@ class LabelPortfolioContract(unittest.TestCase):
             "amplification messages must leave through the owner's own outbox",
         )
 
+    def test_case_study_export_is_pure_read_model(self):
+        source = API.read_text()
+        self.assertIn("pub async fn export_case_study", source)
+        # A sales artifact must not leak identities either.
+        head = source[source.index("pub async fn export_case_study"):]
+        self.assertNotIn("normalized_email", head)
+
     def test_admin_surface_is_exposed_and_documented(self):
         api_module = API.read_text()
         self.assertIn("/v1/admin/portfolio/amplification", api_module)
