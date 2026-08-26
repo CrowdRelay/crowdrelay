@@ -680,6 +680,14 @@ pub struct ImportFansResponse {
     invalid: u32,
 }
 
+/// Pilot onboarding: bulk-import an operator's existing mailing list.
+///
+/// Consent comes first, so an import can never manufacture an active fan:
+/// every address lands as `pending` and receives the same double-opt-in
+/// confirmation email the signup flow sends. Existing `active` fans are left
+/// untouched (never downgraded), `unsubscribed`/`suppressed` are skipped
+/// outright. All statements live in `crowdrelay-infra::fan_import` so the API
+/// SQL-write ratchet does not regress.
 pub async fn import_fans_admin(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
@@ -697,268 +705,59 @@ pub async fn import_fans_admin(
         return Problem::unprocessable(request_id_value).into_response();
     }
 
-    let workspace = state.fan_lifecycle.workspace_id.into_uuid();
-    let mut transaction = match state.database.begin().await {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "could not start fan import transaction");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-
-    // One shared raw id groups the whole batch's outbox rows for the timeline.
-    let batch_request_id = format!("fan-import-{}", uuid::Uuid::now_v7().simple());
-
-    let mut counts = ImportFansResponse {
-        imported_pending: 0,
-        confirmation_resent: 0,
-        already_active: 0,
-        skipped_suppressed: 0,
-        cooldown_skipped: 0,
-        invalid: 0,
-    };
-
+    let mut entries = Vec::with_capacity(request.entries.len());
+    let mut invalid: u32 = 0;
     for entry in &request.entries {
-        let Ok(email) = NormalizedEmail::parse(entry.email.trim()) else {
-            counts.invalid += 1;
-            continue;
-        };
-        let locale = entry
-            .locale
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let display_name = entry
-            .display_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        // Load-or-create inside the row lock; nothing ever downgrades status.
-        let existing = sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT status FROM fans
-            WHERE workspace_id = $1 AND normalized_email = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(workspace)
-        .bind(email.as_str())
-        .fetch_optional(&mut *transaction)
-        .await;
-
-        let fan_status = match existing {
-            Ok(Some(status)) => status,
-            Ok(None) => {
-                if let Err(error) = sqlx::query(
-                    r#"
-                    INSERT INTO fans (workspace_id, normalized_email, display_name, locale, status)
-                    VALUES ($1, $2, $3, $4, 'pending')
-                    "#,
-                )
-                .bind(workspace)
-                .bind(email.as_str())
-                .bind(display_name)
-                .bind(locale)
-                .execute(&mut *transaction)
-                .await
-                {
-                    tracing::warn!(%error, "fan import insert failed");
-                    return Problem::service_unavailable(request_id_value)
-                        .private()
-                        .into_response();
-                }
-                counts.imported_pending += 1;
-                "pending".to_owned()
-            }
-            Err(error) => {
-                tracing::warn!(%error, "fan import lookup failed");
-                return Problem::service_unavailable(request_id_value)
-                    .private()
-                    .into_response();
-            }
-        };
-
-        match fan_status.as_str() {
-            "active" => {
-                counts.already_active += 1;
-                continue;
-            }
-            "unsubscribed" | "suppressed" => {
-                counts.skipped_suppressed += 1;
-                continue;
-            }
-            "pending" => {}
-            unexpected => {
-                tracing::error!(status = %unexpected, "unexpected fan status during import");
-                return Problem::internal(request_id_value)
-                    .private()
-                    .into_response();
-            }
+        match NormalizedEmail::parse(entry.email.trim()) {
+            Ok(parsed) => entries.push(crowdrelay_infra::fan_import::ImportEntry {
+                email: parsed.as_str().to_owned(),
+                display_name: entry
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+                locale: entry
+                    .locale
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            }),
+            Err(_) => invalid += 1,
         }
-
-        // The fan row exists as pending; fetch its id for token issuance.
-        let fan_id = match sqlx::query_scalar::<_, uuid::Uuid>(
-            "SELECT id FROM fans WHERE workspace_id = $1 AND normalized_email = $2",
-        )
-        .bind(workspace)
-        .bind(email.as_str())
-        .fetch_one(&mut *transaction)
-        .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(%error, "fan import id lookup failed");
-                return Problem::service_unavailable(request_id_value)
-                    .private()
-                    .into_response();
-            }
-        };
-
-        // Same resend cooldown the interactive flow uses: a fresh import must
-        // not machine-gun confirmation emails at an address already waiting.
-        let in_cooldown = matches!(
-            sqlx::query_scalar::<_, bool>(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1 FROM fan_action_tokens
-                    WHERE workspace_id = $1 AND fan_id = $2
-                      AND purpose = 'confirm'
-                      AND consumed_at IS NULL AND expires_at > now()
-                      AND created_at > now() - ($3::bigint * interval '1 second')
-                )
-                "#,
-            )
-            .bind(workspace)
-            .bind(fan_id)
-            .bind(ACCESS_RESEND_COOLDOWN_SECONDS)
-            .fetch_one(&mut *transaction)
-            .await,
-            Ok(true)
-        );
-        if in_cooldown {
-            counts.cooldown_skipped += 1;
-            continue;
-        }
-
-        if let Err(error) = sqlx::query(
-            r#"
-            UPDATE fan_action_tokens
-            SET consumed_at = COALESCE(consumed_at, now())
-            WHERE workspace_id = $1 AND fan_id = $2
-              AND purpose = 'confirm' AND consumed_at IS NULL
-            "#,
-        )
-        .bind(workspace)
-        .bind(fan_id)
-        .execute(&mut *transaction)
-        .await
-        {
-            tracing::warn!(%error, "fan import token rotation failed");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-
-        let raw_token = match sqlx::query_scalar::<_, String>(
-            r#"
-            WITH material AS (
-                SELECT encode(gen_random_bytes(32), 'hex') AS token
-            ), inserted AS (
-                INSERT INTO fan_action_tokens (
-                    workspace_id, fan_id, purpose, token_hash, expires_at
-                )
-                SELECT $1, $2, 'confirm', digest(material.token, 'sha256'),
-                    now() + ($3::bigint * interval '1 day')
-                FROM material
-                RETURNING id
-            )
-            SELECT material.token FROM material, inserted
-            "#,
-        )
-        .bind(workspace)
-        .bind(fan_id)
-        .bind(ACCESS_TOKEN_TTL_DAYS)
-        .fetch_one(&mut *transaction)
-        .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(%error, "fan import token issue failed");
-                return Problem::service_unavailable(request_id_value)
-                    .private()
-                    .into_response();
-            }
-        };
-
-        let event_payload = serde_json::json!({
-            "workspace_id": state.fan_lifecycle.workspace_id,
-            "fan_id": fan_id,
-            "email": email.as_str(),
-            "display_name": display_name,
-            "locale": locale,
-            "confirmation_token": raw_token,
-            "import_source": request.source.trim(),
-        });
-        if let Err(error) = sqlx::query(
-            r#"
-            INSERT INTO outbox_events (
-                workspace_id, event_type, event_version, payload, request_id
-            ) VALUES ($1, 'fan.confirmation_requested', 1, $2, $3)
-            "#,
-        )
-        .bind(workspace)
-        .bind(event_payload)
-        .bind(format!("{batch_request_id}:{}", counts.imported_pending))
-        .execute(&mut *transaction)
-        .await
-        {
-            tracing::warn!(%error, "fan import confirmation enqueue failed");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-        counts.confirmation_resent += 1;
     }
 
-    if let Err(error) = sqlx::query(
-        r#"
-        INSERT INTO audit_events (
-            workspace_id, actor_kind, action, target_type, target_id, metadata
-        ) VALUES ($1, 'operator', 'fans.imported', 'workspace', $2, $3)
-        "#,
-    )
-    .bind(workspace)
-    .bind(workspace.to_string())
-    .bind(serde_json::json!({
-        "source": request.source.trim(),
-        "imported_pending": counts.imported_pending,
-        "confirmation_resent": counts.confirmation_resent,
-        "already_active": counts.already_active,
-        "skipped_suppressed": counts.skipped_suppressed,
-        "cooldown_skipped": counts.cooldown_skipped,
-        "invalid": counts.invalid,
-    }))
-    .execute(&mut *transaction)
-    .await
+    let repository =
+        crowdrelay_infra::fan_import::PostgresFanImportRepository::new(state.database.clone());
+    match repository
+        .import_batch(
+            state.fan_lifecycle.workspace_id.into_uuid(),
+            request.source.trim(),
+            &entries,
+            ACCESS_TOKEN_TTL_DAYS,
+            ACCESS_RESEND_COOLDOWN_SECONDS,
+        )
+        .await
     {
-        tracing::warn!(%error, "fan import audit failed");
-        return Problem::service_unavailable(request_id_value)
-            .private()
-            .into_response();
+        Ok(counts) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
+            Json(ImportFansResponse {
+                imported_pending: counts.imported_pending,
+                confirmation_resent: counts.confirmation_resent,
+                already_active: counts.already_active,
+                skipped_suppressed: counts.skipped_suppressed,
+                cooldown_skipped: counts.cooldown_skipped,
+                invalid,
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "pilot fan import failed");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
     }
-
-    if let Err(error) = transaction.commit().await {
-        tracing::warn!(%error, "could not commit fan import");
-        return Problem::service_unavailable(request_id_value)
-            .private()
-            .into_response();
-    }
-    (
-        StatusCode::OK,
-        [(CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE))],
-        Json(counts),
-    )
-        .into_response()
 }
