@@ -6666,6 +6666,102 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/audience/fans/{fan_id}/referral-code:
+    post:
+      operationId: createAdminFanReferralCode
+      summary: Backfill a referral code for an existing fan
+      description: >
+        Idempotent — returns the fan's existing active referral code if one
+        already exists, otherwise generates one. The nineteen fans who signed
+        up before the referral ledger existed are the reason this endpoint
+        exists.
+      security: [{ adminBearer: [] }]
+      parameters:
+      - in: path
+        name: fan_id
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Referral code created or returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [fan_id, code]
+                properties:
+                  fan_id: { type: string, format: uuid }
+                  code: { type: string, minLength: 6, maxLength: 128 }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /admin/smart-links:
+    get:
+      operationId: listAdminSmartLinks
+      summary: List all tracked smart links with channel attribution
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: All smart links for the workspace, ordered by channel then slug.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/SmartLinkView' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: createAdminSmartLink
+      summary: Create or update a tracked smart link for a campaign channel
+      description: >
+        Idempotent on slug — re-posting the same slug updates the destination
+        and channel fields rather than failing. Channel attribution
+        (source/community/creative) follows migration 0079: the link is the
+        channel, and one link per (source, community, creative) is how a
+        person actually posts.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [slug, destination_url]
+              properties:
+                slug:
+                  type: string
+                  pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$'
+                destination_url:
+                  type: string
+                  pattern: '^https://'
+                channel_source:
+                  type: string
+                  maxLength: 64
+                channel_community:
+                  type: string
+                  maxLength: 120
+                channel_creative:
+                  type: string
+                  maxLength: 120
+                campaign_id:
+                  type: string
+                  format: uuid
+      responses:
+        '201':
+          description: Smart link created or updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SmartLinkView' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
   /admin/audience/segments:
     get:
       operationId: listAdminAudienceSegments
@@ -10691,6 +10787,19 @@ components:
         occurred_at: { type: string, format: date-time }
         title: { type: string, maxLength: 240 }
         detail: { type: object, additionalProperties: true, maxProperties: 32 }
+    SmartLinkView:
+      type: object
+      additionalProperties: false
+      required: [id, slug, destination_url, active]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, maxLength: 128 }
+        destination_url: { type: string }
+        active: { type: boolean }
+        channel_source: { type: [string, 'null'], maxLength: 64 }
+        channel_community: { type: [string, 'null'], maxLength: 120 }
+        channel_creative: { type: [string, 'null'], maxLength: 120 }
+        campaign_id: { type: [string, 'null'], format: uuid }
     RumMetricSummary:
       type: object
       additionalProperties: false

@@ -11,7 +11,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use crowdrelay_application::{AcquisitionRepository, RepositoryError, SignupFanCommand};
+use crowdrelay_application::{
+    AcquisitionRepository, RepositoryError, SignupFanCommand, UpsertSmartLinkCommand,
+    UpsertedSmartLink,
+};
 use crowdrelay_domain::{
     CampaignId, CityId, CitySignal, CitySlug, ClickEvent, CountryCode, DestinationUrl,
     FanActionToken, FanId, FanSignup, FanSignupEmailKind, FanSignupResult, FanStatus, ReferralCode,
@@ -114,6 +117,193 @@ impl AcquisitionRepository for PostgresAcquisitionRepository {
             .await
             .map_err(Into::into)
     }
+
+    async fn upsert_smart_link<'a>(
+        &self,
+        command: &UpsertSmartLinkCommand<'a>,
+    ) -> Result<UpsertedSmartLink, RepositoryError> {
+        self.bounded(async move {
+            let row = sqlx::query_as::<_, SmartLinkUpsertRow>(
+                r#"
+                INSERT INTO smart_links (
+                    workspace_id, slug, destination_url, active,
+                    channel_source, channel_community, channel_creative,
+                    campaign_id
+                )
+                VALUES ($1, $2, $3, true, $4, $5, $6, $7)
+                ON CONFLICT (workspace_id, slug) DO UPDATE SET
+                    destination_url = EXCLUDED.destination_url,
+                    active = true,
+                    channel_source = EXCLUDED.channel_source,
+                    channel_community = EXCLUDED.channel_community,
+                    channel_creative = EXCLUDED.channel_creative,
+                    campaign_id = EXCLUDED.campaign_id,
+                    version = smart_links.version + 1
+                RETURNING id, slug, destination_url, active,
+                          channel_source, channel_community, channel_creative,
+                          campaign_id
+                "#,
+            )
+            .bind(command.workspace_id.into_uuid())
+            .bind(command.slug.as_str())
+            .bind(command.destination_url)
+            .bind(command.channel_source)
+            .bind(command.channel_community)
+            .bind(command.channel_creative)
+            .bind(command.campaign_id.map(|id| id.into_uuid()))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::from_sqlx)?;
+            Ok(UpsertedSmartLink {
+                id: row.id,
+                slug: SmartLinkSlug::parse(&row.slug).map_err(|_| StoreError::Unexpected)?,
+                destination_url: row.destination_url,
+                active: row.active,
+                channel_source: row.channel_source,
+                channel_community: row.channel_community,
+                channel_creative: row.channel_creative,
+                campaign_id: row.campaign_id.map(CampaignId::from_uuid),
+            })
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn list_smart_links(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<UpsertedSmartLink>, RepositoryError> {
+        self.bounded(async move {
+            let rows = sqlx::query_as::<_, SmartLinkUpsertRow>(
+                r#"
+                SELECT id, slug, destination_url, active,
+                       channel_source, channel_community, channel_creative,
+                       campaign_id
+                FROM smart_links
+                WHERE workspace_id = $1
+                ORDER BY channel_source NULLS LAST, slug
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::from_sqlx)?;
+            rows.into_iter()
+                .map(|row| {
+                    Ok(UpsertedSmartLink {
+                        id: row.id,
+                        slug: SmartLinkSlug::parse(&row.slug)
+                            .map_err(|_| StoreError::Unexpected)?,
+                        destination_url: row.destination_url,
+                        active: row.active,
+                        channel_source: row.channel_source,
+                        channel_community: row.channel_community,
+                        channel_creative: row.channel_creative,
+                        campaign_id: row.campaign_id.map(CampaignId::from_uuid),
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn load_or_create_fan_referral_code(
+        &self,
+        workspace_id: WorkspaceId,
+        fan_id: FanId,
+    ) -> Result<ReferralCode, RepositoryError> {
+        self.bounded(async move {
+            let mut transaction = self.pool.begin().await.map_err(StoreError::from_sqlx)?;
+            // Verify the fan exists in this workspace.
+            let fan_exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM fans WHERE workspace_id = $1 AND id = $2)",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(fan_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(StoreError::from_sqlx)?;
+            if !fan_exists {
+                return Err(StoreError::NotFound);
+            }
+            // Return existing active code if one exists.
+            let existing = sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT code
+                FROM referral_codes
+                WHERE workspace_id = $1 AND fan_id = $2 AND active
+                ORDER BY created_at, id
+                LIMIT 1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(fan_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(StoreError::from_sqlx)?;
+            if let Some(code) = existing {
+                transaction.commit().await.map_err(StoreError::from_sqlx)?;
+                return ReferralCode::parse(code).map_err(|_| StoreError::Unexpected);
+            }
+            // Generate a new code. Retry on the unlikely collision: 18 random
+            // bytes hex-encoded is 72 bits of entropy, and the unique
+            // constraint is on (workspace_id, code).
+            for _ in 0..3 {
+                let inserted = sqlx::query_scalar::<_, String>(
+                    r#"
+                    INSERT INTO referral_codes (workspace_id, fan_id, code)
+                    VALUES ($1, $2, encode(gen_random_bytes(18), 'hex'))
+                    ON CONFLICT DO NOTHING
+                    RETURNING code
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(fan_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(StoreError::from_sqlx)?;
+                if let Some(code) = inserted {
+                    transaction.commit().await.map_err(StoreError::from_sqlx)?;
+                    return ReferralCode::parse(code).map_err(|_| StoreError::Unexpected);
+                }
+                // Collision — check whether another transaction created one.
+                let retry = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT code
+                    FROM referral_codes
+                    WHERE workspace_id = $1 AND fan_id = $2 AND active
+                    ORDER BY created_at, id
+                    LIMIT 1
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(fan_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(StoreError::from_sqlx)?;
+                if let Some(code) = retry {
+                    transaction.commit().await.map_err(StoreError::from_sqlx)?;
+                    return ReferralCode::parse(code).map_err(|_| StoreError::Unexpected);
+                }
+            }
+            Err(StoreError::Unexpected)
+        })
+        .await
+        .map_err(Into::into)
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SmartLinkUpsertRow {
+    id: Uuid,
+    slug: String,
+    destination_url: String,
+    active: bool,
+    channel_source: Option<String>,
+    channel_community: Option<String>,
+    channel_creative: Option<String>,
+    campaign_id: Option<Uuid>,
 }
 
 /// Non-blocking sender used directly by the redirect fast path.
@@ -517,6 +707,28 @@ mod tests {
             _workspace_id: WorkspaceId,
             _limit: u32,
         ) -> Result<Vec<CitySignal>, RepositoryError> {
+            unreachable!("not used by click buffer tests")
+        }
+
+        async fn upsert_smart_link<'a>(
+            &self,
+            _command: &UpsertSmartLinkCommand<'a>,
+        ) -> Result<UpsertedSmartLink, RepositoryError> {
+            unreachable!("not used by click buffer tests")
+        }
+
+        async fn list_smart_links(
+            &self,
+            _workspace_id: WorkspaceId,
+        ) -> Result<Vec<UpsertedSmartLink>, RepositoryError> {
+            unreachable!("not used by click buffer tests")
+        }
+
+        async fn load_or_create_fan_referral_code(
+            &self,
+            _workspace_id: WorkspaceId,
+            _fan_id: FanId,
+        ) -> Result<ReferralCode, RepositoryError> {
             unreachable!("not used by click buffer tests")
         }
     }

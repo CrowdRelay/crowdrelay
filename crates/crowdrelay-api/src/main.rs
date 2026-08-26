@@ -174,11 +174,12 @@ async fn main() -> Result<()> {
         workspace_id,
         redirect_cache,
         signup_fan: SignupFan::new(Arc::clone(&repository)),
-        list_cities: ListCities::new(repository),
+        list_cities: ListCities::new(Arc::clone(&repository)),
         click_submitter,
         click_metrics_reader,
         public_site_base_url: config.public_site_base_url.clone(),
         secure_cookies: config.environment.is_production(),
+        acquisition_repository: Arc::clone(&repository),
     });
 
     let referrals = ReferralState::new(
