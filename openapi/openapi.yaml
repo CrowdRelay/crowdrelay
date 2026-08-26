@@ -5853,6 +5853,455 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/portfolio/organization:
+    post:
+      operationId: createPortfolioOrganization
+      summary: Create the label organization and attach the calling workspace
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              properties:
+                slug:
+                  type: string
+                  maxLength: 128
+                name:
+                  type: string
+                  maxLength: 200
+      responses:
+        '200':
+          description: Organization id after attach.
+        '409':
+          $ref: '#/components/responses/Problem'
+  /admin/portfolio/overview:
+    get:
+      operationId: getPortfolioOverview
+      summary: Roster-wide audience totals for the calling workspace's organization
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Aggregated roster KPIs.
+        '404':
+          $ref: '#/components/responses/Problem'
+  /admin/portfolio/amplification:
+    get:
+      operationId: listPortfolioAmplification
+      summary: Consent edges touching this workspace
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum: [proposed, active, paused, revoked]
+      responses:
+        '200':
+          description: Consent edges with monthly campaign counters.
+    post:
+      operationId: proposePortfolioAmplification
+      summary: Propose a consent edge to another workspace of the same organization
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toWorkspaceId, purpose]
+              properties:
+                toWorkspaceId:
+                  type: string
+                  format: uuid
+                purpose:
+                  type: string
+                  enum: [cross_promote, release_feature, event_crossbill]
+                scope:
+                  type: string
+                  enum: [all_active, double_opt_in]
+                  default: all_active
+                maxCampaignsPerMonth:
+                  type: integer
+                  minimum: 1
+                  maximum: 12
+                  default: 2
+                cooldownDays:
+                  type: integer
+                  minimum: 1
+                  maximum: 120
+                  default: 21
+      responses:
+        '200':
+          description: Proposed consent id.
+        '409':
+          $ref: '#/components/responses/Problem'
+  /admin/portfolio/amplification/{consent_id}/decide:
+    post:
+      operationId: decidePortfolioAmplification
+      summary: Approve, pause, resume or revoke an edge; revocation requires a reason
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: consent_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [approve, pause, resume, revoke]
+                actor:
+                  type: string
+                  maxLength: 200
+                revoke_reason:
+                  type: string
+                  maxLength: 1000
+      responses:
+        '200':
+          description: New status.
+        '409':
+          $ref: '#/components/responses/Problem'
+  /admin/portfolio/amplification/{consent_id}/audience-preview:
+    get:
+      operationId: previewPortfolioAmplificationAudience
+      summary: Reachable fan count for this edge (no identities are returned)
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: consent_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Count of reachable fans.
+        '404':
+          $ref: '#/components/responses/Problem'
+  /admin/portfolio/amplification/{consent_id}/campaign:
+    post:
+      operationId: runPortfolioAmplificationCampaign
+      summary: Queue one capped amplification campaign through the owner's outbox
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: consent_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaign_reference, subject, text]
+              properties:
+                campaign_reference:
+                  type: string
+                  maxLength: 200
+                subject:
+                  type: string
+                text:
+                  type: string
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 5000
+      responses:
+        '200':
+          description: Number of fans queued.
+        '409':
+          description: Monthly cap reached for this edge.
+  /admin/audience-graph/places:
+    get:
+      operationId: listAudienceGraphPlaces
+      summary: List discovered audience places with pipeline state
+      security:
+      - adminBearer: []
+      parameters:
+      - in: query
+        name: kind
+        schema:
+          type: string
+          enum: [subreddit, discord, forum, facebook_group, instagram, tiktok, youtube, playlist, zine, festival, other]
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum: [active, archived, blocked]
+      - in: query
+        name: stage
+        schema:
+          type: string
+          enum: [discovered, researched, contacted, replied, negotiating, partnered, declined, dormant]
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+      responses:
+        '200':
+          description: Places ordered by most recent update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudienceGraphPlaceList'
+        '401':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: upsertAudienceGraphPlace
+      summary: Register or refresh one place keyed by platform and URL
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AudienceGraphPlaceUpsert'
+      responses:
+        '200':
+          description: Place id after the upsert.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  placeId:
+                    type: string
+                    format: uuid
+        '401':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+  /admin/audience-graph/places/import:
+    post:
+      operationId: importAudienceGraphScan
+      summary: Bulk-ingest a discovery scan (places plus raw evidence)
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [places]
+              properties:
+                method:
+                  type: string
+                  maxLength: 64
+                places:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    properties:
+                      place:
+                        $ref: '#/components/schemas/AudienceGraphPlaceUpsert'
+                      evidenceKind:
+                        type: string
+                        enum: [scan, mention, sample_post, mod_contact, manual_note]
+                      confidenceBp:
+                        type: integer
+                        minimum: 0
+                        maximum: 10000
+                      payload:
+                        type: object
+      responses:
+        '200':
+          description: Number of ingested places and their ids.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported:
+                    type: integer
+                  placeIds:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        '401':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+  /admin/audience-graph/places/{place_id}:
+    get:
+      operationId: getAudienceGraphPlace
+      summary: One place with rules and pipeline state
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: place_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The place.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudienceGraphPlaceList'
+        '404':
+          $ref: '#/components/responses/Problem'
+  /admin/audience-graph/places/{place_id}/rules:
+    put:
+      operationId: attachAudienceGraphRules
+      summary: Attach or refresh a place's own promotion rules
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: place_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                self_promo_ratio_percent:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                contact_channel:
+                  type: string
+                  maxLength: 64
+                contact_target:
+                  type: string
+                  maxLength: 200
+                requires_approval:
+                  type: boolean
+                  default: false
+                cooldown_days:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  default: 14
+                rules_summary:
+                  type: string
+                  maxLength: 4000
+                verified:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Rules attached.
+        '404':
+          $ref: '#/components/responses/Problem'
+  /admin/audience-graph/places/{place_id}/evidence:
+    post:
+      operationId: appendAudienceGraphEvidence
+      summary: Record one observation about a place (scan hit, mention, mod reply)
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: place_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [evidence_kind, method]
+              properties:
+                evidence_kind:
+                  type: string
+                  enum: [scan, mention, sample_post, mod_contact, manual_note]
+                method:
+                  type: string
+                  maxLength: 64
+                confidence_bp:
+                  type: integer
+                  minimum: 0
+                  maximum: 10000
+                  default: 5000
+                payload:
+                  type: object
+      responses:
+        '200':
+          description: Evidence recorded.
+        '404':
+          $ref: '#/components/responses/Problem'
+  /admin/audience-graph/places/{place_id}/outreach/advance:
+    post:
+      operationId: advanceAudienceGraphOutreach
+      summary: Move the outreach pipeline; the move is refused unless the current stage matches
+      security:
+      - adminBearer: []
+      parameters:
+      - in: path
+        name: place_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_stage, to_stage]
+              properties:
+                from_stage:
+                  type: string
+                  enum: [discovered, researched, contacted, replied, negotiating, partnered, declined, dormant]
+                to_stage:
+                  type: string
+                  enum: [discovered, researched, contacted, replied, negotiating, partnered, declined, dormant]
+                outcome_notes:
+                  type: string
+                  maxLength: 4000
+      responses:
+        '200':
+          description: New stage after the guarded move.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stage:
+                    type: string
+                  advanced:
+                    type: boolean
+        '409':
+          $ref: '#/components/responses/Problem'
   /admin/audience/fans:
     get:
       operationId: listAdminAudienceFans
@@ -10882,6 +11331,48 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PhysicalRewardGrant'
+    AudienceGraphPlaceUpsert:
+      type: object
+      required: [place_kind, platform, name, url]
+      properties:
+        place_kind:
+          type: string
+          enum: [subreddit, discord, forum, facebook_group, instagram, tiktok, youtube, playlist, zine, festival, other]
+        platform:
+          type: string
+          maxLength: 64
+        name:
+          type: string
+          maxLength: 200
+        url:
+          type: string
+          maxLength: 512
+        country_code:
+          type: string
+        language:
+          type: string
+        genres:
+          type: array
+          items:
+            type: string
+        member_count:
+          type: integer
+          minimum: 0
+        activity_bp:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        notes:
+          type: string
+          maxLength: 4000
+    AudienceGraphPlaceList:
+      type: object
+      required: [places]
+      properties:
+        places:
+          type: array
+          items:
+            type: object
     WeightedDrawEntry:
       type: object
       additionalProperties: false
