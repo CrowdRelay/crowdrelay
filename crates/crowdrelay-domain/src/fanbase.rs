@@ -112,6 +112,35 @@ impl Platform {
             .copied()
             .find(|platform| platform.as_str() == value)
     }
+
+    /// Human-readable label for UI display.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Meta => "Meta",
+            Self::Tiktok => "TikTok",
+            Self::GoogleAds => "Google Ads",
+            Self::Reddit => "Reddit",
+            Self::Bandsintown => "Bandsintown",
+            Self::Spotify => "Spotify",
+        }
+    }
+
+    /// Default OAuth scopes for this platform's fanbase connection.
+    pub const fn default_scopes(self) -> &'static [&'static str] {
+        match self {
+            Self::Meta => &["ads_management", "ads_read"],
+            Self::GoogleAds => &["https://www.googleapis.com/auth/adwords"],
+            Self::Spotify => &["user-read-email", "playlist-modify-public"],
+            Self::Reddit => &["identity", "read"],
+            Self::Tiktok => &["user.info.basic", "ad.management"],
+            Self::Bandsintown => &[],
+        }
+    }
+
+    /// Whether this platform supports OAuth connection (vs API-key only).
+    pub const fn supports_oauth(self) -> bool {
+        !matches!(self, Self::Bandsintown)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

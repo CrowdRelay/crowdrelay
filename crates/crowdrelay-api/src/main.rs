@@ -274,6 +274,8 @@ async fn main() -> Result<()> {
                 fcm_project_id: config.push_delivery.fcm_project_id.clone(),
             },
             tenant_profile,
+            config.response_encryption_key.clone(),
+            parse_fanbase_oauth_configs(&config),
         ),
         http_config,
     );
@@ -552,5 +554,101 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {}
         () = terminate => {}
+    }
+}
+
+/// Parse fanbase OAuth provider configs from env vars. Each platform that
+/// supports OAuth has its own env prefix:
+/// `CROWDRELAY_FANBASE_OAUTH_{PLATFORM}_{CLIENT_ID|CLIENT_SECRET|AUTHORIZE_URL|TOKEN_URL|SCOPES}`
+fn parse_fanbase_oauth_configs(
+    _config: &Config,
+) -> Vec<crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig> {
+    use crowdrelay_domain::fanbase::Platform;
+    use crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig;
+
+    let platforms = [
+        (Platform::Meta, "META"),
+        (Platform::GoogleAds, "GOOGLE_ADS"),
+        (Platform::Spotify, "SPOTIFY"),
+        (Platform::Reddit, "REDDDIT"),
+        (Platform::Tiktok, "TIKTOK"),
+    ];
+
+    let mut configs = Vec::new();
+    for (platform, env_suffix) in &platforms {
+        let prefix = format!("CROWDRELAY_FANBASE_OAUTH_{env_suffix}");
+        let client_id = match std::env::var(format!("{prefix}_CLIENT_ID")) {
+            Ok(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let client_secret = std::env::var(format!("{prefix}_CLIENT_SECRET")).unwrap_or_default();
+        let authorize_url = std::env::var(format!("{prefix}_AUTHORIZE_URL"))
+            .unwrap_or_else(|_| default_authorize_url(platform));
+        let token_url = std::env::var(format!("{prefix}_TOKEN_URL"))
+            .unwrap_or_else(|_| default_token_url(platform));
+        let scopes_str = std::env::var(format!("{prefix}_SCOPES"))
+            .unwrap_or_else(|_| platform.default_scopes().join(" "));
+        let scopes: Vec<String> = scopes_str
+            .split([',', ' '])
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        configs.push(FanbaseOauthConfig {
+            platform: *platform,
+            client_id,
+            client_secret,
+            authorize_url,
+            token_url,
+            scopes,
+        });
+    }
+    if !configs.is_empty() {
+        tracing::info!(
+            count = configs.len(),
+            "fanbase OAuth provider configs loaded"
+        );
+    }
+    configs
+}
+
+fn default_authorize_url(platform: &crowdrelay_domain::fanbase::Platform) -> String {
+    match platform {
+        crowdrelay_domain::fanbase::Platform::Meta => {
+            "https://www.facebook.com/v21.0/dialog/oauth".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::GoogleAds => {
+            "https://accounts.google.com/o/oauth2/v2/auth".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Spotify => {
+            "https://accounts.spotify.com/authorize".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Reddit => {
+            "https://www.reddit.com/api/v1/authorize".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Tiktok => {
+            "https://www.tiktok.com/v2/auth/authorize/".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Bandsintown => String::new(),
+    }
+}
+
+fn default_token_url(platform: &crowdrelay_domain::fanbase::Platform) -> String {
+    match platform {
+        crowdrelay_domain::fanbase::Platform::Meta => {
+            "https://graph.facebook.com/v21.0/oauth/access_token".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::GoogleAds => {
+            "https://oauth2.googleapis.com/token".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Spotify => {
+            "https://accounts.spotify.com/api/token".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Reddit => {
+            "https://www.reddit.com/api/v1/access_token".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Tiktok => {
+            "https://open.tiktokapis.com/v2/oauth/token/".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Bandsintown => String::new(),
     }
 }

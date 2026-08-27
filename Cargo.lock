@@ -350,6 +350,7 @@ dependencies = [
  "crowdrelay-domain",
  "getrandom 0.4.3",
  "hex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
