@@ -224,3 +224,26 @@ jobs:
           path: image-digests/
           if-no-files-found: error
           retention-days: 7
+
+      # GHCR packages inherit the org's default visibility (private) on first
+      # publish. The production host pulls anonymously, so every package must
+      # be public. This step is idempotent — PATCH with the same visibility is
+      # a no-op once the package is already public.
+      - name: Ensure package visibility is public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          for pkg in crowdrelay-api crowdrelay-worker crowdrelay-rekor-proof-anchor; do
+            echo "Setting ${pkg} to public…"
+            # The GITHUB_TOKEN in Actions has packages:write for the org's
+            # packages, so this API call works without a PAT.
+            gh api -X PATCH "/orgs/${owner_lower}/packages/container/${pkg}" \
+              -f visibility=public 2>/dev/null \
+              || gh api -X PATCH "/user/packages/container/${pkg}" \
+              -f visibility=public 2>/dev/null \
+              || echo "WARN: could not set ${pkg} visibility (may already be public or token lacks scope)"
+          done
