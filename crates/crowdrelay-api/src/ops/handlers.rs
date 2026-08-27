@@ -330,6 +330,22 @@ pub async fn retry_delivery(
     retry(&state.ops, &headers, "delivery", &id).await
 }
 
+pub async fn retry_push(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !matches!(
+        crate::ecosystem::feature_enabled(&state, "automatic_retry_enabled").await,
+        Ok(true)
+    ) {
+        return Problem::service_unavailable(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    retry(&state.ops, &headers, "push", &id).await
+}
+
 async fn retry(state: &OpsState, headers: &HeaderMap, target: &'static str, id: &str) -> Response {
     let id = match parse_id(id) {
         Ok(id) => id,
@@ -407,6 +423,7 @@ async fn retry_transaction(
     let rows = match target {
         "outbox" => retry_dead_outbox(&mut transaction, state, target_id).await?,
         "delivery" => retry_dead_delivery(&mut transaction, state, target_id).await?,
+        "push" => retry_dead_push(&mut transaction, state, target_id).await?,
         _ => return Err(OpsError::BadRequest),
     };
     if rows == 0 {
@@ -472,6 +489,33 @@ async fn retry_dead_delivery(
     Ok(result.rows_affected())
 }
 
+async fn retry_dead_push(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &OpsState,
+    id: Uuid,
+) -> Result<u64, OpsError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE fan_push_deliveries
+        SET status = 'queued', available_at = now(),
+            attempt_count = 0, error_code = NULL,
+            claim_token = NULL, claimed_at = NULL,
+            provider_started_at = NULL, provider_reference = NULL,
+            provider_accepted_at = NULL, ack_token_hash = NULL, ack_deadline = NULL,
+            delivered_at = NULL, completed_at = NULL, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2
+          AND status IN ('failed', 'ambiguous')
+          AND error_code IS DISTINCT FROM 'preference_disabled'
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .bind(id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(OpsError::sqlx)?;
+    Ok(result.rows_affected())
+}
+
 async fn classify_retry_miss(
     transaction: &mut Transaction<'_, Postgres>,
     state: &OpsState,
@@ -494,6 +538,16 @@ async fn classify_retry_miss(
         .fetch_optional(&mut **transaction)
         .await
         .map_err(OpsError::sqlx)?
+    } else if target == "push" {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM fan_push_deliveries WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(state.workspace_id.into_uuid())
+        .bind(id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(OpsError::sqlx)?
+        .map(|status| (status, true))
     } else {
         sqlx::query_scalar::<_, String>(
             "SELECT status FROM outbox_events WHERE workspace_id = $1 AND id = $2",

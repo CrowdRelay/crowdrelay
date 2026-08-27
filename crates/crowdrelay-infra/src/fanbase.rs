@@ -140,6 +140,27 @@ impl PostgresFanbaseRepository {
         .map_err(Self::unexpected)
     }
 
+    /// Removes a fanbase and all its dependent rows (ingestions, members).
+    /// The CASCADE foreign keys on `fanbase_ingestions` and `fanbase_members`
+    /// do the cleanup; the fans themselves stay — they belong to the workspace,
+    /// not to the fanbase that acquired them.
+    pub async fn delete_fanbase(
+        &self,
+        workspace_id: Uuid,
+        fanbase_id: Uuid,
+    ) -> Result<(), FanbaseError> {
+        let affected = sqlx::query("DELETE FROM fanbases WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace_id)
+            .bind(fanbase_id)
+            .execute(&self.pool)
+            .await
+            .map_err(Self::unexpected)?;
+        if affected.rows_affected() == 0 {
+            return Err(FanbaseError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn assert_fanbase(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         workspace_id: Uuid,

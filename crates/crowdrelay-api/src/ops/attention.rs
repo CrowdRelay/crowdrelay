@@ -14,6 +14,7 @@ struct OperatorAttentionSnapshot {
     alerts: Vec<OpsAlert>,
     dead_outbox: Vec<OutboxItem>,
     dead_deliveries: Vec<DeliveryItem>,
+    dead_push: Vec<PushDeliveryItem>,
     ecosystem: AttentionEcosystemOverview,
     findings: Vec<crate::ecosystem::ReconciliationFinding>,
 }
@@ -24,11 +25,12 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let alerts = run_with_timeout(timeout_duration, load_alerts(&state.ops));
     let dead_outbox = run_with_timeout(timeout_duration, load_dead_outbox(&state.ops));
     let dead_deliveries = run_with_timeout(timeout_duration, load_dead_deliveries(&state.ops));
+    let dead_push = run_with_timeout(timeout_duration, load_dead_push(&state.ops));
     let ecosystem = run_with_timeout(timeout_duration, load_attention_ecosystem(&state));
     let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
 
-    let (summary, alerts, dead_outbox, dead_deliveries, ecosystem, findings) =
-        tokio::join!(summary, alerts, dead_outbox, dead_deliveries, ecosystem, findings);
+    let (summary, alerts, dead_outbox, dead_deliveries, dead_push, ecosystem, findings) =
+        tokio::join!(summary, alerts, dead_outbox, dead_deliveries, dead_push, ecosystem, findings);
 
     let request_id_value = request_id(&headers);
     let summary = match summary {
@@ -44,6 +46,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Err(error) => return error.into_response(request_id(&headers)),
     };
     let dead_deliveries = match dead_deliveries {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let dead_push = match dead_push {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
@@ -63,6 +69,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             alerts,
             dead_outbox,
             dead_deliveries,
+            dead_push,
             ecosystem,
             findings,
         },
@@ -131,6 +138,24 @@ async fn load_dead_deliveries(state: &OpsState) -> Result<Vec<DeliveryItem>, Ops
          AND endpoint.id = delivery.endpoint_id
         WHERE delivery.workspace_id = $1 AND delivery.status = 'dead'
         ORDER BY delivery.created_at DESC, delivery.id DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::sqlx)
+}
+
+async fn load_dead_push(state: &OpsState) -> Result<Vec<PushDeliveryItem>, OpsError> {
+    sqlx::query_as::<_, PushDeliveryItem>(
+        r#"
+        SELECT id, fan_id, source_kind, title, status, attempt_count,
+               error_code, available_at, created_at, delivered_at, completed_at
+        FROM fan_push_deliveries
+        WHERE workspace_id = $1 AND status IN ('failed', 'ambiguous')
+          AND error_code IS DISTINCT FROM 'preference_disabled'
+        ORDER BY created_at DESC, id DESC
         LIMIT 50
         "#,
     )

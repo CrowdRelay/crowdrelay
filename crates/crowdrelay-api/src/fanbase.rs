@@ -138,6 +138,22 @@ pub async fn list_fanbases(State(state): State<crate::AppState>, headers: Header
     }
 }
 
+pub async fn delete_fanbase(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(fanbase_id): Path<Uuid>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    match repository(&state)
+        .delete_fanbase(workspace(&state), fanbase_id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(FanbaseError::NotFound) => Problem::not_found(request_id_value).into_response(),
+        Err(error) => error_response(error, request_id_value),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct IngestFanbaseRequest {

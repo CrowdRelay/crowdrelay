@@ -22,6 +22,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
     Router::new()
         .route("/v1/control-plane/ops/summary", get(crate::ops::summary))
         .route(
+            "/v1/control-plane/ops/signal-overview",
+            get(crate::ops::signal_overview),
+        )
+        .route(
             "/v1/control-plane/ops/attention",
             get(crate::ops::attention),
         )
@@ -45,6 +49,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/ops/deliveries/{delivery_id}/retry",
             post(crate::ops::retry_delivery),
+        )
+        .route(
+            "/v1/control-plane/ops/push/{delivery_id}/retry",
+            post(crate::ops::retry_push),
         )
         .route(
             "/v1/control-plane/ops/operations/{request_id}",
@@ -134,6 +142,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/fanbases",
             get(crate::fanbase::list_fanbases).post(crate::fanbase::create_fanbase),
+        )
+        .route(
+            "/v1/control-plane/fanbases/{fanbase_id}",
+            axum::routing::delete(crate::fanbase::delete_fanbase),
         )
         .route(
             "/v1/control-plane/fanbases/{fanbase_id}/ingest",

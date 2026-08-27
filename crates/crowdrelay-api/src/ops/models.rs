@@ -223,6 +223,25 @@ pub struct DeliveryItem {
 }
 
 #[derive(Debug, Serialize, FromRow)]
+pub struct PushDeliveryItem {
+    id: Uuid,
+    fan_id: Option<Uuid>,
+    source_kind: String,
+    title: String,
+    status: String,
+    attempt_count: i32,
+    error_code: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    available_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    delivered_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    completed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
 pub struct DeliveryAttempt {
     attempt_number: i32,
     #[serde(with = "time::serde::rfc3339")]
