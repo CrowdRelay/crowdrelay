@@ -608,7 +608,10 @@ async fn ensure_marketing_eligible(
 
 pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
     match payload {
-        AutopilotActionPayload::RequestShowGrowth { lever, .. } => !lever.is_first_party_campaign(),
+        // CanonicalLinkSetup is a pure first-party DB write (smart_links), so
+        // it must not be gated behind an executor capability. is_first_party
+        // covers both communication campaigns and the canonical-link write.
+        AutopilotActionPayload::RequestShowGrowth { lever, .. } => !lever.is_first_party(),
         _ => matches!(
             payload,
             AutopilotActionPayload::RequestFanLifecycleMessage { .. }

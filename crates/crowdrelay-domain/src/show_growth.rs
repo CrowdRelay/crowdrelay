@@ -178,6 +178,24 @@ impl ShowGrowthLever {
                 | Self::PostShowFollowAsk
         )
     }
+
+    /// True when the lever executes entirely inside CrowdRelay and needs no
+    /// external executor. Broader than `is_first_party_campaign`: canonical
+    /// link setup is a first-party DB write, not a communication campaign, so
+    /// `is_first_party_campaign` is false for it but this is true.
+    #[must_use]
+    pub const fn is_first_party(self) -> bool {
+        matches!(
+            self,
+            Self::CanonicalLinkSetup
+                | Self::FanAmbassadors
+                | Self::FreeFanChannelPush
+                | Self::MerchBuyerOffer
+                | Self::HighIntentLastMile
+                | Self::PostShowMerchFollowUp
+                | Self::PostShowFollowAsk
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -593,6 +611,15 @@ mod tests {
     #[test]
     fn free_fan_channel_push_is_first_party_executable() {
         assert!(ShowGrowthLever::FreeFanChannelPush.is_first_party_campaign());
+    }
+
+    #[test]
+    fn canonical_link_setup_is_first_party_but_not_a_campaign() {
+        // CanonicalLinkSetup is a pure DB write, not a communication campaign.
+        // It must not require an executor, but it also must not route through
+        // the campaign delivery path.
+        assert!(!ShowGrowthLever::CanonicalLinkSetup.is_first_party_campaign());
+        assert!(ShowGrowthLever::CanonicalLinkSetup.is_first_party());
     }
 
     #[test]
