@@ -158,7 +158,8 @@ impl GoogleAdsConfig {
         let refresh_token = optional_trimmed(values.get(GOOGLE_ADS_REFRESH_TOKEN_KEY));
         let client_id = optional_trimmed(values.get(GOOGLE_ADS_CLIENT_ID_KEY));
         let client_secret = optional_trimmed(values.get(GOOGLE_ADS_CLIENT_SECRET_KEY));
-        let conversion_action_id = optional_trimmed(values.get(GOOGLE_ADS_CONVERSION_ACTION_ID_KEY));
+        let conversion_action_id =
+            optional_trimmed(values.get(GOOGLE_ADS_CONVERSION_ACTION_ID_KEY));
 
         if enabled {
             let customer_id = customer_id.ok_or(ConfigError::Missing {
@@ -274,10 +275,7 @@ impl BandsintownConversionConfig {
                     name: BANDSINTOWN_API_TOKEN_KEY,
                 });
             }
-            Ok(Self {
-                enabled,
-                api_token,
-            })
+            Ok(Self { enabled, api_token })
         } else {
             Ok(Self {
                 enabled: false,
