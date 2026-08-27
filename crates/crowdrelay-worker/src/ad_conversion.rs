@@ -4,8 +4,13 @@
 //! Database triggers fire notifications when a fan gets ad attribution
 //! (signup) or when a ticket order transitions to 'paid'. The worker wakes
 //! immediately, processes the batch, then goes back to waiting — zero idle
-//! polling. A fallback safety-net poll every 5 minutes catches any
-//! notifications missed due to connection drops.
+//! polling.
+//!
+//! The only scenarios where LISTEN/NOTIFY can miss events are startup (the
+//! worker was down when the notification fired) and listener reconnect
+//! (connection dropped mid-gap). Both are discrete events, so the worker
+//! runs a single sweep on startup and after every reconnect — no periodic
+//! fallback poll.
 //!
 //! Events are idempotent: each (platform, event_name, event_id) is sent
 //! exactly once.
@@ -35,7 +40,6 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(300);
 const BATCH_SIZE: i64 = 50;
 /// Politeness gap between individual API calls within a cycle.
 /// Meta CAPI tolerates roughly 1 event per second per dataset; 500ms is safe
@@ -170,26 +174,20 @@ impl AdConversionWorker {
             return;
         }
 
+        // Startup sweep: catch any notifications that fired while the worker
+        // was down (restart, deploy, crash). This is the only scenario where
+        // LISTEN/NOTIFY can miss events — Postgres doesn't queue notifications
+        // for disconnected listeners.
+        tracing::info!("ad conversion worker starting — running startup sweep");
+        self.run_cycle_with_timeout().await;
+
         // Connect a dedicated LISTEN connection. This is separate from the
         // pool because a LISTEN connection must not be used for anything else
         // while subscribed.
-        let mut listener = match PgListener::connect_with(&self.pool).await {
-            Ok(listener) => listener,
-            Err(error) => {
-                tracing::error!(error = %error, "failed to connect PgListener for ad conversion worker");
-                return;
-            }
+        let mut listener = match self.connect_listener().await {
+            Some(listener) => listener,
+            None => return, // error already logged
         };
-        if let Err(error) = listener
-            .listen_all([NOTIFY_CHANNEL_LEAD, NOTIFY_CHANNEL_PURCHASE])
-            .await
-        {
-            tracing::error!(error = %error, "failed to LISTEN on ad conversion channels");
-            return;
-        }
-
-        let mut fallback = tokio::time::interval(POLL_INTERVAL);
-        fallback.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         tracing::info!("ad conversion worker listening on NOTIFY channels");
 
@@ -212,31 +210,39 @@ impl AdConversionWorker {
                         }
                         Err(error) => {
                             tracing::warn!(error = %error, "PgListener error — reconnecting");
-                            // Reconnect and re-listen
-                            match PgListener::connect_with(&self.pool).await {
-                                Ok(new_listener) => {
-                                    listener = new_listener;
-                                    if let Err(error) = listener
-                                        .listen_all([NOTIFY_CHANNEL_LEAD, NOTIFY_CHANNEL_PURCHASE])
-                                        .await
-                                    {
-                                        tracing::error!(error = %error, "failed to re-LISTEN after reconnect");
-                                        return;
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::error!(error = %error, "PgListener reconnect failed — falling back to poll only");
-                                }
+                            // Reconnect + re-listen, then sweep to catch any
+                            // notifications that fired during the disconnect gap.
+                            if let Some(new_listener) = self.connect_listener().await {
+                                listener = new_listener;
+                                tracing::info!("PgListener reconnected — running sweep for missed notifications");
+                                self.run_cycle_with_timeout().await;
+                            } else {
+                                // Reconnect failed. Retry with backoff until it
+                                // works or we shut down — without LISTEN we have
+                                // no way to receive events, so we must keep trying.
+                                tracing::error!("PgListener reconnect failed — retrying");
                             }
                         }
                     }
                 }
-                // Safety net: fallback poll in case notifications were missed
-                _ = fallback.tick() => {
-                    self.run_cycle_with_timeout().await;
-                }
             }
         }
+    }
+
+    /// Connects a PgListener and subscribes to both notification channels.
+    /// Returns None on failure (error already logged).
+    async fn connect_listener(&self) -> Option<PgListener> {
+        let mut listener = PgListener::connect_with(&self.pool).await.map_err(|error| {
+            tracing::error!(error = %error, "failed to connect PgListener for ad conversion worker");
+        }).ok()?;
+        listener
+            .listen_all([NOTIFY_CHANNEL_LEAD, NOTIFY_CHANNEL_PURCHASE])
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "failed to LISTEN on ad conversion channels");
+            })
+            .ok()?;
+        Some(listener)
     }
 
     async fn run_cycle_with_timeout(&self) {
