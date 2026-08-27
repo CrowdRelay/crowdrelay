@@ -84,8 +84,9 @@ CREATE INDEX ad_conversion_deliveries_pending_idx
 -- when a ticket order transitions to 'paid'. The worker wakes immediately,
 -- processes the batch, then goes back to waiting — zero idle polling.
 --
--- A fallback safety-net poll (every 5 minutes) catches any notifications
--- missed due to connection drops.
+-- The worker runs a startup sweep to catch any notifications that fired
+-- while it was down, and a sweep after every listener reconnect to catch
+-- the disconnect gap. No periodic fallback poll.
 
 -- Channel: ad_conversion_lead  — fired on fan_ad_attribution INSERT/UPDATE
 -- Channel: ad_conversion_purchase — fired on ticket_orders status → 'paid'
