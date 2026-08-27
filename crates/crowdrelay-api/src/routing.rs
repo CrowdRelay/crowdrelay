@@ -515,6 +515,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/admin/analytics/city-funnel",
             get(audience::city_funnel),
         )
+        .route(
+            "/v1/admin/analytics/ad-conversion",
+            get(audience::ad_conversion_overview),
+        )
+        .route(
+            "/v1/admin/analytics/ad-conversion/breakdown",
+            get(audience::ad_conversion_breakdown),
+        )
         .route("/v1/admin/ecosystem/overview", get(ecosystem::overview))
         .route("/v1/admin/ecosystem/flags", get(ecosystem::list_flags))
         .route(

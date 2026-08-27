@@ -236,4 +236,172 @@ pub async fn city_funnel(State(state): State<crate::AppState>, headers: HeaderMa
     private_json(result, &headers)
 }
 
+/// Ad conversion measurement: fan transfer from paid ad platforms into CrowdRelay.
+///
+/// Returns per-platform counts of attributed signups, successfully forwarded
+/// conversion events, and the attribution-to-delivery funnel. This is the
+/// control-plane readout that tells the operator whether their Meta/Google/
+/// Bandsintown ad spend is actually converting into fans.
+pub async fn ad_conversion_overview(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let workspace_uuid = state.ticketing.workspace_id().into_uuid();
+    let result = sqlx::query_as::<_, AdConversionOverviewRow>(
+        r#"
+        WITH attributed AS (
+            SELECT
+                CASE
+                    WHEN meta_fbp IS NOT NULL OR meta_fbc IS NOT NULL THEN true
+                    ELSE false
+                END AS has_meta,
+                CASE
+                    WHEN google_gclid IS NOT NULL THEN true
+                    ELSE false
+                END AS has_google,
+                CASE
+                    WHEN bandsintown_ref IS NOT NULL THEN true
+                    ELSE false
+                END AS has_bandsintown,
+                CASE
+                    WHEN utm_source IS NOT NULL THEN true
+                    ELSE false
+                END AS has_utm
+            FROM fan_ad_attribution
+            WHERE workspace_id = $1
+        ),
+        deliveries AS (
+            SELECT
+                platform,
+                event_name,
+                count(*)::bigint AS delivered,
+                count(*) FILTER (WHERE response_status >= 200 AND response_status < 300)::bigint
+                    AS delivered_ok
+            FROM ad_conversion_deliveries
+            WHERE workspace_id = $1
+            GROUP BY platform, event_name
+        )
+        SELECT
+            (SELECT count(*)::bigint FROM fan_ad_attribution WHERE workspace_id = $1)
+                AS attributed_fans,
+            (SELECT count(*)::bigint FROM attributed WHERE has_meta)::bigint
+                AS meta_attributed,
+            (SELECT count(*)::bigint FROM attributed WHERE has_google)::bigint
+                AS google_attributed,
+            (SELECT count(*)::bigint FROM attributed WHERE has_bandsintown)::bigint
+                AS bandsintown_attributed,
+            (SELECT count(*)::bigint FROM attributed WHERE has_utm)::bigint
+                AS utm_attributed,
+            COALESCE((
+                SELECT delivered FROM deliveries WHERE platform = 'meta' AND event_name = 'Lead'
+            ), 0)::bigint AS meta_lead_delivered,
+            COALESCE((
+                SELECT delivered_ok FROM deliveries WHERE platform = 'meta' AND event_name = 'Lead'
+            ), 0)::bigint AS meta_lead_delivered_ok,
+            COALESCE((
+                SELECT delivered FROM deliveries WHERE platform = 'google' AND event_name = 'Lead'
+            ), 0)::bigint AS google_lead_delivered,
+            COALESCE((
+                SELECT delivered_ok FROM deliveries WHERE platform = 'google' AND event_name = 'Lead'
+            ), 0)::bigint AS google_lead_delivered_ok,
+            COALESCE((
+                SELECT delivered FROM deliveries WHERE platform = 'bandsintown' AND event_name = 'Lead'
+            ), 0)::bigint AS bandsintown_lead_delivered,
+            COALESCE((
+                SELECT delivered_ok FROM deliveries WHERE platform = 'bandsintown' AND event_name = 'Lead'
+            ), 0)::bigint AS bandsintown_lead_delivered_ok
+        "#,
+    )
+    .bind(workspace_uuid)
+    .fetch_one(&state.database)
+    .await;
+    private_json(result, &headers)
+}
+
+/// Per-platform conversion breakdown with UTM detail.
+///
+/// Returns one row per (platform, utm_source, utm_medium, utm_campaign)
+/// combination, showing how many fans were attributed and how many
+/// conversion events were successfully delivered. This lets the operator
+/// compare ad campaigns side by side.
+///
+/// The query cross-joins attribution against the set of enabled platforms
+/// so every UTM combination appears once per platform, even if no delivery
+/// has happened yet — that's the "gap" the operator needs to see.
+pub async fn ad_conversion_breakdown(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let workspace_uuid = state.ticketing.workspace_id().into_uuid();
+    let result = sqlx::query_as::<_, AdConversionBreakdownRow>(
+        r#"
+        WITH attr AS (
+            SELECT
+                fan_id,
+                COALESCE(NULLIF(utm_source, ''), '(unattributed)') AS utm_source,
+                COALESCE(NULLIF(utm_medium, ''), '(unattributed)') AS utm_medium,
+                COALESCE(NULLIF(utm_campaign, ''), '(unattributed)') AS utm_campaign
+            FROM fan_ad_attribution
+            WHERE workspace_id = $1
+        ),
+        platforms AS (
+            SELECT unnest(ARRAY['meta', 'google', 'bandsintown']) AS platform
+        ),
+        utm_groups AS (
+            SELECT
+                utm_source,
+                utm_medium,
+                utm_campaign,
+                count(DISTINCT fan_id)::bigint AS attributed_fans
+            FROM attr
+            GROUP BY utm_source, utm_medium, utm_campaign
+        ),
+        deliv AS (
+            SELECT
+                platform,
+                fan_id,
+                count(*)::bigint AS delivered,
+                count(*) FILTER (WHERE response_status >= 200 AND response_status < 300)::bigint
+                    AS delivered_ok
+            FROM ad_conversion_deliveries
+            WHERE workspace_id = $1
+            GROUP BY platform, fan_id
+        ),
+        deliv_by_utm AS (
+            SELECT
+                deliv.platform,
+                attr.utm_source,
+                attr.utm_medium,
+                attr.utm_campaign,
+                COALESCE(sum(deliv.delivered), 0)::bigint AS delivered,
+                COALESCE(sum(deliv.delivered_ok), 0)::bigint AS delivered_ok
+            FROM attr
+            JOIN deliv ON deliv.fan_id = attr.fan_id
+            GROUP BY deliv.platform, attr.utm_source, attr.utm_medium, attr.utm_campaign
+        )
+        SELECT
+            platforms.platform,
+            utm.utm_source,
+            utm.utm_medium,
+            utm.utm_campaign,
+            utm.attributed_fans,
+            COALESCE(deliv.delivered, 0)::bigint AS delivered,
+            COALESCE(deliv.delivered_ok, 0)::bigint AS delivered_ok
+        FROM utm_groups utm
+        CROSS JOIN platforms
+        LEFT JOIN deliv_by_utm deliv
+          ON deliv.platform = platforms.platform
+         AND deliv.utm_source = utm.utm_source
+         AND deliv.utm_medium = utm.utm_medium
+         AND deliv.utm_campaign = utm.utm_campaign
+        ORDER BY utm.attributed_fans DESC, platforms.platform, deliv.delivered_ok DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(workspace_uuid)
+    .fetch_all(&state.database)
+    .await;
+    private_json(result, &headers)
+}
+
 include!("audience/query_support.rs");

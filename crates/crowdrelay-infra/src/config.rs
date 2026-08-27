@@ -22,10 +22,12 @@ use url::Url;
 use crate::sensitive_response::SensitiveResponseKey;
 
 mod click;
+mod meta;
 mod push;
 mod team;
 
 use click::parse_click_buffer_config;
+pub use meta::{AdConversionConfig, BandsintownConversionConfig, GoogleAdsConfig, MetaCapiConfig};
 pub use push::PushPublicConfig;
 pub use team::TeamOperationsConfig;
 use team::{
@@ -171,6 +173,21 @@ const KNOWN_KEYS: &[&str] = &[
     push::PUSH_DELIVERY_ENABLED_KEY,
     push::WEB_PUSH_VAPID_PUBLIC_KEY,
     push::FCM_PROJECT_ID_KEY,
+    meta::META_CAPI_ENABLED_KEY,
+    meta::META_PIXEL_ID_KEY,
+    meta::META_CAPI_ACCESS_TOKEN_KEY,
+    meta::META_CAPI_API_VERSION_KEY,
+    meta::META_CAPI_TEST_EVENT_CODE_KEY,
+    meta::META_CAPI_VERIFY_TOKEN_KEY,
+    meta::GOOGLE_ADS_ENABLED_KEY,
+    meta::GOOGLE_ADS_CUSTOMER_ID_KEY,
+    meta::GOOGLE_ADS_DEVELOPER_TOKEN_KEY,
+    meta::GOOGLE_ADS_REFRESH_TOKEN_KEY,
+    meta::GOOGLE_ADS_CLIENT_ID_KEY,
+    meta::GOOGLE_ADS_CLIENT_SECRET_KEY,
+    meta::GOOGLE_ADS_CONVERSION_ACTION_ID_KEY,
+    meta::BANDSINTOWN_CONVERSION_ENABLED_KEY,
+    meta::BANDSINTOWN_API_TOKEN_KEY,
 ];
 
 /// Runtime configuration shared by the API and worker.
@@ -214,6 +231,8 @@ pub struct Config {
     pub push_delivery: PushPublicConfig,
     /// Edge rate limiting policy applied by the HTTP layer.
     pub rate_limit: RateLimitConfig,
+    /// Server-side ad conversion tracking (Meta CAPI, Google Ads, Bandsintown).
+    pub ad_conversion: AdConversionConfig,
 }
 
 /// Per-identity fixed-window limits enforced at the API edge.
@@ -379,6 +398,7 @@ impl Config {
             DEFAULT_REQUIRE_DOUBLE_OPT_IN,
         )?;
         let rate_limit = parse_rate_limit(&values)?;
+        let ad_conversion = AdConversionConfig::parse(&values)?;
 
         Ok(Self {
             environment,
@@ -408,6 +428,7 @@ impl Config {
             require_double_opt_in,
             push_delivery: PushPublicConfig::parse(&values)?,
             rate_limit,
+            ad_conversion,
         })
     }
 }

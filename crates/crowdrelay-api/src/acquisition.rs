@@ -352,6 +352,33 @@ pub struct FanSignupRequest {
     consent: ConsentRequest,
     #[serde(default)]
     nearby_gigs: NearbyGigsRequest,
+    /// Ad attribution captured client-side for server-side conversion APIs.
+    #[serde(default)]
+    ad_attribution: AdAttributionRequest,
+}
+
+/// Browser-side ad tracking identifiers forwarded by the signup page so the
+/// CAPI/Google Ads workers can send them alongside hashed user data for
+/// maximum matching quality. All fields are optional — the browser sends
+/// what it has.
+#[derive(Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AdAttributionRequest {
+    /// Meta _fbp cookie (browser ID, e.g. "fb.1.1234567890.1234567890").
+    meta_fbp: Option<String>,
+    /// Meta _fbc cookie (click ID, from fbclid URL parameter).
+    meta_fbc: Option<String>,
+    /// Google Click ID from google.com ad URLs.
+    google_gclid: Option<String>,
+    /// Bandsintown tracking ref from event links.
+    bandsintown_ref: Option<String>,
+    utm_source: Option<String>,
+    utm_medium: Option<String>,
+    utm_campaign: Option<String>,
+    utm_content: Option<String>,
+    utm_term: Option<String>,
+    /// The page URL where the signup form was submitted.
+    event_source_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -448,6 +475,12 @@ pub async fn signup_fan(
     let nearby_enabled = payload.nearby_gigs.enabled;
     let nearby_radius_km = payload.nearby_gigs.radius_km;
     let requested_city_slug = payload.city_slug.clone();
+    let ad_attribution = payload.ad_attribution.clone();
+    let client_ip = client_ip_address(&headers);
+    let client_user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     if !(25..=500).contains(&nearby_radius_km) {
         return Problem::unprocessable(request_id_value)
             .private()
@@ -490,6 +523,22 @@ pub async fn signup_fan(
             %error,
             fan_id = %result.fan_id,
             "fan signup completed but nearby preference could not be persisted"
+        );
+    }
+    if let Err(error) = persist_ad_attribution(
+        state.ticketing.pool(),
+        state.acquisition.workspace_id,
+        result.fan_id,
+        &ad_attribution,
+        client_ip.as_deref(),
+        client_user_agent.as_deref(),
+    )
+    .await
+    {
+        tracing::warn!(
+            %error,
+            fan_id = %result.fan_id,
+            "fan signup completed but ad attribution could not be persisted"
         );
     }
 
@@ -752,6 +801,83 @@ fn attribution_cookie(visitor_id: VisitorId, secure: bool) -> String {
 pub(crate) fn referrer_host(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(REFERER)?.to_str().ok()?;
     Url::parse(raw).ok()?.host_str().map(|host| host.to_owned())
+}
+
+/// Extracts the client IP address from the request, preferring X-Forwarded-For
+/// (first hop) then X-Real-IP then the connection info. Used for server-side
+/// ad conversion events where the platform matches on IP.
+pub(crate) fn client_ip_address(headers: &HeaderMap) -> Option<String> {
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(first) = forwarded.split(',').next()
+    {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() && trimmed.len() <= 64 {
+            return Some(trimmed.to_owned());
+        }
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty() && v.len() <= 64)
+}
+
+/// Persists ad attribution parameters so the conversion workers can send
+/// server-side events with maximum matching quality. Idempotent: if the fan
+/// already has attribution, the row is updated with any new non-null values.
+async fn persist_ad_attribution(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    fan_id: FanId,
+    attribution: &AdAttributionRequest,
+    client_ip: Option<&str>,
+    client_user_agent: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let workspace_uuid = workspace_id.into_uuid();
+    let fan_uuid = fan_id.into_uuid();
+    sqlx::query(
+        r#"
+        INSERT INTO fan_ad_attribution (
+            workspace_id, fan_id,
+            meta_fbp, meta_fbc, google_gclid, bandsintown_ref,
+            utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+            client_ip_address, client_user_agent, event_source_url
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+        )
+        ON CONFLICT (workspace_id, fan_id) DO UPDATE SET
+            meta_fbp = COALESCE(EXCLUDED.meta_fbp, fan_ad_attribution.meta_fbp),
+            meta_fbc = COALESCE(EXCLUDED.meta_fbc, fan_ad_attribution.meta_fbc),
+            google_gclid = COALESCE(EXCLUDED.google_gclid, fan_ad_attribution.google_gclid),
+            bandsintown_ref = COALESCE(EXCLUDED.bandsintown_ref, fan_ad_attribution.bandsintown_ref),
+            utm_source = COALESCE(EXCLUDED.utm_source, fan_ad_attribution.utm_source),
+            utm_medium = COALESCE(EXCLUDED.utm_medium, fan_ad_attribution.utm_medium),
+            utm_campaign = COALESCE(EXCLUDED.utm_campaign, fan_ad_attribution.utm_campaign),
+            utm_content = COALESCE(EXCLUDED.utm_content, fan_ad_attribution.utm_content),
+            utm_term = COALESCE(EXCLUDED.utm_term, fan_ad_attribution.utm_term),
+            client_ip_address = COALESCE(EXCLUDED.client_ip_address, fan_ad_attribution.client_ip_address),
+            client_user_agent = COALESCE(EXCLUDED.client_user_agent, fan_ad_attribution.client_user_agent),
+            event_source_url = COALESCE(EXCLUDED.event_source_url, fan_ad_attribution.event_source_url),
+            captured_at = now()
+        "#,
+    )
+    .bind(workspace_uuid)
+    .bind(fan_uuid)
+    .bind(attribution.meta_fbp.as_deref())
+    .bind(attribution.meta_fbc.as_deref())
+    .bind(attribution.google_gclid.as_deref())
+    .bind(attribution.bandsintown_ref.as_deref())
+    .bind(attribution.utm_source.as_deref())
+    .bind(attribution.utm_medium.as_deref())
+    .bind(attribution.utm_campaign.as_deref())
+    .bind(attribution.utm_content.as_deref())
+    .bind(attribution.utm_term.as_deref())
+    .bind(client_ip)
+    .bind(client_user_agent)
+    .bind(attribution.event_source_url.as_deref())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 fn referral_url(base_url: &Url, code: &ReferralCode) -> Result<String, url::ParseError> {

@@ -7344,6 +7344,70 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/analytics/ad-conversion:
+    get:
+      operationId: getAdminAdConversionOverview
+      summary: Read ad conversion funnel (attributed signups → delivered conversion events)
+      description: |
+        Per-platform measurement of fan transfer from paid ad platforms (Meta, Google,
+        Bandsintown) into CrowdRelay. Shows how many fans were attributed to each platform
+        and how many server-side conversion events were successfully delivered.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Ad conversion overview.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attributed_fans: { type: integer, format: int64 }
+                  meta_attributed: { type: integer, format: int64 }
+                  google_attributed: { type: integer, format: int64 }
+                  bandsintown_attributed: { type: integer, format: int64 }
+                  utm_attributed: { type: integer, format: int64 }
+                  meta_lead_delivered: { type: integer, format: int64 }
+                  meta_lead_delivered_ok: { type: integer, format: int64 }
+                  google_lead_delivered: { type: integer, format: int64 }
+                  google_lead_delivered_ok: { type: integer, format: int64 }
+                  bandsintown_lead_delivered: { type: integer, format: int64 }
+                  bandsintown_lead_delivered_ok: { type: integer, format: int64 }
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/analytics/ad-conversion/breakdown:
+    get:
+      operationId: getAdminAdConversionBreakdown
+      summary: Read per-platform, per-UTM ad conversion breakdown
+      description: |
+        One row per (platform, utm_source, utm_medium, utm_campaign) combination showing
+        attributed fans and delivered conversion events. Lets the operator compare ad
+        campaigns side by side.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Ad conversion breakdown by platform and UTM parameters.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    platform: { type: string, nullable: true }
+                    utm_source: { type: string }
+                    utm_medium: { type: string }
+                    utm_campaign: { type: string }
+                    attributed_fans: { type: integer, format: int64 }
+                    delivered: { type: integer, format: int64 }
+                    delivered_ok: { type: integer, format: int64 }
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/ecosystem/overview:
     get:
       operationId: getEcosystemOverview
@@ -11683,6 +11747,48 @@ components:
               type: string
               minLength: 1
               maxLength: 128
+        ad_attribution:
+          type: object
+          additionalProperties: false
+          description: Browser-side ad tracking identifiers forwarded by the signup page so the
+            server-side conversion workers (Meta CAPI, Google Ads, Bandsintown) can send them
+            alongside hashed user data for maximum matching quality. All fields are optional.
+          properties:
+            meta_fbp:
+              type: string
+              maxLength: 128
+              description: Meta _fbp cookie (browser ID, e.g. "fb.1.1234567890.1234567890").
+            meta_fbc:
+              type: string
+              maxLength: 256
+              description: Meta _fbc cookie (click ID, from fbclid URL parameter).
+            google_gclid:
+              type: string
+              maxLength: 256
+              description: Google Click ID from google.com ad URLs.
+            bandsintown_ref:
+              type: string
+              maxLength: 256
+              description: Bandsintown tracking ref from event links.
+            utm_source:
+              type: string
+              maxLength: 256
+            utm_medium:
+              type: string
+              maxLength: 256
+            utm_campaign:
+              type: string
+              maxLength: 256
+            utm_content:
+              type: string
+              maxLength: 256
+            utm_term:
+              type: string
+              maxLength: 256
+            event_source_url:
+              type: string
+              maxLength: 2048
+              description: The page URL where the signup form was submitted.
     FanSignupResponse:
       type: object
       additionalProperties: false
