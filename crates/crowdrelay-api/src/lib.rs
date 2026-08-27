@@ -333,17 +333,31 @@ fn is_control_plane_management_path(path: &str) -> bool {
                 | "/v1/control-plane/ecosystem/reconcile"
                 | "/v1/control-plane/ecosystem/flags"
                 | "/v1/control-plane/autopilot/overview"
+                | "/v1/control-plane/autopilot/growth"
+                | "/v1/control-plane/autopilot/scorecard"
+                | "/v1/control-plane/autopilot/reply-triage"
+                | "/v1/control-plane/autopilot/next-best-actions"
+                | "/v1/control-plane/portfolio/overview"
+                | "/v1/control-plane/portfolio/amplification"
+                | "/v1/control-plane/tenant-settings"
+                | "/v1/control-plane/fanbases"
+                | "/v1/control-plane/webhook-endpoints"
         )
         || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
         || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
-        || path == "/v1/control-plane/autopilot/next-best-actions"
-        || path == "/v1/control-plane/autopilot/reply-triage"
+        || one_segment_after(path, "/v1/control-plane/tenant-settings/")
         || one_segment_with_suffix(path, "/v1/control-plane/autopilot/actions/", "/approve")
         || one_segment_with_suffix(
             path,
             "/v1/control-plane/autopilot/decisions/",
             "/handled-externally",
         )
+        || one_segment_with_suffix(
+            path,
+            "/v1/control-plane/portfolio/amplification/",
+            "/decide",
+        )
+        || one_segment_with_suffix(path, "/v1/control-plane/fanbases/", "/ingest")
 }
 
 async fn enforce_privileged_namespace(

@@ -147,18 +147,24 @@ async fn load_agent_scorecard(
     let pool = &state.database;
 
     // 1. Status: agent enabled, posture, last activity.
+    // The kill switch and dry-run flag live on the growth envelope, while the
+    // posture label lives on the growth posture table. Both are keyed by
+    // workspace_id and provisioned on workspace creation, so a CROSS JOIN of
+    // two single-row tables is the correct join here.
     let status_row = sqlx::query_as::<_, StatusRow>(
         r#"
         SELECT
-            posture.agent_enabled,
-            posture.dry_run,
+            envelope.agent_enabled,
+            envelope.dry_run,
             posture.posture,
             (SELECT max(evaluated_at) FROM viryaos_autopilot_decisions
              WHERE workspace_id = $1) AS last_decision_at,
             (SELECT max(finished_at) FROM viryaos_autopilot_actions
              WHERE workspace_id = $1 AND finished_at IS NOT NULL) AS last_action_at
-        FROM viryaos_growth_posture AS posture
-        WHERE posture.workspace_id = $1
+        FROM viryaos_growth_envelope AS envelope
+        LEFT JOIN viryaos_growth_posture AS posture
+          ON posture.workspace_id = envelope.workspace_id
+        WHERE envelope.workspace_id = $1
         "#,
     )
     .bind(workspace_id)
