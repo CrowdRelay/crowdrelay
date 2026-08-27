@@ -120,6 +120,17 @@ control.virya.music {
             }
         }
 
+        # Machine-to-machine automation event ingestion (n8n → control plane).
+        # Bearer token auth, not Basic — the backend validates the automation token.
+        @automation_ingest path /api/v1/automation/events
+        handle @automation_ingest {
+            reverse_proxy control-plane:8090 {
+                health_uri /healthz/ready
+                health_interval 15s
+                health_timeout 3s
+            }
+        }
+
         @provisioner path /api/v1/provisioner/*
         handle @provisioner {
             reverse_proxy control-plane:8090 {
@@ -134,6 +145,7 @@ control.virya.music {
         }
 
         @api {
+            not path /api/v1/automation/events
             path /api/v1/*
             not path /api/v1/tenants/*/runtime
         }
