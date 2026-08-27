@@ -40,7 +40,8 @@ CREATE TABLE fanbase_oauth_states (
 CREATE INDEX fanbase_oauth_states_workspace_idx
     ON fanbase_oauth_states (workspace_id, platform, expires_at DESC);
 
--- Partial index for cleanup: only states that have expired need scanning.
-CREATE INDEX fanbase_oauth_states_expired_idx
-    ON fanbase_oauth_states (expires_at)
-    WHERE expires_at < now();
+-- Index for cleanup queries (DELETE ... WHERE expires_at < now()).
+-- A partial index with now() in the predicate is not allowed (now() is
+-- STABLE, not IMMUTABLE), so this is a plain index on expires_at.
+CREATE INDEX fanbase_oauth_states_expires_at_idx
+    ON fanbase_oauth_states (expires_at);

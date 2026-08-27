@@ -252,6 +252,64 @@ pub enum SensitiveResponseError {
     ContextTooLarge,
 }
 
+// ---------------------------------------------------------------------------
+// Standalone encrypt/decrypt for non-response secrets (e.g. fanbase OAuth
+// tokens). Uses the same XChaCha20-Poly1305 primitive and key type, but with
+// caller-supplied associated data instead of the workspace/scope/key tuple.
+// ---------------------------------------------------------------------------
+
+/// Encrypt a raw byte string with a `SensitiveResponseKey` and custom
+/// associated data. Returns a nonce || ciphertext byte vector.
+pub fn encrypt_value(
+    plaintext: &[u8],
+    key: &SensitiveResponseKey,
+    associated_data: &[u8],
+) -> Result<Vec<u8>, SensitiveResponseError> {
+    let mut nonce_bytes = [0_u8; XCHACHA20_NONCE_BYTES];
+    if getrandom::fill(&mut nonce_bytes).is_err() {
+        return Err(SensitiveResponseError::Randomness);
+    }
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
+    let encrypted = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: plaintext,
+                aad: associated_data,
+            },
+        )
+        .map_err(|_| SensitiveResponseError::Encryption)?;
+    let mut output = Vec::with_capacity(XCHACHA20_NONCE_BYTES + encrypted.len());
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&encrypted);
+    Ok(output)
+}
+
+/// Decrypt a nonce || ciphertext byte vector produced by `encrypt_value`.
+pub fn decrypt_value(
+    ciphertext: &[u8],
+    key: &SensitiveResponseKey,
+    associated_data: &[u8],
+) -> Result<Vec<u8>, SensitiveResponseError> {
+    if ciphertext.len() < XCHACHA20_NONCE_BYTES {
+        return Err(SensitiveResponseError::Malformed);
+    }
+    let (nonce_bytes, encrypted) = ciphertext.split_at(XCHACHA20_NONCE_BYTES);
+    let nonce: [u8; XCHACHA20_NONCE_BYTES] = nonce_bytes
+        .try_into()
+        .map_err(|_| SensitiveResponseError::Malformed)?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
+    cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: encrypted,
+                aad: associated_data,
+            },
+        )
+        .map_err(|_| SensitiveResponseError::Authentication)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,62 +436,4 @@ mod tests {
         );
         Ok(())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Standalone encrypt/decrypt for non-response secrets (e.g. fanbase OAuth
-// tokens). Uses the same XChaCha20-Poly1305 primitive and key type, but with
-// caller-supplied associated data instead of the workspace/scope/key tuple.
-// ---------------------------------------------------------------------------
-
-/// Encrypt a raw byte string with a `SensitiveResponseKey` and custom
-/// associated data. Returns a nonce || ciphertext byte vector.
-pub fn encrypt_value(
-    plaintext: &[u8],
-    key: &SensitiveResponseKey,
-    associated_data: &[u8],
-) -> Result<Vec<u8>, SensitiveResponseError> {
-    let mut nonce_bytes = [0_u8; XCHACHA20_NONCE_BYTES];
-    if getrandom::fill(&mut nonce_bytes).is_err() {
-        return Err(SensitiveResponseError::Randomness);
-    }
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
-    let encrypted = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce_bytes),
-            Payload {
-                msg: plaintext,
-                aad: associated_data,
-            },
-        )
-        .map_err(|_| SensitiveResponseError::Encryption)?;
-    let mut output = Vec::with_capacity(XCHACHA20_NONCE_BYTES + encrypted.len());
-    output.extend_from_slice(&nonce_bytes);
-    output.extend_from_slice(&encrypted);
-    Ok(output)
-}
-
-/// Decrypt a nonce || ciphertext byte vector produced by `encrypt_value`.
-pub fn decrypt_value(
-    ciphertext: &[u8],
-    key: &SensitiveResponseKey,
-    associated_data: &[u8],
-) -> Result<Vec<u8>, SensitiveResponseError> {
-    if ciphertext.len() < XCHACHA20_NONCE_BYTES {
-        return Err(SensitiveResponseError::Malformed);
-    }
-    let (nonce_bytes, encrypted) = ciphertext.split_at(XCHACHA20_NONCE_BYTES);
-    let nonce: [u8; XCHACHA20_NONCE_BYTES] = nonce_bytes
-        .try_into()
-        .map_err(|_| SensitiveResponseError::Malformed)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
-    cipher
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: encrypted,
-                aad: associated_data,
-            },
-        )
-        .map_err(|_| SensitiveResponseError::Authentication)
 }
