@@ -83,7 +83,7 @@ async fn queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event()
             task_title: "Check booking request".to_owned(),
             task_detail: "Open Needs you and review the booking request.".to_owned(),
             due_at: None,
-            action_url_path: "/staff/control/".to_owned(),
+            action_url_path: "/staff/".to_owned(),
             reminder_number: 0,
         })?,
         now,
