@@ -386,3 +386,29 @@ pub struct FanJourneyEntry {
     title: String,
     detail: Value,
 }
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct AdConversionOverviewRow {
+    pub attributed_fans: i64,
+    pub meta_attributed: i64,
+    pub google_attributed: i64,
+    pub bandsintown_attributed: i64,
+    pub utm_attributed: i64,
+    pub meta_lead_delivered: i64,
+    pub meta_lead_delivered_ok: i64,
+    pub google_lead_delivered: i64,
+    pub google_lead_delivered_ok: i64,
+    pub bandsintown_lead_delivered: i64,
+    pub bandsintown_lead_delivered_ok: i64,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct AdConversionBreakdownRow {
+    pub platform: Option<String>,
+    pub utm_source: String,
+    pub utm_medium: String,
+    pub utm_campaign: String,
+    pub attributed_fans: i64,
+    pub delivered: i64,
+    pub delivered_ok: i64,
+}

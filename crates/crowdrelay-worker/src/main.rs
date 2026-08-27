@@ -24,6 +24,7 @@ use crowdrelay_infra::{
     autopilot::PostgresAutopilotRepository, config::Config, database, observability,
 };
 use crowdrelay_worker::{
+    ad_conversion::AdConversionWorker,
     audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
@@ -332,6 +333,17 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         tracing::info!("reddit discovery disabled; CROWDRELAY_DISCOVERY_REDDIT_QUERIES not set");
         None
     };
+    let ad_conversion_worker = if config.ad_conversion.any_enabled() {
+        Some(AdConversionWorker::new(
+            database.clone(),
+            workspace_id,
+            config.ad_conversion.clone(),
+            config.database.operation_timeout,
+        )?)
+    } else {
+        tracing::info!("ad conversion disabled; no platforms (Meta/Google/Bandsintown) enabled");
+        None
+    };
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
@@ -344,6 +356,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let operator_brief_shutdown = shutdown_receiver.clone();
     let discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
+    let ad_conversion_shutdown = shutdown_receiver.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -402,6 +415,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         runtime_tasks.spawn(async move {
             worker.run(discovery_shutdown).await;
             "reddit discovery"
+        });
+    }
+    if let Some(worker) = ad_conversion_worker {
+        runtime_tasks.spawn(async move {
+            worker.run(ad_conversion_shutdown).await;
+            "ad conversion worker"
         });
     }
 
