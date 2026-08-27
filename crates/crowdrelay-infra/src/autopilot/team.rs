@@ -510,7 +510,7 @@ pub(super) async fn queue_team_email_action(
         task_title,
         task_detail,
         due_at,
-        action_url_path: "/staff/control/".to_owned(),
+        action_url_path: "/staff/".to_owned(),
         reminder_number,
     })
     .map_err(|_| RepositoryError::Unexpected)?;
