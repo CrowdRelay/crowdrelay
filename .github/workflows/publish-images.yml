@@ -168,12 +168,14 @@ jobs:
       - name: Merge per-architecture manifests into the release tag
         run: |
           set -Eeuo pipefail
+          # Docker tags must be lowercase; GitHub org names are case-preserving.
+          owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           mkdir -p image-digests
           printf 'CROWDRELAY_RELEASE_SHA=%s\n' "${IMAGE_SHA}" > image-digests/images.env
 
           merge() {
             local repo="$1" var="$2" target digest platforms
-            target="${REGISTRY}/${{ env.OWNER_LOWER }}/${repo}:sha-${IMAGE_SHA}"
+            target="${REGISTRY}/${owner_lower}/${repo}:sha-${IMAGE_SHA}"
             docker buildx imagetools create --tag "$target" "${target}-amd64" "${target}-arm64"
 
             digest="$(docker buildx imagetools inspect "$target" --format '{{.Manifest.Digest}}')"

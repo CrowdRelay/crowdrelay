@@ -197,6 +197,113 @@ impl PostgresEcosystemRepository {
             })
             .collect())
     }
+
+    /// Resolve findings from previous runs that this run's snapshot no longer
+    /// detects. A finding is obsolete when the same `(kind, entity_id)` pair
+    /// does not appear in the new run's findings — meaning the underlying
+    /// condition was fixed (dead delivery retried/cancelled, ticket order
+    /// corrected, etc.). Without this, findings accumulate across runs and the
+    /// attention page shows duplicates that can never be cleared.
+    async fn resolve_obsolete_findings(
+        tx: &mut Transaction<'_, Postgres>,
+        workspace_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<(), EcosystemRepositoryError> {
+        // Build the set of (kind, entity_id) pairs that this run will raise.
+        // We resolve everything from prior runs first, then insert_findings
+        // adds the current snapshot. Findings that persist will be re-created
+        // fresh; findings that no longer apply stay resolved.
+        sqlx::query(
+            r#"
+            UPDATE reconciliation_findings AS old
+            SET resolved_at = now()
+            WHERE old.workspace_id = $1
+              AND old.resolved_at IS NULL
+              AND old.run_id <> $2
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM (
+                      -- Mirror the insert_findings SELECT exactly so we only
+                      -- keep findings that are still true in this snapshot.
+                      SELECT 'ticket.pass_count_mismatch' AS kind, ticket_order.id AS entity_id
+                      FROM ticket_orders AS ticket_order
+                      JOIN LATERAL (
+                          SELECT COALESCE(sum(item.quantity), 0)::bigint AS quantity
+                          FROM ticket_order_items AS item
+                          WHERE item.workspace_id = ticket_order.workspace_id
+                            AND item.ticket_order_id = ticket_order.id
+                      ) AS expected ON true
+                      JOIN LATERAL (
+                          SELECT count(pass.id)::bigint AS quantity
+                          FROM admission_passes AS pass
+                          JOIN ticket_order_items AS item
+                            ON item.workspace_id = pass.workspace_id
+                           AND item.id = pass.ticket_order_item_id
+                          WHERE item.workspace_id = ticket_order.workspace_id
+                            AND item.ticket_order_id = ticket_order.id
+                            AND pass.issuance_method = 'paid'
+                      ) AS actual ON true
+                      WHERE ticket_order.workspace_id = $1
+                        AND ticket_order.status IN ('paid', 'partially_refunded', 'refunded')
+                        AND expected.quantity <> actual.quantity
+
+                      UNION ALL
+
+                      SELECT 'ticket.paid_event_missing', ticket_order.id
+                      FROM ticket_orders AS ticket_order
+                      WHERE ticket_order.workspace_id = $1
+                        AND ticket_order.status IN ('paid', 'partially_refunded', 'refunded')
+                        AND NOT EXISTS (
+                            SELECT 1 FROM outbox_events AS event
+                            WHERE event.workspace_id = ticket_order.workspace_id
+                              AND event.event_type = 'ticket.order.paid'
+                              AND event.payload ->> 'order_id' = ticket_order.id::text
+                        )
+
+                      UNION ALL
+
+                      SELECT 'ticket.delivery_event_missing', request.ticket_order_id
+                      FROM ticket_delivery_requests AS request
+                      JOIN ticket_orders AS ticket_order
+                        ON ticket_order.workspace_id = request.workspace_id
+                       AND ticket_order.id = request.ticket_order_id
+                      WHERE request.workspace_id = $1
+                        AND NOT EXISTS (
+                            SELECT 1 FROM outbox_events AS event
+                            WHERE event.workspace_id = request.workspace_id
+                              AND event.event_type = 'ticket.order.delivery_requested'
+                              AND event.payload ->> 'order_id' = request.ticket_order_id::text
+                              AND event.created_at >= request.created_at - interval '5 seconds'
+                        )
+
+                      UNION ALL
+
+                      SELECT 'outbox.dead', event.id
+                      FROM outbox_events AS event
+                      WHERE event.workspace_id = $1 AND event.status = 'dead'
+
+                      UNION ALL
+
+                      SELECT 'webhook.dead', delivery.id
+                      FROM webhook_deliveries AS delivery
+                      JOIN webhook_endpoints AS endpoint
+                        ON endpoint.workspace_id = delivery.workspace_id
+                       AND endpoint.id = delivery.endpoint_id
+                      WHERE delivery.workspace_id = $1 AND delivery.status = 'dead'
+                  ) AS current
+                  WHERE current.kind = old.kind
+                    AND current.entity_id = old.entity_id
+              )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
     /// Every discrepancy class this pass knows how to detect, raised in one
     /// statement so a run is a single consistent snapshot rather than five
     /// queries racing each other.
@@ -685,6 +792,12 @@ impl EcosystemControlPlaneRepository for PostgresEcosystemRepository {
         .execute(&mut *tx)
         .await
         .map_err(Self::unexpected)?;
+
+        // Resolve findings from previous runs that are no longer present in
+        // this run's snapshot. Without this, findings accumulate across runs —
+        // a dead delivery that was cancelled still shows as an open finding
+        // from every prior run that observed it.
+        Self::resolve_obsolete_findings(&mut tx, workspace_id, run_id).await?;
 
         Self::insert_findings(&mut tx, workspace_id, run_id).await?;
 
