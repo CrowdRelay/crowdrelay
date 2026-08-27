@@ -1,9 +1,14 @@
 //! Server-side ad conversion tracking for Meta CAPI, Google Ads, and Bandsintown.
 //!
-//! The worker polls for active, marketing-consented fans that have ad
-//! attribution but no conversion delivery record, then forwards the
-//! appropriate event to each enabled platform. Events are idempotent:
-//! each (platform, event_name, event_id) is sent exactly once.
+//! The worker listens on Postgres LISTEN/NOTIFY channels instead of polling.
+//! Database triggers fire notifications when a fan gets ad attribution
+//! (signup) or when a ticket order transitions to 'paid'. The worker wakes
+//! immediately, processes the batch, then goes back to waiting — zero idle
+//! polling. A fallback safety-net poll every 5 minutes catches any
+//! notifications missed due to connection drops.
+//!
+//! Events are idempotent: each (platform, event_name, event_id) is sent
+//! exactly once.
 //!
 //! Events sent:
 //! - Meta: Lead (fan signup), Purchase (ticket order paid)
@@ -23,30 +28,37 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use sqlx::postgres::PgListener;
 use tokio::{
     sync::watch,
     time::{Interval, MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_secs(300);
 const BATCH_SIZE: i64 = 50;
 /// Politeness gap between individual API calls within a cycle.
 /// Meta CAPI tolerates roughly 1 event per second per dataset; 500ms is safe
 /// and keeps a 50-fan batch under 30 seconds.
 const REQUEST_SPACING: Duration = Duration::from_millis(500);
+/// Maximum time for one cycle. Worst case: 5 batches (meta lead, meta purchase,
+/// google lead, google purchase, bandsintown lead) × 50 items × 500ms = 125s.
+/// Add headroom for network latency and token refresh.
+const CYCLE_TIMEOUT: Duration = Duration::from_secs(180);
 const META_GRAPH_BASE: &str = "https://graph.facebook.com";
 const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_ADS_API_BASE: &str = "https://googleads.googleapis.com";
 const GOOGLE_ADS_API_VERSION: &str = "v18";
 const BANDSINTOWN_CONVERSION_URL: &str = "https://www.bandsintown.com/api/v1/conversion";
+const NOTIFY_CHANNEL_LEAD: &str = "ad_conversion_lead";
+const NOTIFY_CHANNEL_PURCHASE: &str = "ad_conversion_purchase";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdConversionError {
     #[error("ad conversion HTTP request failed")]
     Network(#[from] reqwest::Error),
-    #[error("ad conversion API returned HTTP {0}")]
-    Status(u16),
+    #[error("ad conversion API returned HTTP {status}: {body}")]
+    Status { status: u16, body: String },
     #[error("ad conversion payload serialization failed")]
     Payload(#[from] serde_json::Error),
     #[error("ad conversion database query failed")]
@@ -97,6 +109,12 @@ struct PaidTicketOrder {
     google_gclid: Option<String>,
     #[sqlx(default)]
     bandsintown_ref: Option<String>,
+    #[sqlx(default)]
+    utm_source: Option<String>,
+    #[sqlx(default)]
+    utm_medium: Option<String>,
+    #[sqlx(default)]
+    utm_campaign: Option<String>,
     #[sqlx(default)]
     client_ip_address: Option<String>,
     #[sqlx(default)]
@@ -151,31 +169,90 @@ impl AdConversionWorker {
             tracing::info!("ad conversion worker disabled; no platforms configured");
             return;
         }
-        let mut ticker = tokio::time::interval(POLL_INTERVAL);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // Connect a dedicated LISTEN connection. This is separate from the
+        // pool because a LISTEN connection must not be used for anything else
+        // while subscribed.
+        let mut listener = match PgListener::connect_with(&self.pool).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to connect PgListener for ad conversion worker");
+                return;
+            }
+        };
+        if let Err(error) = listener
+            .listen_all([NOTIFY_CHANNEL_LEAD, NOTIFY_CHANNEL_PURCHASE])
+            .await
+        {
+            tracing::error!(error = %error, "failed to LISTEN on ad conversion channels");
+            return;
+        }
+
+        let mut fallback = tokio::time::interval(POLL_INTERVAL);
+        fallback.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        tracing::info!("ad conversion worker listening on NOTIFY channels");
+
         loop {
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return; }
                 }
-                _ = ticker.tick() => {
-                    match timeout(POLL_INTERVAL * 3, self.run_cycle()).await {
-                        Ok(Ok(stats)) => {
-                            if stats.total_sent > 0 {
-                                tracing::info!(
-                                    meta_sent = stats.meta_sent,
-                                    google_sent = stats.google_sent,
-                                    bandsintown_sent = stats.bandsintown_sent,
-                                    "ad conversion cycle completed"
-                                );
+                // Primary path: wake on database notification
+                notification = listener.recv() => {
+                    match notification {
+                        Ok(notif) => {
+                            tracing::debug!(
+                                channel = notif.channel(),
+                                payload = notif.payload(),
+                                "ad conversion notification received"
+                            );
+                            self.run_cycle_with_timeout().await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "PgListener error — reconnecting");
+                            // Reconnect and re-listen
+                            match PgListener::connect_with(&self.pool).await {
+                                Ok(new_listener) => {
+                                    listener = new_listener;
+                                    if let Err(error) = listener
+                                        .listen_all([NOTIFY_CHANNEL_LEAD, NOTIFY_CHANNEL_PURCHASE])
+                                        .await
+                                    {
+                                        tracing::error!(error = %error, "failed to re-LISTEN after reconnect");
+                                        return;
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::error!(error = %error, "PgListener reconnect failed — falling back to poll only");
+                                }
                             }
                         }
-                        Ok(Err(error)) => tracing::warn!(error = %error, "ad conversion cycle failed"),
-                        Err(_) => tracing::warn!("ad conversion cycle timed out"),
                     }
                 }
+                // Safety net: fallback poll in case notifications were missed
+                _ = fallback.tick() => {
+                    self.run_cycle_with_timeout().await;
+                }
             }
+        }
+    }
+
+    async fn run_cycle_with_timeout(&self) {
+        match timeout(CYCLE_TIMEOUT, self.run_cycle()).await {
+            Ok(Ok(stats)) => {
+                if stats.total_sent > 0 {
+                    tracing::info!(
+                        meta_sent = stats.meta_sent,
+                        google_sent = stats.google_sent,
+                        bandsintown_sent = stats.bandsintown_sent,
+                        "ad conversion cycle completed"
+                    );
+                }
+            }
+            Ok(Err(error)) => tracing::warn!(error = %error, "ad conversion cycle failed"),
+            Err(_) => tracing::warn!("ad conversion cycle timed out"),
         }
     }
 
@@ -224,19 +301,11 @@ impl AdConversionWorker {
         for fan in &fans {
             limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
-            match self.send_meta_event(fan, "Lead", &event_id).await {
-                Ok(status) => {
-                    if let Err(error) = self
-                        .record_delivery("meta", Some(fan.fan_id), None, "Lead", &event_id, status, None)
-                        .await
-                    {
-                        tracing::warn!(error = %error, fan_id = %fan.fan_id, "failed to record meta delivery — event will be re-sent next cycle");
-                    }
-                    sent += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, fan_id = %fan.fan_id, "meta CAPI Lead event failed");
-                }
+            let result = self.send_meta_event(fan, "Lead", &event_id).await;
+            self.record_result("meta", Some(fan.fan_id), None, "Lead", &event_id, &result)
+                .await;
+            if result.is_ok() {
+                sent += 1;
             }
         }
         Ok(sent)
@@ -249,27 +318,18 @@ impl AdConversionWorker {
         for order in &orders {
             limiter.tick().await;
             let event_id = format!("purchase-{}", order.order_id);
-            match self.send_meta_purchase_event(order, &event_id).await {
-                Ok(status) => {
-                    if let Err(error) = self
-                        .record_delivery(
-                            "meta",
-                            order.fan_id,
-                            Some(order.order_id),
-                            "Purchase",
-                            &event_id,
-                            status,
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %error, order_id = %order.order_id, "failed to record meta delivery — event will be re-sent next cycle");
-                    }
-                    sent += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, order_id = %order.order_id, "meta CAPI Purchase event failed");
-                }
+            let result = self.send_meta_purchase_event(order, &event_id).await;
+            self.record_result(
+                "meta",
+                order.fan_id,
+                Some(order.order_id),
+                "Purchase",
+                &event_id,
+                &result,
+            )
+            .await;
+            if result.is_ok() {
+                sent += 1;
             }
         }
         Ok(sent)
@@ -322,12 +382,7 @@ impl AdConversionWorker {
             event.insert("event_source_url".to_owned(), json!(url));
         }
 
-        let mut payload = Map::new();
-        payload.insert("data".to_owned(), json!([Value::Object(event)]));
-        if let Some(test_code) = &config.test_event_code {
-            payload.insert("test_event_code".to_owned(), json!(test_code));
-        }
-
+        let payload = self.build_meta_payload(event, config);
         let url = format!(
             "{META_GRAPH_BASE}/{api_version}/{pixel_id}/events",
             api_version = config.api_version,
@@ -337,14 +392,14 @@ impl AdConversionWorker {
             .client
             .post(&url)
             .query(&[("access_token", config.access_token.as_str())])
-            .json(&Value::Object(payload))
+            .json(&payload)
             .send()
             .await?;
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "meta CAPI error response");
-            return Err(AdConversionError::Status(status));
+            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
         }
         tracing::debug!(event_name, event_id, status, "meta CAPI event sent");
         Ok(status)
@@ -375,10 +430,21 @@ impl AdConversionWorker {
         }
 
         // Meta expects value and currency in custom_data for Purchase events.
+        // Also include UTM params so Meta can attribute the purchase to the
+        // campaign that drove the signup.
         let value = (order.amount_gross_minor as f64) / 100.0;
         let mut custom_data = Map::new();
         custom_data.insert("currency".to_owned(), json!(order.currency.to_lowercase()));
         custom_data.insert("value".to_owned(), json!(value));
+        if let Some(source) = &order.utm_source {
+            custom_data.insert("utm_source".to_owned(), json!(source));
+        }
+        if let Some(medium) = &order.utm_medium {
+            custom_data.insert("utm_medium".to_owned(), json!(medium));
+        }
+        if let Some(campaign) = &order.utm_campaign {
+            custom_data.insert("utm_campaign".to_owned(), json!(campaign));
+        }
 
         let mut event = Map::new();
         event.insert("event_name".to_owned(), json!("Purchase"));
@@ -391,12 +457,7 @@ impl AdConversionWorker {
             event.insert("event_source_url".to_owned(), json!(url));
         }
 
-        let mut payload = Map::new();
-        payload.insert("data".to_owned(), json!([Value::Object(event)]));
-        if let Some(test_code) = &config.test_event_code {
-            payload.insert("test_event_code".to_owned(), json!(test_code));
-        }
-
+        let payload = self.build_meta_payload(event, config);
         let url = format!(
             "{META_GRAPH_BASE}/{api_version}/{pixel_id}/events",
             api_version = config.api_version,
@@ -406,17 +467,32 @@ impl AdConversionWorker {
             .client
             .post(&url)
             .query(&[("access_token", config.access_token.as_str())])
-            .json(&Value::Object(payload))
+            .json(&payload)
             .send()
             .await?;
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "meta CAPI Purchase error response");
-            return Err(AdConversionError::Status(status));
+            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
         }
         tracing::debug!(event_id, status, "meta CAPI Purchase event sent");
         Ok(status)
+    }
+
+    /// Wraps an event object in the standard Meta CAPI payload envelope,
+    /// adding the test event code if configured.
+    fn build_meta_payload(
+        &self,
+        event: Map<String, Value>,
+        config: &crowdrelay_infra::config::MetaCapiConfig,
+    ) -> Value {
+        let mut payload = Map::new();
+        payload.insert("data".to_owned(), json!([Value::Object(event)]));
+        if let Some(test_code) = &config.test_event_code {
+            payload.insert("test_event_code".to_owned(), json!(test_code));
+        }
+        Value::Object(payload)
     }
 
     // ── Google Ads Enhanced Conversions ────────────────────────────────
@@ -428,19 +504,11 @@ impl AdConversionWorker {
         for fan in &fans {
             limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
-            match self.send_google_conversion(fan, "Lead", &event_id, None, None).await {
-                Ok(status) => {
-                    if let Err(error) = self
-                        .record_delivery("google", Some(fan.fan_id), None, "Lead", &event_id, status, None)
-                        .await
-                    {
-                        tracing::warn!(error = %error, fan_id = %fan.fan_id, "failed to record google delivery — event will be re-sent next cycle");
-                    }
-                    sent += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, fan_id = %fan.fan_id, "google ads Lead conversion failed");
-                }
+            let result = self.send_google_conversion(fan, "Lead", &event_id, None, None).await;
+            self.record_result("google", Some(fan.fan_id), None, "Lead", &event_id, &result)
+                .await;
+            if result.is_ok() {
+                sent += 1;
             }
         }
         Ok(sent)
@@ -454,7 +522,7 @@ impl AdConversionWorker {
             limiter.tick().await;
             let event_id = format!("purchase-{}", order.order_id);
             let value = (order.amount_gross_minor as f64) / 100.0;
-            match self
+            let result = self
                 .send_google_conversion(
                     &FanAttribution {
                         fan_id: order.fan_id.unwrap_or_else(Uuid::nil),
@@ -475,28 +543,18 @@ impl AdConversionWorker {
                     Some(value),
                     Some(&order.currency),
                 )
-                .await
-            {
-                Ok(status) => {
-                    if let Err(error) = self
-                        .record_delivery(
-                            "google",
-                            order.fan_id,
-                            Some(order.order_id),
-                            "Purchase",
-                            &event_id,
-                            status,
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %error, order_id = %order.order_id, "failed to record google delivery — event will be re-sent next cycle");
-                    }
-                    sent += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, order_id = %order.order_id, "google ads Purchase conversion failed");
-                }
+                .await;
+            self.record_result(
+                "google",
+                order.fan_id,
+                Some(order.order_id),
+                "Purchase",
+                &event_id,
+                &result,
+            )
+            .await;
+            if result.is_ok() {
+                sent += 1;
             }
         }
         Ok(sent)
@@ -547,7 +605,7 @@ impl AdConversionWorker {
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "google ads error response");
-            return Err(AdConversionError::Status(status));
+            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
         }
         tracing::debug!(event_name, event_id, status, "google ads conversion sent");
         Ok(status)
@@ -601,19 +659,11 @@ impl AdConversionWorker {
         for fan in &fans {
             limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
-            match self.send_bandsintown_conversion(fan, &event_id).await {
-                Ok(status) => {
-                    if let Err(error) = self
-                        .record_delivery("bandsintown", Some(fan.fan_id), None, "Lead", &event_id, status, None)
-                        .await
-                    {
-                        tracing::warn!(error = %error, fan_id = %fan.fan_id, "failed to record bandsintown delivery — event will be re-sent next cycle");
-                    }
-                    sent += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, fan_id = %fan.fan_id, "bandsintown conversion failed");
-                }
+            let result = self.send_bandsintown_conversion(fan, &event_id).await;
+            self.record_result("bandsintown", Some(fan.fan_id), None, "Lead", &event_id, &result)
+                .await;
+            if result.is_ok() {
+                sent += 1;
             }
         }
         Ok(sent)
@@ -645,7 +695,7 @@ impl AdConversionWorker {
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "bandsintown conversion error");
-            return Err(AdConversionError::Status(status));
+            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
         }
         tracing::debug!(event_id, status, "bandsintown conversion sent");
         Ok(status)
@@ -750,6 +800,9 @@ impl AdConversionWorker {
                 attr.meta_fbc,
                 attr.google_gclid,
                 attr.bandsintown_ref,
+                attr.utm_source,
+                attr.utm_medium,
+                attr.utm_campaign,
                 attr.client_ip_address,
                 attr.client_user_agent,
                 attr.event_source_url
@@ -824,6 +877,43 @@ impl AdConversionWorker {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Records the outcome of a send attempt — both successes and failures.
+    /// On failure, the HTTP status and error body are persisted so the
+    /// operator can inspect what went wrong without digging through logs.
+    /// A failed delivery record also prevents indefinite retries (the
+    /// `NOT EXISTS` in `fetch_pending_*` treats any delivery row as
+    /// "done", regardless of status code).
+    async fn record_result(
+        &self,
+        platform: &str,
+        fan_id: Option<Uuid>,
+        ticket_order_id: Option<Uuid>,
+        event_name: &str,
+        event_id: &str,
+        result: &Result<u16, AdConversionError>,
+    ) {
+        let (status, body) = match result {
+            Ok(status) => (*status, None),
+            Err(AdConversionError::Status { status, body }) => (*status, Some(body.as_str())),
+            Err(error) => {
+                tracing::warn!(error = %error, platform, event_id, "ad conversion send failed (non-HTTP)");
+                // Non-HTTP errors (network, OAuth) — record with status 0
+                // so we don't retry indefinitely, but the operator can see
+                // it wasn't a platform rejection.
+                (0, None)
+            }
+        };
+        if let Err(error) = self
+            .record_delivery(platform, fan_id, ticket_order_id, event_name, event_id, status, body)
+            .await
+        {
+            tracing::warn!(
+                error = %error, platform, event_id,
+                "failed to record delivery — event will be re-sent next cycle"
+            );
+        }
     }
 }
 
@@ -958,6 +1048,9 @@ mod tests {
             meta_fbc: None,
             google_gclid: None,
             bandsintown_ref: None,
+            utm_source: Some("facebook".to_owned()),
+            utm_medium: Some("paid_social".to_owned()),
+            utm_campaign: Some("metalhead_q3".to_owned()),
             client_ip_address: None,
             client_user_agent: None,
             event_source_url: None,
@@ -968,6 +1061,9 @@ mod tests {
         let mut custom_data = Map::new();
         custom_data.insert("currency".to_owned(), json!(order.currency.to_lowercase()));
         custom_data.insert("value".to_owned(), json!(value));
+        custom_data.insert("utm_source".to_owned(), json!(order.utm_source));
+        custom_data.insert("utm_medium".to_owned(), json!(order.utm_medium));
+        custom_data.insert("utm_campaign".to_owned(), json!(order.utm_campaign));
 
         let custom = Value::Object(custom_data);
         assert_eq!(custom["currency"], "pln");

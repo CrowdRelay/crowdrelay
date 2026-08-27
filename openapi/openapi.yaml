@@ -7369,8 +7369,12 @@ paths:
                   utm_attributed: { type: integer, format: int64 }
                   meta_lead_delivered: { type: integer, format: int64 }
                   meta_lead_delivered_ok: { type: integer, format: int64 }
+                  meta_purchase_delivered: { type: integer, format: int64 }
+                  meta_purchase_delivered_ok: { type: integer, format: int64 }
                   google_lead_delivered: { type: integer, format: int64 }
                   google_lead_delivered_ok: { type: integer, format: int64 }
+                  google_purchase_delivered: { type: integer, format: int64 }
+                  google_purchase_delivered_ok: { type: integer, format: int64 }
                   bandsintown_lead_delivered: { type: integer, format: int64 }
                   bandsintown_lead_delivered_ok: { type: integer, format: int64 }
         '401':
@@ -7382,14 +7386,14 @@ paths:
       operationId: getAdminAdConversionBreakdown
       summary: Read per-platform, per-UTM ad conversion breakdown
       description: |
-        One row per (platform, utm_source, utm_medium, utm_campaign) combination showing
-        attributed fans and delivered conversion events. Lets the operator compare ad
-        campaigns side by side.
+        One row per (platform, event_name, utm_source, utm_medium, utm_campaign) combination
+        showing attributed fans and delivered conversion events. Lets the operator compare
+        ad campaigns side by side, with Lead and Purchase events broken out separately.
       security:
       - adminBearer: []
       responses:
         '200':
-          description: Ad conversion breakdown by platform and UTM parameters.
+          description: Ad conversion breakdown by platform, event type, and UTM parameters.
           content:
             application/json:
               schema:
@@ -7398,6 +7402,7 @@ paths:
                   type: object
                   properties:
                     platform: { type: string, nullable: true }
+                    event_name: { type: string, nullable: true }
                     utm_source: { type: string }
                     utm_medium: { type: string }
                     utm_campaign: { type: string }
