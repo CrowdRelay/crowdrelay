@@ -357,7 +357,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
             -- compare against.
             WITH completed_pace AS (
                 SELECT
-                    completed.event_id,
+                    completed.id AS event_id,
                     GREATEST(
                         0,
                         FLOOR(EXTRACT(EPOCH FROM (
@@ -380,7 +380,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
                 WHERE completed.workspace_id = $1
                   AND completed.status = 'completed'
                   AND orders.paid_at <= completed.starts_at
-                GROUP BY completed.event_id, orders.paid_at
+                GROUP BY completed.id, orders.paid_at
             ),
             upcoming_sales AS (
                 SELECT
