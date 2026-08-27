@@ -65,6 +65,7 @@ const EVENT_REMINDER_OFFSETS_MINUTES_KEY: &str = "CROWDRELAY_EVENT_REMINDER_OFFS
 const EVENT_REMINDER_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_EVENT_REMINDER_POLL_INTERVAL_MS";
 const AUTOPILOT_ENABLED_KEY: &str = "CROWDRELAY_AUTOPILOT_ENABLED";
 const AUTOPILOT_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_AUTOPILOT_POLL_INTERVAL_MS";
+const AGENT_OUTCOMES_ENABLED_KEY: &str = "CROWDRELAY_AGENT_OUTCOMES_ENABLED";
 const ADMIN_API_KEY_KEY: &str = "CROWDRELAY_ADMIN_API_KEY";
 const STAFF_API_KEY_KEY: &str = "CROWDRELAY_STAFF_API_KEY";
 const QR_SIGNING_SECRET_KEY: &str = "CROWDRELAY_QR_SIGNING_SECRET";
@@ -152,6 +153,7 @@ const KNOWN_KEYS: &[&str] = &[
     EVENT_REMINDER_POLL_INTERVAL_MS_KEY,
     AUTOPILOT_ENABLED_KEY,
     AUTOPILOT_POLL_INTERVAL_MS_KEY,
+    AGENT_OUTCOMES_ENABLED_KEY,
     ADMIN_API_KEY_KEY,
     STAFF_API_KEY_KEY,
     QR_SIGNING_SECRET_KEY,
@@ -218,6 +220,9 @@ pub struct Config {
     pub event_reminder_poll_interval: Duration,
     pub autopilot_enabled: bool,
     pub autopilot_poll_interval: Duration,
+    /// When true, the agent outcome worker polls `agent_outcomes` and maps
+    /// LLM-produced outcomes into autopilot decisions. Default ON.
+    pub agent_outcomes_enabled: bool,
     pub admission_security: AdmissionSecurityConfig,
     /// Optional secret-backed team contacts used only to bootstrap routing identities.
     pub team_operations: TeamOperationsConfig,
@@ -365,6 +370,11 @@ impl Config {
             AUTOPILOT_ENABLED_KEY,
             false,
         )?;
+        let agent_outcomes_enabled = parse_bool(
+            values.get(AGENT_OUTCOMES_ENABLED_KEY),
+            AGENT_OUTCOMES_ENABLED_KEY,
+            true,
+        )?;
         let autopilot_poll_interval = parse_bounded_duration(
             values.get(AUTOPILOT_POLL_INTERVAL_MS_KEY),
             AUTOPILOT_POLL_INTERVAL_MS_KEY,
@@ -421,6 +431,7 @@ impl Config {
             event_reminder_poll_interval,
             autopilot_enabled,
             autopilot_poll_interval,
+            agent_outcomes_enabled,
             admission_security,
             team_operations,
             response_encryption_key,

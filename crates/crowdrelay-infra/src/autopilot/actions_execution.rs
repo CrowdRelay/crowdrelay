@@ -882,6 +882,25 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestAgentContent {
+                    template_id,
+                    task_id,
+                    draft,
+                } => {
+                    emit_external_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "crowdrelay.agent.content_requested",
+                        json!({
+                            "action_id": action.id,
+                            "template_id": template_id,
+                            "task_id": task_id,
+                            "draft": draft,
+                        }),
+                    )
+                    .await?;
+                }
             }
 
             // External intents are only *dispatched* here. Their learning/outcome

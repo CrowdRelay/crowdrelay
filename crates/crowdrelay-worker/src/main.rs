@@ -25,6 +25,7 @@ use crowdrelay_infra::{
 };
 use crowdrelay_worker::{
     ad_conversion::AdConversionWorker,
+    agent_outcomes::AgentOutcomeWorker,
     audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
@@ -58,6 +59,9 @@ const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const OPERATOR_BRIEF_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// The graph changes at human speed; an hour of decay lag is invisible.
 const AUDIENCE_GRAPH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Agent outcome polling cadence. Outcomes are not time-critical — the
+/// operator approves them on the board — so 30s is plenty.
+const AGENT_OUTCOME_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const WEBHOOK_SECRETS_FILE_KEY: &str = "CROWDRELAY_WEBHOOK_SECRETS_FILE";
 const BOOTSTRAP_JSON_KEY: &str = "CROWDRELAY_BOOTSTRAP_JSON";
 const BOOTSTRAP_FILE_KEY: &str = "CROWDRELAY_BOOTSTRAP_FILE";
@@ -304,6 +308,17 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         OPS_WATCHDOG_INTERVAL,
         config.database.operation_timeout,
     );
+    let agent_outcome_worker = if config.agent_outcomes_enabled {
+        Some(AgentOutcomeWorker::new(
+            database.clone(),
+            workspace_id,
+            AGENT_OUTCOME_POLL_INTERVAL,
+            config.database.operation_timeout,
+        ))
+    } else {
+        tracing::info!("agent outcome ingestion is disabled by process configuration");
+        None
+    };
     // Deliberately not gated on `autopilot_enabled`: an operator whose agent is
     // switched off is exactly the one who most needs to be told so.
     let operator_brief = OperatorBriefWorker::new(
@@ -357,6 +372,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
+    let agent_outcome_shutdown = shutdown_receiver.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -423,6 +439,13 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             "ad conversion worker"
         });
     }
+    runtime_tasks.spawn(async move {
+        match agent_outcome_worker {
+            Some(worker) => worker.run(agent_outcome_shutdown).await,
+            None => wait_for_shutdown(agent_outcome_shutdown).await,
+        }
+        "agent outcome worker"
+    });
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
     checks.set_missed_tick_behavior(MissedTickBehavior::Skip);

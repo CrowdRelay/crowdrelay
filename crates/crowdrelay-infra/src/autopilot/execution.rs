@@ -256,7 +256,8 @@ pub(super) async fn schedule_effect_measurement(
         // happened to be last would be a number that reads as attribution and
         // is not. Phase 14 measures the play against its own pre-play baseline.
         | AutopilotActionPayload::RunPlayStep { .. }
-        | AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {}
+        | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
+        | AutopilotActionPayload::RequestAgentContent { .. } => {}
     }
 
     for (kind, subject_id, baseline_value, due_at) in plans {
@@ -409,6 +410,9 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::SubmitFundingApplication { .. } => ("funding_submission_requested",1.0,None),
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => {
             ("team_assignment_email_requested", 1.0, None)
+        }
+        AutopilotActionPayload::RequestAgentContent { .. } => {
+            ("agent_content_requested", 1.0, None)
         }
     };
     sqlx::query(
@@ -634,6 +638,7 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
                 | AutopilotActionPayload::RunPlayStep { .. }
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
+                | AutopilotActionPayload::RequestAgentContent { .. }
         ),
     }
 }
@@ -674,6 +679,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
         AutopilotActionPayload::RunPlayStep { .. } => "play.step",
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
+        AutopilotActionPayload::RequestAgentContent { .. } => "agent.content",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.
         _ => return None,
@@ -713,6 +719,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.calendar.upsert_requested" => "calendar.upsert",
         "crowdrelay.play.step_requested" => "play.step",
         "crowdrelay.team.assignment_email_requested" => "team.email",
+        "crowdrelay.agent.content_requested" => "agent.content",
         _ => "unknown",
     }
 }

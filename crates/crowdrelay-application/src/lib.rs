@@ -22,6 +22,7 @@
 //! the redirect and event-discovery fast paths.
 
 pub mod admission;
+pub mod agent_outcomes;
 pub mod area_admin;
 pub mod autopilot;
 pub mod beacon_release;

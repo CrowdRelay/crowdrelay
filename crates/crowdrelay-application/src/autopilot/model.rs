@@ -641,6 +641,15 @@ pub enum AutopilotActionPayload {
         action_url_path: String,
         reminder_number: u8,
     },
+    /// An LLM agent produced a content draft (press pitch, social post, etc.)
+    /// that the operator approved. Execution materializes the draft into the
+    /// appropriate channel via the agent.content executor capability — the
+    /// agent itself never sends anything, the autopilot does, after approval.
+    RequestAgentContent {
+        template_id: String,
+        task_id: uuid::Uuid,
+        draft: serde_json::Value,
+    },
 }
 
 impl AutopilotActionPayload {
@@ -705,7 +714,10 @@ impl AutopilotActionPayload {
             // exactly why it may run unattended: the whole point is checking a
             // claim without asking the person who made it.
             | Self::VerifyPlaylistPlacement { .. }
-            | Self::EscalateEditorialPitch { .. } => ActionClass::FirstPartyReversible,
+            | Self::EscalateEditorialPitch { .. }
+            // An LLM draft materializes as a first-party campaign draft; the
+            // actual send is a separate, separately-approved action.
+            | Self::RequestAgentContent { .. } => ActionClass::FirstPartyReversible,
 
             // The step kind decides, not the play and not this table: the same
             // play may legitimately hold an owned-audience ask and a curator
@@ -787,6 +799,7 @@ impl AutopilotActionPayload {
             Self::IssueReferralCode { .. } => "referral.code.issue",
             Self::RunPlayStep { .. } => "play.step.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
+            Self::RequestAgentContent { .. } => "agent.content.request",
         }
     }
 }
