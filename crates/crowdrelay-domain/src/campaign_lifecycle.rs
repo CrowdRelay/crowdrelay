@@ -121,6 +121,21 @@ pub fn evaluate_event_campaign(
         }
         return request(EventCampaignPhase::ThankYou, 9_300);
     }
+    // Announcement comes before the narrower pre-event windows because it is
+    // the widest gate (up to 120 days) and the later phases only make sense
+    // after an announcement has gone out. Without this ordering, an event
+    // within `reminder_days_before` but with fewer interested fans than the
+    // minimum would hit the InterestReminder guard first and return
+    // InsufficientAudience, preventing the announcement from ever firing.
+    if until <= Duration::days(i64::from(policy.announcement_max_days_before))
+        && until.is_positive()
+    {
+        if snapshot.history.announcement_sent {
+            // Fall through to the narrower pre-event windows below.
+        } else {
+            return request(EventCampaignPhase::Announcement, 8_800);
+        }
+    }
     if until <= Duration::hours(i64::from(policy.day_of_hours_before)) && until.is_positive() {
         if snapshot.history.day_of_sent {
             return EventCampaignDecision::Hold(EventCampaignHoldReason::AlreadySent);
@@ -153,14 +168,6 @@ pub fn evaluate_event_campaign(
             return EventCampaignDecision::Hold(EventCampaignHoldReason::InsufficientAudience);
         }
         return request(EventCampaignPhase::InterestReminder, 9_000);
-    }
-    if until <= Duration::days(i64::from(policy.announcement_max_days_before))
-        && until.is_positive()
-    {
-        if snapshot.history.announcement_sent {
-            return EventCampaignDecision::Hold(EventCampaignHoldReason::AlreadySent);
-        }
-        return request(EventCampaignPhase::Announcement, 8_800);
     }
     EventCampaignDecision::Hold(EventCampaignHoldReason::NotDue)
 }
@@ -204,12 +211,12 @@ mod tests {
 
     #[test]
     fn interest_reminder_targets_unconverted_interest() {
+        // Interest reminders only fire after an announcement has gone out.
+        // Without this guard the announcement would fire first (wider window).
+        let mut data = snapshot(Duration::days(10));
+        data.history.announcement_sent = true;
         assert!(matches!(
-            evaluate_event_campaign(
-                snapshot(Duration::days(10)),
-                EventCampaignPolicy::default(),
-                now()
-            ),
+            evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
             EventCampaignDecision::Request {
                 phase: EventCampaignPhase::InterestReminder,
                 ..
@@ -220,6 +227,7 @@ mod tests {
     #[test]
     fn paid_buyers_suppress_sales_reminder_when_no_unconverted_audience() {
         let mut data = snapshot(Duration::days(10));
+        data.history.announcement_sent = true;
         data.paid_buyers = data.interested_fans;
         assert_eq!(
             evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
@@ -235,5 +243,23 @@ mod tests {
             evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
             EventCampaignDecision::Hold(EventCampaignHoldReason::InsufficientAudience)
         );
+    }
+
+    #[test]
+    fn announcement_fires_before_interest_reminder_when_not_yet_sent() {
+        // An event within the reminder window but without an announcement
+        // should get an announcement, not an interest reminder. Without the
+        // ordering fix, the interest_reminder guard (InsufficientAudience)
+        // would fire first and block the announcement forever.
+        let mut data = snapshot(Duration::days(10));
+        data.interested_fans = 1; // below minimum_audience for reminder
+        data.paid_buyers = 0;
+        assert!(matches!(
+            evaluate_event_campaign(data, EventCampaignPolicy::default(), now()),
+            EventCampaignDecision::Request {
+                phase: EventCampaignPhase::Announcement,
+                ..
+            }
+        ));
     }
 }
