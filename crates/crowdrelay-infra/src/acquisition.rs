@@ -661,6 +661,77 @@ fn duration_as_milliseconds(duration: Duration) -> Result<i64, StoreError> {
     i64::try_from(duration.as_millis()).map_err(|_| StoreError::Unexpected)
 }
 
+/// Parameters for [`persist_fan_ad_attribution`]. All fields are optional —
+/// the caller collects whatever the browser/pixel provides.
+pub struct FanAdAttributionParams<'a> {
+    pub meta_fbp: Option<&'a str>,
+    pub meta_fbc: Option<&'a str>,
+    pub google_gclid: Option<&'a str>,
+    pub bandsintown_ref: Option<&'a str>,
+    pub utm_source: Option<&'a str>,
+    pub utm_medium: Option<&'a str>,
+    pub utm_campaign: Option<&'a str>,
+    pub utm_content: Option<&'a str>,
+    pub utm_term: Option<&'a str>,
+    pub client_ip_address: Option<&'a str>,
+    pub client_user_agent: Option<&'a str>,
+    pub event_source_url: Option<&'a str>,
+}
+
+/// Persists ad attribution parameters so the conversion workers can send
+/// server-side events with maximum matching quality. Idempotent: if the fan
+/// already has attribution, the row is updated with any new non-null values.
+pub async fn persist_fan_ad_attribution(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+    fan_id: uuid::Uuid,
+    params: &FanAdAttributionParams<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO fan_ad_attribution (
+            workspace_id, fan_id,
+            meta_fbp, meta_fbc, google_gclid, bandsintown_ref,
+            utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+            client_ip_address, client_user_agent, event_source_url
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+        )
+        ON CONFLICT (workspace_id, fan_id) DO UPDATE SET
+            meta_fbp = COALESCE(EXCLUDED.meta_fbp, fan_ad_attribution.meta_fbp),
+            meta_fbc = COALESCE(EXCLUDED.meta_fbc, fan_ad_attribution.meta_fbc),
+            google_gclid = COALESCE(EXCLUDED.google_gclid, fan_ad_attribution.google_gclid),
+            bandsintown_ref = COALESCE(EXCLUDED.bandsintown_ref, fan_ad_attribution.bandsintown_ref),
+            utm_source = COALESCE(EXCLUDED.utm_source, fan_ad_attribution.utm_source),
+            utm_medium = COALESCE(EXCLUDED.utm_medium, fan_ad_attribution.utm_medium),
+            utm_campaign = COALESCE(EXCLUDED.utm_campaign, fan_ad_attribution.utm_campaign),
+            utm_content = COALESCE(EXCLUDED.utm_content, fan_ad_attribution.utm_content),
+            utm_term = COALESCE(EXCLUDED.utm_term, fan_ad_attribution.utm_term),
+            client_ip_address = COALESCE(EXCLUDED.client_ip_address, fan_ad_attribution.client_ip_address),
+            client_user_agent = COALESCE(EXCLUDED.client_user_agent, fan_ad_attribution.client_user_agent),
+            event_source_url = COALESCE(EXCLUDED.event_source_url, fan_ad_attribution.event_source_url),
+            captured_at = now()
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(fan_id)
+    .bind(params.meta_fbp)
+    .bind(params.meta_fbc)
+    .bind(params.google_gclid)
+    .bind(params.bandsintown_ref)
+    .bind(params.utm_source)
+    .bind(params.utm_medium)
+    .bind(params.utm_campaign)
+    .bind(params.utm_content)
+    .bind(params.utm_term)
+    .bind(params.client_ip_address)
+    .bind(params.client_user_agent)
+    .bind(params.event_source_url)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
