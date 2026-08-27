@@ -396,8 +396,12 @@ pub struct AdConversionOverviewRow {
     pub utm_attributed: i64,
     pub meta_lead_delivered: i64,
     pub meta_lead_delivered_ok: i64,
+    pub meta_purchase_delivered: i64,
+    pub meta_purchase_delivered_ok: i64,
     pub google_lead_delivered: i64,
     pub google_lead_delivered_ok: i64,
+    pub google_purchase_delivered: i64,
+    pub google_purchase_delivered_ok: i64,
     pub bandsintown_lead_delivered: i64,
     pub bandsintown_lead_delivered_ok: i64,
 }
@@ -405,6 +409,7 @@ pub struct AdConversionOverviewRow {
 #[derive(Debug, Serialize, FromRow)]
 pub struct AdConversionBreakdownRow {
     pub platform: Option<String>,
+    pub event_name: Option<String>,
     pub utm_source: String,
     pub utm_medium: String,
     pub utm_campaign: String,

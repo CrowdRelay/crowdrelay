@@ -299,11 +299,23 @@ pub async fn ad_conversion_overview(
                 SELECT delivered_ok FROM deliveries WHERE platform = 'meta' AND event_name = 'Lead'
             ), 0)::bigint AS meta_lead_delivered_ok,
             COALESCE((
+                SELECT delivered FROM deliveries WHERE platform = 'meta' AND event_name = 'Purchase'
+            ), 0)::bigint AS meta_purchase_delivered,
+            COALESCE((
+                SELECT delivered_ok FROM deliveries WHERE platform = 'meta' AND event_name = 'Purchase'
+            ), 0)::bigint AS meta_purchase_delivered_ok,
+            COALESCE((
                 SELECT delivered FROM deliveries WHERE platform = 'google' AND event_name = 'Lead'
             ), 0)::bigint AS google_lead_delivered,
             COALESCE((
                 SELECT delivered_ok FROM deliveries WHERE platform = 'google' AND event_name = 'Lead'
             ), 0)::bigint AS google_lead_delivered_ok,
+            COALESCE((
+                SELECT delivered FROM deliveries WHERE platform = 'google' AND event_name = 'Purchase'
+            ), 0)::bigint AS google_purchase_delivered,
+            COALESCE((
+                SELECT delivered_ok FROM deliveries WHERE platform = 'google' AND event_name = 'Purchase'
+            ), 0)::bigint AS google_purchase_delivered_ok,
             COALESCE((
                 SELECT delivered FROM deliveries WHERE platform = 'bandsintown' AND event_name = 'Lead'
             ), 0)::bigint AS bandsintown_lead_delivered,
@@ -344,8 +356,17 @@ pub async fn ad_conversion_breakdown(
             FROM fan_ad_attribution
             WHERE workspace_id = $1
         ),
-        platforms AS (
-            SELECT unnest(ARRAY['meta', 'google', 'bandsintown']) AS platform
+        -- One row per (platform, event_name) combination that we track.
+        -- Bandsintown only has Lead; Meta and Google have both.
+        platform_events AS (
+            SELECT platform, event_name
+            FROM (VALUES
+                ('meta', 'Lead'),
+                ('meta', 'Purchase'),
+                ('google', 'Lead'),
+                ('google', 'Purchase'),
+                ('bandsintown', 'Lead')
+            ) AS t(platform, event_name)
         ),
         utm_groups AS (
             SELECT
@@ -359,17 +380,19 @@ pub async fn ad_conversion_breakdown(
         deliv AS (
             SELECT
                 platform,
+                event_name,
                 fan_id,
                 count(*)::bigint AS delivered,
                 count(*) FILTER (WHERE response_status >= 200 AND response_status < 300)::bigint
                     AS delivered_ok
             FROM ad_conversion_deliveries
             WHERE workspace_id = $1
-            GROUP BY platform, fan_id
+            GROUP BY platform, event_name, fan_id
         ),
         deliv_by_utm AS (
             SELECT
                 deliv.platform,
+                deliv.event_name,
                 attr.utm_source,
                 attr.utm_medium,
                 attr.utm_campaign,
@@ -377,10 +400,11 @@ pub async fn ad_conversion_breakdown(
                 COALESCE(sum(deliv.delivered_ok), 0)::bigint AS delivered_ok
             FROM attr
             JOIN deliv ON deliv.fan_id = attr.fan_id
-            GROUP BY deliv.platform, attr.utm_source, attr.utm_medium, attr.utm_campaign
+            GROUP BY deliv.platform, deliv.event_name, attr.utm_source, attr.utm_medium, attr.utm_campaign
         )
         SELECT
-            platforms.platform,
+            pe.platform,
+            pe.event_name,
             utm.utm_source,
             utm.utm_medium,
             utm.utm_campaign,
@@ -388,13 +412,14 @@ pub async fn ad_conversion_breakdown(
             COALESCE(deliv.delivered, 0)::bigint AS delivered,
             COALESCE(deliv.delivered_ok, 0)::bigint AS delivered_ok
         FROM utm_groups utm
-        CROSS JOIN platforms
+        CROSS JOIN platform_events pe
         LEFT JOIN deliv_by_utm deliv
-          ON deliv.platform = platforms.platform
+          ON deliv.platform = pe.platform
+         AND deliv.event_name = pe.event_name
          AND deliv.utm_source = utm.utm_source
          AND deliv.utm_medium = utm.utm_medium
          AND deliv.utm_campaign = utm.utm_campaign
-        ORDER BY utm.attributed_fans DESC, platforms.platform, deliv.delivered_ok DESC
+        ORDER BY utm.attributed_fans DESC, pe.platform, pe.event_name, deliv.delivered_ok DESC
         LIMIT 200
         "#,
     )

@@ -76,3 +76,56 @@ CREATE INDEX ad_conversion_deliveries_fan_idx
 CREATE INDEX ad_conversion_deliveries_pending_idx
     ON ad_conversion_deliveries (workspace_id, platform, event_name)
     INCLUDE (fan_id);
+
+-- ── Reactive notification triggers ──────────────────────────────────
+--
+-- The ad conversion worker uses LISTEN/NOTIFY instead of polling. These
+-- triggers fire pg_notify() when a fan gets ad attribution (signup) or
+-- when a ticket order transitions to 'paid'. The worker wakes immediately,
+-- processes the batch, then goes back to waiting — zero idle polling.
+--
+-- A fallback safety-net poll (every 5 minutes) catches any notifications
+-- missed due to connection drops.
+
+-- Channel: ad_conversion_lead  — fired on fan_ad_attribution INSERT/UPDATE
+-- Channel: ad_conversion_purchase — fired on ticket_orders status → 'paid'
+
+CREATE OR REPLACE FUNCTION notify_ad_conversion_lead()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM pg_notify('ad_conversion_lead', json_build_object(
+        'workspace_id', NEW.workspace_id,
+        'fan_id', NEW.fan_id
+    )::text);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER fan_ad_attribution_notify_lead
+    AFTER INSERT OR UPDATE ON fan_ad_attribution
+    FOR EACH ROW
+    EXECUTE FUNCTION notify_ad_conversion_lead();
+
+CREATE OR REPLACE FUNCTION notify_ad_conversion_purchase()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Only notify when status actually transitions TO 'paid'
+    IF (NEW.status = 'paid') AND (OLD.status IS DISTINCT FROM 'paid') THEN
+        PERFORM pg_notify('ad_conversion_purchase', json_build_object(
+            'workspace_id', NEW.workspace_id,
+            'order_id', NEW.id
+        )::text);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER ticket_orders_notify_purchase
+    AFTER UPDATE ON ticket_orders
+    FOR EACH ROW
+    WHEN (NEW.status = 'paid' AND OLD.status IS DISTINCT FROM 'paid')
+    EXECUTE FUNCTION notify_ad_conversion_purchase();
