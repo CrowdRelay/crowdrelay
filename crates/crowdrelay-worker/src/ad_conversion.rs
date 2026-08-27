@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::{
     sync::watch,
-    time::{MissedTickBehavior, sleep, timeout},
+    time::{Interval, MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
 
@@ -219,48 +219,58 @@ impl AdConversionWorker {
 
     async fn send_meta_lead_events(&self) -> Result<usize, AdConversionError> {
         let fans = self.fetch_pending_fans("meta", "Lead").await?;
+        let mut limiter = rate_limiter();
         let mut sent = 0;
         for fan in &fans {
+            limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
             match self.send_meta_event(fan, "Lead", &event_id).await {
                 Ok(status) => {
-                    self.record_delivery("meta", Some(fan.fan_id), None, "Lead", &event_id, status, None)
-                        .await?;
+                    if let Err(error) = self
+                        .record_delivery("meta", Some(fan.fan_id), None, "Lead", &event_id, status, None)
+                        .await
+                    {
+                        tracing::warn!(error = %error, fan_id = %fan.fan_id, "failed to record meta delivery — event will be re-sent next cycle");
+                    }
                     sent += 1;
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, fan_id = %fan.fan_id, "meta CAPI Lead event failed");
                 }
             }
-            sleep(REQUEST_SPACING).await;
         }
         Ok(sent)
     }
 
     async fn send_meta_purchase_events(&self) -> Result<usize, AdConversionError> {
         let orders = self.fetch_pending_orders("meta", "Purchase").await?;
+        let mut limiter = rate_limiter();
         let mut sent = 0;
         for order in &orders {
+            limiter.tick().await;
             let event_id = format!("purchase-{}", order.order_id);
             match self.send_meta_purchase_event(order, &event_id).await {
                 Ok(status) => {
-                    self.record_delivery(
-                        "meta",
-                        order.fan_id,
-                        Some(order.order_id),
-                        "Purchase",
-                        &event_id,
-                        status,
-                        None,
-                    )
-                    .await?;
+                    if let Err(error) = self
+                        .record_delivery(
+                            "meta",
+                            order.fan_id,
+                            Some(order.order_id),
+                            "Purchase",
+                            &event_id,
+                            status,
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %error, order_id = %order.order_id, "failed to record meta delivery — event will be re-sent next cycle");
+                    }
                     sent += 1;
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, order_id = %order.order_id, "meta CAPI Purchase event failed");
                 }
             }
-            sleep(REQUEST_SPACING).await;
         }
         Ok(sent)
     }
@@ -414,19 +424,24 @@ impl AdConversionWorker {
     async fn send_google_lead_events(&self) -> Result<usize, AdConversionError> {
         let fans = self.fetch_pending_fans("google", "Lead").await?;
         let mut sent = 0;
+        let mut limiter = rate_limiter();
         for fan in &fans {
+            limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
             match self.send_google_conversion(fan, "Lead", &event_id, None, None).await {
                 Ok(status) => {
-                    self.record_delivery("google", Some(fan.fan_id), None, "Lead", &event_id, status, None)
-                        .await?;
+                    if let Err(error) = self
+                        .record_delivery("google", Some(fan.fan_id), None, "Lead", &event_id, status, None)
+                        .await
+                    {
+                        tracing::warn!(error = %error, fan_id = %fan.fan_id, "failed to record google delivery — event will be re-sent next cycle");
+                    }
                     sent += 1;
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, fan_id = %fan.fan_id, "google ads Lead conversion failed");
                 }
             }
-            sleep(REQUEST_SPACING).await;
         }
         Ok(sent)
     }
@@ -434,7 +449,9 @@ impl AdConversionWorker {
     async fn send_google_purchase_events(&self) -> Result<usize, AdConversionError> {
         let orders = self.fetch_pending_orders("google", "Purchase").await?;
         let mut sent = 0;
+        let mut limiter = rate_limiter();
         for order in &orders {
+            limiter.tick().await;
             let event_id = format!("purchase-{}", order.order_id);
             let value = (order.amount_gross_minor as f64) / 100.0;
             match self
@@ -461,23 +478,26 @@ impl AdConversionWorker {
                 .await
             {
                 Ok(status) => {
-                    self.record_delivery(
-                        "google",
-                        order.fan_id,
-                        Some(order.order_id),
-                        "Purchase",
-                        &event_id,
-                        status,
-                        None,
-                    )
-                    .await?;
+                    if let Err(error) = self
+                        .record_delivery(
+                            "google",
+                            order.fan_id,
+                            Some(order.order_id),
+                            "Purchase",
+                            &event_id,
+                            status,
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %error, order_id = %order.order_id, "failed to record google delivery — event will be re-sent next cycle");
+                    }
                     sent += 1;
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, order_id = %order.order_id, "google ads Purchase conversion failed");
                 }
             }
-            sleep(REQUEST_SPACING).await;
         }
         Ok(sent)
     }
@@ -577,19 +597,24 @@ impl AdConversionWorker {
     async fn send_bandsintown_conversions(&self) -> Result<usize, AdConversionError> {
         let fans = self.fetch_pending_fans("bandsintown", "Lead").await?;
         let mut sent = 0;
+        let mut limiter = rate_limiter();
         for fan in &fans {
+            limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
             match self.send_bandsintown_conversion(fan, &event_id).await {
                 Ok(status) => {
-                    self.record_delivery("bandsintown", Some(fan.fan_id), None, "Lead", &event_id, status, None)
-                        .await?;
+                    if let Err(error) = self
+                        .record_delivery("bandsintown", Some(fan.fan_id), None, "Lead", &event_id, status, None)
+                        .await
+                    {
+                        tracing::warn!(error = %error, fan_id = %fan.fan_id, "failed to record bandsintown delivery — event will be re-sent next cycle");
+                    }
                     sent += 1;
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, fan_id = %fan.fan_id, "bandsintown conversion failed");
                 }
             }
-            sleep(REQUEST_SPACING).await;
         }
         Ok(sent)
     }
@@ -628,15 +653,26 @@ impl AdConversionWorker {
 
     // ── Shared database helpers ────────────────────────────────────────
 
-    /// Fetches active, marketing-consented fans that have ad attribution
-    /// but no delivery record for the given platform/event combination.
+    /// Fetches active, marketing-consented fans that have platform-specific
+    /// ad attribution but no delivery record for the given platform/event.
+    ///
+    /// Each platform only gets fans it can actually attribute:
+    /// - Meta: fans with `_fbp` or `_fbc`
+    /// - Google: fans with `gclid`
+    /// - Bandsintown: fans with `bandsintown_ref`
     async fn fetch_pending_fans(
         &self,
         platform: &str,
         event_name: &str,
     ) -> Result<Vec<FanAttribution>, AdConversionError> {
         let workspace_uuid = self.workspace_id.into_uuid();
-        let rows = sqlx::query_as::<_, FanAttribution>(
+        let platform_filter = match platform {
+            "meta" => "(attr.meta_fbp IS NOT NULL OR attr.meta_fbc IS NOT NULL)",
+            "google" => "attr.google_gclid IS NOT NULL",
+            "bandsintown" => "attr.bandsintown_ref IS NOT NULL",
+            _ => "false",
+        };
+        let sql = format!(
             r#"
             SELECT
                 fan.id AS fan_id,
@@ -657,6 +693,7 @@ impl AdConversionWorker {
              AND attr.fan_id = fan.id
             WHERE fan.workspace_id = $1
               AND fan.status = 'active'
+              AND {platform_filter}
               AND EXISTS (
                   SELECT 1 FROM fan_consents consent
                   WHERE consent.workspace_id = fan.workspace_id
@@ -673,26 +710,35 @@ impl AdConversionWorker {
               )
             ORDER BY fan.created_at DESC
             LIMIT $4
-            "#,
-        )
-        .bind(workspace_uuid)
-        .bind(platform)
-        .bind(event_name)
-        .bind(BATCH_SIZE)
-        .fetch_all(&self.pool)
-        .await?;
+            "#
+        );
+        let rows = sqlx::query_as::<_, FanAttribution>(&sql)
+            .bind(workspace_uuid)
+            .bind(platform)
+            .bind(event_name)
+            .bind(BATCH_SIZE)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
-    /// Fetches paid ticket orders that have ad attribution but no Purchase
-    /// delivery record for the given platform.
+    /// Fetches paid ticket orders from marketing-consented fans that have
+    /// platform-specific ad attribution but no Purchase delivery record.
     async fn fetch_pending_orders(
         &self,
         platform: &str,
         event_name: &str,
     ) -> Result<Vec<PaidTicketOrder>, AdConversionError> {
         let workspace_uuid = self.workspace_id.into_uuid();
-        let rows = sqlx::query_as::<_, PaidTicketOrder>(
+        let platform_filter = match platform {
+            "meta" => "(attr.meta_fbp IS NOT NULL OR attr.meta_fbc IS NOT NULL)",
+            "google" => "attr.google_gclid IS NOT NULL",
+            // Bandsintown doesn't have Purchase events, but keep the guard
+            // for safety in case this is called with that platform.
+            "bandsintown" => "attr.bandsintown_ref IS NOT NULL",
+            _ => "false",
+        };
+        let sql = format!(
             r#"
             SELECT
                 orders.id AS order_id,
@@ -711,11 +757,19 @@ impl AdConversionWorker {
             JOIN fans fan
               ON fan.workspace_id = orders.workspace_id
              AND fan.normalized_email = orders.buyer_email
-            LEFT JOIN fan_ad_attribution attr
+            JOIN fan_ad_attribution attr
               ON attr.workspace_id = fan.workspace_id
              AND attr.fan_id = fan.id
             WHERE orders.workspace_id = $1
               AND orders.status IN ('paid', 'partially_refunded')
+              AND {platform_filter}
+              AND EXISTS (
+                  SELECT 1 FROM fan_consents consent
+                  WHERE consent.workspace_id = fan.workspace_id
+                    AND consent.fan_id = fan.id
+                    AND consent.purpose = 'marketing'
+                    AND consent.granted
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM ad_conversion_deliveries d
                   WHERE d.workspace_id = orders.workspace_id
@@ -725,14 +779,15 @@ impl AdConversionWorker {
               )
             ORDER BY orders.paid_at DESC NULLS LAST
             LIMIT $4
-            "#,
-        )
-        .bind(workspace_uuid)
-        .bind(platform)
-        .bind(event_name)
-        .bind(BATCH_SIZE)
-        .fetch_all(&self.pool)
-        .await?;
+            "#
+        );
+        let rows = sqlx::query_as::<_, PaidTicketOrder>(&sql)
+            .bind(workspace_uuid)
+            .bind(platform)
+            .bind(event_name)
+            .bind(BATCH_SIZE)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -796,6 +851,18 @@ fn hash_sha256(value: &str) -> String {
 /// Truncates a string to at most `max_chars` characters, safe for UTF-8.
 fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// Creates a reactive rate-limiter interval for outbound API calls.
+///
+/// The first `tick()` completes immediately; subsequent ticks yield to the
+/// Tokio scheduler and resume only when the spacing window opens. Uses
+/// `MissedTickBehavior::Delay` so a slow upstream doesn't cause a burst
+/// of catch-up calls.
+fn rate_limiter() -> Interval {
+    let mut interval = interval(REQUEST_SPACING);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -1034,5 +1101,55 @@ mod tests {
         let event_id = format!("purchase-{order_id}");
         assert!(event_id.starts_with("purchase-"));
         assert_ne!(event_id, format!("lead-{order_id}"));
+    }
+
+    #[test]
+    fn platform_filter_for_meta_requires_fbp_or_fbc() {
+        let filter = match "meta" {
+            "meta" => "(attr.meta_fbp IS NOT NULL OR attr.meta_fbc IS NOT NULL)",
+            "google" => "attr.google_gclid IS NOT NULL",
+            "bandsintown" => "attr.bandsintown_ref IS NOT NULL",
+            _ => "false",
+        };
+        assert!(filter.contains("meta_fbp") || filter.contains("meta_fbc"));
+        assert!(!filter.contains("google_gclid"));
+        assert!(!filter.contains("bandsintown_ref"));
+    }
+
+    #[test]
+    fn platform_filter_for_google_requires_gclid() {
+        let filter = match "google" {
+            "meta" => "(attr.meta_fbp IS NOT NULL OR attr.meta_fbc IS NOT NULL)",
+            "google" => "attr.google_gclid IS NOT NULL",
+            "bandsintown" => "attr.bandsintown_ref IS NOT NULL",
+            _ => "false",
+        };
+        assert!(filter.contains("google_gclid"));
+        assert!(!filter.contains("meta_fbp"));
+        assert!(!filter.contains("bandsintown_ref"));
+    }
+
+    #[test]
+    fn platform_filter_for_bandsintown_requires_ref() {
+        let filter = match "bandsintown" {
+            "meta" => "(attr.meta_fbp IS NOT NULL OR attr.meta_fbc IS NOT NULL)",
+            "google" => "attr.google_gclid IS NOT NULL",
+            "bandsintown" => "attr.bandsintown_ref IS NOT NULL",
+            _ => "false",
+        };
+        assert!(filter.contains("bandsintown_ref"));
+        assert!(!filter.contains("meta_fbp"));
+        assert!(!filter.contains("google_gclid"));
+    }
+
+    #[test]
+    fn platform_filter_for_unknown_platform_is_false() {
+        let filter = match "tiktok" {
+            "meta" => "(attr.meta_fbp IS NOT NULL OR attr.meta_fbc IS NOT NULL)",
+            "google" => "attr.google_gclid IS NOT NULL",
+            "bandsintown" => "attr.bandsintown_ref IS NOT NULL",
+            _ => "false",
+        };
+        assert_eq!(filter, "false");
     }
 }
