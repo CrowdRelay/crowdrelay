@@ -71,7 +71,7 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> SqlxErrorClass {
                 "unexpected PostgreSQL persistence failure"
             );
         } else {
-            tracing::error!("unexpected SQLx persistence failure");
+            tracing::error!(error = %error, "unexpected SQLx persistence failure");
         }
     }
     class
