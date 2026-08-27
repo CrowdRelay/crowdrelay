@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -66,6 +67,23 @@ jobs:
           rustc --version --verbose
           cargo --version
 
+      - name: Purge stale Rust cache entries
+        # Swatinem/rust-cache keys on Cargo.lock hash; each lock change leaves
+        # the previous ~640 MB entry orphaned until 7-day TTL. Prune old
+        # entries before saving a new one to stay within the account quota.
+        if: github.ref == 'refs/heads/main' && github.job == 'rust-tests'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t ids < <(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | .id' 2>/dev/null || true)
+          for id in "${ids[@]}"; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}" 2>/dev/null || true
+          done
+          echo "Purged ${#ids[@]} stale Rust cache entries"
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
