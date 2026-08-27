@@ -67,6 +67,7 @@ pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> SqlxErrorClass {
             tracing::error!(
                 sqlstate = database.code().as_deref(),
                 constraint = database.constraint(),
+                message = %database.message(),
                 "unexpected PostgreSQL persistence failure"
             );
         } else {

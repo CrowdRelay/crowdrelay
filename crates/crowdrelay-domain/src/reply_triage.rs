@@ -266,7 +266,12 @@ fn declined_matches(lower: &str) -> Vec<&'static str> {
         ("not interested", "declined:not_interested"),
         ("nie zainteresowany", "declined:nie_zainteresowany"),
         ("nie zainteresowana", "declined:nie_zainteresowana"),
-        ("pass", "declined:pass"),
+        // "pass" alone is ambiguous — "password", "compass", "passage".
+        // Match "pass" only as a standalone reply, not as a substring.
+        ("i'll pass", "declined:pass"),
+        ("i will pass", "declined:pass"),
+        ("pass on this", "declined:pass"),
+        ("pass on it", "declined:pass"),
         ("maybe later", "declined:maybe_later"),
         ("może później", "declined:moze_pozniej"),
         ("może następnym", "declined:moze_nastepnym"),
@@ -290,14 +295,16 @@ fn declined_matches(lower: &str) -> Vec<&'static str> {
 fn dnc_matches(lower: &str) -> Vec<&'static str> {
     let rules: &[(&str, &str)] = &[
         ("unsubscribe", "dnc:unsubscribe"),
-        ("stop", "dnc:stop"),
+        // "stop" alone is ambiguous — "bus stop", "don't stop", "stopwatch".
+        // Removed the bare "stop" rule; "stop emailing" and "stop contacting"
+        // are specific enough. A bare "stop" routes to NeedsHuman via
+        // UnmatchedText, which is the safe fallback.
         ("don't contact", "dnc:dont_contact"),
         ("do not contact", "dnc:do_not_contact"),
         ("nie kontaktuj", "dnc:nie_kontaktuj"),
         ("remove me", "dnc:remove_me"),
         ("usuń mnie", "dnc:usun_mnie"),
         ("stop emailing", "dnc:stop_emailing"),
-        ("przestań pisać", "dnc:przestan_pisac"),
         ("przestań pisać", "dnc:przestan_pisac"),
         ("nie pisz", "dnc:nie_pisz"),
         ("take me off", "dnc:take_me_off"),
