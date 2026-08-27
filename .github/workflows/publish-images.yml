@@ -23,10 +23,8 @@ env:
   # Actions cache is a single 10 GB LRU pool shared with the Swatinem Rust
   # caches, so a mode=max BuildKit export kept evicting itself between runs and
   # every publish recompiled the workspace from scratch.
-  CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
-  # Note: CACHE_REF is fine with mixed case — GHCR accepts it as a cache ref.
-  # The image *tags* below must be lowercase, so they use OWNER_LOWER set in
-  # the build step.
+  # CACHE_REF and OWNER_LOWER are set in the first build step because Docker
+  # requires lowercase repository names and GitHub org names are case-preserving.
 
 jobs:
   build:
@@ -70,8 +68,11 @@ jobs:
           build_timestamp="$(git show -s --format=%cI "${IMAGE_SHA}")"
           [[ -n "$build_timestamp" ]] || { echo "Missing commit timestamp for ${IMAGE_SHA}" >&2; exit 1; }
           echo "BUILD_TIMESTAMP=${build_timestamp}" >> "$GITHUB_ENV"
-          # Docker tags must be lowercase, but GitHub org names are case-preserving.
-          echo "OWNER_LOWER=$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+          # Docker tags and cache refs must be lowercase, but GitHub org names
+          # are case-preserving (e.g. "CrowdRelay"). Lowercase once here.
+          owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "OWNER_LOWER=${owner_lower}" >> "$GITHUB_ENV"
+          echo "CACHE_REF=ghcr.io/${owner_lower}/crowdrelay-buildcache" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
