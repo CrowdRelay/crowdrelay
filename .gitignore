@@ -68,3 +68,4 @@ scripts/provision-*.sh
 # Local-only PG upgrade tooling (untracked by request)
 scripts/local/
 backups-local/
+chrome/
