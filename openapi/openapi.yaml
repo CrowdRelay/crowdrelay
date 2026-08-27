@@ -2810,6 +2810,83 @@ paths:
               schema: { $ref: '#/components/schemas/AutopilotChiefOfStaff' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/scorecard:
+    get:
+      operationId: getAutopilotScorecard
+      summary: Read the agent scorecard — is it running, what did it do, did it work
+      description: >
+        One endpoint that shows the agent's status (enabled, posture, live capabilities),
+        a 7-day action summary (executed, succeeded, failed, parked), the all-time track
+        record (improved vs worsened outcomes, measurement coverage), actions broken down
+        by context, and the last 10 completed actions with their measured outcomes.
+        Not logs — results.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Agent scorecard.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: object
+                    properties:
+                      agent_enabled: { type: boolean }
+                      dry_run: { type: boolean }
+                      posture: { type: string, nullable: true }
+                      live_capabilities: { type: array, items: { type: string } }
+                      parked_capabilities: { type: array, items: { type: string } }
+                      last_decision_at: { type: string, format: date-time, nullable: true }
+                      last_action_at: { type: string, format: date-time, nullable: true }
+                  week:
+                    type: object
+                    properties:
+                      executed: { type: integer, format: int64 }
+                      succeeded: { type: integer, format: int64 }
+                      failed: { type: integer, format: int64 }
+                      parked: { type: integer, format: int64 }
+                      awaiting_approval: { type: integer, format: int64 }
+                      success_rate_basis_points: { type: integer, nullable: true }
+                  track_record:
+                    type: object
+                    properties:
+                      improved: { type: integer, format: int64 }
+                      neutral: { type: integer, format: int64 }
+                      worsened: { type: integer, format: int64 }
+                      unmeasured: { type: integer, format: int64 }
+                      measurement_coverage_basis_points: { type: integer, nullable: true }
+                  by_context:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        context: { type: string }
+                        executed: { type: integer, format: int64 }
+                        succeeded: { type: integer, format: int64 }
+                        failed: { type: integer, format: int64 }
+                        parked: { type: integer, format: int64 }
+                  recent_results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        context: { type: string }
+                        action_kind: { type: string }
+                        subject_kind: { type: string }
+                        subject_id: { type: string, format: uuid }
+                        status: { type: string }
+                        outcome: { type: string, nullable: true }
+                        metric_key: { type: string, nullable: true }
+                        delta_basis_points: { type: integer, nullable: true }
+                        completed_at: { type: string, format: date-time }
+                        executor_id: { type: string, nullable: true }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/acquisition-channels:
     get:
       operationId: getAutopilotAcquisitionChannels
@@ -7214,6 +7291,55 @@ paths:
                 type: array
                 items:
                   type: object
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/analytics/referral-conversion:
+    get:
+      operationId: getAdminAudienceReferralConversion
+      summary: Read referral conversion funnel (sent, qualified, activated, reversed)
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Referral conversion counts — sent, qualified, activated (30d), reversed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  referrals_sent: { type: integer, format: int64 }
+                  qualified: { type: integer, format: int64 }
+                  activated: { type: integer, format: int64 }
+                  reversed: { type: integer, format: int64 }
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /admin/analytics/city-funnel:
+    get:
+      operationId: getAdminAudienceCityFunnel
+      summary: Read per-city fan funnel (signups, active, consented, bookable)
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Per-city breakdown of fans, 30d-active, consented, and whether the city is bookable.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    city_slug: { type: string }
+                    city_name: { type: string }
+                    country_code: { type: string }
+                    fans: { type: integer, format: int64 }
+                    active_30d: { type: integer, format: int64 }
+                    consented: { type: integer, format: int64 }
+                    bookable: { type: boolean }
         '401':
           $ref: '#/components/responses/Problem'
         '503':

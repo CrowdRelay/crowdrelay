@@ -59,11 +59,11 @@ docs/*
 ops/edge/control-plane-basic.bcrypt
 ops/edge/control-plane-basic.env
 
-# Local Claude Code context (not part of the product)
 CLAUDE.md
+PHA*
 .claude/
-scripts/migrate-to-virya-crowdrelay.sh
-scripts/provision-oracle-instance.sh
+scripts/migrate-to-*.sh
+scripts/provision-*.sh
 
 # Local-only PG upgrade tooling (untracked by request)
 scripts/local/

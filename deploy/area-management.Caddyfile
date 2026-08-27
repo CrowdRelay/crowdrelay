@@ -5,7 +5,7 @@
 
 :18080 {
 	@area path /v1/control-plane/area /v1/control-plane/area/*
-	@operations path /v1/control-plane/ops/summary /v1/control-plane/ops/attention /v1/control-plane/ops/outbox /v1/control-plane/ops/outbox/* /v1/control-plane/ops/deliveries /v1/control-plane/ops/deliveries/* /v1/control-plane/ops/operations/* /v1/control-plane/ecosystem/overview /v1/control-plane/ecosystem/findings /v1/control-plane/ecosystem/reconcile /v1/control-plane/ecosystem/flags /v1/control-plane/ecosystem/flags/* /v1/control-plane/autopilot/overview /v1/control-plane/autopilot/growth /v1/control-plane/autopilot/policies/* /v1/control-plane/autopilot/next-best-actions /v1/control-plane/autopilot/actions/* /v1/control-plane/autopilot/decisions/* \
+	@operations path /v1/control-plane/ops/summary /v1/control-plane/ops/attention /v1/control-plane/ops/outbox /v1/control-plane/ops/outbox/* /v1/control-plane/ops/deliveries /v1/control-plane/ops/deliveries/* /v1/control-plane/ops/operations/* /v1/control-plane/ecosystem/overview /v1/control-plane/ecosystem/findings /v1/control-plane/ecosystem/reconcile /v1/control-plane/ecosystem/flags /v1/control-plane/ecosystem/flags/* /v1/control-plane/autopilot/overview /v1/control-plane/autopilot/growth /v1/control-plane/autopilot/policies/* /v1/control-plane/autopilot/next-best-actions /v1/control-plane/autopilot/scorecard /v1/control-plane/autopilot/reply-triage /v1/control-plane/autopilot/actions/* /v1/control-plane/autopilot/decisions/* \
         /v1/control-plane/portfolio/overview \
         /v1/control-plane/portfolio/amplification \
         /v1/control-plane/portfolio/amplification/* \

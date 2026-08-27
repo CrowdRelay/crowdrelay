@@ -339,7 +339,45 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 }
             }
 
-            let relationship_delta = match command.disposition {
+            // Capture the target's kind and previous disposition before the
+            // update overwrites it. Both are needed to enqueue the reply for
+            // first-party classification when reply_text was provided.
+            let (target_kind, previous_disposition): (String, Option<String>) =
+                sqlx::query_as::<_, (String, Option<String>)>(
+                    r#"
+                    SELECT target_kind::text, last_reply_disposition::text
+                    FROM viryaos_outreach_targets
+                    WHERE workspace_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.target_id.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+
+            // When the caller captured the reply text, the target's
+            // disposition stays `Received` until the worker re-classifies it.
+            // This avoids double-counting the relationship delta (once here,
+            // once in the worker) and preserves a previous DNC flag until the
+            // classifier or a human confirms the change. The operator action
+            // details above still record n8n's original disposition for audit.
+            let has_reply_text = command
+                .reply_text
+                .as_deref()
+                .map(|t| {
+                    let trimmed = t.trim();
+                    !trimmed.is_empty() && trimmed.len() <= 4000
+                })
+                .unwrap_or(false);
+            let applied_disposition = if has_reply_text {
+                OutreachReplyDisposition::Received
+            } else {
+                command.disposition
+            };
+            let applied_disposition_str = outreach_reply_str(applied_disposition);
+
+            let relationship_delta = match applied_disposition {
                 OutreachReplyDisposition::Received | OutreachReplyDisposition::None => 0,
                 OutreachReplyDisposition::Positive => 5,
                 OutreachReplyDisposition::Declined => -5,
@@ -362,7 +400,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             .bind(workspace_id.into_uuid())
             .bind(command.target_id.into_uuid())
             .bind(command.occurred_at)
-            .bind(disposition)
+            .bind(applied_disposition_str)
             .bind(relationship_delta)
             .fetch_optional(&mut *transaction)
             .await
@@ -398,7 +436,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             .await
             .map_err(map_sqlx)?;
 
-            if disposition == "do_not_contact" {
+            if applied_disposition_str == "do_not_contact" {
                 sqlx::query(
                     r#"
                     INSERT INTO viryaos_contact_governor (
@@ -441,6 +479,37 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+
+            // When the caller captured the reply text, enqueue it for
+            // first-party classification. The worker loads rows where
+            // `classification_result = 'auto'` and `classified_disposition`
+            // is still NULL, classifies the text, and updates both this row
+            // and the target's disposition. This runs inside the same
+            // transaction so a reply is never recorded without its triage
+            // queue entry.
+            if has_reply_text {
+                let trimmed = command.reply_text.as_deref().map(str::trim).unwrap_or("");
+                sqlx::query(
+                    r#"
+                    INSERT INTO viryaos_reply_classifications (
+                        workspace_id, target_id, target_kind,
+                        reply_text, previous_disposition,
+                        classification_result, classified_disposition,
+                        confidence_basis_points, matched_rules, classified_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, 'auto', NULL, 0, '[]'::jsonb, $6)
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.target_id.into_uuid())
+                .bind(&target_kind)
+                .bind(trimmed)
+                .bind(&previous_disposition)
+                .bind(command.occurred_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
 
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(AutopilotControlMutation {

@@ -62,6 +62,7 @@ use crowdrelay_domain::{
     tour_economics::TourEconomicsPolicy,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 const PRIVATE_NO_STORE: &str = "private, no-store";
@@ -162,4 +163,6 @@ include!("autopilot/show_cost.rs");
 include!("autopilot/objectives.rs");
 include!("autopilot/target_discovery.rs");
 include!("autopilot/booking_discovery.rs");
+include!("autopilot/scorecard.rs");
+include!("autopilot/reply_triage.rs");
 include!("autopilot/validation.rs");

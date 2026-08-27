@@ -563,7 +563,53 @@ pub fn assess_wave_claim(
     )
 }
 
-/// Turns one play's observation into the verdict that will be stored.
+// ---------------------------------------------------------------------------
+// Reply triage — first-party classification of inbound replies.
+//
+// n8n posts replies with a disposition it assigned. When the disposition is
+// `Received` (unclassified), the worker re-classifies using the domain
+// classifier and records the result. Replies that need human review are
+// surfaced via the operator brief.
+// ---------------------------------------------------------------------------
+
+/// A reply awaiting first-party classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplyNeedingTriage {
+    pub reply_id: uuid::Uuid,
+    pub target_id: uuid::Uuid,
+    pub target_kind: OutreachTargetKind,
+    pub reply_text: String,
+    pub previous_disposition: Option<crowdrelay_domain::outreach::OutreachReplyDisposition>,
+}
+
+/// The result of classifying one reply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplyTriageResult {
+    pub classification: crowdrelay_domain::reply_triage::ReplyClassification,
+    pub classified_at: OffsetDateTime,
+}
+
+#[async_trait]
+pub trait AutopilotReplyTriageRepository: Send + Sync {
+    /// Loads replies with `Received` disposition that have not been classified
+    /// by the first-party classifier yet. Bounded by `limit`.
+    async fn load_replies_needing_triage(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+    ) -> Result<Vec<ReplyNeedingTriage>, RepositoryError>;
+
+    /// Records the classification for a reply and updates the reply's
+    /// disposition if the classifier produced an auto-classification.
+    /// For `NeedsHuman`, the disposition stays `Received` and the
+    /// classification is stored for the operator brief to surface.
+    async fn record_reply_classification(
+        &self,
+        workspace_id: WorkspaceId,
+        reply_id: uuid::Uuid,
+        result: &ReplyTriageResult,
+    ) -> Result<(), RepositoryError>;
+}
 ///
 /// A free function rather than a method so the rule stays testable without a
 /// database, and so the worker cannot reach a different answer than the one the

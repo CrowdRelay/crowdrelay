@@ -507,6 +507,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route("/v1/admin/analytics/funnel", get(audience::funnel))
         .route("/v1/admin/analytics/revenue", get(audience::revenue))
+        .route(
+            "/v1/admin/analytics/referral-conversion",
+            get(audience::referral_conversion),
+        )
+        .route(
+            "/v1/admin/analytics/city-funnel",
+            get(audience::city_funnel),
+        )
         .route("/v1/admin/ecosystem/overview", get(ecosystem::overview))
         .route("/v1/admin/ecosystem/flags", get(ecosystem::list_flags))
         .route(
@@ -597,6 +605,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route(
             "/v1/admin/autopilot/chief-of-staff",
             get(autopilot::chief_of_staff),
+        )
+        .route(
+            "/v1/admin/autopilot/scorecard",
+            get(autopilot::scorecard_handler),
         )
         .route(
             "/v1/admin/autopilot/next-best-actions",

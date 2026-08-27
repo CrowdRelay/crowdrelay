@@ -21,9 +21,23 @@
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
+/// A capability with parked actions and no executor heartbeat. The operator
+/// sees which credential to fix rather than just a count.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ParkedCapability {
+    /// The capability name, e.g. "playlist.verify", "outreach.send".
+    pub capability: String,
+    /// How many actions are parked behind this capability.
+    pub parked_count: u32,
+    /// Days since the last executor heartbeat for this capability, if any
+    /// executor ever heartbeated. `None` means no executor has ever
+    /// advertised this capability — the credential was never bootstrapped.
+    pub days_since_heartbeat: Option<u32>,
+}
+
 /// The state of the agent as of the brief, assembled from facts the control
 /// and chief-of-staff read models already own.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct OperatorBriefSnapshot {
     /// Actions that actually completed, executor-confirmed where an executor
     /// was involved.
@@ -40,6 +54,12 @@ pub struct OperatorBriefSnapshot {
     /// True when parked actions exist but no executor has a fresh heartbeat.
     /// The execution plane itself is dead, not just one capability gap.
     pub execution_plane_dead: bool,
+    /// Capabilities with parked actions and no executor heartbeat for N days.
+    /// Each entry is the capability name and the count of parked actions.
+    /// This is the per-capability detail behind `actions_parked` — the
+    /// operator sees not just "12 actions parked" but "playlist.verify: 8,
+    /// outreach.send: 4", so they know which credential to fix.
+    pub parked_capabilities: Vec<ParkedCapability>,
     /// Off-platform feeds the agent has no series for. Reported so "we saw no
     /// change" is never confused with "we could not look".
     pub blind_platforms: u16,
@@ -222,6 +242,7 @@ mod tests {
             oldest_approval_age_hours: None,
             actions_parked: 0,
             execution_plane_dead: false,
+            parked_capabilities: Vec::new(),
             blind_platforms: 0,
             last_sweep_read_nothing: false,
             agent_enabled: true,

@@ -288,6 +288,7 @@ pub async fn record_outreach_reply(
         target_id: OutreachTargetId::from_uuid(target_id),
         opportunity_id: request.opportunity_id.map(OutreachOpportunityId::from_uuid),
         disposition: request.disposition,
+        reply_text: request.reply_text,
         occurred_at: request.occurred_at,
     };
     match state

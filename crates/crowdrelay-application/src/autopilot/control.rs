@@ -288,6 +288,10 @@ pub struct AcquisitionChannels {
     /// Everyone contactable right now, whatever their signup date. The
     /// denominator every owned-audience decision should be checked against.
     pub reachable_consented: u32,
+    /// Fans active in both the current and previous 30-day windows. The
+    /// campaign plan's retention KPI — not just "how many are active now"
+    /// but "how many stayed active".
+    pub retained_30d: u32,
     /// People whose channel could not be established, by reason. Reported
     /// prominently: a report that hides its unknowns is how a 40% attribution
     /// gap goes unnoticed for a month.
