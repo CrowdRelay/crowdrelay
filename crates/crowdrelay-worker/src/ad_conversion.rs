@@ -206,21 +206,37 @@ impl AdConversionWorker {
                                 payload = notif.payload(),
                                 "ad conversion notification received"
                             );
+                            // Coalesce notification storms: if N fans sign up
+                            // at once, N NOTIFY events fire. The first cycle
+                            // fetches all N (up to BATCH_SIZE). Drain the
+                            // remaining notifications so we don't run N-1
+                            // no-op cycles.
+                            while listener.try_recv().await.is_ok() {}
                             self.run_cycle_with_timeout().await;
                         }
                         Err(error) => {
                             tracing::warn!(error = %error, "PgListener error — reconnecting");
-                            // Reconnect + re-listen, then sweep to catch any
-                            // notifications that fired during the disconnect gap.
-                            if let Some(new_listener) = self.connect_listener().await {
-                                listener = new_listener;
-                                tracing::info!("PgListener reconnected — running sweep for missed notifications");
-                                self.run_cycle_with_timeout().await;
-                            } else {
-                                // Reconnect failed. Retry with backoff until it
-                                // works or we shut down — without LISTEN we have
-                                // no way to receive events, so we must keep trying.
-                                tracing::error!("PgListener reconnect failed — retrying");
+                            // Reconnect with backoff. Without LISTEN we have no
+                            // way to receive events, so we must keep trying
+                            // until it works or we shut down.
+                            let mut backoff = Duration::from_secs(1);
+                            loop {
+                                if *shutdown.borrow() { return; }
+                                if let Some(new_listener) = self.connect_listener().await {
+                                    listener = new_listener;
+                                    tracing::info!("PgListener reconnected — running sweep for missed notifications");
+                                    self.run_cycle_with_timeout().await;
+                                    break;
+                                }
+                                tracing::warn!(backoff = ?backoff, "PgListener reconnect failed — retrying");
+                                tokio::select! {
+                                    biased;
+                                    _ = shutdown.changed() => {
+                                        if *shutdown.borrow() { return; }
+                                    }
+                                    _ = tokio::time::sleep(backoff) => {}
+                                }
+                                backoff = (backoff * 2).min(Duration::from_secs(60));
                             }
                         }
                     }
@@ -262,7 +278,7 @@ impl AdConversionWorker {
         }
     }
 
-    /// Runs one polling cycle. Each platform is tried independently — a
+    /// Runs one processing cycle. Each platform is tried independently — a
     /// failure on one does not block the others. Lead events (fan signups)
     /// and Purchase events (paid ticket orders) are both forwarded.
     async fn run_cycle(&self) -> Result<CycleStats, AdConversionError> {
@@ -885,12 +901,16 @@ impl AdConversionWorker {
         Ok(())
     }
 
-    /// Records the outcome of a send attempt — both successes and failures.
-    /// On failure, the HTTP status and error body are persisted so the
-    /// operator can inspect what went wrong without digging through logs.
-    /// A failed delivery record also prevents indefinite retries (the
-    /// `NOT EXISTS` in `fetch_pending_*` treats any delivery row as
-    /// "done", regardless of status code).
+    /// Records the outcome of a send attempt.
+    ///
+    /// **Successes and HTTP rejections** (4xx/5xx) are recorded as delivery
+    /// rows. This persists the response for debugging and prevents retries —
+    /// a 4xx means the platform rejected the event, so retrying won't help.
+    ///
+    /// **Transient errors** (network failures, OAuth token refresh failures)
+    /// are NOT recorded. The fan/order stays in the pending set and will be
+    /// retried on the next cycle, which is the correct behavior for transient
+    /// failures.
     async fn record_result(
         &self,
         platform: &str,
@@ -904,11 +924,13 @@ impl AdConversionWorker {
             Ok(status) => (*status, None),
             Err(AdConversionError::Status { status, body }) => (*status, Some(body.as_str())),
             Err(error) => {
-                tracing::warn!(error = %error, platform, event_id, "ad conversion send failed (non-HTTP)");
-                // Non-HTTP errors (network, OAuth) — record with status 0
-                // so we don't retry indefinitely, but the operator can see
-                // it wasn't a platform rejection.
-                (0, None)
+                // Transient error — don't record a delivery row so the
+                // event gets retried on the next cycle.
+                tracing::warn!(
+                    error = %error, platform, event_id,
+                    "ad conversion send failed (transient) — will retry next cycle"
+                );
+                return;
             }
         };
         if let Err(error) = self
