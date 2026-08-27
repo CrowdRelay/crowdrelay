@@ -144,7 +144,7 @@ source .crowdrelay.local.sh
 [[ "${CROWDRELAY_IMAGE_SHA:-}" == "$target" ]] || fail 'pin-mismatch'
 
 for component in api worker; do
-  image="ghcr.io/wojciechbator/crowdrelay-${component}:sha-${target}"
+  image="ghcr.io/crowdrelay/crowdrelay-${component}:sha-${target}"
   [[ "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)" == "$target" ]] \
     || fail "target-image-invalid-$component"
 done
@@ -190,7 +190,7 @@ model=json.load(sys.stdin)
 target=sys.argv[1]
 for service, component in (("api","api"),("worker","worker")):
     image=model["services"][service]["image"]
-    expected=f"ghcr.io/wojciechbator/crowdrelay-{component}:sha-{target}"
+    expected=f"ghcr.io/crowdrelay/crowdrelay-{component}:sha-{target}"
     if image != expected:
         raise SystemExit(f"effective image mismatch for {service}: {image} != {expected}")
 ' "$target" || fail 'effective-compose-not-exact'

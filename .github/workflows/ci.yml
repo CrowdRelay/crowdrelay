@@ -336,8 +336,8 @@ jobs:
             CROWDRELAY_ENV_FILE=deploy/env.production.example \
             CROWDRELAY_BOOTSTRAP_HOST_FILE=./deploy/bootstrap.example.json \
             CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE=./deploy/webhook-secrets.example.json \
-            CROWDRELAY_API_IMAGE_REF="ghcr.io/wojciechbator/crowdrelay-api@$digest" \
-            CROWDRELAY_WORKER_IMAGE_REF="ghcr.io/wojciechbator/crowdrelay-worker@$digest" \
+            CROWDRELAY_API_IMAGE_REF="ghcr.io/crowdrelay/crowdrelay-api@$digest" \
+            CROWDRELAY_WORKER_IMAGE_REF="ghcr.io/crowdrelay/crowdrelay-worker@$digest" \
               docker compose \
                 --env-file deploy/env.production.example \
                 --file compose.production.yaml \

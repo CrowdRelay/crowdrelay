@@ -13,7 +13,7 @@ edition = "2024"
 license = "Apache-2.0"
 version = "1.0.0"
 authors = ["Wojciech Bator"]
-repository = "https://github.com/wojciechbator/crowdrelay"
+repository = "https://github.com/CrowdRelay/crowdrelay"
 
 [workspace.dependencies]
 anyhow = "1"

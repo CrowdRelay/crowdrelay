@@ -43,7 +43,7 @@ jobs:
       - name: Check out Virya Signal consumer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: wojciechbator/virya-signal
+          repository: CrowdRelay/virya-signal
           ref: main
           path: virya-signal
           persist-credentials: false
@@ -51,7 +51,7 @@ jobs:
       - name: Check out Synesthesia consumer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: wojciechbator/synesthesia
+          repository: CrowdRelay/synesthesia
           ref: main
           path: synesthesia
           persist-credentials: false
