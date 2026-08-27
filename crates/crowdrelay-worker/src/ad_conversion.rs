@@ -174,20 +174,23 @@ impl AdConversionWorker {
             return;
         }
 
+        // Connect the LISTEN connection BEFORE the startup sweep. This closes
+        // the race window: if we sweep first and connect after, any signups
+        // during the sweep fire notifications that no one is listening for
+        // (Postgres doesn't queue notifications for non-listening sessions).
+        // By connecting first, notifications during the sweep are queued by
+        // Postgres and picked up after the sweep completes.
+        let mut listener = match self.connect_listener().await {
+            Some(listener) => listener,
+            None => return, // error already logged
+        };
+
         // Startup sweep: catch any notifications that fired while the worker
         // was down (restart, deploy, crash). This is the only scenario where
         // LISTEN/NOTIFY can miss events — Postgres doesn't queue notifications
         // for disconnected listeners.
         tracing::info!("ad conversion worker starting — running startup sweep");
         self.run_cycle_with_timeout().await;
-
-        // Connect a dedicated LISTEN connection. This is separate from the
-        // pool because a LISTEN connection must not be used for anything else
-        // while subscribed.
-        let mut listener = match self.connect_listener().await {
-            Some(listener) => listener,
-            None => return, // error already logged
-        };
 
         tracing::info!("ad conversion worker listening on NOTIFY channels");
 
@@ -211,7 +214,7 @@ impl AdConversionWorker {
                             // fetches all N (up to BATCH_SIZE). Drain the
                             // remaining notifications so we don't run N-1
                             // no-op cycles.
-                            while listener.try_recv().await.is_ok() {}
+                            while let Ok(Some(_)) = listener.try_recv().await {}
                             self.run_cycle_with_timeout().await;
                         }
                         Err(error) => {
@@ -231,8 +234,9 @@ impl AdConversionWorker {
                                 tracing::warn!(backoff = ?backoff, "PgListener reconnect failed — retrying");
                                 tokio::select! {
                                     biased;
-                                    _ = shutdown.changed() => {
-                                        if *shutdown.borrow() { return; }
+                                    changed = shutdown.changed() => {
+                                        // Sender dropped or shutdown set — either way, stop.
+                                        if changed.is_err() || *shutdown.borrow() { return; }
                                     }
                                     _ = tokio::time::sleep(backoff) => {}
                                 }
@@ -600,7 +604,9 @@ impl AdConversionWorker {
         let mut conversion = Map::new();
         conversion.insert("conversionAction".to_owned(), json!(config.conversion_action_id));
         conversion.insert("conversionDateTime".to_owned(), json!(conversion_time));
-        conversion.insert("conversionValue".to_owned(), json!(value.unwrap_or(1.0)));
+        // Lead events have no monetary value — report 0, not a default that
+        // would inflate conversion value reports in Google Ads.
+        conversion.insert("conversionValue".to_owned(), json!(value.unwrap_or(0.0)));
         conversion.insert("currencyCode".to_owned(), json!(currency.unwrap_or("PLN")));
         conversion.insert("orderId".to_owned(), json!(event_id));
         conversion.insert(
@@ -1119,7 +1125,7 @@ mod tests {
         let mut conversion = Map::new();
         conversion.insert("conversionAction".to_owned(), json!("customers/123/conversionActions/456"));
         conversion.insert("conversionDateTime".to_owned(), json!("2026-08-27T12:00:00Z"));
-        conversion.insert("conversionValue".to_owned(), json!(1));
+        conversion.insert("conversionValue".to_owned(), json!(0));
         conversion.insert("currencyCode".to_owned(), json!("PLN"));
         conversion.insert("orderId".to_owned(), json!(event_id));
         conversion.insert("gclid".to_owned(), json!(fan.google_gclid));
