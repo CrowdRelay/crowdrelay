@@ -228,6 +228,11 @@ pub struct OutreachOpportunityRequest {
 pub struct OutreachReplyRequest {
     opportunity_id: Option<Uuid>,
     disposition: OutreachReplyDisposition,
+    /// The free-text body of the reply, when n8n captured it. When present,
+    /// the worker re-classifies it with the first-party domain classifier
+    /// rather than trusting the disposition n8n assigned.
+    #[serde(default)]
+    reply_text: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     occurred_at: OffsetDateTime,
 }

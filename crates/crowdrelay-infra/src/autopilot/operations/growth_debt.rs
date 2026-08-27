@@ -282,6 +282,167 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
             WHERE target.workspace_id = $1
               AND target.active
               AND target.accepts_booking
+        ),
+        calendar_routing_conflicts AS (
+            -- Two confirmed shows on consecutive days with an impractical
+            -- distance between them. The domain module estimates inter-show
+            -- distance as `sum_from_home - shorter_leg` (an upper bound), so
+            -- the SQL provides each show's distance from home base. Shows
+            -- without a cost ledger entry have no distance and the domain
+            -- rule returns `Ok` — no distance, no claim.
+            WITH published_with_distance AS (
+                SELECT
+                    event.id AS event_id,
+                    event.starts_at::date AS show_date,
+                    cost.distance_km
+                FROM events AS event
+                LEFT JOIN viryaos_show_cost_ledger AS cost
+                  ON cost.workspace_id = event.workspace_id
+                 AND cost.event_id = event.id
+                WHERE event.workspace_id = $1
+                  AND event.status = 'published'
+                  AND event.starts_at > $2
+            ),
+            -- Pair each show with the next show within 2 days.
+            show_pairs AS (
+                SELECT
+                    earlier.event_id AS earlier_event_id,
+                    earlier.show_date AS earlier_date,
+                    earlier.distance_km AS earlier_distance_km,
+                    later.event_id AS later_event_id,
+                    later.show_date AS later_date,
+                    later.distance_km AS later_distance_km,
+                    (later.show_date - earlier.show_date) AS gap_days
+                FROM published_with_distance AS earlier
+                JOIN published_with_distance AS later
+                  ON later.show_date > earlier.show_date
+                 AND later.show_date <= earlier.show_date + INTERVAL '2 days'
+            )
+            SELECT
+                'calendar_routing_conflict' AS debt_kind,
+                'event' AS subject_kind,
+                pairs.later_event_id AS subject_id,
+                0::bigint AS idle_hours,
+                1::bigint AS outstanding_items,
+                1::bigint AS tracked_items,
+                NULL::integer AS relationship_score,
+                FLOOR(EXTRACT(EPOCH FROM (
+                    (SELECT starts_at FROM events WHERE id = pairs.later_event_id) - $2
+                )) / 3600)::bigint AS hours_until_deadline
+            FROM show_pairs AS pairs
+            -- Only raise when both distances are known and the estimated
+            -- inter-show distance exceeds the threshold. The domain rule's
+            -- upper bound: sum - shorter_leg. Default thresholds: 400 km
+            -- for consecutive days, 800 km for 2-day gap.
+            WHERE pairs.earlier_distance_km IS NOT NULL
+              AND pairs.later_distance_km IS NOT NULL
+              AND (
+                  (pairs.gap_days = 1
+                   AND pairs.earlier_distance_km + pairs.later_distance_km
+                       - LEAST(pairs.earlier_distance_km, pairs.later_distance_km) > 400)
+                  OR
+                  (pairs.gap_days = 2
+                   AND pairs.earlier_distance_km + pairs.later_distance_km
+                       - LEAST(pairs.earlier_distance_km, pairs.later_distance_km) > 800)
+              )
+        ),
+        ticket_sales_behind_pace AS (
+            -- Upcoming shows selling far below the workspace's own historical
+            -- pace at the same lead time. The response is owned-audience and
+            -- free: a message to consented fans in the show's city.
+            --
+            -- The historical baseline is the average paid tickets of completed
+            -- shows at the same lead time (±3 days). With fewer than 2
+            -- matching completed shows, the detector holds — no pace to
+            -- compare against.
+            WITH completed_pace AS (
+                SELECT
+                    completed.event_id,
+                    GREATEST(
+                        0,
+                        FLOOR(EXTRACT(EPOCH FROM (
+                            completed.starts_at - orders.paid_at
+                        )) / 86400)
+                    )::bigint AS days_to_event,
+                    SUM(item.quantity)::bigint AS paid_tickets
+                FROM events AS completed
+                JOIN ticket_sales AS sale
+                  ON sale.workspace_id = completed.workspace_id
+                 AND sale.event_id = completed.id
+                 AND sale.active
+                JOIN ticket_orders AS orders
+                  ON orders.workspace_id = completed.workspace_id
+                 AND orders.ticket_sale_id = sale.id
+                 AND orders.status IN ('paid', 'partially_refunded')
+                JOIN ticket_order_items AS item
+                  ON item.workspace_id = orders.workspace_id
+                 AND item.ticket_order_id = orders.id
+                WHERE completed.workspace_id = $1
+                  AND completed.status = 'completed'
+                  AND orders.paid_at <= completed.starts_at
+                GROUP BY completed.event_id, orders.paid_at
+            ),
+            upcoming_sales AS (
+                SELECT
+                    event.id AS event_id,
+                    event.starts_at,
+                    GREATEST(
+                        0,
+                        FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 86400)
+                    )::bigint AS days_to_event,
+                    COALESCE(SUM(item.quantity) FILTER (
+                        WHERE orders.status IN ('paid', 'partially_refunded')
+                    ), 0)::bigint AS paid_tickets
+                FROM events AS event
+                JOIN ticket_sales AS sale
+                  ON sale.workspace_id = event.workspace_id
+                 AND sale.event_id = event.id
+                 AND sale.active
+                LEFT JOIN ticket_orders AS orders
+                  ON orders.workspace_id = event.workspace_id
+                 AND orders.ticket_sale_id = sale.id
+                LEFT JOIN ticket_order_items AS item
+                  ON item.workspace_id = orders.workspace_id
+                 AND item.ticket_order_id = orders.id
+                WHERE event.workspace_id = $1
+                  AND event.status = 'published'
+                  AND event.starts_at > $2
+                  AND event.starts_at <= $2 + INTERVAL '21 days'
+                GROUP BY event.id, event.starts_at
+            ),
+            pace_comparison AS (
+                SELECT
+                    upcoming.event_id,
+                    upcoming.days_to_event,
+                    upcoming.paid_tickets,
+                    AVG(history.paid_tickets)::bigint AS historical_average
+                FROM upcoming_sales AS upcoming
+                JOIN completed_pace AS history
+                  ON ABS(history.days_to_event - upcoming.days_to_event) <= 3
+                GROUP BY upcoming.event_id, upcoming.days_to_event, upcoming.paid_tickets
+                HAVING count(*) >= 2
+            )
+            SELECT
+                'ticket_sales_behind_pace' AS debt_kind,
+                'event' AS subject_kind,
+                comparison.event_id AS subject_id,
+                -- Structural, not time-based: idle_hours is 0 (the horizon is
+                -- 0 for this kind). The debt exists the moment sales fall
+                -- behind, not after some idle period.
+                0::bigint AS idle_hours,
+                -- 1 outstanding item: the show needs a reach push.
+                1::bigint AS outstanding_items,
+                1::bigint AS tracked_items,
+                NULL::integer AS relationship_score,
+                FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $2)) / 3600)::bigint
+                    AS hours_until_deadline
+            FROM pace_comparison AS comparison
+            JOIN events AS event
+              ON event.workspace_id = $1
+             AND event.id = comparison.event_id
+            -- Only raise when current sales are below 70% of historical pace.
+            WHERE comparison.historical_average > 0
+              AND comparison.paid_tickets * 10_000 < comparison.historical_average * 7_000
         )
         SELECT * FROM quiet_relationships
         UNION ALL
@@ -292,6 +453,10 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         SELECT * FROM missing_assets
         UNION ALL
         SELECT * FROM stale_contacts
+        UNION ALL
+        SELECT * FROM calendar_routing_conflicts
+        UNION ALL
+        SELECT * FROM ticket_sales_behind_pace
         ORDER BY idle_hours DESC, subject_id
         LIMIT $4
         "#,

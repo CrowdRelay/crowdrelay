@@ -167,6 +167,7 @@ impl OperatorBriefWorker {
             oldest_approval_age_hours: row.oldest_approval_hours.map(clamp),
             actions_parked: clamp(row.parked),
             execution_plane_dead: row.execution_plane_dead,
+            parked_capabilities: Vec::new(),
             blind_platforms: u16::try_from(row.blind_platforms.max(0)).unwrap_or(u16::MAX),
             last_sweep_read_nothing: row.last_sweep_read_nothing,
             // A workspace with no envelope row has never been configured, and
@@ -308,6 +309,7 @@ mod tests {
             actions_awaiting_approval: 12,
             oldest_approval_age_hours: Some(70),
             actions_parked: 4,
+            parked_capabilities: Vec::new(),
             blind_platforms: 3,
             last_sweep_read_nothing: false,
             agent_enabled: false,

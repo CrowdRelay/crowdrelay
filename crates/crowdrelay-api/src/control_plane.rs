@@ -93,6 +93,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::autopilot::next_best_actions),
         )
         .route(
+            "/v1/control-plane/autopilot/scorecard",
+            get(crate::autopilot::scorecard_handler),
+        )
+        .route(
+            "/v1/control-plane/autopilot/reply-triage",
+            get(crate::autopilot::reply_triage_handler),
+        )
+        .route(
             "/v1/control-plane/autopilot/actions/{action_id}/approve",
             post(crate::autopilot::approve_action),
         )

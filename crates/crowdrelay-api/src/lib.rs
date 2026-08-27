@@ -337,6 +337,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
         || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
         || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
         || path == "/v1/control-plane/autopilot/next-best-actions"
+        || path == "/v1/control-plane/autopilot/reply-triage"
         || one_segment_with_suffix(path, "/v1/control-plane/autopilot/actions/", "/approve")
         || one_segment_with_suffix(
             path,

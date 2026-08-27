@@ -56,6 +56,18 @@ pub enum GrowthDebtKind {
     /// confirmed" would claim evidence that does not exist. The rule is here
     /// and tested; wiring it needs a real clock first.
     StaleContactData,
+    /// Two confirmed shows on consecutive days with an impractical distance
+    /// between them — the system can see this and nobody enjoys discovering
+    /// it late. Phase 7's cost model already knows what the drive costs; this
+    /// rule surfaces the conflict before the second show is accepted.
+    CalendarRoutingConflict,
+    /// An upcoming show whose ticket sales are far below the workspace's own
+    /// historical pace at the same lead time. The response is owned-audience
+    /// and free: a message to consented fans in the show's city. The
+    /// empty-denominator invariant keeps this inert until there are enough
+    /// past shows to form a baseline — with zero history the detector
+    /// honestly says "insufficient evidence" rather than inventing a pace.
+    TicketSalesBehindPace,
 }
 
 impl GrowthDebtKind {
@@ -67,6 +79,8 @@ impl GrowthDebtKind {
             Self::ReleaseMilestonesMissed => "release_milestones_missed",
             Self::ReleaseAssetsMissing => "release_assets_missing",
             Self::StaleContactData => "stale_contact_data",
+            Self::CalendarRoutingConflict => "calendar_routing_conflict",
+            Self::TicketSalesBehindPace => "ticket_sales_behind_pace",
         }
     }
 
@@ -78,6 +92,8 @@ impl GrowthDebtKind {
             "release_milestones_missed" => Some(Self::ReleaseMilestonesMissed),
             "release_assets_missing" => Some(Self::ReleaseAssetsMissing),
             "stale_contact_data" => Some(Self::StaleContactData),
+            "calendar_routing_conflict" => Some(Self::CalendarRoutingConflict),
+            "ticket_sales_behind_pace" => Some(Self::TicketSalesBehindPace),
             _ => None,
         }
     }
@@ -102,6 +118,12 @@ impl GrowthDebtKind {
             Self::StaleContactData => {
                 "a contact record has not been re-verified inside the policy horizon"
             }
+            Self::CalendarRoutingConflict => {
+                "two confirmed shows on consecutive days are too far apart to drive between"
+            }
+            Self::TicketSalesBehindPace => {
+                "an upcoming show is selling far below the workspace's own historical pace at the same lead time"
+            }
         }
     }
 
@@ -115,6 +137,8 @@ impl GrowthDebtKind {
             Self::ReleaseMilestonesMissed => "resume_release_plan",
             Self::ReleaseAssetsMissing => "complete_release_assets",
             Self::StaleContactData => "reverify_contact_data",
+            Self::CalendarRoutingConflict => "review_calendar_routing",
+            Self::TicketSalesBehindPace => "announce_show_to_local_fans",
         }
     }
 
@@ -132,6 +156,8 @@ impl GrowthDebtKind {
             Self::ReleaseMilestonesMissed => "raise_growth_debt_release_milestones_missed",
             Self::ReleaseAssetsMissing => "raise_growth_debt_release_assets_missing",
             Self::StaleContactData => "raise_growth_debt_stale_contact_data",
+            Self::CalendarRoutingConflict => "raise_growth_debt_calendar_routing_conflict",
+            Self::TicketSalesBehindPace => "raise_growth_debt_ticket_sales_behind_pace",
         }
     }
 
@@ -143,6 +169,8 @@ impl GrowthDebtKind {
             Self::ReleaseMilestonesMissed => "growth_debt_release_milestones",
             Self::ReleaseAssetsMissing => "growth_debt_release_assets",
             Self::StaleContactData => "growth_debt_contact_data",
+            Self::CalendarRoutingConflict => "growth_debt_calendar_routing",
+            Self::TicketSalesBehindPace => "growth_debt_ticket_sales_pace",
         }
     }
 
@@ -155,7 +183,9 @@ impl GrowthDebtKind {
         match self {
             Self::EventLeversSkipped
             | Self::ReleaseMilestonesMissed
-            | Self::ReleaseAssetsMissing => MetricValueTier::Downstream,
+            | Self::ReleaseAssetsMissing
+            | Self::CalendarRoutingConflict
+            | Self::TicketSalesBehindPace => MetricValueTier::Downstream,
             Self::RelationshipQuiet => MetricValueTier::Intermediate,
             Self::StaleContactData => MetricValueTier::Vanity,
         }
@@ -167,7 +197,11 @@ impl GrowthDebtKind {
     pub const fn is_deadline_bound(self) -> bool {
         matches!(
             self,
-            Self::EventLeversSkipped | Self::ReleaseMilestonesMissed | Self::ReleaseAssetsMissing
+            Self::EventLeversSkipped
+                | Self::ReleaseMilestonesMissed
+                | Self::ReleaseAssetsMissing
+                | Self::CalendarRoutingConflict
+                | Self::TicketSalesBehindPace
         )
     }
 
@@ -179,10 +213,25 @@ impl GrowthDebtKind {
         matches!(self, Self::RelationshipQuiet)
     }
 
+    /// True when the kind is structural rather than time-based. Structural
+    /// kinds have a horizon of 0 by design: the finding is either present or
+    /// not, and the SQL already filtered to real findings. Time-based kinds
+    /// with a configured horizon of 0 are a misconfiguration that means
+    /// "disabled", not "always on".
+    #[must_use]
+    pub const fn is_structural(self) -> bool {
+        matches!(
+            self,
+            Self::CalendarRoutingConflict | Self::TicketSalesBehindPace
+        )
+    }
+
     const fn base_priority(self) -> u16 {
         match self {
             Self::EventLeversSkipped => 75,
             Self::ReleaseAssetsMissing => 70,
+            Self::CalendarRoutingConflict => 80,
+            Self::TicketSalesBehindPace => 72,
             Self::ReleaseMilestonesMissed => 65,
             Self::RelationshipQuiet => 50,
             Self::StaleContactData => 30,
@@ -329,6 +378,14 @@ pub const fn horizon_hours(kind: GrowthDebtKind, policy: GrowthDebtPolicy) -> u3
         GrowthDebtKind::ReleaseMilestonesMissed => policy.release_milestone_grace_hours,
         GrowthDebtKind::ReleaseAssetsMissing => policy.release_assets_ready_before_hours,
         GrowthDebtKind::StaleContactData => policy.contact_data_stale_after_hours,
+        // Routing conflict is structural, not time-based. Horizon of 0 means
+        // it is always detectable — the conflict exists the moment both shows
+        // are confirmed.
+        GrowthDebtKind::CalendarRoutingConflict => 0,
+        // Sales pace is structural, not time-based. The detector compares
+        // current sales against historical pace at the same lead time, so the
+        // horizon is 0 — the debt exists the moment sales fall behind.
+        GrowthDebtKind::TicketSalesBehindPace => 0,
     }
 }
 
@@ -432,7 +489,12 @@ pub fn evaluate_growth_debt(
     }
 
     let horizon = horizon_hours(kind, policy);
-    if horizon == 0 || observation.idle_hours <= horizon {
+    // Structural kinds (horizon 0 by design) are always detectable — the SQL
+    // already filtered to real findings, so the domain trusts the observation.
+    // Time-based kinds with a configured horizon of 0 are a misconfiguration
+    // that means "disabled", not "always on": a zero quiet-after period would
+    // report every relationship as debt, which is the bug this guard prevents.
+    if !kind.is_structural() && (horizon == 0 || observation.idle_hours <= horizon) {
         return GrowthDebtDecision::Hold;
     }
 
@@ -453,11 +515,19 @@ pub fn evaluate_growth_debt(
         return GrowthDebtDecision::Hold;
     }
 
-    let overdue_basis_points = u64::from(observation.idle_hours)
-        .saturating_mul(10_000)
-        .checked_div(u64::from(horizon))
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(u32::MAX);
+    // For structural kinds (horizon 0 by design), the finding is present
+    // rather than overdue — the SQL already determined there is a real
+    // conflict or behind-pace show. Use 10_000 (at-horizon) so confidence
+    // and priority get a meaningful value instead of dividing by zero.
+    let overdue_basis_points = if kind.is_structural() {
+        10_000
+    } else {
+        u64::from(observation.idle_hours)
+            .saturating_mul(10_000)
+            .checked_div(u64::from(horizon))
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(u32::MAX)
+    };
 
     GrowthDebtDecision::Raise(GrowthDebtItem {
         kind,
@@ -727,6 +797,8 @@ mod tests {
             GrowthDebtKind::ReleaseMilestonesMissed,
             GrowthDebtKind::ReleaseAssetsMissing,
             GrowthDebtKind::StaleContactData,
+            GrowthDebtKind::CalendarRoutingConflict,
+            GrowthDebtKind::TicketSalesBehindPace,
         ] {
             assert_eq!(GrowthDebtKind::parse(kind.as_str()), Some(kind));
             assert!(!kind.reason().is_empty());
@@ -798,6 +870,95 @@ mod release_assets_tests {
         // about nothing.
         assert_eq!(
             evaluate_growth_debt(&observation(24 * 60, -5), GrowthDebtPolicy::default()),
+            GrowthDebtDecision::Hold
+        );
+    }
+}
+
+#[cfg(test)]
+mod structural_kind_tests {
+    use super::*;
+
+    fn ticket_sales_observation(hours_until_deadline: i64) -> GrowthDebtObservation {
+        GrowthDebtObservation {
+            kind: GrowthDebtKind::TicketSalesBehindPace,
+            subject: GrowthDebtSubject::Event(EventId::from_uuid(uuid::Uuid::now_v7())),
+            // Structural: idle_hours is 0 because the finding is present, not
+            // aged. The SQL already determined the show is behind pace.
+            idle_hours: 0,
+            outstanding_items: 1,
+            tracked_items: 1,
+            relationship_score: None,
+            hours_until_deadline: Some(hours_until_deadline),
+            hours_since_last_signal: None,
+        }
+    }
+
+    fn routing_observation(hours_until_deadline: i64) -> GrowthDebtObservation {
+        GrowthDebtObservation {
+            kind: GrowthDebtKind::CalendarRoutingConflict,
+            subject: GrowthDebtSubject::Event(EventId::from_uuid(uuid::Uuid::now_v7())),
+            idle_hours: 0,
+            outstanding_items: 1,
+            tracked_items: 1,
+            relationship_score: None,
+            hours_until_deadline: Some(hours_until_deadline),
+            hours_since_last_signal: None,
+        }
+    }
+
+    #[test]
+    fn ticket_sales_behind_pace_raises_when_finding_is_present() {
+        // The SQL found a behind-pace show 14 days out. The domain must raise,
+        // not hold — the horizon is 0 (structural), and the observation is
+        // already filtered to a real finding.
+        let decision = evaluate_growth_debt(
+            &ticket_sales_observation(24 * 14),
+            GrowthDebtPolicy::default(),
+        );
+        let GrowthDebtDecision::Raise(item) = decision else {
+            panic!("expected Raise for behind-pace show, got {decision:?}");
+        };
+        assert_eq!(item.kind, GrowthDebtKind::TicketSalesBehindPace);
+        assert_eq!(item.overdue_basis_points, 10_000);
+        assert!(item.priority >= 72);
+    }
+
+    #[test]
+    fn calendar_routing_conflict_raises_when_finding_is_present() {
+        let decision =
+            evaluate_growth_debt(&routing_observation(24 * 14), GrowthDebtPolicy::default());
+        let GrowthDebtDecision::Raise(item) = decision else {
+            panic!("expected Raise for routing conflict, got {decision:?}");
+        };
+        assert_eq!(item.kind, GrowthDebtKind::CalendarRoutingConflict);
+        assert_eq!(item.overdue_basis_points, 10_000);
+        assert!(item.priority >= 80);
+    }
+
+    #[test]
+    fn structural_kind_still_respects_cooldown() {
+        let observation = GrowthDebtObservation {
+            kind: GrowthDebtKind::TicketSalesBehindPace,
+            subject: GrowthDebtSubject::Event(EventId::from_uuid(uuid::Uuid::now_v7())),
+            idle_hours: 0,
+            outstanding_items: 1,
+            tracked_items: 1,
+            relationship_score: None,
+            hours_until_deadline: Some(24 * 14),
+            hours_since_last_signal: Some(1), // within cooldown
+        };
+        assert_eq!(
+            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            GrowthDebtDecision::Hold
+        );
+    }
+
+    #[test]
+    fn structural_kind_still_respects_expired_deadline() {
+        // A routing conflict for a show that already happened is useless.
+        assert_eq!(
+            evaluate_growth_debt(&routing_observation(-1), GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }

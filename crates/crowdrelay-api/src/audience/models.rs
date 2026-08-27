@@ -15,6 +15,10 @@ pub struct FanListQuery {
     limit: Option<i64>,
     search: Option<String>,
     city_slug: Option<String>,
+    /// Filter by activation state: "active", "inactive", "inactive_no_consent",
+    /// "inactive_never_acted", "inactive_window_expired".
+    /// Omit to return all fans regardless of activation.
+    activation: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -33,6 +37,15 @@ pub struct FanCard {
     attended_events: i64,
     paid_ticket_orders: i64,
     synesthesia_entries: i64,
+    /// Whether the fan has granted marketing consent.
+    consented: bool,
+    /// When the fan last did something meaningful, if ever.
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_activity_at: Option<OffsetDateTime>,
+    /// The fan's activation state: "active", "inactive_no_consent",
+    /// "inactive_never_acted", "inactive_window_expired", "inactive_account_closed".
+    /// Derived from the same definition as the KPI view, not from account status.
+    activation_state: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -327,6 +340,33 @@ pub struct FunnelRow {
     active_fans: i64,
     ticket_buyers: i64,
     attendees: i64,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct CityFunnelRow {
+    city_slug: String,
+    city_name: String,
+    country_code: String,
+    fans: i64,
+    active_30d: i64,
+    consented: i64,
+    /// Whether this city has enough active fans to be worth booking.
+    /// Threshold is 50 active fans — the plan's "two hundred in four cities
+    /// produce four shows" implies ~50 per city as the minimum.
+    bookable: bool,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct ReferralConversionRow {
+    /// Total referral attributions (people who used a code).
+    referrals_sent: i64,
+    /// Attributions that reached 'qualified' status (referred fan qualified).
+    qualified: i64,
+    /// Qualified referrals whose referred fan is 30d-active (consented +
+    /// meaningful action in last 30 days).
+    activated: i64,
+    /// Qualified referrals that were later reversed (e.g. fan unsubscribed).
+    reversed: i64,
 }
 
 #[derive(Debug, Serialize, FromRow)]

@@ -269,11 +269,15 @@ pub struct OutreachOpportunityMutation {
     pub replayed: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RecordOutreachReply {
     pub target_id: OutreachTargetId,
     pub opportunity_id: Option<OutreachOpportunityId>,
     pub disposition: OutreachReplyDisposition,
+    /// The free-text body of the reply, when the caller captured it. When
+    /// present, the infra adapter inserts a row into the reply triage queue
+    /// so the worker can re-classify it with the first-party classifier.
+    pub reply_text: Option<String>,
     pub occurred_at: OffsetDateTime,
 }
 

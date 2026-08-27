@@ -7,8 +7,9 @@ use crowdrelay_application::{
     autopilot::{
         AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository,
         AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementRepository,
-        AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotWaveOutcomeRepository,
-        EvaluateAutopilot, assess_measurement_effect, assess_play_claim, assess_wave_claim,
+        AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotReplyTriageRepository,
+        AutopilotWaveOutcomeRepository, EvaluateAutopilot, assess_measurement_effect,
+        assess_play_claim, assess_wave_claim,
     },
 };
 use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
@@ -29,6 +30,7 @@ const PLAY_OUTCOME_BATCH_SIZE: u32 = 8;
 /// released. Same small batch: a backlog means something has been broken for
 /// weeks, and draining it slowly is the safer failure.
 const WAVE_OUTCOME_BATCH_SIZE: u32 = 8;
+const REPLY_TRIAGE_BATCH_SIZE: u32 = 50;
 
 #[derive(Clone, Debug)]
 pub struct AutopilotWorker {
@@ -372,6 +374,49 @@ impl AutopilotWorker {
             Err(error) => {
                 phase_failed = true;
                 tracing::warn!(error = %error, "ViryaOS wave outcome claim failed");
+            }
+        }
+
+        // Reply triage settles last. Replies with `Received` disposition are
+        // classified by the first-party domain classifier, and the result is
+        // recorded. `NeedsHuman` classifications surface via the operator
+        // brief. This runs even when outreach is switched off, because
+        // classifying a reply that already arrived is measurement, not action.
+        match self
+            .repository
+            .load_replies_needing_triage(self.workspace_id, REPLY_TRIAGE_BATCH_SIZE)
+            .await
+        {
+            Ok(replies) => {
+                for reply in replies {
+                    let classified_at = OffsetDateTime::now_utc();
+                    let input = crowdrelay_domain::reply_triage::ReplyClassificationInput {
+                        reply_text: &reply.reply_text,
+                        target_kind: reply.target_kind,
+                        previous_disposition: reply.previous_disposition,
+                    };
+                    let classification = crowdrelay_domain::reply_triage::classify_reply(&input);
+                    let result = crowdrelay_application::autopilot::ReplyTriageResult {
+                        classification,
+                        classified_at,
+                    };
+                    if let Err(error) = self
+                        .repository
+                        .record_reply_classification(self.workspace_id, reply.reply_id, &result)
+                        .await
+                    {
+                        phase_failed = true;
+                        tracing::warn!(
+                            reply_id = %reply.reply_id,
+                            error = %error,
+                            "ViryaOS reply triage failed"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                phase_failed = true;
+                tracing::warn!(error = %error, "ViryaOS reply triage claim failed");
             }
         }
 

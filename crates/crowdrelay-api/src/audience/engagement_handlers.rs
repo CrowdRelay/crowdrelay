@@ -81,12 +81,29 @@ pub async fn list_fans(
     if city_slug.as_ref().is_some_and(|value| !valid_slug(value)) {
         return bad_request(&headers);
     }
+    let activation = query
+        .activation
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if activation.as_ref().is_some_and(|value| {
+        !matches!(
+            value.as_str(),
+            "active"
+                | "inactive"
+                | "inactive_no_consent"
+                | "inactive_never_acted"
+                | "inactive_window_expired"
+        )
+    }) {
+        return bad_request(&headers);
+    }
 
     let result = load_fan_cards(
         &state,
         state.ticketing.workspace_id().into_uuid(),
         search.as_deref(),
         city_slug.as_deref(),
+        activation.as_deref(),
         limit,
     )
     .await;

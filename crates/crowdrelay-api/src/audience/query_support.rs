@@ -3,10 +3,32 @@ async fn load_fan_cards(
     workspace_id: Uuid,
     search: Option<&str>,
     city_slug: Option<&str>,
+    activation_filter: Option<&str>,
     limit: i64,
 ) -> Result<Vec<FanCard>, sqlx::Error> {
+    let now = OffsetDateTime::now_utc();
     sqlx::query_as::<_, FanCard>(
         r#"
+        WITH fan_activation AS (
+            SELECT
+                fan.id,
+                fan.workspace_id,
+                fan.normalized_email,
+                fan.status,
+                fan.last_activity_at,
+                EXISTS (
+                    SELECT 1 FROM fan_consents AS consent
+                    WHERE consent.workspace_id = fan.workspace_id
+                      AND consent.fan_id = fan.id
+                      AND consent.purpose = 'marketing'
+                      AND consent.granted
+                ) AS consented,
+                fan_last_meaningful_action(
+                    fan.workspace_id, fan.id, fan.normalized_email
+                ) AS last_meaningful_action_at
+            FROM fans fan
+            WHERE fan.workspace_id = $1
+        )
         SELECT
             fan.id,
             fan.normalized_email AS email,
@@ -32,8 +54,18 @@ async fn load_fan_cards(
                AND orders.status IN ('paid', 'partially_refunded', 'refunded')) AS paid_ticket_orders,
             (SELECT count(*)::bigint FROM synesthesia_reward_entries entry
              WHERE entry.workspace_id = fan.workspace_id
-               AND entry.fan_id = fan.id) AS synesthesia_entries
+               AND entry.fan_id = fan.id) AS synesthesia_entries,
+            act.consented,
+            act.last_activity_at,
+            CASE
+                WHEN fan.status = 'closed' THEN 'inactive_account_closed'
+                WHEN NOT act.consented THEN 'inactive_no_consent'
+                WHEN act.last_meaningful_action_at IS NULL THEN 'inactive_never_acted'
+                WHEN act.last_meaningful_action_at < $5 - INTERVAL '30 days' THEN 'inactive_window_expired'
+                ELSE 'active'
+            END AS activation_state
         FROM fans fan
+        JOIN fan_activation act ON act.id = fan.id
         WHERE fan.workspace_id = $1
           AND ($2::text IS NULL
                OR fan.normalized_email ILIKE '%' || $2 || '%'
@@ -46,13 +78,40 @@ async fn load_fan_cards(
                 AND city_interest.fan_id = fan.id
                 AND city.slug = $3
           ))
+          AND (
+              $4::text IS NULL
+              OR ($4 = 'active'
+                  AND act.consented
+                  AND act.last_meaningful_action_at IS NOT NULL
+                  AND act.last_meaningful_action_at >= $5 - INTERVAL '30 days'
+                  AND fan.status <> 'closed')
+              OR ($4 = 'inactive'
+                  AND (
+                      fan.status = 'closed'
+                      OR NOT act.consented
+                      OR act.last_meaningful_action_at IS NULL
+                      OR act.last_meaningful_action_at < $5 - INTERVAL '30 days'
+                  ))
+              OR ($4 = 'inactive_no_consent' AND NOT act.consented)
+              OR ($4 = 'inactive_never_acted'
+                  AND act.consented
+                  AND act.last_meaningful_action_at IS NULL
+                  AND fan.status <> 'closed')
+              OR ($4 = 'inactive_window_expired'
+                  AND act.consented
+                  AND act.last_meaningful_action_at IS NOT NULL
+                  AND act.last_meaningful_action_at < $5 - INTERVAL '30 days'
+                  AND fan.status <> 'closed')
+          )
         ORDER BY fan.updated_at DESC, fan.id DESC
-        LIMIT $4
+        LIMIT $6
         "#,
     )
     .bind(workspace_id)
     .bind(search)
     .bind(city_slug)
+    .bind(activation_filter)
+    .bind(now)
     .bind(limit)
     .fetch_all(&state.database)
     .await
@@ -63,8 +122,29 @@ async fn load_fan_card(
     workspace_id: Uuid,
     fan_id: Uuid,
 ) -> Result<Option<FanCard>, sqlx::Error> {
+    let now = OffsetDateTime::now_utc();
     sqlx::query_as::<_, FanCard>(
         r#"
+        WITH fan_activation AS (
+            SELECT
+                fan.id,
+                fan.workspace_id,
+                fan.normalized_email,
+                fan.status,
+                fan.last_activity_at,
+                EXISTS (
+                    SELECT 1 FROM fan_consents AS consent
+                    WHERE consent.workspace_id = fan.workspace_id
+                      AND consent.fan_id = fan.id
+                      AND consent.purpose = 'marketing'
+                      AND consent.granted
+                ) AS consented,
+                fan_last_meaningful_action(
+                    fan.workspace_id, fan.id, fan.normalized_email
+                ) AS last_meaningful_action_at
+            FROM fans fan
+            WHERE fan.workspace_id = $1 AND fan.id = $2
+        )
         SELECT
             fan.id,
             fan.normalized_email AS email,
@@ -90,13 +170,24 @@ async fn load_fan_card(
                AND orders.status IN ('paid', 'partially_refunded', 'refunded')) AS paid_ticket_orders,
             (SELECT count(*)::bigint FROM synesthesia_reward_entries entry
              WHERE entry.workspace_id = fan.workspace_id
-               AND entry.fan_id = fan.id) AS synesthesia_entries
+               AND entry.fan_id = fan.id) AS synesthesia_entries,
+            act.consented,
+            act.last_activity_at,
+            CASE
+                WHEN fan.status = 'closed' THEN 'inactive_account_closed'
+                WHEN NOT act.consented THEN 'inactive_no_consent'
+                WHEN act.last_meaningful_action_at IS NULL THEN 'inactive_never_acted'
+                WHEN act.last_meaningful_action_at < $3 - INTERVAL '30 days' THEN 'inactive_window_expired'
+                ELSE 'active'
+            END AS activation_state
         FROM fans fan
+        JOIN fan_activation act ON act.id = fan.id
         WHERE fan.workspace_id = $1 AND fan.id = $2
         "#,
     )
     .bind(workspace_id)
     .bind(fan_id)
+    .bind(now)
     .fetch_optional(&state.database)
     .await
 }
