@@ -2,7 +2,7 @@ name: crowdrelay
 
 services:
   setup:
-    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/wojciechbator/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
+    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     command: ["setup"]
     env_file:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
@@ -21,7 +21,7 @@ services:
     networks: [runtime]
 
   api:
-    image: ${CROWDRELAY_API_IMAGE:-ghcr.io/wojciechbator/crowdrelay-api}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
+    image: ${CROWDRELAY_API_IMAGE:-ghcr.io/crowdrelay/crowdrelay-api}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     labels:
       io.crowdrelay.release.ref: ${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     env_file:
@@ -59,7 +59,7 @@ services:
         aliases: [crowdrelay-api]
 
   worker:
-    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/wojciechbator/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
+    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     labels:
       io.crowdrelay.release.ref: ${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     command: ["run"]

@@ -55,7 +55,7 @@ command -v docker >/dev/null 2>&1 || fail 'docker is missing on production host'
 command -v timeout >/dev/null 2>&1 || fail 'GNU timeout is missing on production host'
 
 for component in api worker; do
-  image="ghcr.io/wojciechbator/crowdrelay-${component}:sha-${target}"
+  image="ghcr.io/crowdrelay/crowdrelay-${component}:sha-${target}"
   success=false
 
   for ((attempt=1; attempt<=attempts; attempt++)); do

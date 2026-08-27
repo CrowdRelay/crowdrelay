@@ -33,7 +33,7 @@ target "_common" {
     CROWDRELAY_BUILD_TIMESTAMP = CROWDRELAY_BUILD_TIMESTAMP
   }
   labels = {
-    "org.opencontainers.image.source"   = "https://github.com/wojciechbator/crowdrelay"
+    "org.opencontainers.image.source"   = "https://github.com/CrowdRelay/crowdrelay"
     "org.opencontainers.image.revision" = CROWDRELAY_GIT_SHA
     "org.opencontainers.image.licenses" = "Apache-2.0"
   }

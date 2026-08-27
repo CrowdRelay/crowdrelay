@@ -7,8 +7,8 @@ set -Eeuo pipefail
 
 TAG="${CROWDRELAY_IMAGE_TAG:-}"
 [[ "$TAG" =~ ^sha-[0-9a-f]{40}$ ]] || { echo 'CROWDRELAY_IMAGE_TAG must be sha-<full 40-char git SHA>' >&2; exit 2; }
-API_REPO="${CROWDRELAY_API_IMAGE:-ghcr.io/wojciechbator/crowdrelay-api}"
-WORKER_REPO="${CROWDRELAY_WORKER_IMAGE:-ghcr.io/wojciechbator/crowdrelay-worker}"
+API_REPO="${CROWDRELAY_API_IMAGE:-ghcr.io/crowdrelay/crowdrelay-api}"
+WORKER_REPO="${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}"
 OUT="${DIGEST_ENV_FILE:-deploy/.image-digests.env}"
 
 resolve() {

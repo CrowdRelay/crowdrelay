@@ -66,7 +66,7 @@ RUN --mount=type=cache,id=crowdrelay-cargo-registry,target=/usr/local/cargo/regi
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
 
-LABEL org.opencontainers.image.source="https://github.com/wojciechbator/crowdrelay" \
+LABEL org.opencontainers.image.source="https://github.com/CrowdRelay/crowdrelay" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apt-get update \
