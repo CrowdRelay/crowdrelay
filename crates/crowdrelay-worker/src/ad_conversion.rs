@@ -1022,11 +1022,11 @@ fn truncate(value: &str, max_chars: usize) -> String {
 ///
 /// The first `tick()` completes immediately; subsequent ticks yield to the
 /// Tokio scheduler and resume only when the spacing window opens. Uses
-/// `MissedTickBehavior::Delay` so a slow upstream doesn't cause a burst
+/// `MissedTickBehavior::Skip` so a slow upstream doesn't cause a burst
 /// of catch-up calls.
 fn rate_limiter() -> Interval {
     let mut interval = interval(REQUEST_SPACING);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval
 }
 
