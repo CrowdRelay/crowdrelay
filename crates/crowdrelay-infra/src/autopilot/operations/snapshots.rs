@@ -243,7 +243,7 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
             opportunity.id AS opportunity_id,
             target.id AS target_id,
             target.target_kind,
-            target.version,
+            target.version AS target_version,
             opportunity.active AND target.active AND NOT target.do_not_contact AS active,
             target.verified,
             target.accepts_outreach,
