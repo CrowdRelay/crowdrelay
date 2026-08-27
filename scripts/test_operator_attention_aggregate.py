@@ -51,6 +51,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
             "load_alerts",
             "load_dead_outbox",
             "load_dead_deliveries",
+            "load_dead_push",
             "load_open_findings",
         ):
             body = self.attention.split(f"async fn {loader}", 1)[1].split("async fn ", 1)[0]
@@ -83,6 +84,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
                 "alerts",
                 "dead_deliveries",
                 "dead_outbox",
+                "dead_push",
                 "ecosystem",
                 "findings",
                 "summary",
