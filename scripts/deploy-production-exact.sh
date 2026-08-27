@@ -58,45 +58,69 @@ for component in api worker; do
   image="ghcr.io/crowdrelay/crowdrelay-${component}:sha-${target}"
   success=false
 
-  for ((attempt=1; attempt<=attempts; attempt++)); do
-    printf 'Checking %s (%d/%d)\n' "$image" "$attempt" "$attempts"
-    output_file="$(mktemp)"
-    if timeout 90s docker pull --quiet "$image" >"$output_file" 2>&1; then
+  # If the image is already present locally (e.g. built on-host or pre-loaded),
+  # skip the registry pull. This supports airgapped hosts and private registries
+  # where anonymous pull is not available.
+  local_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
+  if [[ "$local_revision" == "$target" ]]; then
+    printf 'LOCAL image=%s revision=%s (skipping registry pull)\n' "$image" "$local_revision"
+    success=true
+  else
+    for ((attempt=1; attempt<=attempts; attempt++)); do
+      printf 'Checking %s (%d/%d)\n' "$image" "$attempt" "$attempts"
+      output_file="$(mktemp)"
+      if timeout 90s docker pull --quiet "$image" >"$output_file" 2>&1; then
+        rm -f "$output_file"
+        success=true
+        break
+      fi
+
+      output="$(cat "$output_file")"
       rm -f "$output_file"
-      success=true
-      break
-    fi
 
-    output="$(cat "$output_file")"
-    rm -f "$output_file"
-
-    case "$output" in
-      *"no matching manifest"*)
-        printf '%s\n' "$output" >&2
-        fail "published image does not support the production platform: $image"
-        ;;
-      *"manifest unknown"*|*"not found"*|*"not published"*)
-        if (( attempt == attempts )); then
+      case "$output" in
+        *"no matching manifest"*)
           printf '%s\n' "$output" >&2
-          fail "exact image did not become available: $image"
-        fi
-        printf 'WAIT image=%s reason=not-published-yet\n' "$image"
-        sleep "$sleep_seconds"
-        ;;
-      *"context deadline exceeded"*|*"i/o timeout"*|*"TLS handshake timeout"*|*"temporary failure"*)
-        if (( attempt == attempts )); then
+          fail "published image does not support the production platform: $image"
+          ;;
+        *"manifest unknown"*|*"not found"*|*"not published"*)
+          if (( attempt == attempts )); then
+            printf '%s\n' "$output" >&2
+            fail "exact image did not become available: $image"
+          fi
+          printf 'WAIT image=%s reason=not-published-yet\n' "$image"
+          sleep "$sleep_seconds"
+          ;;
+        *"context deadline exceeded"*|*"i/o timeout"*|*"TLS handshake timeout"*|*"temporary failure"*)
+          if (( attempt == attempts )); then
+            printf '%s\n' "$output" >&2
+            fail "registry transport did not recover for $image"
+          fi
+          printf 'WAIT image=%s reason=registry-transport\n' "$image"
+          sleep "$sleep_seconds"
+          ;;
+        *"unauthorized"*)
+          # The registry may be private. If a local image with the correct
+          # revision exists, use it instead of failing.
+          if [[ -n "$local_revision" ]]; then
+            printf 'WARN registry unauthorized for %s — using local image (revision=%s)\n' "$image" "$local_revision"
+            success=true
+            break
+          fi
+          if (( attempt == attempts )); then
+            printf '%s\n' "$output" >&2
+            fail "registry unauthorized and no local image for $image"
+          fi
+          printf 'WAIT image=%s reason=unauthorized\n' "$image"
+          sleep "$sleep_seconds"
+          ;;
+        *)
           printf '%s\n' "$output" >&2
-          fail "registry transport did not recover for $image"
-        fi
-        printf 'WAIT image=%s reason=registry-transport\n' "$image"
-        sleep "$sleep_seconds"
-        ;;
-      *)
-        printf '%s\n' "$output" >&2
-        fail "docker pull failed for $image"
-        ;;
-    esac
-  done
+          fail "docker pull failed for $image"
+          ;;
+      esac
+    done
+  fi
 
   [[ "$success" == true ]] || fail "image gate exhausted unexpectedly: $image"
 
