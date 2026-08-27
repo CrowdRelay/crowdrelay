@@ -276,6 +276,7 @@ async fn main() -> Result<()> {
             tenant_profile,
             config.response_encryption_key.clone(),
             parse_fanbase_oauth_configs(&config),
+            crowdrelay_infra::fanbase_oauth::FanbaseOauthRepository::new(database.clone()),
         ),
         http_config,
     );
@@ -570,7 +571,7 @@ fn parse_fanbase_oauth_configs(
         (Platform::Meta, "META"),
         (Platform::GoogleAds, "GOOGLE_ADS"),
         (Platform::Spotify, "SPOTIFY"),
-        (Platform::Reddit, "REDDDIT"),
+        (Platform::Reddit, "REDDIT"),
         (Platform::Tiktok, "TIKTOK"),
     ];
 

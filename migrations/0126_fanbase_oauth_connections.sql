@@ -19,8 +19,11 @@ ALTER TABLE fanbase_connections
     ADD COLUMN IF NOT EXISTS account_name text,
     ADD COLUMN IF NOT EXISTS account_picture_url text;
 
--- OAuth state for fanbase connection flows. PKCE verifier is stored encrypted
--- so a DB leak cannot be used to complete a stolen authorization code.
+-- OAuth state for fanbase connection flows. The PKCE verifier is stored as
+-- plaintext because it is short-lived (10 minute TTL) and encrypting it would
+-- require the encryption key to be available at state creation time, which
+-- adds complexity for minimal security gain. The state column itself is
+-- unguessable (32 random bytes, base64url-encoded).
 CREATE TABLE fanbase_oauth_states (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

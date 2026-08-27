@@ -282,11 +282,14 @@ impl FanbaseOauthRepository {
             .exchange_token(config, code, &row.redirect_uri, &row.pkce_verifier)
             .await?;
 
-        // Get the account identity from the provider.
+        // Get the account identity from the provider. If the profile endpoint
+        // is unavailable, fall back to a unique ID so the ON CONFLICT upsert
+        // doesn't silently overwrite another connection that also failed to
+        // resolve its account ref.
         let account_ref = self
             .fetch_account_ref(platform, &token_response.access_token, config)
             .await
-            .unwrap_or_else(|_| "unknown".to_owned());
+            .unwrap_or_else(|_| format!("unresolved-{}", Uuid::now_v7()));
 
         let encrypted = EncryptedTokens::encrypt(&token_response, encryption_key)?;
 

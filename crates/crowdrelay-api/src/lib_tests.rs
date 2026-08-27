@@ -441,6 +441,11 @@ mod tests {
                     data_region: crate::tenant::RegionalSource::TenantProfile,
                 },
             },
+            /* SensitiveResponseKey */ crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(b"test-key-do-not-use"),
+            /* Vec<FanbaseOauthConfig> */ Vec::new(),
+            /* FanbaseOauthRepository */ crowdrelay_infra::fanbase_oauth::FanbaseOauthRepository::new(
+                sqlx::PgPool::connect_lazy("postgres://unused").unwrap(),
+            ),
         ))
     }
 

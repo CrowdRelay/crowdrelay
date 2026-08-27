@@ -245,8 +245,8 @@ use crowdrelay_infra::fanbase_oauth::{
     FanbaseOauthConfig, FanbaseOauthError, FanbaseOauthRepository,
 };
 
-fn oauth_repository(state: &crate::AppState) -> FanbaseOauthRepository {
-    FanbaseOauthRepository::new(state.database.clone())
+fn oauth_repository(state: &crate::AppState) -> &FanbaseOauthRepository {
+    &state.fanbase_oauth_repository
 }
 
 fn encryption_key(

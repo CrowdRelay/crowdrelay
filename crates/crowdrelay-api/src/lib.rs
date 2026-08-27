@@ -160,6 +160,7 @@ pub struct AppState {
     pub(crate) tenant: tenant::TenantProfile,
     pub(crate) response_encryption_key: crowdrelay_infra::sensitive_response::SensitiveResponseKey,
     pub(crate) fanbase_oauth_configs: Vec<crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig>,
+    pub(crate) fanbase_oauth_repository: crowdrelay_infra::fanbase_oauth::FanbaseOauthRepository,
 }
 
 impl AppState {
@@ -187,6 +188,7 @@ impl AppState {
         tenant: tenant::TenantProfile,
         response_encryption_key: crowdrelay_infra::sensitive_response::SensitiveResponseKey,
         fanbase_oauth_configs: Vec<crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig>,
+        fanbase_oauth_repository: crowdrelay_infra::fanbase_oauth::FanbaseOauthRepository,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
         let area_admin = crowdrelay_application::AreaAdminService::new(Arc::new(
@@ -215,6 +217,7 @@ impl AppState {
             tenant,
             response_encryption_key,
             fanbase_oauth_configs,
+            fanbase_oauth_repository,
         }
     }
 }
