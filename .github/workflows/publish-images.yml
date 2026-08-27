@@ -24,6 +24,9 @@ env:
   # caches, so a mode=max BuildKit export kept evicting itself between runs and
   # every publish recompiled the workspace from scratch.
   CACHE_REF: ghcr.io/${{ github.repository_owner }}/crowdrelay-buildcache
+  # Note: CACHE_REF is fine with mixed case — GHCR accepts it as a cache ref.
+  # The image *tags* below must be lowercase, so they use OWNER_LOWER set in
+  # the build step.
 
 jobs:
   build:
@@ -67,6 +70,8 @@ jobs:
           build_timestamp="$(git show -s --format=%cI "${IMAGE_SHA}")"
           [[ -n "$build_timestamp" ]] || { echo "Missing commit timestamp for ${IMAGE_SHA}" >&2; exit 1; }
           echo "BUILD_TIMESTAMP=${build_timestamp}" >> "$GITHUB_ENV"
+          # Docker tags must be lowercase, but GitHub org names are case-preserving.
+          echo "OWNER_LOWER=$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -87,8 +92,8 @@ jobs:
         id: images
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
-          API_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-api:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
-          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
+          API_IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-api:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
+          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
           CROWDRELAY_GIT_SHA: ${{ env.IMAGE_SHA }}
           CROWDRELAY_BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
           # One cache tag per architecture. A shared tag would have the two
@@ -111,7 +116,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: >-
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
+            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
@@ -167,7 +172,7 @@ jobs:
 
           merge() {
             local repo="$1" var="$2" target digest platforms
-            target="${REGISTRY}/${{ github.repository_owner }}/${repo}:sha-${IMAGE_SHA}"
+            target="${REGISTRY}/${{ env.OWNER_LOWER }}/${repo}:sha-${IMAGE_SHA}"
             docker buildx imagetools create --tag "$target" "${target}-amd64" "${target}-arm64"
 
             digest="$(docker buildx imagetools inspect "$target" --format '{{.Manifest.Digest}}')"
