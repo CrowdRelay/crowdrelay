@@ -104,6 +104,7 @@ struct PaidTicketOrder {
     fan_id: Option<Uuid>,
     buyer_email: String,
     amount_gross_minor: i64,
+    amount_refunded_minor: i64,
     currency: String,
     #[sqlx(default)]
     meta_fbp: Option<String>,
@@ -458,7 +459,10 @@ impl AdConversionWorker {
         // Meta expects value and currency in custom_data for Purchase events.
         // Also include UTM params so Meta can attribute the purchase to the
         // campaign that drove the signup.
-        let value = (order.amount_gross_minor as f64) / 100.0;
+        // Use net amount (gross - refunded) so partially refunded orders
+        // report the actual value the fan paid.
+        let net_minor = order.amount_gross_minor - order.amount_refunded_minor;
+        let value = (net_minor as f64) / 100.0;
         let mut custom_data = Map::new();
         custom_data.insert("currency".to_owned(), json!(order.currency.to_lowercase()));
         custom_data.insert("value".to_owned(), json!(value));
@@ -547,7 +551,8 @@ impl AdConversionWorker {
         for order in &orders {
             limiter.tick().await;
             let event_id = format!("purchase-{}", order.order_id);
-            let value = (order.amount_gross_minor as f64) / 100.0;
+            let net_minor = order.amount_gross_minor - order.amount_refunded_minor;
+            let value = (net_minor as f64) / 100.0;
             let result = self
                 .send_google_conversion(
                     &FanAttribution {
@@ -557,9 +562,9 @@ impl AdConversionWorker {
                         meta_fbc: None,
                         google_gclid: order.google_gclid.clone(),
                         bandsintown_ref: None,
-                        utm_source: None,
-                        utm_medium: None,
-                        utm_campaign: None,
+                        utm_source: order.utm_source.clone(),
+                        utm_medium: order.utm_medium.clone(),
+                        utm_campaign: order.utm_campaign.clone(),
                         client_ip_address: order.client_ip_address.clone(),
                         client_user_agent: order.client_user_agent.clone(),
                         event_source_url: order.event_source_url.clone(),
@@ -823,6 +828,7 @@ impl AdConversionWorker {
                 fan.id AS fan_id,
                 orders.buyer_email,
                 orders.amount_gross_minor,
+                orders.amount_refunded_minor,
                 orders.currency::text AS currency,
                 attr.meta_fbp,
                 attr.meta_fbc,
@@ -1077,6 +1083,7 @@ mod tests {
             fan_id: Some(test_uuid()),
             buyer_email: "buyer@example.com".to_owned(),
             amount_gross_minor: 15000,
+            amount_refunded_minor: 5000,
             currency: "PLN".to_owned(),
             meta_fbp: None,
             meta_fbc: None,
@@ -1089,8 +1096,10 @@ mod tests {
             client_user_agent: None,
             event_source_url: None,
         };
-        let value = (order.amount_gross_minor as f64) / 100.0;
-        assert_eq!(value, 150.0);
+        // Net value = gross - refunded = 15000 - 5000 = 10000 minor = 100.00
+        let net_minor = order.amount_gross_minor - order.amount_refunded_minor;
+        let value = (net_minor as f64) / 100.0;
+        assert_eq!(value, 100.0);
 
         let mut custom_data = Map::new();
         custom_data.insert("currency".to_owned(), json!(order.currency.to_lowercase()));
@@ -1101,7 +1110,7 @@ mod tests {
 
         let custom = Value::Object(custom_data);
         assert_eq!(custom["currency"], "pln");
-        assert_eq!(custom["value"], 150.0);
+        assert_eq!(custom["value"], 100.0);
     }
 
     #[test]
