@@ -426,7 +426,10 @@ impl AdConversionWorker {
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "meta CAPI error response");
-            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
+            return Err(AdConversionError::Status {
+                status,
+                body: truncate(&body, 512),
+            });
         }
         tracing::debug!(event_name, event_id, status, "meta CAPI event sent");
         Ok(status)
@@ -504,7 +507,10 @@ impl AdConversionWorker {
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "meta CAPI Purchase error response");
-            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
+            return Err(AdConversionError::Status {
+                status,
+                body: truncate(&body, 512),
+            });
         }
         tracing::debug!(event_id, status, "meta CAPI Purchase event sent");
         Ok(status)
@@ -534,7 +540,9 @@ impl AdConversionWorker {
         for fan in &fans {
             limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
-            let result = self.send_google_conversion(fan, "Lead", &event_id, None, None).await;
+            let result = self
+                .send_google_conversion(fan, "Lead", &event_id, None, None)
+                .await;
             self.record_result("google", Some(fan.fan_id), None, "Lead", &event_id, &result)
                 .await;
             if result.is_ok() {
@@ -607,7 +615,10 @@ impl AdConversionWorker {
             .unwrap_or_default();
 
         let mut conversion = Map::new();
-        conversion.insert("conversionAction".to_owned(), json!(config.conversion_action_id));
+        conversion.insert(
+            "conversionAction".to_owned(),
+            json!(config.conversion_action_id),
+        );
         conversion.insert("conversionDateTime".to_owned(), json!(conversion_time));
         // Lead events have no monetary value — report 0, not a default that
         // would inflate conversion value reports in Google Ads.
@@ -638,7 +649,10 @@ impl AdConversionWorker {
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "google ads error response");
-            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
+            return Err(AdConversionError::Status {
+                status,
+                body: truncate(&body, 512),
+            });
         }
         tracing::debug!(event_name, event_id, status, "google ads conversion sent");
         Ok(status)
@@ -666,7 +680,10 @@ impl AdConversionWorker {
             .send()
             .await?;
         if !response.status().is_success() {
-            tracing::warn!(status = response.status().as_u16(), "google OAuth token refresh failed");
+            tracing::warn!(
+                status = response.status().as_u16(),
+                "google OAuth token refresh failed"
+            );
             return Err(AdConversionError::OAuth);
         }
         let token_response: GoogleTokenResponse = response.json().await?;
@@ -693,8 +710,15 @@ impl AdConversionWorker {
             limiter.tick().await;
             let event_id = format!("lead-{}", fan.fan_id);
             let result = self.send_bandsintown_conversion(fan, &event_id).await;
-            self.record_result("bandsintown", Some(fan.fan_id), None, "Lead", &event_id, &result)
-                .await;
+            self.record_result(
+                "bandsintown",
+                Some(fan.fan_id),
+                None,
+                "Lead",
+                &event_id,
+                &result,
+            )
+            .await;
             if result.is_ok() {
                 sent += 1;
             }
@@ -728,7 +752,10 @@ impl AdConversionWorker {
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status, body = %truncate(&body, 512), "bandsintown conversion error");
-            return Err(AdConversionError::Status { status, body: truncate(&body, 512) });
+            return Err(AdConversionError::Status {
+                status,
+                body: truncate(&body, 512),
+            });
         }
         tracing::debug!(event_id, status, "bandsintown conversion sent");
         Ok(status)
@@ -946,7 +973,15 @@ impl AdConversionWorker {
             }
         };
         if let Err(error) = self
-            .record_delivery(platform, fan_id, ticket_order_id, event_name, event_id, status, body)
+            .record_delivery(
+                platform,
+                fan_id,
+                ticket_order_id,
+                event_name,
+                event_id,
+                status,
+                body,
+            )
             .await
         {
             tracing::warn!(
@@ -1003,7 +1038,12 @@ mod tests {
     use crowdrelay_infra::config::MetaCapiConfig;
 
     fn test_uuid() -> Uuid {
-        Uuid::from_fields_le(0x12345678, 0x1234, 0x1234, &[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0])
+        Uuid::from_fields_le(
+            0x12345678,
+            0x1234,
+            0x1234,
+            &[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0],
+        )
     }
 
     #[test]
@@ -1047,8 +1087,14 @@ mod tests {
         user_data.insert("em".to_owned(), json!([hash_sha256(&fan.normalized_email)]));
         user_data.insert("fbp".to_owned(), json!(fan.meta_fbp.as_ref().unwrap()));
         user_data.insert("fbc".to_owned(), json!(fan.meta_fbc.as_ref().unwrap()));
-        user_data.insert("client_ip_address".to_owned(), json!(fan.client_ip_address.as_ref().unwrap()));
-        user_data.insert("client_user_agent".to_owned(), json!(fan.client_user_agent.as_ref().unwrap()));
+        user_data.insert(
+            "client_ip_address".to_owned(),
+            json!(fan.client_ip_address.as_ref().unwrap()),
+        );
+        user_data.insert(
+            "client_user_agent".to_owned(),
+            json!(fan.client_user_agent.as_ref().unwrap()),
+        );
 
         let mut custom_data = Map::new();
         custom_data.insert("utm_source".to_owned(), json!(fan.utm_source));
@@ -1068,10 +1114,19 @@ mod tests {
         assert_eq!(event_value["event_name"], "Lead");
         assert_eq!(event_value["action_source"], "website");
         assert!(event_value["user_data"]["em"].is_array());
-        assert_eq!(event_value["user_data"]["em"][0].as_str().unwrap().len(), 64);
-        assert_eq!(event_value["user_data"]["fbp"], "fb.1.1234567890.1234567890");
+        assert_eq!(
+            event_value["user_data"]["em"][0].as_str().unwrap().len(),
+            64
+        );
+        assert_eq!(
+            event_value["user_data"]["fbp"],
+            "fb.1.1234567890.1234567890"
+        );
         assert_eq!(event_value["user_data"]["fbc"], "fb.1.1234567890.abcdef");
-        assert_eq!(event_value["user_data"]["client_ip_address"], "203.0.113.42");
+        assert_eq!(
+            event_value["user_data"]["client_ip_address"],
+            "203.0.113.42"
+        );
         assert_eq!(event_value["custom_data"]["utm_source"], "facebook");
         assert_eq!(event_value["event_source_url"], "https://virya.music/area");
     }
@@ -1132,8 +1187,14 @@ mod tests {
         let event_id = format!("lead-{}", fan.fan_id);
 
         let mut conversion = Map::new();
-        conversion.insert("conversionAction".to_owned(), json!("customers/123/conversionActions/456"));
-        conversion.insert("conversionDateTime".to_owned(), json!("2026-08-27T12:00:00Z"));
+        conversion.insert(
+            "conversionAction".to_owned(),
+            json!("customers/123/conversionActions/456"),
+        );
+        conversion.insert(
+            "conversionDateTime".to_owned(),
+            json!("2026-08-27T12:00:00Z"),
+        );
         conversion.insert("conversionValue".to_owned(), json!(0));
         conversion.insert("currencyCode".to_owned(), json!("PLN"));
         conversion.insert("orderId".to_owned(), json!(event_id));
@@ -1144,10 +1205,19 @@ mod tests {
         );
 
         let conversion_value = Value::Object(conversion);
-        assert_eq!(conversion_value["conversionAction"], "customers/123/conversionActions/456");
+        assert_eq!(
+            conversion_value["conversionAction"],
+            "customers/123/conversionActions/456"
+        );
         assert_eq!(conversion_value["gclid"], "EAIaIQobChMItest123");
         assert_eq!(conversion_value["orderId"], event_id);
-        assert_eq!(conversion_value["userIdentifiers"][0]["hashedEmail"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            conversion_value["userIdentifiers"][0]["hashedEmail"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
         assert_eq!(conversion_value["currencyCode"], "PLN");
     }
 
