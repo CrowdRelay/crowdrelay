@@ -71,4 +71,4 @@ chrome/
 *.local.md
 
 # Service account credentials for FCM and other external providers.
-secrets/
+/secrets/
