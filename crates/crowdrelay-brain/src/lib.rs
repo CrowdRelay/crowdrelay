@@ -41,6 +41,7 @@
 //! LLM blindly — it aggregates intelligence, applies deterministic rules,
 //! and decides.
 
+pub mod audience;
 pub mod bayesian;
 pub mod causal_model;
 pub mod efe;
@@ -55,6 +56,7 @@ pub mod strategy;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
+pub use audience::{AudienceKey, estimate_overlap, marginal_value};
 pub use causal_model::{
     CausalModel, DEFAULT_EXPECTED_FANS, DEFAULT_EXPECTED_SIGNAL, DispatchContext,
     DispatchPrediction, PRIOR_VARIANCE, PredictionOutcome,
