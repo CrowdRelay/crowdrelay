@@ -7,8 +7,14 @@
 --
 -- Idempotent: safe to re-run. ON CONFLICT DO UPDATE ensures the flag is
 -- enabled even if the row was previously inserted with enabled=false.
+-- Guarded by EXISTS check so CI (which doesn't bootstrap the Virya workspace)
+-- can run all migrations from scratch without a FK violation.
 INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
-VALUES ('6c69282c-0d60-4f18-8379-60ede34362c6', 'push_delivery_enabled', true, 'Sprint 5 activation')
+SELECT '6c69282c-0d60-4f18-8379-60ede34362c6', 'push_delivery_enabled', true, 'Sprint 5 activation'
+WHERE EXISTS (
+    SELECT 1 FROM ecosystem_workspaces
+    WHERE id = '6c69282c-0d60-4f18-8379-60ede34362c6'
+)
 ON CONFLICT (workspace_id, key) DO UPDATE
 SET enabled = true, reason = EXCLUDED.reason,
     updated_at = now(), version = ecosystem_feature_flags.version + 1;
