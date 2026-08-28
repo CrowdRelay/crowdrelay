@@ -113,6 +113,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::autopilot::approve_action),
         )
         .route(
+            "/v1/control-plane/autopilot/actions/{action_id}/cancel",
+            post(crate::autopilot::cancel_action),
+        )
+        .route(
             "/v1/control-plane/autopilot/decisions/{decision_id}/handled-externally",
             post(crate::autopilot::mark_decision_handled_externally),
         )
