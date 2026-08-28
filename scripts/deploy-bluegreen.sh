@@ -166,6 +166,10 @@ printf 'GREEN_HEALTH=PASS meta_sha=%s\n' "$TARGET"
 # --- 3. Run migrations via setup --------------------------------------------
 
 printf '\n==> 3/6 — Run migrations (setup)\n'
+# Run setup with the green image tag so migrations from the new release
+# are applied. Without this, the setup container uses the old CROWDRELAY_IMAGE_TAG
+# from the env file and misses any new migrations added since the last deploy.
+CROWDRELAY_IMAGE_TAG="$CROWDRELAY_GREEN_TAG" \
 docker compose --env-file "$env_file" -f "$compose_file" \
   run --rm -T setup </dev/null
 printf 'MIGRATIONS=PASS\n'
