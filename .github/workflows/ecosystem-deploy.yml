@@ -74,6 +74,7 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.CROWDRELAY_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.CROWDRELAY_DEPLOY_KNOWN_HOSTS }}
+          CROWDRELAY_DEPLOY_HOST_IP: ${{ secrets.CROWDRELAY_DEPLOY_HOST_IP }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -82,9 +83,9 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-          cat > ~/.ssh/config <<'SSH'
+          cat > ~/.ssh/config <<SSH
           Host virya-crowdrelay
-              HostName 152.70.162.119
+              HostName \${CROWDRELAY_DEPLOY_HOST_IP}
               User ubuntu
               IdentityFile ~/.ssh/deploy_key
               IdentitiesOnly yes
