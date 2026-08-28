@@ -44,15 +44,24 @@
 pub mod audience;
 pub mod bayesian;
 pub mod causal_model;
+pub mod change_point;
 pub mod efe;
 pub mod experiment;
 pub mod exploration;
+pub mod fan_network;
+pub mod hypothesis;
+pub mod metacognition;
 pub mod north_star;
 pub mod opportunity;
+pub mod opportunity_graph;
+pub mod options;
 pub mod portfolio;
+pub mod simulation;
 pub mod snapshot;
 pub mod standing;
 pub mod strategy;
+pub mod strategy_learning;
+pub mod voi;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
@@ -61,6 +70,7 @@ pub use causal_model::{
     CausalModel, DEFAULT_EXPECTED_FANS, DEFAULT_EXPECTED_SIGNAL, DispatchContext,
     DispatchPrediction, PRIOR_VARIANCE, PredictionOutcome,
 };
+pub use change_point::{ChangeDirection, ChangePoint, ChangePointDetector};
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, compute_efe, information_gain,
     softmax_dispatch,
@@ -70,12 +80,20 @@ pub use experiment::{
     PropensityRecord, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
+pub use fan_network::{FanNetworkModel, NetworkEffect, RecruitmentChannel};
+pub use hypothesis::{Hypothesis, HypothesisRegistry, HypothesisStatus};
+pub use metacognition::{MetacognitionMonitor, MetacognitiveState};
 pub use north_star::NorthStarMetric;
 pub use opportunity::{OpportunityAction, OpportunityId, OpportunityState, TrackedOpportunity};
+pub use opportunity_graph::{
+    DependencyKind, NodeStatus, OpportunityEdge, OpportunityGraph, OpportunityNode,
+};
+pub use options::{ActionOption, OptionPlanner, OptionStatus, OptionStep, OptionStepStatus};
 pub use portfolio::{
     PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
     PortfolioSelection, RejectionReason,
 };
+pub use simulation::{MonthlyPrediction, SimulationResult, WorldSimulation};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,
     RecentInsight, UnengagedTarget,
@@ -84,6 +102,8 @@ pub use standing::{
     AgentTier, agent_standing_policy, effective_agent_cooldown, effective_agent_tier,
 };
 pub use strategy::{GrowthStrategy, PathwayRecord};
+pub use strategy_learning::{StrategyLearner, StrategyOutcome};
+pub use voi::{expected_information_gain, exploration_bonus, option_value, value_of_information};
 pub use world_model::{GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel};
 
 // Re-export shared domain types the brain depends on.
