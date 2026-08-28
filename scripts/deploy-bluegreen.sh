@@ -185,6 +185,20 @@ sed -i "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy ${GREEN_ALIAS}:8080|" "
 grep -Fq "reverse_proxy ${GREEN_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile was not updated to green upstream"
 grep -Fq "reverse_proxy ${BLUE_ALIAS}:8080" "$EDGE_CADDYFILE" && fail "Caddyfile still contains blue upstream — ambiguous state"
 
+# Also update the area management proxy Caddyfile if it exists.
+# The proxy forwards control-plane requests to the CrowdRelay API via the
+# Docker DNS name "api" (blue) — after blue-green cutover the blue container
+# is gone, so the proxy must point to the green alias instead.
+AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
+AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
+if [[ -f "$AREA_CADDYFILE" ]]; then
+  sed -i "s|http://${BLUE_ALIAS}:8080|http://${GREEN_ALIAS}:8080|g" "$AREA_CADDYFILE"
+  # Also handle the bare "api" hostname used before the first green deploy
+  sed -i "s|http://api:8080|http://${GREEN_ALIAS}:8080|g" "$AREA_CADDYFILE"
+  docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
+  printf 'AREA_PROXY=PASS upstream=%s\n' "$GREEN_ALIAS"
+fi
+
 # Graceful Caddy reload (zero-downtime: in-flight requests complete, new ones go to green)
 docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force
 CADDY_SWITCHED=true
