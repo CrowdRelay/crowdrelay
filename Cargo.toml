@@ -4,6 +4,7 @@ members = [
   "crates/crowdrelay-api",
   "crates/crowdrelay-worker",
   "crates/crowdrelay-domain",
+  "crates/crowdrelay-brain",
   "crates/crowdrelay-application",
   "crates/crowdrelay-infra",
 ]

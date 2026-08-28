@@ -335,10 +335,22 @@ name = "crowdrelay-application"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "crowdrelay-brain",
  "crowdrelay-domain",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "crowdrelay-brain"
+version = "1.0.0"
+dependencies = [
+ "crowdrelay-domain",
+ "serde",
+ "serde_json",
  "time",
  "uuid",
 ]
@@ -363,6 +375,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "crowdrelay-application",
+ "crowdrelay-brain",
  "crowdrelay-domain",
  "getrandom 0.4.3",
  "hex",

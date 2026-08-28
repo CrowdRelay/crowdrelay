@@ -2,6 +2,7 @@
 
 use uuid::Uuid;
 
+use crowdrelay_brain::{DispatchContext, DispatchPrediction, GrowthStrategy, context_hash};
 use crowdrelay_domain::{
     FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
@@ -30,7 +31,6 @@ use crowdrelay_domain::{
     },
     funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
     growth_envelope::{EnvelopeUsage, EnvelopeVerdict, GrowthEnvelope, check_envelope},
-    growth_intelligence::{DispatchContext, DispatchPrediction, GrowthStrategy, context_hash},
     live_opportunities::{
         LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
         live_opportunity_score,
@@ -83,7 +83,7 @@ use commercial::{
     merch_candidate, merch_price_candidate,
 };
 use growth_debt::growth_debt_candidate;
-use growth_intelligence::growth_intelligence_candidate;
+use growth_intelligence::{classify_subreddit, growth_intelligence_candidate};
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
 use placements::placement_candidate;
@@ -582,12 +582,23 @@ where
                             consumed_ids.push(insight.outcome_id);
                         }
                         // Compute exploration novelty for this (template, context) pair.
-                        // Reuse a stack-allocated DispatchContext — only the
-                        // fields that affect the context hash are set.
+                        // The context must match what the evaluator will build,
+                        // so the novelty score is consistent with the dispatch
+                        // context that gets recorded.
+                        let subreddit_type = snapshot
+                            .unengaged_targets
+                            .first()
+                            .map(|t| classify_subreddit(&t.subreddit))
+                            .or_else(|| {
+                                snapshot
+                                    .community_engagement_history
+                                    .first()
+                                    .map(|c| classify_subreddit(&c.subreddit))
+                            });
                         let ctx = DispatchContext {
                             days_to_event: snapshot.days_to_next_event,
                             fan_growth_trend: snapshot.world_model.fan_growth_trend,
-                            subreddit_type: None,
+                            subreddit_type,
                             post_format: None,
                             time_of_day_bps: 0,
                             community_novelty_bps: 0,
@@ -613,14 +624,15 @@ where
                             ));
                         }
                     }
-                    // Sort by strategy rank (primary), then EFE score
-                    // (secondary — lower EFE = better). This dispatches
-                    // strategy-prioritized, lowest-EFE opportunities first.
-                    scored_candidates.sort_by(|a, b| {
-                        a.3.cmp(&b.3).then_with(|| {
-                            a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                    });
+                    // Sort by EFE score only (lower EFE = better).
+                    // Strategy alignment is already baked into the EFE score
+                    // via a strategy multiplier — the evaluator applies a
+                    // bonus to strategy-aligned templates rather than using
+                    // strategy as a primary sort key. This ensures the North
+                    // Star (incremental fans via EFE) is never overridden by
+                    // strategy preference.
+                    scored_candidates
+                        .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
                     for (candidate, prediction, _efe, _rank) in scored_candidates {
                         let persisted = self.persist(&candidate, &mut limits, &mut report).await?;
                         // Record the prediction for later comparison with

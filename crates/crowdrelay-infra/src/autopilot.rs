@@ -68,6 +68,7 @@ use crowdrelay_application::{
         WaveOutcomeObservation,
     },
 };
+use crowdrelay_brain::GrowthIntelligenceSnapshot;
 #[cfg(test)]
 use crowdrelay_domain::pricing::TicketYieldPolicy;
 use crowdrelay_domain::{
@@ -91,7 +92,6 @@ use crowdrelay_domain::{
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
     growth_envelope::{EnvelopeUsage, GrowthEnvelope},
-    growth_intelligence::GrowthIntelligenceSnapshot,
     growth_metrics::{
         GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
         MetricValueTier, compute_trend, velocity_ratio_basis_points,

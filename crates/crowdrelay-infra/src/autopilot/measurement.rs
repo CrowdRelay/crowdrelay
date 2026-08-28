@@ -340,6 +340,30 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                 }
+                // Incremental fan growth (North Star): new fans in the
+                // 14-day post-action window minus the counterfactual
+                // (pre-action daily rate × 14, stored as baseline_value).
+                // Returns max(0, observed - counterfactual) — the
+                // incremental fans attributable to the action.
+                AutopilotMeasurementKind::IncrementalFanGrowth14d => {
+                    let observed = sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision FROM fans
+                        WHERE workspace_id = $1
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '14 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+                    // The baseline_value stores the pre-action daily fan
+                    // arrival rate. Counterfactual = rate × 14 days.
+                    let counterfactual = measurement.baseline_value * 14.0;
+                    (observed - counterfactual).max(0.0)
+                }
                 // Signal install growth after an agent dispatch: count new
                 // active push endpoints in the 7-day window. A push endpoint
                 // is a fan who installed Signal and opted in for push.

@@ -340,7 +340,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
     async fn load_causal_model(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<crowdrelay_domain::growth_intelligence::CausalModel, RepositoryError> {
+    ) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
         super::operations::load_causal_model(self, workspace_id).await
     }
 
@@ -348,7 +348,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         action_id: uuid::Uuid,
-        prediction: &crowdrelay_domain::growth_intelligence::DispatchPrediction,
+        prediction: &crowdrelay_brain::DispatchPrediction,
     ) -> Result<(), RepositoryError> {
         super::operations::record_dispatch_prediction(self, workspace_id, action_id, prediction)
             .await
@@ -357,7 +357,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
     async fn load_exploration_memory(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<crowdrelay_domain::growth_intelligence::ExplorationMemory, RepositoryError> {
+    ) -> Result<crowdrelay_brain::ExplorationMemory, RepositoryError> {
         super::operations::load_exploration_memory(self, workspace_id).await
     }
 

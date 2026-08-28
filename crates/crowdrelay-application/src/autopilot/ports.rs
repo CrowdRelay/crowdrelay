@@ -1,6 +1,9 @@
 //! Infrastructure ports used by Autopilot evaluation, execution and measurement.
 
 use async_trait::async_trait;
+use crowdrelay_brain::{
+    CausalModel, DispatchPrediction, ExplorationMemory, GrowthIntelligenceSnapshot,
+};
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, PlayId, WorkspaceId,
     action_class::ActionClass,
@@ -14,7 +17,6 @@ use crowdrelay_domain::{
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
     growth_envelope::{EnvelopeUsage, GrowthEnvelope},
-    growth_intelligence::GrowthIntelligenceSnapshot,
     growth_metrics::GrowthMetricSnapshot,
     learning::{WaveOutcomeVerdict, WaveReplyCounts, assess_wave_outcome},
     live_opportunities::LiveOpportunitySnapshot,
@@ -308,7 +310,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     async fn load_causal_model(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<crowdrelay_domain::growth_intelligence::CausalModel, RepositoryError>;
+    ) -> Result<CausalModel, RepositoryError>;
 
     /// Records a dispatch prediction. Called when the brain dispatches a
     /// worker — stores the prediction so it can be compared with the
@@ -317,7 +319,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         action_id: uuid::Uuid,
-        prediction: &crowdrelay_domain::growth_intelligence::DispatchPrediction,
+        prediction: &DispatchPrediction,
     ) -> Result<(), RepositoryError>;
 
     /// Loads the exploration memory from past dispatch predictions.
@@ -326,7 +328,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     async fn load_exploration_memory(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<crowdrelay_domain::growth_intelligence::ExplorationMemory, RepositoryError>;
+    ) -> Result<ExplorationMemory, RepositoryError>;
 
     /// Loads the most recently dispatched template's ID, used to infer
     /// the previous growth strategy for hysteresis. Returns `None` if
@@ -713,6 +715,11 @@ pub enum AutopilotMeasurementKind {
     /// whether the worker's intelligence gathering actually aggregated
     /// new fans into the fanbase.
     AgentRunFanGrowth14d,
+    /// Incremental fan growth: new fans in the 14-day post-action window
+    /// minus the counterfactual (pre-action daily rate × 14). This is the
+    /// North Star metric — it measures causal uplift, not just correlation.
+    /// The baseline_value stores the pre-action daily fan arrival rate.
+    IncrementalFanGrowth14d,
     /// Signal install delta in the 7 days after an agent dispatch. Measures
     /// whether the worker's output moved fans toward the Signal app (growth).
     AgentRunSignalInstalls7d,
@@ -737,6 +744,7 @@ impl AutopilotMeasurementKind {
             Self::ShowGrowthAttributedTicketOrders7d => "show_growth_attributed_ticket_orders_7d",
             Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
             Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
+            Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
             Self::AgentRunSignalInstalls7d => "agent_run_signal_installs_7d",
             Self::AgentRunCommunityEngagement7d => "agent_run_community_engagement_7d",
         }

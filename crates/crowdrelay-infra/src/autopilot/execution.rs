@@ -282,6 +282,30 @@ pub(super) async fn schedule_effect_measurement(
                 baseline_fans,
                 now + time::Duration::days(14),
             ));
+            // North Star: incremental fan growth with counterfactual baseline.
+            // The baseline is the pre-action daily fan arrival rate (fans per
+            // day in the 30 days before the action). The measurement observes
+            // new fans in the 14-day post-action window and computes
+            // max(0, observed - rate × 14) — the incremental uplift.
+            let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COUNT(*)::double precision / 30.0 FROM fans
+                WHERE workspace_id = $1
+                  AND created_at >= $2 - INTERVAL '30 days'
+                  AND created_at < $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth14d,
+                action_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(14),
+            ));
             let baseline_installs = sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COUNT(*)::double precision

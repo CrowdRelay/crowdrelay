@@ -25,4 +25,5 @@ url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 crowdrelay-domain = { path = "../crowdrelay-domain" }
+crowdrelay-brain = { path = "../crowdrelay-brain" }
 crowdrelay-application = { path = "../crowdrelay-application" }

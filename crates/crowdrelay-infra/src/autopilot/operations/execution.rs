@@ -963,7 +963,7 @@ pub(in crate::autopilot) async fn execute_agent_run(
     template_id: &str,
     prompt: &str,
     _priority: u8,
-    tier: crowdrelay_domain::growth_intelligence::AgentTier,
+    tier: crowdrelay_brain::AgentTier,
     _now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     // Insert a task row into agent_service_tasks. The TS agent service's

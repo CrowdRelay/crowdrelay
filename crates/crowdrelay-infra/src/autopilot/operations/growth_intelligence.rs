@@ -27,7 +27,7 @@
 //! intelligence and draft content — the brain decides strategy.
 
 use super::*;
-use crowdrelay_domain::growth_intelligence::{
+use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
     GrowthTrend, RecentInsight, UnengagedTarget, WorldModel, agent_standing_policy,
 };
@@ -563,10 +563,8 @@ pub(in crate::autopilot) async fn mark_insights_consumed(
 pub(in crate::autopilot) async fn load_causal_model(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-) -> Result<crowdrelay_domain::growth_intelligence::CausalModel, RepositoryError> {
-    use crowdrelay_domain::growth_intelligence::{
-        CausalModel, DispatchPrediction, PredictionOutcome,
-    };
+) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
+    use crowdrelay_brain::{CausalModel, DispatchPrediction, PredictionOutcome};
 
     let pool = &repo.pool;
 
@@ -619,7 +617,7 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     action_id: uuid::Uuid,
-    prediction: &crowdrelay_domain::growth_intelligence::DispatchPrediction,
+    prediction: &crowdrelay_brain::DispatchPrediction,
 ) -> Result<(), RepositoryError> {
     let pool = &repo.pool;
     let context_json = serde_json::to_value(&prediction.context).unwrap_or(serde_json::json!({}));
@@ -653,27 +651,29 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
 pub(in crate::autopilot) async fn load_exploration_memory(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-) -> Result<crowdrelay_domain::growth_intelligence::ExplorationMemory, RepositoryError> {
-    use crowdrelay_domain::growth_intelligence::{
-        DispatchContext, ExplorationMemory, context_hash,
-    };
+) -> Result<crowdrelay_brain::ExplorationMemory, RepositoryError> {
+    use crowdrelay_brain::{DispatchContext, ExplorationMemory, VISIT_DECAY, context_hash};
+    use time::OffsetDateTime;
 
-    /// Exploration row: (template_id, days_to_event, subreddit_type, trend, time_of_day_bps)
+    /// Exploration row: (template_id, days_to_event, subreddit_type, trend, time_of_day_bps, predicted_at)
     type ExplorationRow = (
         String,
         Option<i32>,
         Option<String>,
         Option<String>,
         Option<i32>,
+        OffsetDateTime,
     );
     let pool = &repo.pool;
+    let now = OffsetDateTime::now_utc();
     let rows: Vec<ExplorationRow> = sqlx::query_as(
         r#"
             SELECT template_id,
                    (context ->> 'days_to_event')::int,
                    context ->> 'subreddit_type',
                    context ->> 'fan_growth_trend',
-                   (context ->> 'time_of_day_bps')::int
+                   (context ->> 'time_of_day_bps')::int,
+                   predicted_at
             FROM viryaos_dispatch_predictions
             WHERE workspace_id = $1
             "#,
@@ -684,12 +684,26 @@ pub(in crate::autopilot) async fn load_exploration_memory(
     .map_err(map_sqlx)?;
 
     let mut mem = ExplorationMemory::default();
-    for (template_id, days_to_event, subreddit_type, trend_str, time_of_day_bps) in rows {
+    // The autopilot cycle runs every 5 minutes. Each historical visit is
+    // weighted by VISIT_DECAY^age_cycles so old visits contribute less.
+    // This fixes the bug where 6-month-old visits counted the same as
+    // yesterday's — the decay was never applied during DB reconstruction.
+    const CYCLE_HOURS: f64 = 5.0 / 60.0; // 5 minutes in hours
+    for (template_id, days_to_event, subreddit_type, trend_str, time_of_day_bps, predicted_at) in
+        rows
+    {
+        let age_hours = (now - predicted_at).whole_hours().max(0) as f64;
+        let age_cycles = age_hours / CYCLE_HOURS;
+        let decayed_weight = VISIT_DECAY.powf(age_cycles);
+        // Skip visits that have decayed to near-zero.
+        if decayed_weight < 0.01 {
+            continue;
+        }
         let fan_growth_trend = match trend_str.as_deref().unwrap_or("steady") {
-            "stagnant" => crowdrelay_domain::growth_intelligence::GrowthTrend::Stagnant,
-            "decelerating" => crowdrelay_domain::growth_intelligence::GrowthTrend::Decelerating,
-            "accelerating" => crowdrelay_domain::growth_intelligence::GrowthTrend::Accelerating,
-            _ => crowdrelay_domain::growth_intelligence::GrowthTrend::Steady,
+            "stagnant" => crowdrelay_brain::GrowthTrend::Stagnant,
+            "decelerating" => crowdrelay_brain::GrowthTrend::Decelerating,
+            "accelerating" => crowdrelay_brain::GrowthTrend::Accelerating,
+            _ => crowdrelay_brain::GrowthTrend::Steady,
         };
         let ctx = DispatchContext {
             days_to_event: days_to_event.map(|d| d as u32),
@@ -700,7 +714,7 @@ pub(in crate::autopilot) async fn load_exploration_memory(
             community_novelty_bps: 0,
         };
         let hash = context_hash(&ctx);
-        mem.record_visit(&template_id, &hash);
+        mem.record_decayed_visit(&template_id, &hash, decayed_weight);
     }
     Ok(mem)
 }

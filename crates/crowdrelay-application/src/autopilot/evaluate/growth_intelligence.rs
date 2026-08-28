@@ -24,7 +24,7 @@
 //! brain dispatches first when multiple are eligible. This is the
 //! hierarchical layer: strategy → template priority → EFE tie-break.
 
-use crowdrelay_domain::growth_intelligence::{
+use crowdrelay_brain::{
     AgentTier, CausalModel, DispatchContext, DispatchPrediction, EfeWeights,
     GrowthIntelligencePolicy, GrowthIntelligenceSnapshot, GrowthOpportunity, GrowthStrategy,
     RecentInsight, UnengagedTarget, effective_agent_cooldown, effective_agent_tier,
@@ -139,6 +139,7 @@ pub fn evaluate_growth_intelligence(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
+    now: OffsetDateTime,
 ) -> Option<IntelligenceRequest> {
     // A retired worker is never dispatched. The standing is computed from
     // past measurement outcomes — a worker that consistently produces no fan
@@ -147,14 +148,32 @@ pub fn evaluate_growth_intelligence(
         return None;
     }
 
-    // Build the dispatch context from the world model for prediction.
+    // Build the dispatch context from the world model and snapshot data.
+    // Enriching the context with subreddit_type, post_format, time_of_day,
+    // and community_novelty gives the causal model and exploration memory
+    // richer keys to learn from — the brain distinguishes "reddit-scanner
+    // in a metal subreddit in the evening" from "community-engager in a
+    // prog subreddit in the morning".
+    let subreddit_type = snapshot
+        .unengaged_targets
+        .first()
+        .map(|t| classify_subreddit(&t.subreddit))
+        .or_else(|| {
+            snapshot
+                .community_engagement_history
+                .first()
+                .map(|c| classify_subreddit(&c.subreddit))
+        });
+    let post_format = template_post_format(&snapshot.template_id);
+    let time_of_day_bps = time_of_day_to_bps(now.hour());
+    let community_novelty_bps = community_novelty_bps(&snapshot.community_engagement_history);
     let dispatch_context = DispatchContext {
         days_to_event: snapshot.days_to_next_event,
         fan_growth_trend: snapshot.world_model.fan_growth_trend,
-        subreddit_type: None,
-        post_format: None,
-        time_of_day_bps: 0,
-        community_novelty_bps: 0,
+        subreddit_type,
+        post_format,
+        time_of_day_bps,
+        community_novelty_bps,
     };
     // Predict expected new fans using the causal model.
     let expected_new_fans = causal_model.predict(&snapshot.template_id, &dispatch_context);
@@ -175,26 +194,51 @@ pub fn evaluate_growth_intelligence(
     // - Exploration: novelty from the exploration memory (Go-Explore bonus).
     // - Risk: penalizes uncertain outcomes (risk aversion).
     let confidence = causal_model.confidence(&snapshot.template_id);
-    let info_gain = information_gain(confidence);
     let predict_std = causal_model.predict_std(&snapshot.template_id);
+    let info_gain = information_gain(confidence, predict_std);
     let efe_weights = EfeWeights::default();
-    let efe_score = GrowthOpportunity::compute_efe(
-        expected_new_fans,
-        info_gain,
-        predict_std,
-        exploration_novelty,
-        efe_weights,
-    );
 
-    // ── Strategy rank ──
-    // The strategy determines which templates the brain prioritizes.
-    // Rank 0 = highest priority. Templates not in the strategy list get
-    // a rank of usize::MAX so they sort last.
+    // ── Strategy alignment ──
+    // The strategy determines which templates the brain prioritizes, but it
+    // does NOT override the North Star. Instead, strategy alignment modifies
+    // the expected fan count before EFE computation: strategy-aligned
+    // templates get an effective fan boost (dividing by <1.0), making their
+    // EFE lower (better). A strategy-misaligned template with much better
+    // actual expected fans still wins — the strategy is a tie-breaker bonus,
+    // not a hard override.
+    //
+    // Strategy multiplier:
+    //   rank 0 → 0.7× (43% fan boost)
+    //   rank 1 → 0.8× (25% fan boost)
+    //   rank 2 → 0.9× (11% fan boost)
+    //   rank 3+ → 1.0× (no bonus)
+    //   not in list → 1.1× (9% fan penalty)
     let strategy_priority = strategy.template_priority();
     let strategy_rank = strategy_priority
         .iter()
         .position(|t| *t == snapshot.template_id)
         .unwrap_or(usize::MAX);
+    let strategy_multiplier = if strategy_rank == usize::MAX {
+        // Not in strategy list: 10% penalty.
+        1.1
+    } else {
+        match strategy_rank {
+            0 => 0.7,
+            1 => 0.8,
+            2 => 0.9,
+            _ => 1.0,
+        }
+    };
+    // Apply the strategy multiplier as a fan boost: aligned templates get
+    // higher effective fans (lower EFE), misaligned ones get lower.
+    let strategy_adjusted_fans = expected_new_fans / strategy_multiplier;
+    let efe_score = GrowthOpportunity::compute_efe(
+        strategy_adjusted_fans,
+        info_gain,
+        predict_std,
+        exploration_novelty,
+        efe_weights,
+    );
 
     // Adaptive cadence: the effective cooldown is adjusted by the worker's
     // measured standing. Effective workers get shorter cooldowns (dispatched
@@ -534,6 +578,7 @@ pub(super) fn growth_intelligence_candidate(
         causal_model,
         strategy,
         exploration_novelty,
+        now,
     ) else {
         return Ok(None);
     };
@@ -598,7 +643,7 @@ fn cooldown_window(now: OffsetDateTime, cooldown_hours: u32) -> i64 {
 /// communities.
 fn push_engagement_history(
     prompt: &mut String,
-    history: &[crowdrelay_domain::growth_intelligence::CommunityEngagementSummary],
+    history: &[crowdrelay_brain::CommunityEngagementSummary],
 ) {
     if history.is_empty() {
         return;
@@ -624,4 +669,65 @@ fn push_engagement_history(
         "Communities with near-zero engagement may not be worth posting to again. \
          Communities with good engagement are worth nurturing — match what worked.",
     );
+}
+
+// ── Context enrichment helpers (Phase 1.5) ──
+
+/// Classifies a subreddit name into a genre type for context-level learning.
+/// The causal model uses this to pool observations across subreddits of the
+/// same genre — "r/MetalMusic" and "r/heavymetal" both map to "metal".
+pub(super) fn classify_subreddit(subreddit: &str) -> String {
+    let lower = subreddit.to_lowercase();
+    if lower.contains("metal") {
+        "metal".to_owned()
+    } else if lower.contains("prog") {
+        "prog".to_owned()
+    } else if lower.contains("polish") || lower.contains("polska") || lower.contains("pl") {
+        "polish".to_owned()
+    } else if lower.contains("rock") {
+        "rock".to_owned()
+    } else if lower.contains("jazz") {
+        "jazz".to_owned()
+    } else if lower.contains("indie") {
+        "indie".to_owned()
+    } else if lower.contains("electronic") || lower.contains("edm") {
+        "electronic".to_owned()
+    } else if lower.contains("hiphop") || lower.contains("rap") {
+        "hiphop".to_owned()
+    } else {
+        "other".to_owned()
+    }
+}
+
+/// Returns the default post format for a worker template. Different templates
+/// produce different content formats — reddit-scanner produces text reports,
+/// social-post produces social media posts, etc.
+fn template_post_format(template_id: &str) -> Option<String> {
+    match template_id {
+        "reddit-scanner" => Some("text_report".to_owned()),
+        "community-engager" => Some("text_post".to_owned()),
+        "social-post" => Some("social_post".to_owned()),
+        "press-pitch" => Some("email_pitch".to_owned()),
+        "signal-inviter" => Some("direct_message".to_owned()),
+        "growth-strategist" => Some("text_report".to_owned()),
+        _ => None,
+    }
+}
+
+/// Converts the hour-of-day (0–23) to basis points (0–10_000).
+/// 0 = midnight, 4167 = 10am, 6250 = 3pm, 8333 = 8pm.
+fn time_of_day_to_bps(hour: u8) -> u16 {
+    ((hour as u32 * 10_000) / 24).min(10_000) as u16
+}
+
+/// Computes community novelty in basis points (0–10_000).
+/// 10_000 = completely novel (no engagement history), 0 = well-explored.
+fn community_novelty_bps(history: &[crowdrelay_brain::CommunityEngagementSummary]) -> u16 {
+    if history.is_empty() {
+        return 10_000;
+    }
+    // More history = less novel. Cap at 10_000.
+    let count = history.len() as u32;
+    let novelty = 10_000_u32.saturating_sub(count.saturating_mul(1_000));
+    novelty as u16
 }

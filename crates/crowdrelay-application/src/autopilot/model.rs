@@ -1,5 +1,6 @@
 //! Stable application-boundary types for ViryaOS Autopilot.
 
+use crowdrelay_brain::{AgentTier, GrowthIntelligencePolicy};
 use crowdrelay_domain::{
     AutopilotActionId, BeaconId, BookingTargetId, CityId, ContentSourceId, EventId, ExperimentId,
     ExperimentVariantId, FanId, GrowthMetricSeriesId, MerchProductId, MerchVariantId,
@@ -16,7 +17,6 @@ use crowdrelay_domain::{
     free_reach::{WaveAnchor, WaveExpiry},
     funding::FundingPolicy,
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
-    growth_intelligence::{AgentTier, GrowthIntelligencePolicy},
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
     learning::{OutcomeRecord, Standing},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},

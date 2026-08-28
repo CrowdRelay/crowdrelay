@@ -1,16 +1,15 @@
 [package]
-name = "crowdrelay-application"
+name = "crowdrelay-brain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait.workspace = true
+crowdrelay-domain = { path = "../crowdrelay-domain" }
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true
-crowdrelay-domain = { path = "../crowdrelay-domain" }
-crowdrelay-brain = { path = "../crowdrelay-brain" }
 
+[dev-dependencies]
+serde_json.workspace = true
