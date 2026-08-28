@@ -21,6 +21,7 @@ pub struct IntelligenceRequest {
     pub template_id: &'static str,
     pub priority: u8,
     pub prompt: String,
+    #[allow(dead_code)]
     pub cooldown_hours: u32,
     /// The time window used for the decision/action idempotency key. For a
     /// normal dispatch (after a successful run), this equals `cooldown_hours`.
@@ -124,7 +125,11 @@ pub fn evaluate_growth_intelligence(
             priority: 3,
             prompt,
             cooldown_hours: policy.reddit_scanner_cooldown_hours,
-            key_window_hours: if is_retry { retry_window } else { policy.reddit_scanner_cooldown_hours },
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                policy.reddit_scanner_cooldown_hours
+            },
             reason: "Reddit community scan is due (7-day cadence)",
             tier: AgentTier::Basic,
         });
@@ -149,7 +154,11 @@ pub fn evaluate_growth_intelligence(
                 priority,
                 prompt,
                 cooldown_hours: policy.press_pitch_cooldown_hours,
-                key_window_hours: if is_retry { retry_window } else { policy.press_pitch_cooldown_hours },
+                key_window_hours: if is_retry {
+                    retry_window
+                } else {
+                    policy.press_pitch_cooldown_hours
+                },
                 reason: "Upcoming event within press lead window",
                 // Premium: press pitches go to real human contacts. A bad
                 // pitch burns a relationship permanently — quality matters.
@@ -173,7 +182,11 @@ pub fn evaluate_growth_intelligence(
             priority: 2,
             prompt,
             cooldown_hours: policy.social_post_cooldown_hours,
-            key_window_hours: if is_retry { retry_window } else { policy.social_post_cooldown_hours },
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                policy.social_post_cooldown_hours
+            },
             reason: "Social content cadence is due (2-day cycle)",
             tier: AgentTier::Basic,
         });
@@ -201,7 +214,11 @@ pub fn evaluate_growth_intelligence(
             priority: 2,
             prompt,
             cooldown_hours: policy.community_engager_cooldown_hours,
-            key_window_hours: if is_retry { retry_window } else { policy.community_engager_cooldown_hours },
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                policy.community_engager_cooldown_hours
+            },
             reason: "Fan growth stagnant — community engagement needed",
             // Premium: posts to somebody else's community (Reddit). A bad
             // post gets banned and damages reputation — quality matters.
@@ -231,7 +248,11 @@ pub fn evaluate_growth_intelligence(
             priority: 2,
             prompt,
             cooldown_hours: policy.community_engager_cooldown_hours,
-            key_window_hours: if is_retry { retry_window } else { policy.community_engager_cooldown_hours },
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                policy.community_engager_cooldown_hours
+            },
             reason: "Unengaged outreach targets need community posts",
             tier: AgentTier::Premium,
         });
@@ -252,7 +273,11 @@ pub fn evaluate_growth_intelligence(
             priority: 3,
             prompt,
             cooldown_hours: policy.signal_inviter_cooldown_hours,
-            key_window_hours: if is_retry { retry_window } else { policy.signal_inviter_cooldown_hours },
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                policy.signal_inviter_cooldown_hours
+            },
             reason: "Signal invite cadence is due (7-day cycle)",
             tier: AgentTier::Basic,
         });
@@ -287,7 +312,11 @@ pub fn evaluate_growth_intelligence(
             priority: 4,
             prompt,
             cooldown_hours: policy.growth_strategist_cooldown_hours,
-            key_window_hours: if is_retry { retry_window } else { policy.growth_strategist_cooldown_hours },
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                policy.growth_strategist_cooldown_hours
+            },
             reason: if stagnant_escalation {
                 "Daily intelligence analysis is due (escalated to premium: stagnant growth)"
             } else {
@@ -337,12 +366,12 @@ pub(super) fn growth_intelligence_candidate(
             "decision:growth-intelligence:v{}:{}:{}",
             policy.version,
             request.template_id,
-            cooldown_window(now, request.cooldown_hours),
+            cooldown_window(now, request.key_window_hours),
         ),
         action_idempotency_key: format!(
             "action:agent-run:{}:{}",
             request.template_id,
-            cooldown_window(now, request.cooldown_hours),
+            cooldown_window(now, request.key_window_hours),
         ),
     }))
 }
