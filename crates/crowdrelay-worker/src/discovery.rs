@@ -13,7 +13,9 @@ use crowdrelay_infra::audience_graph::{
     EvidenceInput, PostgresAudienceGraphRepository, UpsertPlaceInput,
 };
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, timeout},
@@ -21,6 +23,24 @@ use tokio::{
 use uuid::Uuid;
 
 const USER_AGENT: &str = "CrowdRelay/1.0 audience-graph-discovery";
+
+/// Namespace for the HMAC-derived management token, matching the agents
+/// service's `auth.ts` and the control plane's `tenant_area_client.rs`.
+const AGENT_AUTH_NAMESPACE: &[u8] = b"crowdrelay-control-plane-v1:";
+
+/// Derives a per-workspace bearer token for the agents service.
+/// `token = hex(HMAC-SHA256(master_key, namespace + workspace_id))`
+pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String {
+    // HMAC-SHA256 accepts any key length; this never fails.
+    let mut mac = match <Hmac<Sha256> as Mac>::new_from_slice(master_key.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return String::new(),
+    };
+    mac.update(AGENT_AUTH_NAMESPACE);
+    mac.update(workspace_id.to_string().as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 /// Reddit's unauthenticated JSON API tolerates roughly one request per second
 /// per client; two seconds keeps the sweep polite without making it useless.
 const REQUEST_SPACING: Duration = Duration::from_secs(2);
@@ -239,10 +259,11 @@ impl RedditDiscoveryWorker {
     async fn fetch_reddit_cookies(&self, client: &reqwest::Client) -> Option<String> {
         let auth_key = self.agent_service_auth_key.as_ref()?;
         let ws = self.workspace_id.into_uuid();
+        let token = derive_agent_token(auth_key, ws);
         let url = format!("{}/reddit/cookies", self.agent_service_url);
         let response = client
             .get(&url)
-            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("Authorization", format!("Bearer {token}"))
             .header("X-Workspace-Id", ws.to_string())
             .timeout(Duration::from_secs(5))
             .send()
@@ -361,15 +382,17 @@ impl RedditDiscoveryWorker {
         let Some(auth_key) = self.agent_service_auth_key.as_deref() else {
             return Ok(None);
         };
+        let ws = self.workspace_id.into_uuid();
+        let token = derive_agent_token(auth_key, ws);
 
-        let rows = match self.fetch_scrape_results(client, auth_key, query).await {
+        let rows = match self.fetch_scrape_results(client, &token, query).await {
             Ok(Some(rows)) if !rows.is_empty() => rows,
             Ok(_) => {
                 // Nothing stored yet — scrape this query through the browser.
-                if !self.trigger_agents_scrape(client, auth_key, query).await {
+                if !self.trigger_agents_scrape(client, &token, query).await {
                     return Ok(None);
                 }
-                match self.fetch_scrape_results(client, auth_key, query).await {
+                match self.fetch_scrape_results(client, &token, query).await {
                     Ok(Some(rows)) if !rows.is_empty() => rows,
                     _ => return Ok(None),
                 }

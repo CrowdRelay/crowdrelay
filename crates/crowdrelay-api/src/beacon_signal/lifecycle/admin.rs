@@ -161,11 +161,11 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
         JOIN viryaos_beacons beacon
           ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
         LEFT JOIN cities city ON city.id=beacon.city_id
-        LEFT JOIN session_counts USING (workspace_id,beacon_id)
-        LEFT JOIN endpoint_counts USING (workspace_id,beacon_id)
-        LEFT JOIN request_counts USING (workspace_id,beacon_id)
-        LEFT JOIN engagement_counts USING (workspace_id,beacon_id)
-        LEFT JOIN coverage_counts USING (workspace_id,beacon_id)
+        LEFT JOIN session_counts ON session_counts.workspace_id=profile.workspace_id AND session_counts.beacon_id=profile.beacon_id
+        LEFT JOIN endpoint_counts ON endpoint_counts.workspace_id=profile.workspace_id AND endpoint_counts.beacon_id=profile.beacon_id
+        LEFT JOIN request_counts ON request_counts.workspace_id=profile.workspace_id AND request_counts.beacon_id=profile.beacon_id
+        LEFT JOIN engagement_counts ON engagement_counts.workspace_id=profile.workspace_id AND engagement_counts.beacon_id=profile.beacon_id
+        LEFT JOIN coverage_counts ON coverage_counts.workspace_id=profile.workspace_id AND coverage_counts.beacon_id=profile.beacon_id
         WHERE profile.workspace_id=$1
         ORDER BY CASE profile.status WHEN 'active' THEN 0 WHEN 'invited' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
                  beacon.relevance_basis_points DESC,beacon.relationship_score DESC,beacon.display_name,beacon.id

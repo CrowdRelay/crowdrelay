@@ -545,6 +545,7 @@ impl CommunityExecutorWorker {
             CommunityExecutorError::RedditApi("agent service auth key not configured".to_owned())
         })?;
         let ws = self.workspace_id.into_uuid();
+        let token = crate::discovery::derive_agent_token(auth_key, ws);
         let url = format!("{}/reddit/post", self.agent_service_url);
         let payload = serde_json::json!({
             "subreddit": action.subreddit,
@@ -559,7 +560,7 @@ impl CommunityExecutorWorker {
             .clone();
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("Authorization", format!("Bearer {token}"))
             .header("X-Workspace-Id", ws.to_string())
             .json(&payload)
             .timeout(AGENTS_SUBMIT_TIMEOUT)
@@ -921,6 +922,7 @@ impl CommunityExecutorWorker {
     async fn fetch_reddit_cookies(&self) -> Option<String> {
         let auth_key = self.agent_service_auth_key.as_ref()?;
         let ws = self.workspace_id.into_uuid();
+        let token = crate::discovery::derive_agent_token(auth_key, ws);
         let url = format!("{}/reddit/cookies", self.agent_service_url);
         let client = self
             .http_client
@@ -929,7 +931,7 @@ impl CommunityExecutorWorker {
             .clone();
         let response = client
             .get(&url)
-            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("Authorization", format!("Bearer {token}"))
             .header("X-Workspace-Id", ws.to_string())
             .timeout(Duration::from_secs(5))
             .send()
@@ -968,6 +970,7 @@ impl CommunityExecutorWorker {
             .as_deref()
             .ok_or_else(|| CommunityExecutorError::NoRedditConnection)?;
         let ws = self.workspace_id.into_uuid();
+        let token = crate::discovery::derive_agent_token(auth_key, ws);
         let url = format!("{}/reddit/metrics", self.agent_service_url);
         let payload = serde_json::json!({ "post_id": reddit_post_id });
 
@@ -978,7 +981,7 @@ impl CommunityExecutorWorker {
             .clone();
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("Authorization", format!("Bearer {token}"))
             .header("X-Workspace-Id", ws.to_string())
             .json(&payload)
             .timeout(AGENTS_METRICS_TIMEOUT)
