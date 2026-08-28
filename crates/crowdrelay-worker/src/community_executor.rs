@@ -1124,8 +1124,16 @@ impl CommunityExecutorWorker {
         Ok(())
     }
 
-    /// Marks a community post as failed with an error message.
+    /// Marks a community post as failed with an error message and
+    /// propagates the failure back to the parent autopilot action so the
+    /// ledger does not report success for a post that never went live.
     async fn mark_failed(&self, post_id: Uuid, error: &str) -> Result<(), CommunityExecutorError> {
+        let action_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT action_id FROM community_posts WHERE id = $1")
+                .bind(post_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
         sqlx::query(
             r#"
             UPDATE community_posts
@@ -1139,10 +1147,46 @@ impl CommunityExecutorWorker {
         .bind(error)
         .execute(&self.pool)
         .await?;
+
+        // Propagate failure to the parent autopilot action. The action was
+        // marked 'succeeded' by actions_execution.rs before this worker
+        // ran — that was premature. Correct it now so the operator sees
+        // the real outcome in the autopilot ledger.
+        if let Some(action_id) = action_id {
+            let error_kind = if error.len() > 96 {
+                "community_post_failed"
+            } else {
+                error
+            };
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions
+                SET status = 'failed',
+                    finished_at = now(),
+                    last_error_kind = $3,
+                    updated_at = now()
+                WHERE id = $1 AND status = 'succeeded'
+                "#,
+            )
+            .bind(action_id)
+            .bind(self.workspace_id.into_uuid())
+            .bind(error_kind)
+            .execute(&self.pool)
+            .await?;
+            tracing::warn!(
+                post_id = %post_id,
+                action_id = %action_id,
+                error = %error,
+                "community post failed — propagated failure to autopilot action"
+            );
+        }
         Ok(())
     }
 
     /// Marks a community post as rate-limited with a backoff window.
+    /// Does not propagate to the autopilot action because rate-limited
+    /// posts will be retried — the action stays 'succeeded' and the
+    /// community_posts row tracks the retry state.
     async fn mark_rate_limited(&self, post_id: Uuid) -> Result<(), CommunityExecutorError> {
         sqlx::query(
             r#"

@@ -55,7 +55,7 @@ def find_working_proxy() -> str | None:
 def test_proxy_against_reddit(proxy_url: str) -> tuple[bool, int | None]:
     """Test the proxy by making a request to Reddit's JSON endpoint.
     Returns (success, status_code)."""
-    # FreeProxy returns URLs like "http://1.2.3.4:8080" or "https://..."
+    # FreeProxy returns URLs like "http://10.0.0.1:8080" or "https://..."
     # urllib uses the proxy via ProxyHandler.
     proxy_handler = urllib.request.ProxyHandler({
         "http": proxy_url,

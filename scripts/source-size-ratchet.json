@@ -26,7 +26,7 @@
     "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs": 1353,
     "crates/crowdrelay-api/src/acquisition.rs": 1213,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
-    "crates/crowdrelay-worker/src/community_executor.rs": 1270,
+    "crates/crowdrelay-worker/src/community_executor.rs": 1314,
     "crates/crowdrelay-application/src/autopilot/model.rs": 1230
   }
 }
