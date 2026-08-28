@@ -905,6 +905,7 @@ impl PostgresAutopilotRepository {
                     template_id,
                     prompt,
                     priority,
+                    tier,
                 } => {
                     operations::execute_agent_run(
                         &mut transaction,
@@ -913,6 +914,7 @@ impl PostgresAutopilotRepository {
                         template_id,
                         prompt,
                         *priority,
+                        *tier,
                         now,
                     )
                     .await?;
@@ -939,6 +941,27 @@ impl PostgresAutopilotRepository {
                             "body": body,
                             "smart_link": smart_link,
                         }),
+                    )
+                    .await?;
+                }
+                AutopilotActionPayload::RequestSignalPush {
+                    task_id: _,
+                    title,
+                    body,
+                    target_path,
+                    event_id,
+                    segment,
+                } => {
+                    operations::execute_signal_push(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        title,
+                        body,
+                        target_path.as_deref(),
+                        event_id.as_ref(),
+                        segment.as_deref(),
+                        now,
                     )
                     .await?;
                 }

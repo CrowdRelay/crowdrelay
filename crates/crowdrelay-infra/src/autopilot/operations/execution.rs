@@ -955,6 +955,7 @@ pub(in crate::autopilot) const fn release_milestone_str(
 /// This is a first-party reversible write: creating a task row reaches nobody,
 /// costs nothing, and is undone by deleting the row. The worker's outcomes
 /// flow back through `agent_outcomes` and the existing autopilot mapping.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::autopilot) async fn execute_agent_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
@@ -962,21 +963,24 @@ pub(in crate::autopilot) async fn execute_agent_run(
     template_id: &str,
     prompt: &str,
     _priority: u8,
+    tier: crowdrelay_domain::growth_intelligence::AgentTier,
     _now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     // Insert a task row into agent_service_tasks. The TS agent service's
     // scheduler claims due tasks and runs them. model_id = "auto" tells the
-    // runner to pick a free model.
+    // runner to pick a model based on the tier: free for basic, connected
+    // premium provider for premium (with fallback to basic if none connected).
     sqlx::query(
         r#"
-        INSERT INTO agent_service_tasks (id, workspace_id, template_id, model_id, prompt, status, metadata)
-        VALUES ($1, $2, $3, 'auto', $4, 'queued', $5)
+        INSERT INTO agent_service_tasks (id, workspace_id, template_id, model_id, prompt, status, tier, metadata)
+        VALUES ($1, $2, $3, 'auto', $4, 'queued', $5, $6)
         "#,
     )
     .bind(uuid::Uuid::now_v7())
     .bind(workspace_id.into_uuid())
     .bind(template_id)
     .bind(prompt)
+    .bind(tier.as_str())
     .bind(serde_json::json!({
         "source": "autopilot",
         "action_id": action_id.into_uuid(),
@@ -984,5 +988,108 @@ pub(in crate::autopilot) async fn execute_agent_run(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Materializes an approved Signal push as `fan_push_deliveries` rows for all
+/// consented fans with active push endpoints. The PushDeliveryWorker then
+/// sends them via FCM/Web Push.
+///
+/// Idempotency: `UNIQUE (workspace_id, source_kind, source_id, endpoint_id)`
+/// on `fan_push_deliveries` means a retry of the same action + endpoint is a
+/// no-op. `source_id` is the autopilot action id.
+///
+/// When `segment` is `Some(slug)`, the slug is resolved against the
+/// `audience_segments` table. If a matching active segment is found, its
+/// JSONB filter is parsed into a typed `SegmentFilter` and applied as
+/// additional fan predicates so only segment members receive the push.
+/// If the slug is not found, inactive, or the filter has invalid field
+/// types, the push falls back to broadcasting to all consented fans with
+/// active endpoints (the original behavior). See `push_segments.rs` for
+/// filter resolution and SQL generation.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::autopilot) async fn execute_signal_push(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    title: &str,
+    body: &str,
+    target_path: Option<&str>,
+    _event_id: Option<&uuid::Uuid>,
+    segment: Option<&str>,
+    _now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let action_uuid = action_id.into_uuid();
+    let collapse_key = format!("agent:{action_uuid}");
+    let target = target_path.unwrap_or("/my-signal/");
+
+    // Resolve the segment filter if a slug was provided. Falls back to
+    // None (broadcast) if the slug is missing, not found, inactive, or
+    // the filter has invalid field types.
+    let mut segment_filter = resolve_segment_filter(tx, workspace_id, segment).await;
+
+    // Build the segment clause + typed bind values. Only fields present
+    // in the filter generate SQL conditions, avoiding unnecessary
+    // correlated subqueries for absent fields.
+    let (segment_clause, segment_binds) = segment_filter
+        .as_mut()
+        .map(|f| f.sql_clause(7))
+        .unwrap_or_default();
+
+    let sql = format!(
+        r#"
+        INSERT INTO fan_push_deliveries
+            (workspace_id, fan_id, endpoint_id, source_kind, source_id,
+             category, title, body, target_path, collapse_key)
+        SELECT endpoint.workspace_id, endpoint.fan_id, endpoint.id,
+               'agent_signal_push', $2,
+               'community', $3, $4, $5, $6
+        FROM fan_push_endpoints endpoint
+        JOIN fans fan
+          ON fan.workspace_id = endpoint.workspace_id
+         AND fan.id = endpoint.fan_id
+        WHERE endpoint.workspace_id = $1
+          AND endpoint.active
+          AND endpoint.invalidated_at IS NULL
+          AND fan.status = 'active'
+          AND EXISTS (
+              SELECT 1 FROM fan_consents consent
+              WHERE consent.workspace_id = endpoint.workspace_id
+                AND consent.fan_id = endpoint.fan_id
+                AND consent.purpose = 'marketing'
+                AND consent.granted
+                AND consent.id = (
+                    SELECT newest.id FROM fan_consents newest
+                    WHERE newest.workspace_id = consent.workspace_id
+                      AND newest.fan_id = consent.fan_id
+                      AND newest.purpose = consent.purpose
+                    ORDER BY newest.recorded_at DESC, newest.id DESC LIMIT 1
+                )
+          )
+          {segment_clause}
+        ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+        "#
+    );
+
+    let mut query = sqlx::query(&sql)
+        .bind(workspace_id.into_uuid())
+        .bind(action_uuid)
+        .bind(title)
+        .bind(body)
+        .bind(target)
+        .bind(&collapse_key);
+
+    for bind in segment_binds {
+        query = match bind {
+            SegmentBind::Statuses(v) => query.bind(v),
+            SegmentBind::CitySlugs(v) => query.bind(v),
+            SegmentBind::MinReferrals(v) => query.bind(v),
+            SegmentBind::Synesthesia(v) => query.bind(v),
+            SegmentBind::TagsAll(v) => query.bind(v),
+        };
+    }
+
+    query.execute(&mut **tx).await.map_err(map_sqlx)?;
+
     Ok(())
 }
