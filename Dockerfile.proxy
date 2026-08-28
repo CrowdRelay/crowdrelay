@@ -1,0 +1,4 @@
+FROM python:3.12-slim
+RUN pip install --no-cache-dir free-proxy psycopg2-binary
+COPY scripts/find_reddit_proxy.py /app/find_reddit_proxy.py
+CMD ["python", "/app/find_reddit_proxy.py"]

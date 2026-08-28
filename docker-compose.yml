@@ -136,5 +136,23 @@ services:
         max-file: "3"
     restart: unless-stopped
 
+  reddit-proxy-finder:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: "postgres://crowdrelay:crowdrelay-local-only@postgres:5432/crowdrelay"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
 volumes:
   crowdrelay_postgres19:

@@ -6,7 +6,9 @@
 //! The deterministic evaluator consumes these to decide whether to dispatch.
 
 use super::*;
-use crowdrelay_domain::growth_intelligence::GrowthIntelligenceSnapshot;
+use crowdrelay_domain::growth_intelligence::{
+    CommunityEngagementSummary, GrowthIntelligenceSnapshot, RecentInsight, UnengagedTarget,
+};
 
 /// The worker templates the brain may dispatch, in the order the evaluator
 /// checks them. Adding a new worker template means adding it here and to the
@@ -72,6 +74,36 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .await
     .map_err(map_sqlx)?;
 
+    // Load the actual promoted community targets with a subreddit so the
+    // community-engager prompt can include concrete target_id + subreddit
+    // pairs. The LLM needs these to produce social_post outcomes that
+    // result in community.engage.request actions.
+    let unengaged_target_rows: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, display_name, subreddit
+        FROM agent_outreach_targets
+        WHERE workspace_id = $1
+          AND status = 'promoted'
+          AND target_kind = 'community'
+          AND subreddit IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 20
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let unengaged_targets: Vec<UnengagedTarget> = unengaged_target_rows
+        .into_iter()
+        .map(|(target_id, display_name, subreddit)| UnengagedTarget {
+            target_id,
+            display_name,
+            subreddit,
+        })
+        .collect();
+
     let now = OffsetDateTime::now_utc();
     let next_event_time = upcoming_event.and_then(|(t,)| t);
     let has_upcoming_event = next_event_time
@@ -100,6 +132,102 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
 
     let unengaged = u32::try_from(unengaged_count.0.max(0)).unwrap_or(0);
 
+    // Load unconsumed insights from agent_outcomes. The brain feeds these
+    // into the next worker dispatch prompt ("here's what we already know")
+    // and marks them consumed after planning. This closes the feedback loop.
+    // We join with agent_service_tasks to get the template_id that produced
+    // each insight, so the brain can attach insights to the right snapshot.
+    let insights: Vec<(uuid::Uuid, String, String, String, String, Option<String>)> =
+        sqlx::query_as(
+            r#"
+            SELECT ao.id,
+                   COALESCE(ast.template_id, 'unknown') AS template_id,
+                   ao.kind,
+                   COALESCE(ao.payload->'item'->>'headline', ao.payload->'item'->>'subject', '(no headline)') AS headline,
+                   COALESCE(ao.payload->'item'->>'detail', ao.payload->'item'->>'body', '') AS detail,
+                   ao.payload->'item'->>'recommended_action' AS recommended_action
+            FROM agent_outcomes ao
+            LEFT JOIN agent_service_tasks ast ON ast.id = ao.task_id
+            WHERE ao.workspace_id = $1
+              AND ao.status = 'processed'
+              AND ao.consumed_at IS NULL
+              AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
+            ORDER BY ao.created_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx)?;
+
+    let recent_insights: Vec<RecentInsight> = insights
+        .into_iter()
+        .map(
+            |(outcome_id, template_id, kind, headline, detail, recommended_action)| RecentInsight {
+                outcome_id,
+                template_id,
+                kind,
+                headline,
+                detail,
+                recommended_action,
+            },
+        )
+        .collect();
+
+    // Load community engagement history: aggregated post performance per
+    // subreddit from `community_post_metrics`. Only the latest metrics row
+    // per post is used, averaged across all posts to each subreddit in the
+    // last 30 days. This gives the brain a signal: "r/abc gets 45 upvotes
+    // on average, r/xyz gets 0 — don't waste LLM budget there."
+    let engagement_rows: Vec<(String, i64, f64, f64, f64, Option<f64>)> = sqlx::query_as(
+        r#"
+        WITH latest_per_post AS (
+            SELECT DISTINCT ON (cpm.community_post_id)
+                cpm.community_post_id,
+                cpm.score,
+                cpm.upvotes,
+                cpm.num_comments,
+                cpm.upvote_ratio,
+                cp.subreddit
+            FROM community_post_metrics cpm
+            JOIN community_posts cp ON cp.id = cpm.community_post_id
+            WHERE cp.workspace_id = $1
+              AND cp.posted_at > now() - interval '30 days'
+            ORDER BY cpm.community_post_id, cpm.measured_at DESC
+        )
+        SELECT subreddit,
+               COUNT(*)::bigint AS post_count,
+               AVG(score)::double precision AS avg_score,
+               AVG(upvotes)::double precision AS avg_upvotes,
+               AVG(num_comments)::double precision AS avg_comments,
+               AVG(upvote_ratio)::double precision AS avg_upvote_ratio
+        FROM latest_per_post
+        GROUP BY subreddit
+        ORDER BY avg_score DESC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let engagement_history: Vec<CommunityEngagementSummary> = engagement_rows
+        .into_iter()
+        .map(
+            |(subreddit, post_count, avg_score, avg_upvotes, avg_comments, avg_upvote_ratio)| {
+                CommunityEngagementSummary {
+                    subreddit,
+                    post_count: u32::try_from(post_count.max(0)).unwrap_or(0),
+                    avg_score,
+                    avg_upvotes,
+                    avg_comments,
+                    avg_upvote_ratio,
+                }
+            },
+        )
+        .collect();
+
     // Build one snapshot per worker template.
     let mut snapshots = Vec::with_capacity(WORKER_TEMPLATES.len());
     for template_id in WORKER_TEMPLATES {
@@ -112,6 +240,27 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 u32::try_from(delta.whole_hours().max(0)).unwrap_or(u32::MAX)
             });
 
+        // Attach insights produced by this template.
+        let template_insights: Vec<RecentInsight> = recent_insights
+            .iter()
+            .filter(|i| i.template_id == *template_id)
+            .cloned()
+            .collect();
+
+        // Attach engagement history and unengaged targets only to the
+        // community-engager snapshot. Other templates don't use them, so
+        // we avoid cloning the Vecs.
+        let history = if *template_id == "community-engager" {
+            engagement_history.clone()
+        } else {
+            Vec::new()
+        };
+        let targets = if *template_id == "community-engager" {
+            unengaged_targets.clone()
+        } else {
+            Vec::new()
+        };
+
         snapshots.push(GrowthIntelligenceSnapshot {
             template_id: (*template_id).to_owned(),
             hours_since_last_run,
@@ -119,8 +268,40 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             days_to_next_event,
             fan_growth_stagnant,
             unengaged_outreach_targets: unengaged,
+            unengaged_targets: targets,
+            recent_insights: template_insights,
+            community_engagement_history: history,
         });
     }
 
     Ok(snapshots)
+}
+
+/// Marks agent outcomes as consumed by the brain. Called after the evaluator
+/// has factored the insights into its dispatch decisions. Consumed rows are
+/// deleted by the retention worker after 7 days.
+pub(in crate::autopilot) async fn mark_insights_consumed(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    outcome_ids: &[uuid::Uuid],
+) -> Result<u64, RepositoryError> {
+    if outcome_ids.is_empty() {
+        return Ok(0);
+    }
+    let pool = &repo.pool;
+    let result = sqlx::query(
+        r#"
+        UPDATE agent_outcomes
+        SET consumed_at = now()
+        WHERE workspace_id = $1
+          AND id = ANY($2)
+          AND consumed_at IS NULL
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(outcome_ids)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(result.rows_affected())
 }

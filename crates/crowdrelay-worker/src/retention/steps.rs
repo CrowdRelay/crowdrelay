@@ -584,3 +584,33 @@ async fn delete_expired_growth_metric_points(
     .map_err(RetentionRunError::Database)?;
     Ok(result.rows_affected())
 }
+
+/// Deletes agent outcomes that the brain has consumed (read and factored
+/// into planning) more than 7 days ago. The 7-day window gives operators
+/// a short audit/debugging buffer before the row is permanently removed.
+/// Once deleted, the same topic can be re-evaluated by future worker runs
+/// — the content-hash dedup only blocks live (unconsumed) duplicates.
+async fn delete_consumed_agent_outcomes(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM agent_outcomes AS outcome
+        WHERE outcome.id IN (
+            SELECT candidate.id
+            FROM agent_outcomes AS candidate
+            WHERE candidate.consumed_at IS NOT NULL
+              AND candidate.consumed_at < now() - interval '7 days'
+            ORDER BY candidate.consumed_at, candidate.id
+            FOR UPDATE OF candidate SKIP LOCKED
+            LIMIT $1
+        )
+        "#,
+    )
+    .bind(batch_size)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}

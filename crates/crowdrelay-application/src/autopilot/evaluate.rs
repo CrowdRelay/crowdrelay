@@ -1,5 +1,7 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 
+use uuid::Uuid;
+
 use crowdrelay_domain::{
     FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
@@ -526,7 +528,16 @@ where
                         .repository
                         .load_growth_intelligence_snapshots(self.workspace_id, now)
                         .await?;
+                    // Collect all unconsumed insight IDs across all snapshots.
+                    // After the evaluator has factored them into dispatch
+                    // decisions (or decided not to dispatch), mark them
+                    // consumed so the brain doesn't re-read stale insights
+                    // and the retention worker can clean them up.
+                    let mut consumed_ids: Vec<Uuid> = Vec::new();
                     for snapshot in &snapshots {
+                        for insight in &snapshot.recent_insights {
+                            consumed_ids.push(insight.outcome_id);
+                        }
                         if let Some(candidate) = growth_intelligence_candidate(
                             snapshot,
                             &policy,
@@ -535,6 +546,16 @@ where
                         )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
+                    }
+                    // Mark all loaded insights as consumed, regardless of
+                    // whether a dispatch was produced. The brain has read
+                    // them and made its decision — keeping them unconsumed
+                    // would just re-feed the same data next cycle.
+                    if !consumed_ids.is_empty() {
+                        let _ = self
+                            .repository
+                            .mark_insights_consumed(self.workspace_id, &consumed_ids)
+                            .await;
                     }
                 }
             }

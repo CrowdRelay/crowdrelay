@@ -204,6 +204,10 @@ impl RetentionWorker {
             growth_metric_points_deleted,
             RetentionStep::ExpiredGrowthMetricPoints
         );
+        execute_step!(
+            consumed_agent_outcomes_deleted,
+            RetentionStep::ConsumedAgentOutcomes
+        );
 
         if let Some(error) = first_failure {
             return Err(error);
@@ -277,6 +281,9 @@ impl RetentionWorker {
             RetentionStep::ExpiredGrowthMetricPoints => {
                 delete_expired_growth_metric_points(&mut transaction, self.batch_size).await?
             }
+            RetentionStep::ConsumedAgentOutcomes => {
+                delete_consumed_agent_outcomes(&mut transaction, self.batch_size).await?
+            }
         };
 
         transaction
@@ -303,6 +310,7 @@ enum RetentionStep {
     TerminalOutboxSecrets,
     BeaconReleaseDeliveryPii,
     ExpiredGrowthMetricPoints,
+    ConsumedAgentOutcomes,
 }
 
 impl RetentionStep {
@@ -322,6 +330,7 @@ impl RetentionStep {
             Self::TerminalOutboxSecrets => "terminal_outbox_secrets",
             Self::BeaconReleaseDeliveryPii => "beacon_release_delivery_pii",
             Self::ExpiredGrowthMetricPoints => "expired_growth_metric_points",
+            Self::ConsumedAgentOutcomes => "consumed_agent_outcomes",
         }
     }
 }
@@ -343,6 +352,7 @@ pub struct RetentionStats {
     pub terminal_outbox_events_deleted: u64,
     pub beacon_release_delivery_pii_purged: u64,
     pub growth_metric_points_deleted: u64,
+    pub consumed_agent_outcomes_deleted: u64,
 }
 
 impl RetentionStats {
@@ -361,6 +371,8 @@ impl RetentionStats {
             || self.outbox_payloads_scrubbed > 0
             || self.terminal_outbox_events_deleted > 0
             || self.beacon_release_delivery_pii_purged > 0
+            || self.growth_metric_points_deleted > 0
+            || self.consumed_agent_outcomes_deleted > 0
     }
 }
 

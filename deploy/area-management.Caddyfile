@@ -45,6 +45,8 @@
         /v1/control-plane/audience/fans/* \
         /v1/control-plane/audience/segments \
         /v1/control-plane/audience/segments/* \
+        /v1/control-plane/community-posts \
+        /v1/control-plane/community-posts/* \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready

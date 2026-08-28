@@ -85,6 +85,12 @@ impl AgentOutcomeWorker {
     }
 
     async fn run_once(&self) -> Result<usize, AgentOutcomeError> {
+        // Recover any outcomes stuck in 'processing' from a previous crash.
+        // The poll query only selects 'pending', so without this a crash
+        // between the UPDATE to 'processing' and the commit leaves rows
+        // stranded forever.
+        self.recover_stale_processing().await?;
+
         let mut total = 0;
         loop {
             let processed = self.process_batch().await?;
@@ -94,6 +100,34 @@ impl AgentOutcomeWorker {
             total += processed;
         }
         Ok(total)
+    }
+
+    /// Resets outcomes stuck in 'processing' for more than 10 minutes back to
+    /// 'pending' so they can be retried. This handles worker crashes between
+    /// the claim (`SET status = 'processing'`) and the commit. Uses
+    /// `created_at` because the table has no `updated_at` column — if a row
+    /// was created more than 10 minutes ago and is still processing, the
+    /// worker that claimed it is dead.
+    async fn recover_stale_processing(&self) -> Result<(), AgentOutcomeError> {
+        let reset = sqlx::query(
+            r#"
+            UPDATE agent_outcomes
+            SET status = 'pending'
+            WHERE workspace_id = $1
+              AND status = 'processing'
+              AND created_at < now() - INTERVAL '10 minutes'
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .execute(&self.pool)
+        .await?;
+        if reset.rows_affected() > 0 {
+            tracing::info!(
+                recovered = reset.rows_affected(),
+                "recovered stale processing agent outcomes"
+            );
+        }
+        Ok(())
     }
 
     /// Claims one batch of pending outcomes (FOR UPDATE SKIP LOCKED), validates
@@ -147,8 +181,7 @@ impl AgentOutcomeWorker {
             };
 
             match self.map_outcome(&outcome).await {
-                Ok((decision_id, action_id)) => {
-                    let _ = (decision_id, action_id);
+                Ok(_) => {
                     processed += 1;
                 }
                 Err(error) => {
@@ -202,17 +235,22 @@ impl AgentOutcomeWorker {
         .bind(outcome.kind.decision_kind())
         .bind(outcome.confidence_basis_points)
         .bind(outcome.kind.disposition())
-        .bind(
+        .bind({
             // The autopilot_decisions.reason column has a CHECK constraint
             // (non-empty, <=240 chars). The LLM rationale can be longer, so
-            // truncate to fit. The full rationale is preserved in
-            // input_snapshot.payload.rationale.
-            outcome
-                .payload
-                .rationale
-                .get(..outcome.payload.rationale.ceil_char_boundary(240))
-                .unwrap_or(&outcome.payload.rationale),
-        )
+            // truncate to fit. Use char-based truncation (not byte-based)
+            // so multi-byte UTF-8 (Polish diacritics, emoji) doesn't
+            // exceed the char_length CHECK. The full rationale is
+            // preserved in input_snapshot.payload.rationale.
+            let r = &outcome.payload.rationale;
+            if r.chars().count() <= 240 {
+                r.as_str()
+            } else {
+                let byte_end = r.char_indices().nth(240).map_or(r.len(), |(b, _)| b);
+                // Safety: char_indices always lands on a UTF-8 boundary.
+                r.get(..byte_end).unwrap_or(r)
+            }
+        })
         .bind(&input_snapshot)
         .bind(json!({ "source": "agent_outcome", "schema_version": outcome.schema_version }))
         .bind(json!({}))
@@ -255,41 +293,98 @@ impl AgentOutcomeWorker {
             let action_id = Uuid::now_v7();
 
             // A social_post from the community-engager worker targets a
-            // specific community (Reddit, forum) and carries a target_id +
-            // subreddit. Regular social posts target owned channels
-            // (Instagram, Facebook, X) and materialize as campaign drafts.
-            // The distinction is in the item payload, not the outcome kind.
-            let is_community_engagement = outcome.kind == OutcomeKind::SocialPost
-                && outcome
+            // specific community (Reddit, forum) and carries a valid
+            // target_id + subreddit. Regular social posts target owned
+            // channels (Instagram, Facebook, X) and materialize as campaign
+            // drafts. The distinction is in the item payload, not the
+            // outcome kind. The target_id must parse as a valid UUID — if
+            // it doesn't, the post falls through to the generic content
+            // path rather than pointing at a non-existent outreach target.
+            let community_target_id = if outcome.kind == OutcomeKind::SocialPost {
+                outcome
                     .payload
                     .item
                     .as_ref()
                     .and_then(|i| i.get("platform"))
                     .and_then(Value::as_str)
-                    == Some("reddit")
-                && outcome
-                    .payload
-                    .item
-                    .as_ref()
-                    .and_then(|i| i.get("target_id"))
-                    .is_some();
+                    .filter(|p| *p == "reddit")
+                    .and_then(|_| {
+                        outcome
+                            .payload
+                            .item
+                            .as_ref()
+                            .and_then(|i| i.get("target_id"))
+                            .and_then(Value::as_str)
+                            .and_then(|s| Uuid::parse_str(s).ok())
+                    })
+            } else {
+                None
+            };
 
-            let (payload, action_kind, action_class) = if is_community_engagement {
+            // Check if the workspace's promotion_budget policy is set to
+            // bounded_auto. If so, Reddit community engagement posts skip
+            // the approval step and go straight to queued. The community
+            // executor's anti-spam guardrails (3 posts/24h, 7-day subreddit
+            // cooldown) serve as the bounds. Only Reddit community posts
+            // are eligible — press pitches and signal pushes always require
+            // human approval because they reach people directly.
+            let is_reddit_community_post = community_target_id.is_some();
+            let auto_execute = if is_reddit_community_post {
+                self.is_promotion_budget_bounded_auto(&mut tx).await?
+            } else {
+                false
+            };
+
+            let (payload, action_kind, action_class) = if let Some(target_id) = community_target_id
+            {
                 let item = outcome.payload.item.as_ref();
-                let target_id = item
-                    .and_then(|i| i.get("target_id"))
+                let subreddit = item
+                    .and_then(|i| i.get("subreddit"))
                     .and_then(Value::as_str)
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .unwrap_or_else(Uuid::now_v7);
+                    .unwrap_or("");
+                let raw_link = item
+                    .and_then(|i| i.get("smart_link"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                // Create a tracked smart link for attribution so we can
+                // measure which Reddit posts drive ticket sales / signups.
+                // Log errors instead of silently swallowing them — a post
+                // without attribution is still deliverable, but the operator
+                // should know the smart link failed.
+                let tracked_link = if !raw_link.is_empty() {
+                    match self
+                        .ensure_agent_smart_link(
+                            &mut tx,
+                            outcome.workspace_id,
+                            outcome,
+                            raw_link,
+                            "reddit",
+                            Some(subreddit),
+                        )
+                        .await
+                    {
+                        Ok(link) => link,
+                        Err(error) => {
+                            tracing::warn!(
+                                outcome_id = %outcome.id,
+                                error = %error,
+                                "failed to create agent smart link — post will go out untracked"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 (
                     json!({
                         "kind": "request_community_engagement",
                         "target_id": target_id,
                         "platform": "reddit",
-                        "subreddit": item.and_then(|i| i.get("subreddit")).and_then(Value::as_str),
+                        "subreddit": subreddit,
                         "title": item.and_then(|i| i.get("title")).and_then(Value::as_str).unwrap_or(""),
                         "body": item.and_then(|i| i.get("body")).and_then(Value::as_str).unwrap_or(""),
-                        "smart_link": item.and_then(|i| i.get("smart_link")).and_then(Value::as_str),
+                        "smart_link": tracked_link,
                     }),
                     "community.engage.request",
                     "third_party",
@@ -299,23 +394,51 @@ impl AgentOutcomeWorker {
                     OutcomeKind::PressPitch | OutcomeKind::SocialPost => (
                         json!({
                             "kind": "request_agent_content",
-                            "template_id": outcome
-                                .payload
-                                .item
-                                .as_ref()
-                                .and_then(|i| i.get("template_id"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown"),
                             "task_id": outcome.task_id,
                             "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
                         }),
                         "agent.content.request",
                         "first_party_reversible",
                     ),
+                    OutcomeKind::SignalPush => {
+                        let item = outcome.payload.item.as_ref();
+                        let title = item
+                            .and_then(|i| i.get("title"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let body = item
+                            .and_then(|i| i.get("body"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let target_path = item
+                            .and_then(|i| i.get("target_path"))
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_owned());
+                        let event_id = item
+                            .and_then(|i| i.get("event_id"))
+                            .and_then(Value::as_str)
+                            .and_then(|s| Uuid::parse_str(s).ok());
+                        let segment = item
+                            .and_then(|i| i.get("segment"))
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_owned());
+                        (
+                            json!({
+                                "kind": "request_signal_push",
+                                "task_id": outcome.task_id,
+                                "title": title,
+                                "body": body,
+                                "target_path": target_path,
+                                "event_id": event_id,
+                                "segment": segment,
+                            }),
+                            "signal.push.request",
+                            "owned_audience",
+                        )
+                    }
                     OutcomeKind::OutreachTargets => (
                         json!({
                             "kind": "request_agent_content",
-                            "template_id": "outreach-targets",
                             "task_id": outcome.task_id,
                             "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
                         }),
@@ -329,35 +452,81 @@ impl AgentOutcomeWorker {
                     ),
                 }
             };
-            sqlx::query_scalar::<_, Uuid>(
-                r#"
-                INSERT INTO viryaos_autopilot_actions (
-                    id, workspace_id, decision_id, context, action_kind,
-                    subject_kind, subject_id, idempotency_key, payload, status,
-                    action_class, approved_at, approved_by, approval_expires_at
+            let inserted_action = if auto_execute {
+                sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO viryaos_autopilot_actions (
+                        id, workspace_id, decision_id, context, action_kind,
+                        subject_kind, subject_id, idempotency_key, payload, status,
+                        action_class, approved_at, approved_by, approval_expires_at
+                    )
+                    VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                        now(), 'policy:bounded_auto', NULL
+                    )
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    "#,
                 )
-                VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                    NULL, NULL,
-                    now() + INTERVAL '72 hours'
+                .bind(action_id)
+                .bind(outcome.workspace_id)
+                .bind(decision_id)
+                .bind(outcome.kind.autopilot_context())
+                .bind(action_kind)
+                .bind("agent_task")
+                .bind(outcome.task_id)
+                .bind(&outcome.idempotency_key)
+                .bind(&payload)
+                .bind("queued")
+                .bind(action_class)
+                .fetch_optional(&mut *tx)
+                .await?
+            } else {
+                sqlx::query_scalar::<_, Uuid>(
+                    r#"
+                    INSERT INTO viryaos_autopilot_actions (
+                        id, workspace_id, decision_id, context, action_kind,
+                        subject_kind, subject_id, idempotency_key, payload, status,
+                        action_class, approved_at, approved_by, approval_expires_at
+                    )
+                    VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                        NULL, NULL,
+                        now() + INTERVAL '72 hours'
+                    )
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    "#,
                 )
-                ON CONFLICT DO NOTHING
-                RETURNING id
-                "#,
-            )
-            .bind(action_id)
-            .bind(outcome.workspace_id)
-            .bind(decision_id)
-            .bind(outcome.kind.autopilot_context())
-            .bind(action_kind)
-            .bind("agent_task")
-            .bind(outcome.task_id)
-            .bind(&outcome.idempotency_key)
-            .bind(&payload)
-            .bind("awaiting_approval")
-            .bind(action_class)
-            .fetch_optional(&mut *tx)
-            .await?
+                .bind(action_id)
+                .bind(outcome.workspace_id)
+                .bind(decision_id)
+                .bind(outcome.kind.autopilot_context())
+                .bind(action_kind)
+                .bind("agent_task")
+                .bind(outcome.task_id)
+                .bind(&outcome.idempotency_key)
+                .bind(&payload)
+                .bind("awaiting_approval")
+                .bind(action_class)
+                .fetch_optional(&mut *tx)
+                .await?
+            };
+            // On a re-run the action row already exists (conflict). Resolve
+            // the existing id so processed_action_id is not NULL.
+            match inserted_action {
+                Some(id) => Some(id),
+                None => {
+                    sqlx::query_scalar::<_, Option<Uuid>>(
+                        "SELECT id FROM viryaos_autopilot_actions \
+                 WHERE workspace_id = $1 AND idempotency_key = $2",
+                    )
+                    .bind(outcome.workspace_id)
+                    .bind(&outcome.idempotency_key)
+                    .fetch_one(&mut *tx)
+                    .await?
+                }
+            }
         } else {
             None
         };
@@ -377,13 +546,65 @@ impl AgentOutcomeWorker {
             "#,
         )
         .bind(outcome.id)
-        .bind(inserted_decision)
+        .bind(decision_id)
         .bind(action_id)
         .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;
-        Ok((inserted_decision, action_id))
+        Ok((Some(decision_id), action_id))
+    }
+
+    /// Creates a tracked smart link for an agent-produced content item so
+    /// clicks from the posted content can be attributed back to the agent
+    /// channel. Called within the `map_outcome` transaction.
+    ///
+    /// The slug is deterministic: `agent-{outcome.id.simple()}`. This
+    /// makes re-runs idempotent (ON CONFLICT DO UPDATE) and keeps agent-
+    /// created links identifiable in the admin smart-links list.
+    ///
+    /// Returns the public redirect path (`/l/{slug}`) or `None` if the item
+    /// has no usable destination URL.
+    async fn ensure_agent_smart_link(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        workspace_id: Uuid,
+        outcome: &ValidatedOutcome,
+        destination: &str,
+        channel_source: &str,
+        channel_community: Option<&str>,
+    ) -> Result<Option<String>, AgentOutcomeError> {
+        if !destination.starts_with("http") {
+            return Ok(None);
+        }
+        // The smart_links table enforces UNIQUE(workspace_id, slug) so
+        // re-runs of the same outcome won't create duplicates — the ON
+        // CONFLICT DO UPDATE handles that. The full simple UUID (32 hex
+        // chars) keeps the slug well under the 128-char CHECK constraint.
+        let slug = format!("agent-{}", outcome.id.simple());
+
+        sqlx::query(
+            r#"
+            INSERT INTO smart_links
+                (workspace_id, slug, destination_url, active,
+                 channel_source, channel_community)
+            VALUES ($1, $2, $3, true, $4, $5)
+            ON CONFLICT (workspace_id, slug) DO UPDATE SET
+                destination_url = EXCLUDED.destination_url,
+                active = true,
+                version = smart_links.version + 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&slug)
+        .bind(destination)
+        .bind(channel_source)
+        .bind(channel_community)
+        .execute(&mut **tx)
+        .await
+        .map_err(AgentOutcomeError::from)?;
+
+        Ok(Some(format!("/l/{slug}")))
     }
 
     /// Inserts an `agent_fan_segments` row from an audience_segments item.
@@ -427,8 +648,12 @@ impl AgentOutcomeWorker {
         Ok(())
     }
 
-    /// Inserts an `agent_outreach_targets` staging row. `verified=false` by
-    /// default — operator verification is the approval that flips it.
+    /// Inserts an `agent_outreach_targets` staging row. For personal-contact
+    /// kinds (press, radio, etc.) the row is `proposed` — operator
+    /// verification is the approval that flips it. For `community`-kind
+    /// targets (Reddit subreddits, forums) the row is auto-promoted to
+    /// `promoted` because these are public spaces, not personal contacts —
+    /// the growth loop can engage them without operator review.
     async fn insert_outreach_target(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -447,12 +672,27 @@ impl AgentOutcomeWorker {
         let contact_domain = item.get("contact_domain").and_then(Value::as_str);
         let why_fit = item.get("why_fit").and_then(Value::as_str).unwrap_or("");
         let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
+        let subreddit = item.get("subreddit").and_then(Value::as_str);
+        // Community targets (Reddit subreddits, forums) are public spaces.
+        // Auto-promote them so the brain's community-engager can dispatch
+        // without waiting for operator review. Personal-contact kinds keep
+        // the proposed → promoted operator-approval flow.
+        let is_community = target_kind == "community";
+        let initial_status = if is_community { "promoted" } else { "proposed" };
         sqlx::query(
             r#"
             INSERT INTO agent_outreach_targets
                 (workspace_id, target_kind, display_name, contact_email, contact_domain,
-                 why_fit, evidence, source_task_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                 why_fit, evidence, source_task_id, subreddit, status)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
+                subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
+                status = CASE
+                    WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
+                    WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
+                    ELSE agent_outreach_targets.status
+                END,
+                updated_at = now()
             "#,
         )
         .bind(outcome.workspace_id)
@@ -463,6 +703,8 @@ impl AgentOutcomeWorker {
         .bind(why_fit)
         .bind(&evidence)
         .bind(outcome.task_id)
+        .bind(subreddit)
+        .bind(initial_status)
         .execute(&mut **tx)
         .await?;
         Ok(())
@@ -485,6 +727,32 @@ impl AgentOutcomeWorker {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Checks whether the workspace's `promotion_budget` autopilot policy
+    /// is set to `bounded_auto`. This is the gate for autonomous Reddit
+    /// community engagement: if the operator has set the policy to
+    /// `bounded_auto`, community engagement posts skip the approval step
+    /// and go straight to `queued`. The community executor's anti-spam
+    /// guardrails (3 posts/24h, 7-day subreddit cooldown) serve as the
+    /// bounds. Returns `false` if the policy is missing or not
+    /// `bounded_auto` — fail-closed to `require_approval`.
+    async fn is_promotion_budget_bounded_auto(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<bool, AgentOutcomeError> {
+        let autonomy: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT autonomy_level
+            FROM viryaos_autopilot_policies
+            WHERE workspace_id = $1 AND context = 'promotion_budget'
+            LIMIT 1
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(autonomy.as_deref() == Some("bounded_auto"))
     }
 }
 

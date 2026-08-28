@@ -12,6 +12,7 @@ use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::audience_graph::{
     EvidenceInput, PostgresAudienceGraphRepository, UpsertPlaceInput,
 };
+use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::watch,
@@ -25,11 +26,52 @@ const USER_AGENT: &str = "CrowdRelay/1.0 audience-graph-discovery";
 const REQUEST_SPACING: Duration = Duration::from_secs(2);
 const MAX_SUBREDDITS_PER_QUERY: usize = 10;
 const MAX_QUERIES_PER_PASS: usize = 5;
+/// How often the worker checks `reddit_proxy_state` for a new proxy.
+const PROXY_REFRESH_INTERVAL: Duration = Duration::from_secs(300); // 5 min
+/// Watchdog for one full sweep. A sweep may trigger browser scrapes in the
+/// agents service (possible login + navigation = minutes), so the old
+/// `operation_timeout * 2` cap (10s) would cancel sweeps mid-flight and
+/// leave nothing imported. This only guards against a permanently hung cycle.
+const SWEEP_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Scrape POSTs can drive a browser login server-side; give them room.
+/// Overrides the client-wide operation timeout for that one request.
+const AGENTS_SCRAPE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Plain agents reads (no browser work involved).
+const AGENTS_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds a reqwest client with an optional proxy. Shared between the
+/// constructor (initial build) and the run-loop proxy refresh.
+fn build_reddit_client(
+    proxy_url: Option<&str>,
+    operation_timeout: Duration,
+) -> Result<reqwest::Client, DiscoveryBuildError> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(operation_timeout.min(Duration::from_secs(10)))
+        .timeout(operation_timeout)
+        .user_agent(USER_AGENT);
+    if let Some(url) = proxy_url {
+        let proxy =
+            reqwest::Proxy::all(url).map_err(|e| DiscoveryBuildError::Proxy(e.to_string()))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(DiscoveryBuildError::Client)
+}
+
+/// Resolves the effective proxy URL: DB proxy (written by the sidecar)
+/// takes precedence, falling back to the env var override.
+async fn resolve_proxy_url(pool: &sqlx::PgPool, env_proxy: &Option<String>) -> Option<String> {
+    if let Some(db_proxy) = read_reddit_proxy_from_db(pool).await {
+        return Some(db_proxy);
+    }
+    env_proxy.clone()
+}
 
 /// Discovery is enabled by configuring at least one query.
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
     pub reddit_queries: Vec<String>,
+    /// Optional proxy URL for Reddit requests (bypasses IP-level 403 blocks).
+    pub proxy_url: Option<String>,
 }
 
 impl DiscoveryConfig {
@@ -44,7 +86,14 @@ impl DiscoveryConfig {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        Self { reddit_queries }
+        let proxy_url = std::env::var("CROWDRELAY_REDDIT_PROXY_URL")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        Self {
+            reddit_queries,
+            proxy_url,
+        }
     }
 
     #[must_use]
@@ -56,8 +105,12 @@ impl DiscoveryConfig {
 /// Static client configuration cannot fail; this error exists so a builder
 /// regression surfaces as a startup error rather than a panic.
 #[derive(Debug, thiserror::Error)]
-#[error("reddit discovery HTTP client build failed")]
-pub struct DiscoveryBuildError(#[from] reqwest::Error);
+pub enum DiscoveryBuildError {
+    #[error("reddit discovery HTTP client build failed")]
+    Client(#[from] reqwest::Error),
+    #[error("invalid proxy URL: {0}")]
+    Proxy(String),
+}
 
 pub struct RedditDiscoveryWorker {
     pool: sqlx::PgPool,
@@ -66,6 +119,10 @@ pub struct RedditDiscoveryWorker {
     config: DiscoveryConfig,
     poll_interval: Duration,
     operation_timeout: Duration,
+    /// Base URL of the agents service (for Reddit cookie fetching).
+    agent_service_url: String,
+    /// Auth key for the agents service (HMAC-derived management token).
+    agent_service_auth_key: Option<String>,
 }
 
 impl RedditDiscoveryWorker {
@@ -75,15 +132,10 @@ impl RedditDiscoveryWorker {
         config: DiscoveryConfig,
         poll_interval: Duration,
         operation_timeout: Duration,
+        agent_service_url: String,
+        agent_service_auth_key: Option<String>,
     ) -> Result<Self, DiscoveryBuildError> {
-        // Static configuration cannot fail; a panic here would be a bug, so
-        // the constructor surfaces it as an error like every other builder.
-        let client = reqwest::Client::builder()
-            .connect_timeout(operation_timeout.min(Duration::from_secs(10)))
-            .timeout(operation_timeout)
-            .user_agent(USER_AGENT)
-            .build()
-            .map_err(DiscoveryBuildError)?;
+        let client = build_reddit_client(config.proxy_url.as_deref(), operation_timeout)?;
         Ok(Self {
             pool,
             workspace_id,
@@ -91,6 +143,8 @@ impl RedditDiscoveryWorker {
             config,
             poll_interval,
             operation_timeout,
+            agent_service_url,
+            agent_service_auth_key,
         })
     }
 
@@ -99,16 +153,41 @@ impl RedditDiscoveryWorker {
             tracing::info!("reddit discovery disabled; no queries configured");
             return;
         }
+        let operation_timeout = self.operation_timeout;
+        let mut client = self.client.clone(); // cheap — Arc-backed
+        let mut current_proxy = self.config.proxy_url.clone();
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut proxy_timer = tokio::time::interval(PROXY_REFRESH_INTERVAL);
+        proxy_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        proxy_timer.tick().await; // skip first immediate tick
         loop {
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return; }
                 }
+                _ = proxy_timer.tick() => {
+                    let new_proxy = resolve_proxy_url(&self.pool, &self.config.proxy_url).await;
+                    if new_proxy != current_proxy {
+                        match build_reddit_client(new_proxy.as_deref(), operation_timeout) {
+                            Ok(new_client) => {
+                                tracing::info!(
+                                    old = current_proxy.as_deref().unwrap_or("direct"),
+                                    new = new_proxy.as_deref().unwrap_or("direct"),
+                                    "reddit discovery proxy changed, rebuilding HTTP client"
+                                );
+                                client = new_client;
+                                current_proxy = new_proxy;
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = %error, "failed to rebuild client with new proxy, keeping old client");
+                            }
+                        }
+                    }
+                }
                 _ = ticker.tick() => {
-                    match timeout(self.operation_timeout * 2, self.run_once()).await {
+                    match timeout(SWEEP_WATCHDOG_TIMEOUT, self.run_once(&client)).await {
                         Ok(Ok(imported)) if imported > 0 => {
                             tracing::info!(imported, "reddit discovery imported new places");
                         }
@@ -121,11 +200,11 @@ impl RedditDiscoveryWorker {
         }
     }
 
-    async fn run_once(&self) -> Result<usize, DiscoveryError> {
+    async fn run_once(&self, client: &reqwest::Client) -> Result<usize, DiscoveryError> {
         let repository = PostgresAudienceGraphRepository::new(self.pool.clone());
         let mut imported = 0_usize;
         for query in self.config.reddit_queries.iter().take(MAX_QUERIES_PER_PASS) {
-            let subreddits = self.search_subreddits(query).await?;
+            let subreddits = self.search_subreddits(client, query).await?;
             let inputs: Vec<UpsertPlaceInput> = subreddits
                 .iter()
                 .map(|sub| sub.to_place_input(self.workspace_id.into_uuid()))
@@ -137,7 +216,7 @@ impl RedditDiscoveryWorker {
                     index,
                     vec![EvidenceInput {
                         evidence_kind: "scan",
-                        method: "reddit_public_search",
+                        method: sub.method,
                         confidence_bp: 6_000,
                         payload: &sub.raw,
                     }],
@@ -153,21 +232,197 @@ impl RedditDiscoveryWorker {
         Ok(imported)
     }
 
+    /// Fetches Reddit session cookies from the agents service (obtained by
+    /// the Playwright scraper via Google OAuth). Returns None if the agents
+    /// service is unreachable or no cookies are stored — the caller falls
+    /// back to an unauthenticated request.
+    async fn fetch_reddit_cookies(&self, client: &reqwest::Client) -> Option<String> {
+        let auth_key = self.agent_service_auth_key.as_ref()?;
+        let ws = self.workspace_id.into_uuid();
+        let url = format!("{}/reddit/cookies", self.agent_service_url);
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("X-Workspace-Id", ws.to_string())
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body: serde_json::Value = response.json().await.ok()?;
+        let cookies = body.get("cookies")?.as_array()?;
+        let cookie_str = cookies
+            .iter()
+            .filter_map(|c| {
+                let name = c.get("name")?.as_str()?;
+                let value = c.get("value")?.as_str()?;
+                Some(format!("{name}={value}"))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if cookie_str.is_empty() {
+            None
+        } else {
+            Some(cookie_str)
+        }
+    }
+
+    /// Reads stored scrape results from the agents service. Ok(None) means
+    /// "no results for this query (yet)" — the caller falls back.
+    async fn fetch_scrape_results(
+        &self,
+        client: &reqwest::Client,
+        auth_key: &str,
+        query: &str,
+    ) -> Result<Option<Vec<AgentsScrapeRow>>, DiscoveryError> {
+        let ws = self.workspace_id.into_uuid();
+        let url = format!("{}/reddit/scrape/results", self.agent_service_url);
+        let response = client
+            .get(&url)
+            .query(&[
+                ("query", query),
+                ("limit", &MAX_SUBREDDITS_PER_QUERY.to_string()),
+            ])
+            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("X-Workspace-Id", ws.to_string())
+            .timeout(AGENTS_READ_TIMEOUT)
+            .send()
+            .await
+            .map_err(DiscoveryError::Network)?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            if status == 429 || status >= 500 {
+                // Transient failure — return an error so the caller skips
+                // this query instead of hammering the agents service with
+                // a scrape trigger or falling back to a likely-403 direct path.
+                return Err(DiscoveryError::Status(status));
+            }
+            // 404 or other 4xx — no results for this query yet.
+            tracing::warn!(status, body = %body, "agents scrape-results read failed");
+            return Ok(None);
+        }
+        let rows: Vec<AgentsScrapeRow> = response.json().await?;
+        Ok(Some(rows))
+    }
+
+    /// Asks the agents service to scrape this query through its logged-in
+    /// browser. Returns false when the scrape could not run (service down,
+    /// no credentials) — the caller then falls back to the direct path.
+    async fn trigger_agents_scrape(
+        &self,
+        client: &reqwest::Client,
+        auth_key: &str,
+        query: &str,
+    ) -> bool {
+        let ws = self.workspace_id.into_uuid();
+        let url = format!("{}/reddit/scrape", self.agent_service_url);
+        let payload = serde_json::json!({
+            "queries": [query],
+            "limit": MAX_SUBREDDITS_PER_QUERY,
+        });
+        let response = match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {auth_key}"))
+            .header("X-Workspace-Id", ws.to_string())
+            .json(&payload)
+            .timeout(AGENTS_SCRAPE_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "agents scrape trigger failed");
+                return false;
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(status = status.as_u16(), body = %body, "agents scrape trigger rejected");
+            return false;
+        }
+        true
+    }
+
+    /// Subreddit search through the agents service: read stored browser
+    /// scrape results; when empty, trigger one scrape and re-read. Ok(None)
+    /// means the agents path produced nothing (or was unreachable) and the
+    /// caller should fall back to the direct Reddit request. Network errors
+    /// are logged and treated as "no results" so the direct-Reddit fallback
+    /// is always reached.
+    async fn search_via_agents(
+        &self,
+        client: &reqwest::Client,
+        query: &str,
+    ) -> Result<Option<Vec<NormalizedSubreddit>>, DiscoveryError> {
+        let Some(auth_key) = self.agent_service_auth_key.as_deref() else {
+            return Ok(None);
+        };
+
+        let rows = match self.fetch_scrape_results(client, auth_key, query).await {
+            Ok(Some(rows)) if !rows.is_empty() => rows,
+            Ok(_) => {
+                // Nothing stored yet — scrape this query through the browser.
+                if !self.trigger_agents_scrape(client, auth_key, query).await {
+                    return Ok(None);
+                }
+                match self.fetch_scrape_results(client, auth_key, query).await {
+                    Ok(Some(rows)) if !rows.is_empty() => rows,
+                    _ => return Ok(None),
+                }
+            }
+            Err(error) => {
+                // Agents service unreachable — log and fall back to the
+                // direct Reddit path instead of aborting the whole sweep.
+                tracing::warn!(error = %error, "agents scrape-results read failed, falling back to direct Reddit");
+                return Ok(None);
+            }
+        };
+
+        // NSFW rows are excluded at the adapter boundary (defensive — the
+        // agents service already filters them before storing).
+        let subreddits: Vec<NormalizedSubreddit> = rows
+            .into_iter()
+            .filter(|row| !row.over18)
+            .map(NormalizedSubreddit::from_scrape_row)
+            .collect();
+        if subreddits.is_empty() {
+            return Ok(None);
+        }
+        tracing::debug!(query, count = subreddits.len(), "agents scrape results");
+        Ok(Some(subreddits))
+    }
+
     async fn search_subreddits(
         &self,
+        client: &reqwest::Client,
         query: &str,
     ) -> Result<Vec<NormalizedSubreddit>, DiscoveryError> {
-        let response = self
-            .client
+        // Browser-first: the agents service scrapes Reddit with a real
+        // logged-in session (the only access path that still works).
+        if let Some(subreddits) = self.search_via_agents(client, query).await? {
+            return Ok(subreddits);
+        }
+
+        // Legacy direct path — kept as fallback for deployments without the
+        // agents service. Reddit 403s unauthenticated requests, so this is
+        // effectively dark in production, but it must not regress for anyone
+        // who has it working (e.g. via proxy).
+        let mut request = client
             .get("https://www.reddit.com/subreddits/search.json")
             .query(&[
                 ("q", query),
                 ("limit", &MAX_SUBREDDITS_PER_QUERY.to_string()),
                 ("sort", "activity"),
-            ])
-            .send()
-            .await
-            .map_err(DiscoveryError::Network)?;
+            ]);
+        // Attach Reddit session cookies if available (bypasses JS challenge).
+        if let Some(cookie_header) = self.fetch_reddit_cookies(client).await {
+            request = request.header("Cookie", cookie_header);
+        }
+        let response = request.send().await.map_err(DiscoveryError::Network)?;
         if !response.status().is_success() {
             return Err(DiscoveryError::Status(response.status().as_u16()));
         }
@@ -228,6 +483,21 @@ pub(crate) struct RedditSubredditData {
     lang: Option<String>,
 }
 
+/// A row from the agents service's `reddit_scrape_results` table, returned
+/// by `GET /reddit/scrape/results`. The agents service stores browser-scraped
+/// subreddit listings; this struct deserializes them for normalization.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AgentsScrapeRow {
+    subreddit_name: String,
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    subscribers: Option<u64>,
+    url: String,
+    #[serde(default, rename = "over18")]
+    over18: bool,
+}
+
 /// The normalized slice of a listing that becomes one graph place.
 #[derive(Debug)]
 pub struct NormalizedSubreddit {
@@ -237,6 +507,7 @@ pub struct NormalizedSubreddit {
     pub description: String,
     pub subscribers: u64,
     pub raw: serde_json::Value,
+    pub method: &'static str,
 }
 
 impl NormalizedSubreddit {
@@ -249,6 +520,28 @@ impl NormalizedSubreddit {
             description: data.public_description,
             subscribers: data.subscribers.unwrap_or(0),
             raw,
+            method: "reddit_public_search",
+        }
+    }
+
+    /// Converts a row from the agents service's browser scrape results into
+    /// the normalized form. The agents service stores the subreddit name
+    /// without the `r/` prefix, so we add it here for consistency with
+    /// `from_listing`.
+    pub(crate) fn from_scrape_row(row: AgentsScrapeRow) -> Self {
+        let name = if row.subreddit_name.starts_with("r/") {
+            row.subreddit_name
+        } else {
+            format!("r/{}", row.subreddit_name)
+        };
+        Self {
+            name,
+            url: row.url,
+            display_name: row.display_name,
+            description: row.description,
+            subscribers: row.subscribers.unwrap_or(0),
+            raw: serde_json::Value::Null,
+            method: "agents_browser_scrape",
         }
     }
 
@@ -334,10 +627,12 @@ mod tests {
         // happens through from_env in production; here we pin the semantics.
         let config = DiscoveryConfig {
             reddit_queries: vec![],
+            proxy_url: None,
         };
         assert!(!config.enabled());
         let config = DiscoveryConfig {
             reddit_queries: vec!["metal".to_owned()],
+            proxy_url: None,
         };
         assert!(config.enabled());
     }

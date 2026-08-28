@@ -292,6 +292,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthIntelligenceSnapshot>, RepositoryError>;
 
+    /// Marks agent outcomes as consumed by the brain. Called after the
+    /// evaluator has factored the insights into its dispatch decisions.
+    /// Consumed rows are deleted by the retention worker after 7 days.
+    async fn mark_insights_consumed(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_ids: &[uuid::Uuid],
+    ) -> Result<u64, RepositoryError>;
+
     /// What the pitcher currently has to work with. One row per workspace
     /// rather than a list: supply is not a property of any single target, and
     /// counting it per target is how a starved pipeline stays invisible.

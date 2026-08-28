@@ -245,6 +245,35 @@ async fn announce_new_event(
         }),
     )
     .await?;
+
+    // Also create push deliveries for fans with active push endpoints and
+    // marketing consent who are near the event. This runs in the same
+    // transaction as the outbox events so a fan gets both channels (webhook
+    // for email, push for mobile) from one announcement. The push delivery
+    // worker picks these up and sends them via FCM/Web Push.
+    let push_count = enqueue_regional_push_deliveries(
+        transaction,
+        &EventPushDeliveryInput {
+            workspace_id: source.workspace_id,
+            announcement_id,
+            city_id,
+            latitude: event.latitude,
+            longitude: event.longitude,
+            event_id,
+            event_title: &event.title,
+            event_slug: &event.slug,
+        },
+    )
+    .await?;
+    if push_count > 0 {
+        tracing::info!(
+            announcement_id = %announcement_id,
+            event_id = %event_id,
+            push_recipients = push_count,
+            "enqueued event announcement push deliveries"
+        );
+    }
+
     sqlx::query(
         "UPDATE event_announcements SET regional_recipient_count = $3 WHERE workspace_id = $1 AND id = $2",
     )
@@ -549,6 +578,120 @@ async fn enqueue_regional_announcement_outbox(
     .await
     .map_err(EventSyncError::sqlx)?;
     i32::try_from(inserted).map_err(|_| EventSyncError::Database)
+}
+
+/// Input for `enqueue_regional_push_deliveries`. Grouped into a struct to
+/// keep the function signature under clippy's `too_many_arguments` threshold.
+struct EventPushDeliveryInput<'a> {
+    workspace_id: Uuid,
+    announcement_id: Uuid,
+    city_id: Option<Uuid>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    event_id: Uuid,
+    event_title: &'a str,
+    event_slug: &'a str,
+}
+
+/// Creates `fan_push_deliveries` rows for fans with active push endpoints
+/// and marketing consent who are near the event city. This is the push
+/// channel counterpart to `enqueue_regional_announcement_outbox` (which
+/// creates webhook/email deliveries). Both run in the same transaction so
+/// a fan gets both channels from one announcement.
+///
+/// The geo filter matches the outbox logic: fans whose city of interest is
+/// either the event city or within 150km of the event coordinates.
+///
+/// `ON CONFLICT DO NOTHING` makes re-runs idempotent — the
+/// `(workspace_id, source_kind, source_id, endpoint_id)` unique constraint
+/// prevents duplicate pushes for the same announcement + endpoint.
+async fn enqueue_regional_push_deliveries(
+    transaction: &mut Transaction<'_, Postgres>,
+    input: &EventPushDeliveryInput<'_>,
+) -> Result<i32, EventSyncError> {
+    let title = if input.event_title.chars().count() > 100 {
+        let byte_end = input
+            .event_title
+            .char_indices()
+            .nth(100)
+            .map_or(input.event_title.len(), |(b, _)| b);
+        input.event_title.get(..byte_end).unwrap_or(input.event_title)
+    } else {
+        input.event_title
+    };
+    let body = "New show near you. Tap to see details and get tickets.";
+    let target_path = format!("/events/{}", input.event_slug);
+    let collapse_key = format!("event-{}", input.event_id);
+
+    let inserted = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH latest_marketing_consent AS (
+            SELECT DISTINCT ON (consent.fan_id)
+                consent.fan_id,
+                consent.granted
+            FROM fan_consents AS consent
+            WHERE consent.workspace_id = $1
+              AND consent.purpose = 'marketing'
+            ORDER BY consent.fan_id, consent.recorded_at DESC, consent.id DESC
+        ), eligible_fans AS (
+            SELECT DISTINCT ON (fan.id)
+                fan.id
+            FROM fans AS fan
+            JOIN latest_marketing_consent AS consent
+              ON consent.fan_id = fan.id
+             AND consent.granted
+            JOIN fan_city_interests AS interest
+              ON interest.workspace_id = fan.workspace_id
+             AND interest.fan_id = fan.id
+            JOIN cities AS fan_city ON fan_city.id = interest.city_id
+            WHERE fan.workspace_id = $1
+              AND fan.status = 'active'
+              AND (
+                  ($2::uuid IS NOT NULL AND interest.city_id = $2)
+                  OR (
+                      $3::double precision IS NOT NULL
+                      AND $4::double precision IS NOT NULL
+                      AND fan_city.latitude IS NOT NULL
+                      AND fan_city.longitude IS NOT NULL
+                      AND 6371.0 * 2.0 * asin(least(1.0, greatest(0.0, sqrt(
+                          power(sin(radians((fan_city.latitude - $3) / 2.0)), 2)
+                          + cos(radians($3)) * cos(radians(fan_city.latitude))
+                          * power(sin(radians((fan_city.longitude - $4) / 2.0)), 2)
+                      )))) <= 150.0
+                  )
+              )
+        )
+        INSERT INTO fan_push_deliveries
+            (workspace_id, fan_id, endpoint_id, source_kind, source_id,
+             category, title, body, target_path, collapse_key)
+        SELECT
+            $1, fan.id, endpoint.id,
+            'event_announcement', $5,
+            'shows', $6, $7, $8, $9
+        FROM eligible_fans AS fan
+        JOIN fan_push_endpoints AS endpoint
+          ON endpoint.workspace_id = $1
+         AND endpoint.fan_id = fan.id
+         AND endpoint.active
+         AND endpoint.invalidated_at IS NULL
+        ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
+        RETURNING 1
+        "#,
+    )
+    .bind(input.workspace_id)
+    .bind(input.city_id)
+    .bind(input.latitude)
+    .bind(input.longitude)
+    .bind(input.announcement_id)
+    .bind(title)
+    .bind(body)
+    .bind(&target_path)
+    .bind(&collapse_key)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(EventSyncError::sqlx)?;
+
+    i32::try_from(inserted.len()).map_err(|_| EventSyncError::Database)
 }
 
 async fn append_delayed_event_outbox(

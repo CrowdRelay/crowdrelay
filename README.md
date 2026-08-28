@@ -8,11 +8,11 @@ It is built to run **a whole roster from one seat**: each artist is a workspace 
 
 The core idea: **business state and business decisions stay in CrowdRelay; external services only execute the work they are asked to do.** Email, n8n, Stripe, Calendar, Bandsintown and LLM-assisted copy are adapters, not sources of truth.
 
-There is no AI agent in here — deliberately. The system is deterministic Rust, state machines, enums, persisted snapshots, explicit conditions, bounded authority, retries and failure handling. It finds opportunities, makes decisions, executes work, survives failures and knows when it's not allowed to act.
+There is no LLM making decisions in here — deliberately. The brain is deterministic Rust, state machines, enums, persisted snapshots, explicit conditions, bounded authority, retries and failure handling. It finds opportunities, makes decisions, executes work, survives failures and knows when it's not allowed to act. The brain dispatches LLM workers (press pitches, social posts, community engagement drafts) via the separately deployed `crowdrelay-agents` service — the LLMs produce drafts, the brain decides what to do with them.
 
 ## What the brain does
 
-The Autopilot evaluates twenty-one bounded contexts on every cycle:
+The Autopilot evaluates twenty-two bounded contexts on every cycle:
 
 | context | what it handles |
 |---|---|
@@ -36,6 +36,7 @@ The Autopilot evaluates twenty-one bounded contexts on every cycle:
 | **Growth Metrics** | trend and anomaly detection across metric series |
 | **Growth Debt** | neglected committed work: quiet relationships, missed milestones, missing assets |
 | **Outreach Supply** | detects starved pipelines, requests discovery sweeps |
+| **Growth Intelligence** | dispatches LLM workers (reddit-scanner, press-pitch, social-post, community-engager, signal-inviter, growth-strategist) on cooldown-based cadences; feeds previous insights back into the next dispatch |
 | **Plays** | multi-step campaigns with fan anchors and consent re-checks |
 
 Every context passes through a shared funnel: confidence gate → authority level → class ceiling → envelope budget → deliverability halt. The stricter limit wins. Money and contracts stay behind approval in every posture.
@@ -95,6 +96,8 @@ One organization, many artist workspaces, one operator view:
 - free-reach pitching waves with evidence packets and placement verification;
 - beacon network: scene-partner discovery, local amplification, invite batches;
 - community outreach packs assigned to social-skill team members;
+- growth intelligence loop: deterministic brain dispatches LLM workers (reddit-scanner, press-pitch, social-post, community-engager, signal-inviter, growth-strategist) on cooldown cadences, feeds insights back into the next dispatch, and maps worker outcomes into outreach targets and community posts;
+- Reddit authenticated scraping: Playwright-based scraper in `crowdrelay-agents` logs into Reddit via Google OAuth, extracts session cookies, and serves them to the worker for authenticated JSON API access (bypasses Reddit's JS bot-detection challenge);
 - deliverability ramp and bounce/complaint halts;
 - momentum-pullback and core-beta strategies with benchmark-settled outcomes;
 - strategy standings that narrow allocation before retiring;

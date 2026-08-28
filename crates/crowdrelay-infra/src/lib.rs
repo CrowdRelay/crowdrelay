@@ -40,6 +40,7 @@ pub mod observability;
 pub mod portfolio;
 pub mod proofs;
 pub mod push_preferences;
+pub mod reddit_proxy;
 pub mod referrals;
 pub mod regional;
 pub mod sensitive_response;

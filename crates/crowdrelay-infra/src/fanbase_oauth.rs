@@ -534,6 +534,172 @@ impl FanbaseOauthRepository {
             .await?;
         Ok(result.rows_affected())
     }
+
+    /// Exchange username/password for an access token using the OAuth2
+    /// "password" grant (Reddit "script" app type). Unlike the web-app flow,
+    /// this doesn't require a redirect URI or user interaction — the worker
+    /// authenticates directly with the Reddit account credentials.
+    ///
+    /// Reddit script apps do NOT issue a refresh token. When the access token
+    /// expires, the caller must call this method again. The token is stored
+    /// in `fanbase_connections` so the existing `load_tokens` path works.
+    ///
+    /// If a Reddit connection already exists for the workspace, it is updated.
+    /// Otherwise a new connection row is created.
+    pub async fn password_grant(
+        &self,
+        workspace_id: Uuid,
+        config: &FanbaseOauthConfig,
+        username: &str,
+        password: &str,
+        encryption_key: &SensitiveResponseKey,
+    ) -> Result<StoredTokens, FanbaseOauthError> {
+        let form = [
+            ("grant_type", "password"),
+            ("username", username),
+            ("password", password),
+            ("client_id", config.client_id.as_str()),
+            ("client_secret", config.client_secret.as_str()),
+        ];
+        let response = self
+            .http_client
+            .post(&config.token_url)
+            .form(&form)
+            .send()
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await?;
+        if !status.is_success() {
+            let error = body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(FanbaseOauthError::TokenExchange(format!(
+                "password grant failed: {error}"
+            )));
+        }
+        let token_response: TokenResponse = serde_json::from_value(body)
+            .map_err(|e| FanbaseOauthError::TokenExchange(e.to_string()))?;
+        let encrypted = EncryptedTokens::encrypt(&token_response, encryption_key)?;
+
+        // Upsert the connection: if a Reddit connection exists for this
+        // username, update it; otherwise create one. The
+        // `external_account_ref` is the Reddit username — there's no
+        // separate "me" API call to resolve it for script apps.
+        // `credential_ref` and `label` are NOT NULL with CHECK constraints;
+        // for script-app connections there's no external credential ref, so
+        // we use a synthetic placeholder.
+        let connection_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                id, workspace_id, platform, external_account_ref,
+                credential_ref, label, status,
+                encrypted_access_token, encrypted_refresh_token,
+                token_expires_at, token_scope, token_type
+            )
+            VALUES ($1, $2, 'reddit', $3, 'script-app', $3, 'connected', $4, $5, $6, $7, $8)
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                encrypted_access_token = EXCLUDED.encrypted_access_token,
+                encrypted_refresh_token = EXCLUDED.encrypted_refresh_token,
+                token_expires_at = EXCLUDED.token_expires_at,
+                token_scope = EXCLUDED.token_scope,
+                token_type = EXCLUDED.token_type,
+                status = 'connected',
+                updated_at = now()
+            RETURNING id
+            "#,
+        )
+        .bind(connection_id)
+        .bind(workspace_id)
+        .bind(username)
+        .bind(&encrypted.encrypted_access)
+        .bind(&encrypted.encrypted_refresh)
+        .bind(encrypted.expires_at)
+        .bind(&encrypted.scope)
+        .bind(&encrypted.token_type)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(StoredTokens {
+            access_token: token_response.access_token,
+            refresh_token: token_response.refresh_token,
+            expires_at: encrypted.expires_at,
+            scope: token_response.scope,
+            token_type: token_response
+                .token_type
+                .unwrap_or_else(|| "bearer".to_owned()),
+        })
+    }
+}
+
+/// Registers a manually-posted Reddit URL for a community post that was
+/// in `awaiting_manual_post` status. Extracts the Reddit post ID from
+/// the URL and transitions the row to `posted` so the metrics poller
+/// can track it. Called by the API layer when the operator confirms
+/// they've posted manually on Reddit.
+///
+/// # Errors
+/// Returns `FanbaseOauthError::Database` if the post doesn't exist or
+/// isn't in `awaiting_manual_post` status.
+pub async fn register_manual_reddit_post(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    community_post_id: Uuid,
+    reddit_post_url: &str,
+) -> Result<(), FanbaseOauthError> {
+    // Extract the Reddit post ID from the URL.
+    // Reddit post URLs look like: https://www.reddit.com/r/subreddit/comments/abc123/title/
+    // The post ID is the 6-character alphanumeric segment after "comments/".
+    let reddit_post_id = extract_reddit_post_id(reddit_post_url).ok_or_else(|| {
+        FanbaseOauthError::TokenExchange(format!(
+            "could not extract post ID from URL: {reddit_post_url}"
+        ))
+    })?;
+
+    let result = sqlx::query(
+        r#"
+        UPDATE community_posts
+        SET status = 'posted',
+            reddit_post_id = $3,
+            reddit_post_url = $4,
+            posted_at = now(),
+            updated_at = now(),
+            error_message = NULL
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status = 'awaiting_manual_post'
+        "#,
+    )
+    .bind(community_post_id)
+    .bind(workspace_id)
+    .bind(&reddit_post_id)
+    .bind(reddit_post_url)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(FanbaseOauthError::TokenExchange(
+            "community post not found or not in awaiting_manual_post status".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Extracts the Reddit post ID from a URL like:
+/// `https://www.reddit.com/r/metal/comments/abc123/title/` → `abc123`
+fn extract_reddit_post_id(url: &str) -> Option<String> {
+    let parts: Vec<&str> = url.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "comments"
+            && let Some(id) = parts.get(i + 1)
+            && !id.is_empty()
+        {
+            return Some((*id).to_owned());
+        }
+    }
+    None
 }
 
 #[derive(sqlx::FromRow)]

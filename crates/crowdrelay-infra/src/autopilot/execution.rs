@@ -259,7 +259,8 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
         | AutopilotActionPayload::RequestAgentContent { .. }
         | AutopilotActionPayload::RequestAgentRun { .. }
-        | AutopilotActionPayload::RequestCommunityEngagement { .. } => {}
+        | AutopilotActionPayload::RequestCommunityEngagement { .. }
+        | AutopilotActionPayload::RequestSignalPush { .. } => {}
     }
 
     for (kind, subject_id, baseline_value, due_at) in plans {
@@ -421,6 +422,9 @@ pub(super) async fn record_execution_outcome(
         }
         AutopilotActionPayload::RequestCommunityEngagement { .. } => {
             ("community_engagement_requested", 1.0, None)
+        }
+        AutopilotActionPayload::RequestSignalPush { .. } => {
+            ("signal_push_requested", 1.0, None)
         }
     };
     sqlx::query(

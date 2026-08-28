@@ -29,6 +29,7 @@ use crowdrelay_worker::{
     audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
+    community_executor::{CommunityExecutorWorker, reddit_config_from_env},
     discovery::{DiscoveryConfig, RedditDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
@@ -319,6 +320,64 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         tracing::info!("agent outcome ingestion is disabled by process configuration");
         None
     };
+    // Community engagement executor: posts approved community.engage.request
+    // actions to Reddit. When Reddit OAuth is configured, posts automatically.
+    // When not configured (Reddit API access unavailable), runs in manual mode:
+    // creates `community_posts` rows marked `awaiting_manual_post` — the
+    // operator posts manually and registers the URL via the API. Metrics
+    // polling works in both modes via Reddit's public JSON endpoint.
+    let community_executor = if let Some(reddit_config) = reddit_config_from_env() {
+        match CommunityExecutorWorker::new(
+            database.clone(),
+            workspace_id,
+            reddit_config,
+            config.response_encryption_key.clone(),
+            config.database.operation_timeout,
+            false,
+            config.reddit_proxy_url.clone(),
+            config.agent_service_url.clone(),
+            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
+        ) {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                tracing::warn!(error = %error, "community executor disabled: HTTP client build failed");
+                None
+            }
+        }
+    } else {
+        // No Reddit OAuth — spawn in manual mode so the loop still works.
+        // The operator posts manually; metrics are tracked via public JSON.
+        let manual_config = crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig {
+            platform: crowdrelay_domain::fanbase::Platform::Reddit,
+            client_id: String::new(),
+            client_secret: String::new(),
+            authorize_url: String::new(),
+            token_url: String::new(),
+            scopes: Vec::new(),
+        };
+        match CommunityExecutorWorker::new(
+            database.clone(),
+            workspace_id,
+            manual_config,
+            config.response_encryption_key.clone(),
+            config.database.operation_timeout,
+            true,
+            config.reddit_proxy_url.clone(),
+            config.agent_service_url.clone(),
+            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
+        ) {
+            Ok(worker) => {
+                tracing::info!(
+                    "community executor running in MANUAL MODE — posts will be drafted but not posted automatically; operator must post manually and register the URL via the API"
+                );
+                Some(worker)
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "community executor disabled: HTTP client build failed");
+                None
+            }
+        }
+    };
     // Deliberately not gated on `autopilot_enabled`: an operator whose agent is
     // switched off is exactly the one who most needs to be told so.
     let operator_brief = OperatorBriefWorker::new(
@@ -343,6 +402,8 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             discovery_config,
             DISCOVERY_SWEEP_INTERVAL,
             config.database.operation_timeout,
+            config.agent_service_url.clone(),
+            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
         )?)
     } else {
         tracing::info!("reddit discovery disabled; CROWDRELAY_DISCOVERY_REDDIT_QUERIES not set");
@@ -373,6 +434,24 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let audience_graph_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
+    let community_executor_shutdown = shutdown_receiver.clone();
+
+    // Growth readiness summary: tells the operator exactly which growth
+    // systems are active and what's missing. This is the single most
+    // important log line for diagnosing "why isn't the system growing fans?"
+    // Each component maps to a stage of the North Star loop:
+    //   aggregate → grow → convert → learn
+    let growth_readiness = GrowthReadiness {
+        autopilot_enabled: autopilot_worker.is_some(),
+        agent_outcomes_enabled: agent_outcome_worker.is_some(),
+        push_delivery_enabled: push_delivery_worker.is_some(),
+        community_executor_enabled: community_executor.is_some(),
+        reddit_discovery_enabled: reddit_discovery.is_some(),
+        ad_conversion_enabled: ad_conversion_worker.is_some(),
+        random_draws_enabled: weighted_draw_worker.is_some(),
+    };
+    growth_readiness.log();
+
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         outbox_worker.run(shutdown_receiver).await;
@@ -446,6 +525,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         }
         "agent outcome worker"
     });
+    if let Some(worker) = community_executor {
+        runtime_tasks.spawn(async move {
+            worker.run(community_executor_shutdown).await;
+            "community executor"
+        });
+    }
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
     checks.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -676,6 +761,93 @@ async fn validate_active_endpoint_secrets(
     }
 
     Ok(())
+}
+
+/// Growth readiness state: which fan-growth systems are active at startup.
+/// Logged once at boot so the operator can immediately see what's running
+/// and what needs configuration. Maps directly to the North Star loop:
+///   aggregate → grow → convert → learn
+struct GrowthReadiness {
+    /// The deterministic brain. Without this, no growth decisions are made.
+    /// Env: CROWDRELAY_AUTOPILOT_ENABLED=true
+    autopilot_enabled: bool,
+    /// LLM worker outcome ingestion. Without this, the brain can't see what
+    /// the agents produced. Env: CROWDRELAY_AGENT_OUTCOMES_ENABLED (default: true)
+    agent_outcomes_enabled: bool,
+    /// Fan push notification delivery. Without this, Signal invites can't
+    /// be sent. Env: CROWDRELAY_PUSH_DELIVERY_ENABLED=true
+    push_delivery_enabled: bool,
+    /// Reddit posting executor. Without this, community engagement posts are
+    /// drafted but never posted. Env: CROWDRELAY_FANBASE_OAUTH_REDDIT_CLIENT_ID
+    community_executor_enabled: bool,
+    /// Reddit subreddit discovery. Without this, the system can't find new
+    /// communities to engage with. Env: CROWDRELAY_DISCOVERY_REDDIT_QUERIES
+    reddit_discovery_enabled: bool,
+    /// Ad conversion tracking (Meta/Google/Bandsintown). Attribution, not
+    /// fan creation. Env: CROWDRELAY_META_CAPI_ENABLED, etc.
+    ad_conversion_enabled: bool,
+    /// Referral-weighted reward draws. Fan-led growth mechanic.
+    /// Env: CROWDRELAY_RANDOM_DRAWS_ENABLED=true
+    random_draws_enabled: bool,
+}
+
+impl GrowthReadiness {
+    /// Logs a structured growth readiness summary. Each component is logged
+    /// as a field so it can be searched/alerted on in log aggregation.
+    fn log(&self) {
+        let active = [
+            self.autopilot_enabled,
+            self.agent_outcomes_enabled,
+            self.push_delivery_enabled,
+            self.community_executor_enabled,
+            self.reddit_discovery_enabled,
+            self.ad_conversion_enabled,
+            self.random_draws_enabled,
+        ]
+        .iter()
+        .filter(|&&v| v)
+        .count();
+
+        tracing::info!(
+            active_components = active,
+            total_components = 7,
+            autopilot = self.autopilot_enabled,
+            agent_outcomes = self.agent_outcomes_enabled,
+            push_delivery = self.push_delivery_enabled,
+            community_executor = self.community_executor_enabled,
+            reddit_discovery = self.reddit_discovery_enabled,
+            ad_conversion = self.ad_conversion_enabled,
+            random_draws = self.random_draws_enabled,
+            "growth readiness: {}/7 fan-growth components active",
+            active,
+        );
+
+        if !self.autopilot_enabled {
+            tracing::warn!(
+                "growth readiness: autopilot is OFF — set CROWDRELAY_AUTOPILOT_ENABLED=true to enable the deterministic brain"
+            );
+        }
+        if !self.agent_outcomes_enabled {
+            tracing::warn!(
+                "growth readiness: agent outcomes are OFF — set CROWDRELAY_AGENT_OUTCOMES_ENABLED=true to feed LLM worker results to the brain"
+            );
+        }
+        if !self.community_executor_enabled {
+            tracing::warn!(
+                "growth readiness: community executor is OFF — set CROWDRELAY_FANBASE_OAUTH_REDDIT_CLIENT_ID for automatic posting, or the executor will run in manual mode (operator posts manually)"
+            );
+        }
+        if !self.reddit_discovery_enabled {
+            tracing::warn!(
+                "growth readiness: reddit discovery is OFF — set CROWDRELAY_DISCOVERY_REDDIT_QUERIES to find new communities to engage with"
+            );
+        }
+        if !self.push_delivery_enabled {
+            tracing::warn!(
+                "growth readiness: push delivery is OFF — set CROWDRELAY_PUSH_DELIVERY_ENABLED=true to send Signal push notifications"
+            );
+        }
+    }
 }
 
 async fn shutdown_signal() {

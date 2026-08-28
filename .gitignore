@@ -68,3 +68,4 @@ scripts/provision-*.sh
 scripts/local/
 backups-local/
 chrome/
+*.local.md

@@ -16,7 +16,7 @@ use crowdrelay_domain::{
     free_reach::{WaveAnchor, WaveExpiry},
     funding::FundingPolicy,
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
-    growth_intelligence::GrowthIntelligencePolicy,
+    growth_intelligence::{AgentTier, GrowthIntelligencePolicy},
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
     learning::{PlayRecord, PlayStanding},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
@@ -671,6 +671,10 @@ pub enum AutopilotActionPayload {
         template_id: String,
         prompt: String,
         priority: u8,
+        /// Intelligent token optimization: "basic" routes to free-tier models,
+        /// "premium" routes to connected paid providers (Claude, GPT-4o, GLM,
+        /// Devin). The brain classifies each task based on stakes and complexity.
+        tier: AgentTier,
     },
     /// A community engagement post drafted by the `community-engager` worker
     /// and approved by the operator. Execution emits an outbox event for the
@@ -684,6 +688,19 @@ pub enum AutopilotActionPayload {
         title: String,
         body: String,
         smart_link: Option<String>,
+    },
+    /// A Signal push notification drafted by the `signal-inviter` worker and
+    /// approved by the operator. Execution inserts `fan_push_deliveries` rows
+    /// for consented fans with active push endpoints. The PushDeliveryWorker
+    /// then sends them via FCM/Web Push. A sent push cannot be unsent, so this
+    /// is OwnedAudience — fans who opted in, not strangers.
+    RequestSignalPush {
+        task_id: uuid::Uuid,
+        title: String,
+        body: String,
+        target_path: Option<String>,
+        event_id: Option<uuid::Uuid>,
+        segment: Option<String>,
     },
 }
 
@@ -729,9 +746,9 @@ impl AutopilotActionPayload {
             | Self::RequestCommunityEngagement { .. } => ActionClass::ThirdParty,
 
             // Fans who opted in. Free, but a sent message cannot be unsent.
-            Self::RequestFanLifecycleMessage { .. } | Self::RequestAudienceCampaign { .. } => {
-                ActionClass::OwnedAudience
-            }
+            Self::RequestFanLifecycleMessage { .. }
+            | Self::RequestAudienceCampaign { .. }
+            | Self::RequestSignalPush { .. } => ActionClass::OwnedAudience,
 
             // Ours, free and undoable by doing the opposite. The team
             // assignment email is here deliberately: it reaches our own staff,
@@ -845,6 +862,7 @@ impl AutopilotActionPayload {
             Self::RequestAgentContent { .. } => "agent.content.request",
             Self::RequestAgentRun { .. } => "agent.run.request",
             Self::RequestCommunityEngagement { .. } => "community.engage.request",
+            Self::RequestSignalPush { .. } => "signal.push.request",
         }
     }
 }

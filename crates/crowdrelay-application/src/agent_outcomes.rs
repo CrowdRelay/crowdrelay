@@ -13,13 +13,14 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The seven outcome kinds the agents service may emit. Mirrors the zod enum
+/// The eight outcome kinds the agents service may emit. Mirrors the zod enum
 /// in `crowdrelay-agents/src/agent/structured.ts`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeKind {
     PressPitch,
     SocialPost,
+    SignalPush,
     AudienceSegments,
     OutreachTargets,
     CampaignInsight,
@@ -33,6 +34,7 @@ impl OutcomeKind {
         match self {
             Self::PressPitch => "press_pitch",
             Self::SocialPost => "social_post",
+            Self::SignalPush => "signal_push",
             Self::AudienceSegments => "audience_segments",
             Self::OutreachTargets => "outreach_targets",
             Self::CampaignInsight => "campaign_insight",
@@ -45,7 +47,7 @@ impl OutcomeKind {
     #[must_use]
     pub const fn autopilot_context(self) -> &'static str {
         match self {
-            Self::PressPitch | Self::SocialPost => "promotion_budget",
+            Self::PressPitch | Self::SocialPost | Self::SignalPush => "promotion_budget",
             Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets => "booking_opportunity",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => {
@@ -59,7 +61,9 @@ impl OutcomeKind {
     #[must_use]
     pub const fn disposition(self) -> &'static str {
         match self {
-            Self::PressPitch | Self::SocialPost | Self::OutreachTargets => "require_approval",
+            Self::PressPitch | Self::SocialPost | Self::SignalPush | Self::OutreachTargets => {
+                "require_approval"
+            }
             Self::AudienceSegments
             | Self::CampaignInsight
             | Self::ReleasePlanNote
@@ -71,7 +75,7 @@ impl OutcomeKind {
     #[must_use]
     pub const fn decision_kind(self) -> &'static str {
         match self {
-            Self::PressPitch | Self::SocialPost => "agent_content_proposal",
+            Self::PressPitch | Self::SocialPost | Self::SignalPush => "agent_content_proposal",
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
@@ -117,8 +121,6 @@ pub enum OutcomeValidationError {
     ConfidenceOutOfRange(i32),
     #[error("payload is not a JSON object")]
     PayloadNotObject,
-    #[error("item count exceeds the 25-item cap")]
-    TooManyItems,
     #[error("payload failed to deserialize: {0}")]
     Deserialize(#[from] serde_json::Error),
 }
@@ -129,7 +131,7 @@ pub enum OutcomeValidationError {
 ///
 /// # Errors
 /// - [`OutcomeValidationError::UnknownSchemaVersion`] if `schema_version != 1`.
-/// - [`OutcomeValidationError::UnknownKind`] if `kind` is not one of the seven.
+/// - [`OutcomeValidationError::UnknownKind`] if `kind` is not one of the eight.
 /// - [`OutcomeValidationError::ConfidenceOutOfRange`] if outside `0..=10000`.
 /// - [`OutcomeValidationError::PayloadNotObject`] if `payload` is not an object.
 /// - [`OutcomeValidationError::Deserialize`] if `payload` does not match
@@ -152,6 +154,7 @@ pub fn validate(
     let kind = match kind {
         "press_pitch" => OutcomeKind::PressPitch,
         "social_post" => OutcomeKind::SocialPost,
+        "signal_push" => OutcomeKind::SignalPush,
         "audience_segments" => OutcomeKind::AudienceSegments,
         "outreach_targets" => OutcomeKind::OutreachTargets,
         "campaign_insight" => OutcomeKind::CampaignInsight,
@@ -293,5 +296,26 @@ mod tests {
             .expect("valid");
             assert_eq!(outcome.kind.disposition(), "recommend_only");
         }
+    }
+
+    #[test]
+    fn validates_signal_push_kind() {
+        let outcome = validate(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "signal_push",
+            1,
+            &payload("push notification draft"),
+            8000,
+            "k".to_owned(),
+        )
+        .expect("valid signal_push outcome");
+        assert_eq!(outcome.kind, OutcomeKind::SignalPush);
+        assert_eq!(outcome.kind.as_str(), "signal_push");
+        assert_eq!(outcome.kind.disposition(), "require_approval");
+        assert_eq!(outcome.kind.decision_kind(), "agent_content_proposal");
+        assert_eq!(outcome.kind.autopilot_context(), "promotion_budget");
     }
 }

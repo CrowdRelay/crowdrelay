@@ -10,6 +10,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Intelligent token optimization tier. The brain classifies each dispatched
+/// task based on stakes and complexity:
+///
+/// - `Basic`: free-tier models handle volume (scan, draft, suggest)
+/// - `Premium`: connected paid providers handle stakes (human contact, complex
+///   analysis, strategic planning)
+///
+/// If no premium credential is connected, premium tasks silently fall back to
+/// basic — the system never blocks, it degrades.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentTier {
+    #[default]
+    Basic,
+    Premium,
+}
+
+impl AgentTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Premium => "premium",
+        }
+    }
+}
+
+/// A recent unconsumed insight from an agent outcome. The brain reads these
+/// before dispatching the next worker run and includes them in the dispatch
+/// prompt so the worker knows what was already discovered. After the brain
+/// factors an insight into its planning, it marks the row as consumed.
+#[derive(Clone, Debug, Serialize)]
+pub struct RecentInsight {
+    /// The `agent_outcomes.id` — used to mark the row consumed after planning.
+    pub outcome_id: uuid::Uuid,
+    /// Which template produced this insight (derived from the task).
+    pub template_id: String,
+    /// The outcome kind: `campaign_insight`, `generic_insight`, `release_plan_note`.
+    pub kind: String,
+    /// A short headline from the insight payload, for inclusion in the prompt.
+    pub headline: String,
+    /// The detail/body of the insight, for inclusion in the prompt.
+    pub detail: String,
+    /// The recommended action, if any.
+    pub recommended_action: Option<String>,
+}
+
 /// A snapshot of one worker template's dispatch state: when it last ran and
 /// whether the workspace's current situation warrants a new dispatch. The
 /// infra layer computes this from agent_service_tasks history and workspace
@@ -28,6 +74,58 @@ pub struct GrowthIntelligenceSnapshot {
     pub fan_growth_stagnant: bool,
     /// Number of unengaged outreach targets (accepted but not yet engaged).
     pub unengaged_outreach_targets: u32,
+    /// The actual unengaged outreach targets (id, display name, subreddit)
+    /// for the community-engager prompt. Only populated for the
+    /// `community-engager` template snapshot. The brain feeds these into
+    /// the dispatch prompt so the LLM can produce concrete social_post
+    /// outcomes with `target_id` and `subreddit` fields.
+    pub unengaged_targets: Vec<UnengagedTarget>,
+    /// Unconsumed insights from recent worker runs, keyed by template_id.
+    /// The brain feeds these into the next dispatch prompt and marks them
+    /// consumed after planning. This closes the feedback loop: workers
+    /// produce insights → brain reads them → brain feeds them forward →
+    /// brain marks them consumed → retention deletes after 7 days.
+    pub recent_insights: Vec<RecentInsight>,
+    /// Latest community engagement performance per subreddit, from
+    /// `community_post_metrics`. Only populated for the `community-engager`
+    /// template snapshot. The brain uses this to avoid dispatching to
+    /// subreddits with consistently poor engagement and to include
+    /// performance context in the worker prompt.
+    pub community_engagement_history: Vec<CommunityEngagementSummary>,
+}
+
+/// A single unengaged outreach target that the community-engager should
+/// draft a post for. Carries the concrete `target_id` and `subreddit` the
+/// LLM needs to produce a `social_post` outcome with a valid
+/// `community.engage.request` action.
+#[derive(Clone, Debug, Serialize)]
+pub struct UnengagedTarget {
+    /// The `agent_outreach_targets.id` — becomes `target_id` in the
+    /// social_post outcome item.
+    pub target_id: uuid::Uuid,
+    /// Human-readable name, e.g. "r/MetalPoland".
+    pub display_name: String,
+    /// Clean subreddit name without `r/` prefix, e.g. "MetalPoland".
+    pub subreddit: String,
+}
+
+/// Aggregated performance of a single subreddit's recent community posts.
+/// Derived from the latest `community_post_metrics` row per post, averaged
+/// across all posts to that subreddit in the last 30 days.
+#[derive(Clone, Debug, Serialize)]
+pub struct CommunityEngagementSummary {
+    /// The subreddit name (without `r/` prefix).
+    pub subreddit: String,
+    /// Number of posts to this subreddit in the window.
+    pub post_count: u32,
+    /// Average score across posts (Reddit's hotness ranking score).
+    pub avg_score: f64,
+    /// Average upvotes across posts.
+    pub avg_upvotes: f64,
+    /// Average comment count across posts.
+    pub avg_comments: f64,
+    /// Average upvote ratio across posts (0.0–1.0), if available.
+    pub avg_upvote_ratio: Option<f64>,
 }
 
 /// Cooldown intervals (in hours) for each worker template. The brain will

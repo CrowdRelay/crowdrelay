@@ -329,6 +329,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn mark_insights_consumed(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_ids: &[uuid::Uuid],
+    ) -> Result<u64, RepositoryError> {
+        super::operations::mark_insights_consumed(self, workspace_id, outcome_ids).await
+    }
+
     async fn load_outreach_supply_snapshot(
         &self,
         workspace_id: WorkspaceId,

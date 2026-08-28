@@ -422,3 +422,39 @@ pub async fn delete_fanbase_connection(
         Err(error) => error_response(error, request_id_value),
     }
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterManualPostRequest {
+    reddit_post_url: String,
+}
+
+/// Registers a manually-posted Reddit URL for a community post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+/// Transitions the post to `posted` status so the metrics poller can track
+/// its performance via Reddit's public JSON endpoint.
+pub async fn register_manual_community_post(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(community_post_id): Path<Uuid>,
+    payload: Result<Json<RegisterManualPostRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(body)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    match crowdrelay_infra::fanbase_oauth::register_manual_reddit_post(
+        &state.database,
+        workspace(&state),
+        community_post_id,
+        &body.reddit_post_url,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to register manual community post");
+            Problem::bad_request(request_id_value).into_response()
+        }
+    }
+}

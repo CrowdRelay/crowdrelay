@@ -25,6 +25,7 @@ pub mod agent_outcomes;
 pub mod audience_graph;
 pub mod autopilot;
 pub mod bootstrap;
+pub mod community_executor;
 pub mod discovery;
 pub mod draws;
 pub mod event_sync;

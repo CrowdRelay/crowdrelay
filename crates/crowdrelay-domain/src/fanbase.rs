@@ -131,7 +131,7 @@ impl Platform {
             Self::Meta => &["ads_management", "ads_read"],
             Self::GoogleAds => &["https://www.googleapis.com/auth/adwords"],
             Self::Spotify => &["user-read-email", "playlist-modify-public"],
-            Self::Reddit => &["identity", "read"],
+            Self::Reddit => &["identity", "read", "submit"],
             Self::Tiktok => &["user.info.basic", "ad.management"],
             Self::Bandsintown => &[],
         }

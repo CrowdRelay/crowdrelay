@@ -62,3 +62,49 @@ jobs:
       # Virya web is private and intentionally not coupled to an extra PAT here.
       # Its reciprocal upstream-contract workflow checks current CrowdRelay main
       # on every relevant change and on the same six-hour cadence.
+
+  # When the OpenAPI spec changes on main, send a repository_dispatch event to
+  # each downstream repo so it can auto-regenerate its contract files and open
+  # a PR. This closes the manual-sync gap that caused stale SHA markers.
+  # Requires a PAT with repo:dispatch scope stored as CROWDRELAY_CONTRACT_PAT.
+  # The PAT must have access to CrowdRelay/virya (private) for the dispatch to
+  # reach it; if not, virya's polling upstream-contract workflow is the fallback.
+  # If the secret is absent entirely, the job is skipped — downstream repos
+  # still have their polling upstream-contract workflows as a fallback.
+  propagate:
+    name: Notify downstream repos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: public-consumers
+    steps:
+      - name: Check out CrowdRelay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: crowdrelay
+
+      - name: Compute OpenAPI SHA and send dispatch
+        env:
+          GH_TOKEN: ${{ secrets.CROWDRELAY_CONTRACT_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "CROWDRELAY_CONTRACT_PAT not set — skipping dispatch (downstream polling will catch up)"
+            exit 0
+          fi
+          OPENAPI_SHA="$(sha256sum crowdrelay/openapi/openapi.yaml | awk '{print $1}')"
+          CROWDRELAY_SHA="${{ github.sha }}"
+          echo "OpenAPI SHA256: $OPENAPI_SHA"
+          echo "CrowdRelay commit: $CROWDRELAY_SHA"
+
+          for repo in CrowdRelay/virya-signal CrowdRelay/virya CrowdRelay/synesthesia; do
+            echo "==> Sending repository_dispatch to $repo"
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/$repo/dispatches" \
+              -f event_type=crowdrelay-contract-propagated \
+              -f "client_payload[openapi_sha]=$OPENAPI_SHA" \
+              -f "client_payload[crowdrelay_sha]=$CROWDRELAY_SHA" \
+              || echo "WARN: dispatch to $repo failed (repo may not exist or token lacks scope)"
+          done

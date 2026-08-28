@@ -66,6 +66,8 @@ const EVENT_REMINDER_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_EVENT_REMINDER_POL
 const AUTOPILOT_ENABLED_KEY: &str = "CROWDRELAY_AUTOPILOT_ENABLED";
 const AUTOPILOT_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_AUTOPILOT_POLL_INTERVAL_MS";
 const AGENT_OUTCOMES_ENABLED_KEY: &str = "CROWDRELAY_AGENT_OUTCOMES_ENABLED";
+const REDDIT_PROXY_URL_KEY: &str = "CROWDRELAY_REDDIT_PROXY_URL";
+const AGENT_SERVICE_URL_KEY: &str = "CROWDRELAY_AGENT_SERVICE_URL";
 const ADMIN_API_KEY_KEY: &str = "CROWDRELAY_ADMIN_API_KEY";
 const STAFF_API_KEY_KEY: &str = "CROWDRELAY_STAFF_API_KEY";
 const QR_SIGNING_SECRET_KEY: &str = "CROWDRELAY_QR_SIGNING_SECRET";
@@ -154,6 +156,8 @@ const KNOWN_KEYS: &[&str] = &[
     AUTOPILOT_ENABLED_KEY,
     AUTOPILOT_POLL_INTERVAL_MS_KEY,
     AGENT_OUTCOMES_ENABLED_KEY,
+    REDDIT_PROXY_URL_KEY,
+    AGENT_SERVICE_URL_KEY,
     ADMIN_API_KEY_KEY,
     STAFF_API_KEY_KEY,
     QR_SIGNING_SECRET_KEY,
@@ -223,6 +227,15 @@ pub struct Config {
     /// When true, the agent outcome worker polls `agent_outcomes` and maps
     /// LLM-produced outcomes into autopilot decisions. Default ON.
     pub agent_outcomes_enabled: bool,
+    /// Optional HTTP/HTTPS/SOCKS proxy URL for Reddit requests. Reddit blocks
+    /// direct JSON API access from some IPs (403). When set, the discovery
+    /// worker and community executor route Reddit requests through this proxy.
+    /// Format: `http://host:port` or `socks5://host:port`.
+    pub reddit_proxy_url: Option<String>,
+    /// Base URL of the crowdrelay-agents service. Used by the worker to fetch
+    /// Reddit session cookies (obtained by the Playwright scraper) for
+    /// authenticated JSON API access. Default: `http://127.0.0.1:8095`.
+    pub agent_service_url: String,
     pub admission_security: AdmissionSecurityConfig,
     /// Optional secret-backed team contacts used only to bootstrap routing identities.
     pub team_operations: TeamOperationsConfig,
@@ -375,6 +388,17 @@ impl Config {
             AGENT_OUTCOMES_ENABLED_KEY,
             true,
         )?;
+        let reddit_proxy_url = values
+            .get(REDDIT_PROXY_URL_KEY)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_owned());
+        let agent_service_url = values
+            .get(AGENT_SERVICE_URL_KEY)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_owned())
+            .unwrap_or_else(|| "http://127.0.0.1:8095".to_owned());
         let autopilot_poll_interval = parse_bounded_duration(
             values.get(AUTOPILOT_POLL_INTERVAL_MS_KEY),
             AUTOPILOT_POLL_INTERVAL_MS_KEY,
@@ -432,6 +456,8 @@ impl Config {
             autopilot_enabled,
             autopilot_poll_interval,
             agent_outcomes_enabled,
+            reddit_proxy_url,
+            agent_service_url,
             admission_security,
             team_operations,
             response_encryption_key,
