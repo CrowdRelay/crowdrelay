@@ -34,12 +34,24 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // the brain reads it to decide when to dispatch. This is a read-only
     // cross-service query — the brain never writes to agent_service_tasks
     // directly; the executor does that via the action dispatch.
-    let last_runs: Vec<(String, Option<OffsetDateTime>)> = sqlx::query_as(
+    //
+    // We distinguish two timestamps:
+    // - `last_any_run`: the most recent task regardless of outcome. Used for
+    //   the failed-run retry delay so the brain doesn't retry every cycle.
+    // - `last_effective_run`: the most recent task whose outcome had a
+    //   non-empty `items` array. The cooldown is measured from this, so a
+    //   failed/empty run does NOT reset the cooldown.
+    let last_runs: Vec<(String, Option<OffsetDateTime>, Option<OffsetDateTime>)> = sqlx::query_as(
         r#"
-        SELECT template_id, MAX(created_at) AS last_run
-        FROM agent_service_tasks
-        WHERE workspace_id = $1
-        GROUP BY template_id
+        SELECT ast.template_id,
+               MAX(ast.created_at) AS last_any_run,
+               MAX(CASE WHEN ao.payload ? 'items'
+                            AND jsonb_array_length(ao.payload->'items') > 0
+                        THEN ao.created_at END) AS last_effective_run
+        FROM agent_service_tasks ast
+        LEFT JOIN agent_outcomes ao ON ao.task_id = ast.id
+        WHERE ast.workspace_id = $1
+        GROUP BY ast.template_id
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -231,14 +243,21 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // Build one snapshot per worker template.
     let mut snapshots = Vec::with_capacity(WORKER_TEMPLATES.len());
     for template_id in WORKER_TEMPLATES {
-        let hours_since_last_run = last_runs
+        let (hours_since_last_run, hours_since_last_effective_run) = last_runs
             .iter()
-            .find(|(tid, _)| tid == template_id)
-            .and_then(|(_, last_run)| *last_run)
-            .map(|t| {
-                let delta = now - t;
-                u32::try_from(delta.whole_hours().max(0)).unwrap_or(u32::MAX)
-            });
+            .find(|(tid, _, _)| tid == template_id)
+            .map(|(_, last_any, last_effective)| {
+                let any = last_any.map(|t| {
+                    let delta = now - t;
+                    u32::try_from(delta.whole_hours().max(0)).unwrap_or(u32::MAX)
+                });
+                let effective = last_effective.map(|t| {
+                    let delta = now - t;
+                    u32::try_from(delta.whole_hours().max(0)).unwrap_or(u32::MAX)
+                });
+                (any, effective)
+            })
+            .unwrap_or((None, None));
 
         // Attach insights produced by this template.
         let template_insights: Vec<RecentInsight> = recent_insights
@@ -264,6 +283,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         snapshots.push(GrowthIntelligenceSnapshot {
             template_id: (*template_id).to_owned(),
             hours_since_last_run,
+            hours_since_last_effective_run,
             has_upcoming_event,
             days_to_next_event,
             fan_growth_stagnant,

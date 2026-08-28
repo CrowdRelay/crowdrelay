@@ -22,6 +22,11 @@ pub struct IntelligenceRequest {
     pub priority: u8,
     pub prompt: String,
     pub cooldown_hours: u32,
+    /// The time window used for the decision/action idempotency key. For a
+    /// normal dispatch (after a successful run), this equals `cooldown_hours`.
+    /// For a retry after a failed/empty run, this equals the retry delay
+    /// (1 hour) so the key changes each hour and allows retry.
+    pub key_window_hours: u32,
     pub reason: &'static str,
     /// Intelligent token optimization: basic tasks go to free models,
     /// premium tasks go to connected paid providers. Defaults to basic.
@@ -89,11 +94,26 @@ pub fn evaluate_growth_intelligence(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &GrowthIntelligencePolicy,
 ) -> Option<IntelligenceRequest> {
-    let hours = snapshot.hours_since_last_run.unwrap_or(u32::MAX);
+    // Layered cooldown: the effective cooldown only counts runs that produced
+    // items (outreach targets, social posts, etc.). A failed/empty run does
+    // NOT reset the cooldown, but the retry delay prevents 5-minute retry
+    // storms on the autopilot cycle.
+    let effective_hours = snapshot.hours_since_last_effective_run.unwrap_or(u32::MAX);
+    let any_hours = snapshot.hours_since_last_run.unwrap_or(u32::MAX);
+    let retry_ready = any_hours >= policy.failed_run_retry_hours;
     let insights = insights_block(&snapshot.recent_insights);
 
+    // When the last run was not effective (no items produced), use the retry
+    // delay as the idempotency key window so the key changes each hour and
+    // allows retry. When the last run was effective, use the full cooldown.
+    let is_retry = snapshot.hours_since_last_effective_run.is_none();
+    let retry_window = policy.failed_run_retry_hours.max(1);
+
     // Rule 1: Scan Reddit communities on a 7-day cadence.
-    if snapshot.template_id == "reddit-scanner" && hours >= policy.reddit_scanner_cooldown_hours {
+    if snapshot.template_id == "reddit-scanner"
+        && effective_hours >= policy.reddit_scanner_cooldown_hours
+        && retry_ready
+    {
         let mut prompt = "Find Polish and Central-European metal subreddits and forums relevant to the band's genre and upcoming events. Report subscriber estimates, activity levels, and self-promo policies.".to_owned();
         if !insights.is_empty() {
             prompt.push_str("\n\n");
@@ -104,6 +124,7 @@ pub fn evaluate_growth_intelligence(
             priority: 3,
             prompt,
             cooldown_hours: policy.reddit_scanner_cooldown_hours,
+            key_window_hours: if is_retry { retry_window } else { policy.reddit_scanner_cooldown_hours },
             reason: "Reddit community scan is due (7-day cadence)",
             tier: AgentTier::Basic,
         });
@@ -112,7 +133,8 @@ pub fn evaluate_growth_intelligence(
     // Rule 2: If there's an upcoming event within the lead window, pitch press.
     if snapshot.template_id == "press-pitch"
         && snapshot.has_upcoming_event
-        && hours >= policy.press_pitch_cooldown_hours
+        && effective_hours >= policy.press_pitch_cooldown_hours
+        && retry_ready
     {
         let days = snapshot.days_to_next_event.unwrap_or(u32::MAX);
         if days <= policy.press_pitch_event_lead_days {
@@ -127,6 +149,7 @@ pub fn evaluate_growth_intelligence(
                 priority,
                 prompt,
                 cooldown_hours: policy.press_pitch_cooldown_hours,
+                key_window_hours: if is_retry { retry_window } else { policy.press_pitch_cooldown_hours },
                 reason: "Upcoming event within press lead window",
                 // Premium: press pitches go to real human contacts. A bad
                 // pitch burns a relationship permanently — quality matters.
@@ -136,7 +159,10 @@ pub fn evaluate_growth_intelligence(
     }
 
     // Rule 3: Draft social content on a 2-day cadence.
-    if snapshot.template_id == "social-post" && hours >= policy.social_post_cooldown_hours {
+    if snapshot.template_id == "social-post"
+        && effective_hours >= policy.social_post_cooldown_hours
+        && retry_ready
+    {
         let mut prompt = "Create social media content for the band. Reference upcoming events, recent releases, or fan milestones. Write in Polish for the primary audience. Include suggested hashtags.".to_owned();
         if !insights.is_empty() {
             prompt.push_str("\n\n");
@@ -147,6 +173,7 @@ pub fn evaluate_growth_intelligence(
             priority: 2,
             prompt,
             cooldown_hours: policy.social_post_cooldown_hours,
+            key_window_hours: if is_retry { retry_window } else { policy.social_post_cooldown_hours },
             reason: "Social content cadence is due (2-day cycle)",
             tier: AgentTier::Basic,
         });
@@ -155,7 +182,8 @@ pub fn evaluate_growth_intelligence(
     // Rule 4: If fan growth is stagnant, dispatch community engagement.
     if snapshot.template_id == "community-engager"
         && snapshot.fan_growth_stagnant
-        && hours >= policy.community_engager_cooldown_hours
+        && effective_hours >= policy.community_engager_cooldown_hours
+        && retry_ready
     {
         let mut prompt = "Draft authentic community posts for accepted outreach targets. Write like a band member, not a marketer. Match each community's tone and language. One post per community.".to_owned();
         let targets_block = unengaged_targets_block(&snapshot.unengaged_targets);
@@ -173,6 +201,7 @@ pub fn evaluate_growth_intelligence(
             priority: 2,
             prompt,
             cooldown_hours: policy.community_engager_cooldown_hours,
+            key_window_hours: if is_retry { retry_window } else { policy.community_engager_cooldown_hours },
             reason: "Fan growth stagnant — community engagement needed",
             // Premium: posts to somebody else's community (Reddit). A bad
             // post gets banned and damages reputation — quality matters.
@@ -183,7 +212,8 @@ pub fn evaluate_growth_intelligence(
     // Rule 5: If there are unengaged outreach targets, draft community posts.
     if snapshot.template_id == "community-engager"
         && snapshot.unengaged_outreach_targets > 0
-        && hours >= policy.community_engager_cooldown_hours
+        && effective_hours >= policy.community_engager_cooldown_hours
+        && retry_ready
     {
         let mut prompt = "Draft authentic community posts for the unengaged outreach targets. Write like a band member, not a marketer. Match each community's tone and language.".to_owned();
         let targets_block = unengaged_targets_block(&snapshot.unengaged_targets);
@@ -201,13 +231,17 @@ pub fn evaluate_growth_intelligence(
             priority: 2,
             prompt,
             cooldown_hours: policy.community_engager_cooldown_hours,
+            key_window_hours: if is_retry { retry_window } else { policy.community_engager_cooldown_hours },
             reason: "Unengaged outreach targets need community posts",
             tier: AgentTier::Premium,
         });
     }
 
     // Rule 6: Signal inviter on a 7-day cadence.
-    if snapshot.template_id == "signal-inviter" && hours >= policy.signal_inviter_cooldown_hours {
+    if snapshot.template_id == "signal-inviter"
+        && effective_hours >= policy.signal_inviter_cooldown_hours
+        && retry_ready
+    {
         let mut prompt = "Draft Signal push invites for fans near upcoming events. Keep messages personal and under 200 characters. Include a smart link to the Signal install page. Write in Polish.".to_owned();
         if !insights.is_empty() {
             prompt.push_str("\n\n");
@@ -218,6 +252,7 @@ pub fn evaluate_growth_intelligence(
             priority: 3,
             prompt,
             cooldown_hours: policy.signal_inviter_cooldown_hours,
+            key_window_hours: if is_retry { retry_window } else { policy.signal_inviter_cooldown_hours },
             reason: "Signal invite cadence is due (7-day cycle)",
             tier: AgentTier::Basic,
         });
@@ -230,7 +265,8 @@ pub fn evaluate_growth_intelligence(
     // period (>= 2x the stagnation threshold), escalate to premium for deeper
     // analysis — the situation is serious and warrants a more powerful model.
     if snapshot.template_id == "growth-strategist"
-        && hours >= policy.growth_strategist_cooldown_hours
+        && effective_hours >= policy.growth_strategist_cooldown_hours
+        && retry_ready
     {
         let stagnant_escalation = snapshot.fan_growth_stagnant;
         let tier = if stagnant_escalation {
@@ -251,6 +287,7 @@ pub fn evaluate_growth_intelligence(
             priority: 4,
             prompt,
             cooldown_hours: policy.growth_strategist_cooldown_hours,
+            key_window_hours: if is_retry { retry_window } else { policy.growth_strategist_cooldown_hours },
             reason: if stagnant_escalation {
                 "Daily intelligence analysis is due (escalated to premium: stagnant growth)"
             } else {

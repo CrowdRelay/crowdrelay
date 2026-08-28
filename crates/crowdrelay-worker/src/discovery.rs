@@ -224,7 +224,17 @@ impl RedditDiscoveryWorker {
         let repository = PostgresAudienceGraphRepository::new(self.pool.clone());
         let mut imported = 0_usize;
         for query in self.config.reddit_queries.iter().take(MAX_QUERIES_PER_PASS) {
-            let subreddits = self.search_subreddits(client, query).await?;
+            // Skip queries that fail (agents service unreachable, Reddit
+            // 403, etc.) instead of aborting the entire sweep. The next
+            // sweep (6h interval) will retry. This way a single failed
+            // query doesn't prevent processing of the remaining queries.
+            let subreddits = match self.search_subreddits(client, query).await {
+                Ok(subs) => subs,
+                Err(error) => {
+                    tracing::warn!(query, error = %error, "discovery query failed, skipping to next query");
+                    continue;
+                }
+            };
             let inputs: Vec<UpsertPlaceInput> = subreddits
                 .iter()
                 .map(|sub| sub.to_place_input(self.workspace_id.into_uuid()))
@@ -398,10 +408,13 @@ impl RedditDiscoveryWorker {
                 }
             }
             Err(error) => {
-                // Agents service unreachable — log and fall back to the
-                // direct Reddit path instead of aborting the whole sweep.
-                tracing::warn!(error = %error, "agents scrape-results read failed, falling back to direct Reddit");
-                return Ok(None);
+                // Agents service unreachable — do NOT fall back to the
+                // direct Reddit path (it 403s unauthenticated requests).
+                // Propagate the error so the caller can skip this query
+                // and retry on the next sweep instead of burning a
+                // direct-Reddit request that will always fail.
+                tracing::warn!(error = %error, "agents scrape-results read failed, skipping query");
+                return Err(error);
             }
         };
 

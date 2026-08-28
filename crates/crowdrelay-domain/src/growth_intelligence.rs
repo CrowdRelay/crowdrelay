@@ -65,7 +65,15 @@ pub struct GrowthIntelligenceSnapshot {
     /// The worker template ID, e.g. "reddit-scanner", "press-pitch".
     pub template_id: String,
     /// Hours since the last agent run for this template, or `None` if never run.
+    /// This counts **any** run, including ones that produced zero items. Used
+    /// for the failed-run retry delay so the brain doesn't retry every cycle.
     pub hours_since_last_run: Option<u32>,
+    /// Hours since the last **effective** run — one that produced an outcome
+    /// with a non-empty `items` array, or `None` if no effective run exists.
+    /// The cooldown is measured from this, so a failed/empty run does not
+    /// reset the cooldown. If this is `None`, the brain treats the cooldown
+    /// as elapsed (never had a successful run → dispatch immediately).
+    pub hours_since_last_effective_run: Option<u32>,
     /// Whether there is an upcoming event within the press-pitch lead window.
     pub has_upcoming_event: bool,
     /// Days until the nearest upcoming event, or `None`.
@@ -149,6 +157,12 @@ pub struct GrowthIntelligencePolicy {
     pub press_pitch_event_lead_days: u32,
     /// Days of stagnant fan growth before dispatching community engagement. Default: 14 days.
     pub fan_growth_stagnant_days: u32,
+    /// Minimum hours to wait before retrying a worker after a failed/empty
+    /// run. Prevents retry storms on the 5-minute autopilot cycle when a
+    /// worker keeps producing zero items. The hard cap (`max_actions_24h`
+    /// in the autopilot policy table) is the ultimate backstop.
+    /// Default: 1 hour.
+    pub failed_run_retry_hours: u32,
 }
 
 impl Default for GrowthIntelligencePolicy {
@@ -162,6 +176,7 @@ impl Default for GrowthIntelligencePolicy {
             growth_strategist_cooldown_hours: 24,  // 1 day
             press_pitch_event_lead_days: 30,
             fan_growth_stagnant_days: 14,
+            failed_run_retry_hours: 1,
         }
     }
 }
