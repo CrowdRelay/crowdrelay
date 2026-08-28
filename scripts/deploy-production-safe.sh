@@ -175,7 +175,7 @@ network_mode="$(docker inspect "$tunnel" --format '{{.HostConfig.NetworkMode}}')
 # virya-edge) that decouple it from the app container's lifecycle.
 if [[ "$network_mode" != "container:${app_id}" ]]; then
   tunnel_networks="$(docker inspect "$tunnel" --format '{{json .NetworkSettings.Networks}}')"
-  printf '%s' "$tunnel_networks" | grep -Fq '"internal"' || fail "Control Plane tunnel is not on the internal network: $network_mode"
+  printf '%s' "$tunnel_networks" | grep -Fq 'internal' || fail "Control Plane tunnel is not on the internal network: $network_mode"
 fi
 tunnel_caddy="$(docker exec "$tunnel" cat /etc/caddy/Caddyfile)" || fail 'cannot read Control Plane tunnel Caddyfile'
 for route in \
