@@ -216,7 +216,7 @@ impl AgentOutcomeWorker {
         )
         .bind(&input_snapshot)
         .bind(json!({ "source": "agent_outcome", "schema_version": outcome.schema_version }))
-        .bind(Value::Null)
+        .bind(json!({}))
         .fetch_optional(&mut *tx)
         .await?;
 
