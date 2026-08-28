@@ -674,6 +674,17 @@ pub enum AutopilotMeasurementKind {
     ShowGrowthSurfaceClicks7d,
     ShowGrowthAttributedTicketOrders7d,
     GrassrootsActivationReplies14d,
+    /// Fan count delta in the 14 days after an agent dispatch. Measures
+    /// whether the worker's intelligence gathering actually aggregated
+    /// new fans into the fanbase.
+    AgentRunFanGrowth14d,
+    /// Signal install delta in the 7 days after an agent dispatch. Measures
+    /// whether the worker's output moved fans toward the Signal app (growth).
+    AgentRunSignalInstalls7d,
+    /// Community engagement metric delta in the 7 days after a community
+    /// engagement dispatch. Measures whether the posts produced meaningful
+    /// engagement (upvotes, comments) rather than just existing.
+    AgentRunCommunityEngagement7d,
 }
 
 impl AutopilotMeasurementKind {
@@ -690,6 +701,9 @@ impl AutopilotMeasurementKind {
             Self::ShowGrowthSurfaceClicks7d => "show_growth_surface_clicks_7d",
             Self::ShowGrowthAttributedTicketOrders7d => "show_growth_attributed_ticket_orders_7d",
             Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
+            Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
+            Self::AgentRunSignalInstalls7d => "agent_run_signal_installs_7d",
+            Self::AgentRunCommunityEngagement7d => "agent_run_community_engagement_7d",
         }
     }
 

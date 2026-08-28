@@ -258,9 +258,59 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::RunPlayStep { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
         | AutopilotActionPayload::RequestAgentContent { .. }
-        | AutopilotActionPayload::RequestAgentRun { .. }
-        | AutopilotActionPayload::RequestCommunityEngagement { .. }
         | AutopilotActionPayload::RequestSignalPush { .. } => {}
+        // Agent dispatches: measure whether the worker's intelligence
+        // gathering actually grew fans. The baseline is the fan count at
+        // dispatch time; the observation counts new fans in the 14-day
+        // window after the dispatch. This closes the learning loop: the
+        // brain can retire workers that consistently produce no growth and
+        // shorten the cadence of workers that do.
+        AutopilotActionPayload::RequestAgentRun { .. } => {
+            let baseline_fans = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COUNT(*)::double precision FROM fans
+                WHERE workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            plans.push((
+                AutopilotMeasurementKind::AgentRunFanGrowth14d,
+                action_id.into_uuid(),
+                baseline_fans,
+                now + time::Duration::days(14),
+            ));
+            let baseline_installs = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COUNT(*)::double precision
+                FROM fan_push_endpoints
+                WHERE workspace_id = $1 AND invalidated_at IS NULL
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            plans.push((
+                AutopilotMeasurementKind::AgentRunSignalInstalls7d,
+                action_id.into_uuid(),
+                baseline_installs,
+                now + time::Duration::days(7),
+            ));
+        }
+        // Community engagement: measure whether the posts produced
+        // meaningful engagement (upvotes, comments) rather than just
+        // existing. The baseline is zero — the posts didn't exist before.
+        AutopilotActionPayload::RequestCommunityEngagement { target_id, .. } => {
+            plans.push((
+                AutopilotMeasurementKind::AgentRunCommunityEngagement7d,
+                *target_id,
+                0.0,
+                now + time::Duration::days(7),
+            ));
+        }
     }
 
     for (kind, subject_id, baseline_value, due_at) in plans {

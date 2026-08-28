@@ -317,6 +317,79 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                 }
+                // Fan growth after an agent dispatch: count new fans created
+                // in the 14-day window after the action finished. The
+                // subject_id is the action_id (which maps to the
+                // agent_service_tasks row via metadata->>'action_id'). We
+                // count all new fans in the workspace because agent
+                // intelligence gathering has indirect, diffuse effects — a
+                // reddit scan doesn't create a specific fan, it creates the
+                // conditions for fans to find the band.
+                AutopilotMeasurementKind::AgentRunFanGrowth14d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision FROM fans
+                        WHERE workspace_id = $1
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '14 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                // Signal install growth after an agent dispatch: count new
+                // active push endpoints in the 7-day window. A push endpoint
+                // is a fan who installed Signal and opted in for push.
+                AutopilotMeasurementKind::AgentRunSignalInstalls7d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM fan_push_endpoints
+                        WHERE workspace_id = $1
+                          AND invalidated_at IS NULL
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '7 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                // Community engagement after a community.engage dispatch:
+                // aggregate the latest metrics for posts to this target.
+                // The subject_id is the outreach target_id. We sum the
+                // scores of all community posts linked to this target in
+                // the 7-day window — a higher score means the post
+                // resonated with the community.
+                AutopilotMeasurementKind::AgentRunCommunityEngagement7d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COALESCE(SUM(latest.score), 0)::double precision
+                        FROM (
+                            SELECT DISTINCT ON (cpm.community_post_id)
+                                cpm.score
+                            FROM community_post_metrics cpm
+                            JOIN community_posts cp ON cp.id = cpm.community_post_id
+                            WHERE cp.workspace_id = $1
+                              AND cp.target_id = $2
+                              AND cp.posted_at >= $3
+                              AND cp.posted_at < $3 + INTERVAL '7 days'
+                            ORDER BY cpm.community_post_id, cpm.measured_at DESC
+                        ) AS latest
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
             };
             if observed.is_finite() && observed >= 0.0 {
                 Ok(observed)

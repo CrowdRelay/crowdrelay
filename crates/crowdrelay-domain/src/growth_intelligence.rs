@@ -36,6 +36,221 @@ impl AgentTier {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Agent worker standing — the learning loop for dispatched workers.
+//
+// Mirrors the play learning discipline in `learning.rs`: a worker that
+// consistently produces no fan growth gets a longer cooldown, and one that
+// consistently does gets a shorter one. A worker that worsens (produces
+// negative growth) repeatedly is retired until an operator reinstates it.
+//
+// The same four rules apply:
+// 1. An unmeasurable outcome is not a bad outcome.
+// 2. One result changes nothing.
+// 3. A record may only ever narrow (longer cooldown), never widen below base.
+// 4. Retirement is a stated fact, not a decayed weight.
+// ──────────────────────────────────────────────────────────────────────
+
+/// What the measured record says about one worker template.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "standing", rename_all = "snake_case")]
+pub enum AgentStanding {
+    /// Too few measured dispatches to say anything. Runs at base cadence:
+    /// the alternative is a brain that throttles every new worker before it
+    /// has had a chance to produce growth.
+    Untested { measured: u32 },
+    /// Weighted by its own record. `10_000` is full effectiveness (base
+    /// cadence); lower means the worker's cooldown is proportionally longer
+    /// until the record improves.
+    Weighted {
+        effectiveness_bps: u16,
+        measured: u32,
+    },
+    /// Dispatched no longer, until an operator reinstates it.
+    Retired { reason: AgentRetirementReason },
+}
+
+impl AgentStanding {
+    /// `10_000` when nothing is holding the worker back, and zero when it is
+    /// retired.
+    #[must_use]
+    pub const fn effectiveness_bps(self) -> u16 {
+        match self {
+            Self::Untested { .. } => 10_000,
+            Self::Weighted {
+                effectiveness_bps, ..
+            } => effectiveness_bps,
+            Self::Retired { .. } => 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_retired(self) -> bool {
+        matches!(self, Self::Retired { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRetirementReason {
+    /// A run of measured dispatches that each produced no fan growth or
+    /// worsened it.
+    RepeatedlyIneffective,
+    /// A human switched it off. Recorded separately so the brain never claims
+    /// an operator's decision as its own conclusion.
+    OperatorRetired,
+}
+
+impl AgentRetirementReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RepeatedlyIneffective => "repeatedly_ineffective",
+            Self::OperatorRetired => "operator_retired",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "repeatedly_ineffective" => Some(Self::RepeatedlyIneffective),
+            "operator_retired" => Some(Self::OperatorRetired),
+            _ => None,
+        }
+    }
+}
+
+/// The record one worker template has accumulated from measured dispatches.
+///
+/// Counts rather than a score, because a score cannot be argued with. An
+/// operator who disagrees with a standing can see exactly which dispatches
+/// produced it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRecord {
+    pub improved: u32,
+    pub neutral: u32,
+    pub worsened: u32,
+    /// Measured `worsened` outcomes since the last one that was not. Reset by
+    /// any measured result that is not `worsened`.
+    pub consecutive_worsened: u32,
+    /// Set only by an operator. The brain never writes this.
+    pub operator_retired: bool,
+}
+
+impl AgentRecord {
+    /// Outcomes that actually said something.
+    #[must_use]
+    pub const fn measured(self) -> u32 {
+        self.improved
+            .saturating_add(self.neutral)
+            .saturating_add(self.worsened)
+    }
+}
+
+/// Policy for turning an `AgentRecord` into an `AgentStanding`. Mirrors
+/// `LearningPolicy` but with defaults tuned for the slower cadence of agent
+/// dispatch measurement (14-day windows vs 7-day play windows).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct AgentLearningPolicy {
+    /// Measured dispatches required before the record moves anything at all.
+    pub minimum_measured_record: u32,
+    /// However bad the record, a worker that is still running keeps at least
+    /// this share of its base cadence. A weight that could fall to nothing
+    /// would be a silent retirement.
+    pub floor_effectiveness_bps: u16,
+    /// Consecutive measured `worsened` outcomes before the worker retires
+    /// itself.
+    pub retire_after_consecutive_worsened: u32,
+}
+
+impl Default for AgentLearningPolicy {
+    fn default() -> Self {
+        Self {
+            // Two is lower than the play policy (3) because agent dispatches
+            // are measured over 14-day windows — waiting for three full
+            // measurements means six weeks before the brain can adapt.
+            minimum_measured_record: 2,
+            floor_effectiveness_bps: 2_000,
+            retire_after_consecutive_worsened: 3,
+        }
+    }
+}
+
+/// Turns a record into a standing. Same discipline as `assess_play_standing`.
+#[must_use]
+pub fn assess_agent_standing(record: AgentRecord, policy: AgentLearningPolicy) -> AgentStanding {
+    if record.operator_retired {
+        return AgentStanding::Retired {
+            reason: AgentRetirementReason::OperatorRetired,
+        };
+    }
+    if record.consecutive_worsened >= policy.retire_after_consecutive_worsened.max(1) {
+        return AgentStanding::Retired {
+            reason: AgentRetirementReason::RepeatedlyIneffective,
+        };
+    }
+    let measured = record.measured();
+    if measured < policy.minimum_measured_record.max(1) {
+        return AgentStanding::Untested { measured };
+    }
+    // Neutral counts as half. A worker that reliably produces no growth is
+    // not as good as one that does and not as bad as one that harms.
+    let credit = u64::from(record.improved)
+        .saturating_mul(2)
+        .saturating_add(u64::from(record.neutral));
+    let basis_points = credit.saturating_mul(10_000) / u64::from(measured).max(1) / 2;
+    let basis_points = u16::try_from(basis_points.min(10_000)).unwrap_or(10_000);
+    AgentStanding::Weighted {
+        effectiveness_bps: basis_points.max(policy.floor_effectiveness_bps.min(10_000)),
+        measured,
+    }
+}
+
+/// Computes the effective cooldown for a worker template given its standing.
+///
+/// Higher effectiveness → shorter cooldown (dispatch more often).
+/// Lower effectiveness → longer cooldown (dispatch less often).
+/// Retired → never dispatch (u32::MAX).
+///
+/// The adjustment is bounded: at most 4x the base cooldown, so a worker
+/// with a poor record doesn't get pushed out to months between dispatches.
+#[must_use]
+pub fn effective_agent_cooldown(base_cooldown_hours: u32, standing: AgentStanding) -> u32 {
+    match standing {
+        AgentStanding::Untested { .. } => base_cooldown_hours,
+        AgentStanding::Weighted {
+            effectiveness_bps, ..
+        } => {
+            if effectiveness_bps == 0 {
+                return base_cooldown_hours.saturating_mul(4);
+            }
+            // Scale: 10_000 bps → base cooldown, 2_000 bps → 5x base (capped at 4x).
+            // The formula: base * (10_000 / effectiveness), capped at 4x.
+            let factor = 10_000_u32 / effectiveness_bps.max(1) as u32;
+            base_cooldown_hours
+                .saturating_mul(factor)
+                .min(base_cooldown_hours.saturating_mul(4))
+        }
+        AgentStanding::Retired { .. } => u32::MAX,
+    }
+}
+
+/// Computes the effective tier for a worker dispatch given its standing.
+///
+/// A worker with consistently high effectiveness (>= 8_000 bps) escalates
+/// to premium models — the situation is working and warrants a more
+/// powerful model to maximize the proven growth channel.
+#[must_use]
+pub const fn effective_agent_tier(base_tier: AgentTier, standing: AgentStanding) -> AgentTier {
+    match standing {
+        AgentStanding::Weighted {
+            effectiveness_bps, ..
+        } if effectiveness_bps >= 8_000 => AgentTier::Premium,
+        _ => base_tier,
+    }
+}
+
 /// A recent unconsumed insight from an agent outcome. The brain reads these
 /// before dispatching the next worker run and includes them in the dispatch
 /// prompt so the worker knows what was already discovered. After the brain
@@ -100,6 +315,11 @@ pub struct GrowthIntelligenceSnapshot {
     /// subreddits with consistently poor engagement and to include
     /// performance context in the worker prompt.
     pub community_engagement_history: Vec<CommunityEngagementSummary>,
+    /// The measured standing of this worker template from past dispatch
+    /// outcomes. The brain uses this to adjust the dispatch cadence (effective
+    /// workers get shorter cooldowns, ineffective ones get longer ones) and
+    /// to retire workers that consistently produce no fan growth.
+    pub standing: AgentStanding,
 }
 
 /// A single unengaged outreach target that the community-engager should
@@ -178,5 +398,159 @@ impl Default for GrowthIntelligencePolicy {
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> AgentLearningPolicy {
+        AgentLearningPolicy::default()
+    }
+
+    #[test]
+    fn untested_worker_runs_at_base_cadence() {
+        let record = AgentRecord::default();
+        let standing = assess_agent_standing(record, policy());
+        assert!(matches!(standing, AgentStanding::Untested { measured: 0 }));
+        assert_eq!(effective_agent_cooldown(168, standing), 168);
+    }
+
+    #[test]
+    fn one_measurement_does_not_adjust_cadence() {
+        // Below minimum_measured_record (2), the worker stays untested.
+        let record = AgentRecord {
+            improved: 1,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        assert!(matches!(standing, AgentStanding::Untested { measured: 1 }));
+        assert_eq!(effective_agent_cooldown(168, standing), 168);
+    }
+
+    #[test]
+    fn effective_worker_gets_shorter_cooldown() {
+        // 2 improved out of 2 measured → effectiveness = 10_000 bps → base cooldown.
+        let record = AgentRecord {
+            improved: 2,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        assert!(matches!(standing, AgentStanding::Weighted { .. }));
+        // At max effectiveness, cooldown equals base.
+        assert_eq!(effective_agent_cooldown(168, standing), 168);
+    }
+
+    #[test]
+    fn ineffective_worker_gets_longer_cooldown() {
+        // 0 improved, 2 neutral out of 2 → effectiveness = 5_000 bps → 2x base.
+        let record = AgentRecord {
+            neutral: 2,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        if let AgentStanding::Weighted {
+            effectiveness_bps, ..
+        } = standing
+        {
+            assert_eq!(effectiveness_bps, 5_000);
+        } else {
+            panic!("expected Weighted standing");
+        }
+        // 10_000 / 5_000 = 2 → 2x base cooldown.
+        assert_eq!(effective_agent_cooldown(168, standing), 336);
+    }
+
+    #[test]
+    fn cooldown_adjustment_is_capped_at_4x() {
+        // Floor effectiveness is 2_000 bps → 10_000 / 2_000 = 5, but capped at 4x.
+        let record = AgentRecord {
+            worsened: 2,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        if let AgentStanding::Weighted {
+            effectiveness_bps, ..
+        } = standing
+        {
+            assert_eq!(effectiveness_bps, 2_000); // floor
+        } else {
+            panic!("expected Weighted standing");
+        }
+        // Capped at 4x base.
+        assert_eq!(effective_agent_cooldown(168, standing), 168 * 4);
+    }
+
+    #[test]
+    fn retired_worker_never_dispatches() {
+        let record = AgentRecord {
+            worsened: 3,
+            consecutive_worsened: 3,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        assert!(matches!(
+            standing,
+            AgentStanding::Retired {
+                reason: AgentRetirementReason::RepeatedlyIneffective
+            }
+        ));
+        assert_eq!(effective_agent_cooldown(168, standing), u32::MAX);
+    }
+
+    #[test]
+    fn operator_retired_worker_is_retired() {
+        let record = AgentRecord {
+            operator_retired: true,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        assert!(matches!(
+            standing,
+            AgentStanding::Retired {
+                reason: AgentRetirementReason::OperatorRetired
+            }
+        ));
+    }
+
+    #[test]
+    fn one_worsened_does_not_retire() {
+        // A single bad result is noise, not a pattern.
+        let record = AgentRecord {
+            worsened: 1,
+            consecutive_worsened: 1,
+            improved: 1,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        // 2 measured, not retired.
+        assert!(!standing.is_retired());
+    }
+
+    #[test]
+    fn effective_worker_escalates_to_premium() {
+        let record = AgentRecord {
+            improved: 3,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        assert_eq!(
+            effective_agent_tier(AgentTier::Basic, standing),
+            AgentTier::Premium
+        );
+    }
+
+    #[test]
+    fn mediocre_worker_stays_at_base_tier() {
+        let record = AgentRecord {
+            neutral: 2,
+            ..AgentRecord::default()
+        };
+        let standing = assess_agent_standing(record, policy());
+        assert_eq!(
+            effective_agent_tier(AgentTier::Basic, standing),
+            AgentTier::Basic
+        );
     }
 }

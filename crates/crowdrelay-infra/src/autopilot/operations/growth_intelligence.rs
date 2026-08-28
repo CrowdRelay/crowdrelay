@@ -7,7 +7,8 @@
 
 use super::*;
 use crowdrelay_domain::growth_intelligence::{
-    CommunityEngagementSummary, GrowthIntelligenceSnapshot, RecentInsight, UnengagedTarget,
+    AgentStanding, CommunityEngagementSummary, GrowthIntelligenceSnapshot, RecentInsight,
+    UnengagedTarget,
 };
 
 /// The worker templates the brain may dispatch, in the order the evaluator
@@ -293,6 +294,10 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             unengaged_targets: targets,
             recent_insights: template_insights,
             community_engagement_history: history,
+            // TODO: fetch agent records from the DB and call
+            // `assess_agent_standing` to compute the real standing. Until
+            // the infra wiring is complete, all workers are untested.
+            standing: AgentStanding::Untested { measured: 0 },
         });
     }
 
