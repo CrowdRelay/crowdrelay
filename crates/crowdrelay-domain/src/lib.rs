@@ -75,6 +75,7 @@ pub mod free_reach;
 pub mod funding;
 pub mod growth_debt;
 pub mod growth_envelope;
+pub mod growth_intelligence;
 pub mod growth_metrics;
 pub mod ids;
 pub mod learning;

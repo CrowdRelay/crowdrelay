@@ -829,5 +829,18 @@ macro_rules! decision_opportunity_reads {
         ))
         .await
     }
+
+    async fn load_growth_intelligence_snapshots_impl(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthIntelligenceSnapshot>, RepositoryError> {
+        self.bounded(operations::load_growth_intelligence_snapshots(
+            self,
+            workspace_id,
+            now,
+        ))
+        .await
+    }
     };
 }

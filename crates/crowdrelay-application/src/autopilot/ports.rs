@@ -14,6 +14,7 @@ use crowdrelay_domain::{
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
     growth_envelope::{EnvelopeUsage, GrowthEnvelope},
+    growth_intelligence::GrowthIntelligenceSnapshot,
     growth_metrics::GrowthMetricSnapshot,
     learning::{WaveOutcomeVerdict, WaveReplyCounts, assess_wave_outcome},
     live_opportunities::LiveOpportunitySnapshot,
@@ -280,6 +281,16 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthDebtObservation>, RepositoryError>;
+
+    /// Returns one snapshot per worker template that the brain may dispatch.
+    /// Each snapshot carries the hours since the last run and the workspace's
+    /// current situation (upcoming events, fan growth, unengaged targets).
+    /// The deterministic evaluator uses these to decide whether to dispatch.
+    async fn load_growth_intelligence_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthIntelligenceSnapshot>, RepositoryError>;
 
     /// What the pitcher currently has to work with. One row per workspace
     /// rather than a list: supply is not a property of any single target, and

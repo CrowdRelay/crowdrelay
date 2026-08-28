@@ -901,6 +901,47 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestAgentRun {
+                    template_id,
+                    prompt,
+                    priority,
+                } => {
+                    operations::execute_agent_run(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        template_id,
+                        prompt,
+                        *priority,
+                        now,
+                    )
+                    .await?;
+                }
+                AutopilotActionPayload::RequestCommunityEngagement {
+                    target_id,
+                    platform,
+                    subreddit,
+                    title,
+                    body,
+                    smart_link,
+                } => {
+                    emit_external_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "crowdrelay.community.engagement_requested",
+                        json!({
+                            "action_id": action.id,
+                            "target_id": target_id,
+                            "platform": platform,
+                            "subreddit": subreddit,
+                            "title": title,
+                            "body": body,
+                            "smart_link": smart_link,
+                        }),
+                    )
+                    .await?;
+                }
             }
 
             // External intents are only *dispatched* here. Their learning/outcome

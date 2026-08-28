@@ -91,6 +91,7 @@ use crowdrelay_domain::{
     funding::FundingOpportunitySnapshot,
     growth_debt::GrowthDebtObservation,
     growth_envelope::{EnvelopeUsage, GrowthEnvelope},
+    growth_intelligence::GrowthIntelligenceSnapshot,
     growth_metrics::{
         GrowthMetricPolicy, GrowthMetricSnapshot, MetricDirection, MetricPlatform, MetricPoint,
         MetricValueTier, compute_trend, velocity_ratio_basis_points,

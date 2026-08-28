@@ -459,7 +459,7 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         capacity = re.search(r"policies:\s+type: array\s+maxItems: (\d+)", schema)
         self.assertIsNotNone(capacity)
         self.assertGreaterEqual(int(capacity.group(1)), len(contexts))
-        self.assertEqual(len(contexts), 21)
+        self.assertEqual(len(contexts), 22)
 
     def test_chief_of_staff_deadline_radar_reuses_existing_domain_facts(self):
         infra = INFRA_TEXT

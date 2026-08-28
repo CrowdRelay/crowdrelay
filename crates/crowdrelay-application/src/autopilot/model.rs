@@ -16,6 +16,7 @@ use crowdrelay_domain::{
     free_reach::{WaveAnchor, WaveExpiry},
     funding::FundingPolicy,
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
+    growth_intelligence::GrowthIntelligencePolicy,
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
     learning::{PlayRecord, PlayStanding},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
@@ -59,6 +60,10 @@ pub enum AutopilotContext {
     GrowthMetrics,
     GrowthDebt,
     OutreachSupply,
+    /// The deterministic brain. Decides what intelligence to gather, when,
+    /// and what to do with it. Dispatches LLM workers via `RequestAgentRun`
+    /// actions. Never follows an LLM blindly — it applies deterministic rules.
+    GrowthIntelligence,
     /// The only context that remembers. Every other one answers a question per
     /// cycle and forgets; a play carries a campaign across cycles, restarts and
     /// deploys, which is what lets the agent do step two of anything.
@@ -71,7 +76,7 @@ impl AutopilotContext {
     /// Storage parsing is derived from this list rather than restating the
     /// names: a context the policy table can hold but a reader cannot parse
     /// fails the whole overview read, not just its own row.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::TicketYield,
         Self::FanLifecycle,
         Self::CampaignLifecycle,
@@ -92,6 +97,7 @@ impl AutopilotContext {
         Self::GrowthMetrics,
         Self::GrowthDebt,
         Self::OutreachSupply,
+        Self::GrowthIntelligence,
         Self::Plays,
     ];
 
@@ -126,6 +132,7 @@ impl AutopilotContext {
             Self::GrowthMetrics => "growth_metrics",
             Self::GrowthDebt => "growth_debt",
             Self::OutreachSupply => "outreach_supply",
+            Self::GrowthIntelligence => "growth_intelligence",
             Self::Plays => "plays",
         }
     }
@@ -154,6 +161,7 @@ pub enum AutopilotPolicyConfig {
     GrowthMetrics(GrowthMetricPolicy),
     GrowthDebt(GrowthDebtPolicy),
     OutreachSupply(OutreachSupplyPolicy),
+    GrowthIntelligence(GrowthIntelligencePolicy),
     Plays(PlayPolicy),
 }
 
@@ -232,6 +240,11 @@ impl AutopilotPolicyConfig {
             AutopilotContext::OutreachSupply => {
                 Self::parse_into(raw, Self::OutreachSupply, OutreachSupplyPolicy::default())
             }
+            AutopilotContext::GrowthIntelligence => Self::parse_into(
+                raw,
+                Self::GrowthIntelligence,
+                GrowthIntelligencePolicy::default(),
+            ),
             AutopilotContext::Plays => Self::parse_into(raw, Self::Plays, PlayPolicy::default()),
         }
     }
@@ -650,6 +663,28 @@ pub enum AutopilotActionPayload {
         task_id: uuid::Uuid,
         draft: serde_json::Value,
     },
+    /// The deterministic brain dispatches an LLM worker to gather intelligence
+    /// or draft content. The brain decides what to gather and when — never the
+    /// LLM. The worker runs the specified template with the deterministic prompt
+    /// and emits outcomes that the brain consumes via `AgentOutcomeWorker`.
+    RequestAgentRun {
+        template_id: String,
+        prompt: String,
+        priority: u8,
+    },
+    /// A community engagement post drafted by the `community-engager` worker
+    /// and approved by the operator. Execution emits an outbox event for the
+    /// configured executor to post to the external platform (e.g. Reddit) via
+    /// fanbase OAuth. The autopilot never calls the platform API directly — it
+    /// follows the same ThirdParty outbox pattern as outreach and booking.
+    RequestCommunityEngagement {
+        target_id: uuid::Uuid,
+        platform: String,
+        subreddit: Option<String>,
+        title: String,
+        body: String,
+        smart_link: Option<String>,
+    },
 }
 
 impl AutopilotActionPayload {
@@ -687,7 +722,11 @@ impl AutopilotActionPayload {
             // band's calendar and money. Neither is ours to take back.
             | Self::CounterLiveOpportunityTerms { .. }
             | Self::AcceptLiveOpportunityTerms { .. }
-            | Self::SubmitFundingApplication { .. } => ActionClass::ThirdParty,
+            | Self::SubmitFundingApplication { .. }
+            // A community post reaches somebody else's platform — Reddit,
+            // forums — and once posted it cannot be unsent. The operator
+            // approves before it goes, same as any other outward approach.
+            | Self::RequestCommunityEngagement { .. } => ActionClass::ThirdParty,
 
             // Fans who opted in. Free, but a sent message cannot be unsent.
             Self::RequestFanLifecycleMessage { .. } | Self::RequestAudienceCampaign { .. } => {
@@ -717,7 +756,11 @@ impl AutopilotActionPayload {
             | Self::EscalateEditorialPitch { .. }
             // An LLM draft materializes as a first-party campaign draft; the
             // actual send is a separate, separately-approved action.
-            | Self::RequestAgentContent { .. } => ActionClass::FirstPartyReversible,
+            | Self::RequestAgentContent { .. }
+            // The brain dispatching a worker is an internal DB write (creating
+            // an agent_service_tasks row). It reaches nobody, costs nothing,
+            // and is undone by deleting the task row.
+            | Self::RequestAgentRun { .. } => ActionClass::FirstPartyReversible,
 
             // The step kind decides, not the play and not this table: the same
             // play may legitimately hold an owned-audience ask and a curator
@@ -800,6 +843,8 @@ impl AutopilotActionPayload {
             Self::RunPlayStep { .. } => "play.step.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
             Self::RequestAgentContent { .. } => "agent.content.request",
+            Self::RequestAgentRun { .. } => "agent.run.request",
+            Self::RequestCommunityEngagement { .. } => "community.engage.request",
         }
     }
 }

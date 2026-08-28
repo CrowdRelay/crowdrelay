@@ -257,7 +257,9 @@ pub(super) async fn schedule_effect_measurement(
         // is not. Phase 14 measures the play against its own pre-play baseline.
         | AutopilotActionPayload::RunPlayStep { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-        | AutopilotActionPayload::RequestAgentContent { .. } => {}
+        | AutopilotActionPayload::RequestAgentContent { .. }
+        | AutopilotActionPayload::RequestAgentRun { .. }
+        | AutopilotActionPayload::RequestCommunityEngagement { .. } => {}
     }
 
     for (kind, subject_id, baseline_value, due_at) in plans {
@@ -413,6 +415,12 @@ pub(super) async fn record_execution_outcome(
         }
         AutopilotActionPayload::RequestAgentContent { .. } => {
             ("agent_content_requested", 1.0, None)
+        }
+        AutopilotActionPayload::RequestAgentRun { .. } => {
+            ("agent_run_dispatched", 1.0, None)
+        }
+        AutopilotActionPayload::RequestCommunityEngagement { .. } => {
+            ("community_engagement_requested", 1.0, None)
         }
     };
     sqlx::query(
@@ -639,6 +647,7 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::RunPlayStep { .. }
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
                 | AutopilotActionPayload::RequestAgentContent { .. }
+                | AutopilotActionPayload::RequestCommunityEngagement { .. }
         ),
     }
 }
@@ -680,6 +689,7 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RunPlayStep { .. } => "play.step",
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
         AutopilotActionPayload::RequestAgentContent { .. } => "agent.content",
+        AutopilotActionPayload::RequestCommunityEngagement { .. } => "community.engage",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.
         _ => return None,
@@ -720,6 +730,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.play.step_requested" => "play.step",
         "crowdrelay.team.assignment_email_requested" => "team.email",
         "crowdrelay.agent.content_requested" => "agent.content",
+        "crowdrelay.community.engagement_requested" => "community.engage",
         _ => "unknown",
     }
 }

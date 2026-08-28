@@ -66,6 +66,7 @@ mod beacons;
 mod booking_supply;
 mod commercial;
 mod growth_debt;
+mod growth_intelligence;
 mod growth_metrics;
 mod outreach_supply;
 mod placements;
@@ -79,6 +80,7 @@ use commercial::{
     merch_candidate, merch_price_candidate,
 };
 use growth_debt::growth_debt_candidate;
+use growth_intelligence::growth_intelligence_candidate;
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
 use placements::placement_candidate;
@@ -515,6 +517,22 @@ where
                         .await?;
                     for observation in &observations {
                         if let Some(candidate) = growth_debt_candidate(observation, &policy, now)? {
+                            self.persist(&candidate, &mut limits, &mut report).await?;
+                        }
+                    }
+                }
+                AutopilotContext::GrowthIntelligence => {
+                    let snapshots = self
+                        .repository
+                        .load_growth_intelligence_snapshots(self.workspace_id, now)
+                        .await?;
+                    for snapshot in &snapshots {
+                        if let Some(candidate) = growth_intelligence_candidate(
+                            snapshot,
+                            &policy,
+                            self.workspace_id,
+                            now,
+                        )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }

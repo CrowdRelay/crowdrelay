@@ -253,31 +253,81 @@ impl AgentOutcomeWorker {
         // Action row only for require_approval kinds.
         let action_id = if outcome.kind.disposition() == "require_approval" {
             let action_id = Uuid::now_v7();
-            let payload = match outcome.kind {
-                OutcomeKind::PressPitch | OutcomeKind::SocialPost => json!({
-                    "kind": "request_agent_content",
-                    "template_id": outcome
-                        .payload
-                        .item
-                        .as_ref()
-                        .and_then(|i| i.get("template_id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown"),
-                    "task_id": outcome.task_id,
-                    "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
-                }),
-                OutcomeKind::OutreachTargets => json!({
-                    "kind": "request_agent_content",
-                    "template_id": "outreach-targets",
-                    "task_id": outcome.task_id,
-                    "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
-                }),
-                _ => Value::Null,
-            };
-            let action_kind = match outcome.kind {
-                OutcomeKind::PressPitch | OutcomeKind::SocialPost => "agent.content.request",
-                OutcomeKind::OutreachTargets => "outreach.request",
-                _ => "agent.content.request",
+
+            // A social_post from the community-engager worker targets a
+            // specific community (Reddit, forum) and carries a target_id +
+            // subreddit. Regular social posts target owned channels
+            // (Instagram, Facebook, X) and materialize as campaign drafts.
+            // The distinction is in the item payload, not the outcome kind.
+            let is_community_engagement = outcome.kind == OutcomeKind::SocialPost
+                && outcome
+                    .payload
+                    .item
+                    .as_ref()
+                    .and_then(|i| i.get("platform"))
+                    .and_then(Value::as_str)
+                    == Some("reddit")
+                && outcome
+                    .payload
+                    .item
+                    .as_ref()
+                    .and_then(|i| i.get("target_id"))
+                    .is_some();
+
+            let (payload, action_kind, action_class) = if is_community_engagement {
+                let item = outcome.payload.item.as_ref();
+                let target_id = item
+                    .and_then(|i| i.get("target_id"))
+                    .and_then(Value::as_str)
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .unwrap_or_else(Uuid::now_v7);
+                (
+                    json!({
+                        "kind": "request_community_engagement",
+                        "target_id": target_id,
+                        "platform": "reddit",
+                        "subreddit": item.and_then(|i| i.get("subreddit")).and_then(Value::as_str),
+                        "title": item.and_then(|i| i.get("title")).and_then(Value::as_str).unwrap_or(""),
+                        "body": item.and_then(|i| i.get("body")).and_then(Value::as_str).unwrap_or(""),
+                        "smart_link": item.and_then(|i| i.get("smart_link")).and_then(Value::as_str),
+                    }),
+                    "community.engage.request",
+                    "third_party",
+                )
+            } else {
+                match outcome.kind {
+                    OutcomeKind::PressPitch | OutcomeKind::SocialPost => (
+                        json!({
+                            "kind": "request_agent_content",
+                            "template_id": outcome
+                                .payload
+                                .item
+                                .as_ref()
+                                .and_then(|i| i.get("template_id"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown"),
+                            "task_id": outcome.task_id,
+                            "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
+                        }),
+                        "agent.content.request",
+                        "first_party_reversible",
+                    ),
+                    OutcomeKind::OutreachTargets => (
+                        json!({
+                            "kind": "request_agent_content",
+                            "template_id": "outreach-targets",
+                            "task_id": outcome.task_id,
+                            "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
+                        }),
+                        "outreach.request",
+                        "first_party_reversible",
+                    ),
+                    _ => (
+                        Value::Null,
+                        "agent.content.request",
+                        "first_party_reversible",
+                    ),
+                }
             };
             sqlx::query_scalar::<_, Uuid>(
                 r#"
@@ -305,7 +355,7 @@ impl AgentOutcomeWorker {
             .bind(&outcome.idempotency_key)
             .bind(&payload)
             .bind("awaiting_approval")
-            .bind("first_party_reversible")
+            .bind(action_class)
             .fetch_optional(&mut *tx)
             .await?
         } else {

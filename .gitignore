@@ -60,7 +60,6 @@ ops/edge/control-plane-basic.bcrypt
 ops/edge/control-plane-basic.env
 
 CLAUDE.md
-PHA*
 .claude/
 scripts/migrate-to-*.sh
 scripts/provision-*.sh

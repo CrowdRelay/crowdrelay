@@ -320,6 +320,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_growth_intelligence_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GrowthIntelligenceSnapshot>, RepositoryError> {
+        self.load_growth_intelligence_snapshots_impl(workspace_id, now)
+            .await
+    }
+
     async fn load_outreach_supply_snapshot(
         &self,
         workspace_id: WorkspaceId,

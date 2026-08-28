@@ -946,3 +946,43 @@ pub(in crate::autopilot) const fn release_milestone_str(
         Wrap => "wrap",
     }
 }
+
+/// The deterministic brain dispatches an LLM worker. Execution creates an
+/// `agent_service_tasks` row that the TS agent service's scheduler picks up
+/// on the next tick. The worker runs the specified template with the
+/// deterministic prompt and emits outcomes that the brain consumes.
+///
+/// This is a first-party reversible write: creating a task row reaches nobody,
+/// costs nothing, and is undone by deleting the row. The worker's outcomes
+/// flow back through `agent_outcomes` and the existing autopilot mapping.
+pub(in crate::autopilot) async fn execute_agent_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    template_id: &str,
+    prompt: &str,
+    _priority: u8,
+    _now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    // Insert a task row into agent_service_tasks. The TS agent service's
+    // scheduler claims due tasks and runs them. model_id = "auto" tells the
+    // runner to pick a free model.
+    sqlx::query(
+        r#"
+        INSERT INTO agent_service_tasks (id, workspace_id, template_id, model_id, prompt, status, metadata)
+        VALUES ($1, $2, $3, 'auto', $4, 'queued', $5)
+        "#,
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(template_id)
+    .bind(prompt)
+    .bind(serde_json::json!({
+        "source": "autopilot",
+        "action_id": action_id.into_uuid(),
+    }))
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}

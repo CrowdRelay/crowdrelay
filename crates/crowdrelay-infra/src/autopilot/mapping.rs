@@ -20,6 +20,7 @@ fn parse_policy(row: PolicyRow) -> Result<AutopilotPolicy, RepositoryError> {
         "growth_metrics" => AutopilotContext::GrowthMetrics,
         "growth_debt" => AutopilotContext::GrowthDebt,
         "outreach_supply" => AutopilotContext::OutreachSupply,
+        "growth_intelligence" => AutopilotContext::GrowthIntelligence,
         "plays" => AutopilotContext::Plays,
         _ => return Err(RepositoryError::Unexpected),
     };
