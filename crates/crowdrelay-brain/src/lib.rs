@@ -48,6 +48,7 @@ pub mod experiment;
 pub mod exploration;
 pub mod north_star;
 pub mod opportunity;
+pub mod portfolio;
 pub mod snapshot;
 pub mod standing;
 pub mod strategy;
@@ -69,6 +70,10 @@ pub use experiment::{
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
 pub use north_star::NorthStarMetric;
 pub use opportunity::{OpportunityAction, OpportunityId, OpportunityState, TrackedOpportunity};
+pub use portfolio::{
+    PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
+    PortfolioSelection, RejectionReason,
+};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,
     RecentInsight, UnengagedTarget,
