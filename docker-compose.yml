@@ -126,6 +126,8 @@ services:
     read_only: true
     security_opt:
       - no-new-privileges:true
+    volumes:
+      - ./secrets:/run/secrets:ro
     mem_limit: 256m
     cpus: 1.00
     stop_grace_period: 20s
