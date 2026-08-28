@@ -203,17 +203,17 @@ impl AgentOutcomeWorker {
         .bind(outcome.kind.decision_kind())
         .bind(outcome.confidence_basis_points)
         .bind(outcome.kind.disposition())
-        .bind({
+        .bind(
             // The autopilot_decisions.reason column has a CHECK constraint
             // (non-empty, <=240 chars). The LLM rationale can be longer, so
             // truncate to fit. The full rationale is preserved in
             // input_snapshot.payload.rationale.
-            let r = outcome.payload.rationale.as_str();
-            match r.char_indices().nth(240) {
-                None => r,
-                Some((idx, _)) => &r[..idx],
-            }
-        })
+            outcome
+                .payload
+                .rationale
+                .get(..outcome.payload.rationale.ceil_char_boundary(240))
+                .unwrap_or(&outcome.payload.rationale),
+        )
         .bind(&input_snapshot)
         .bind(json!({ "source": "agent_outcome", "schema_version": outcome.schema_version }))
         .bind(Value::Null)
