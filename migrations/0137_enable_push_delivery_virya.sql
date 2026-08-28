@@ -12,7 +12,7 @@
 INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
 SELECT '6c69282c-0d60-4f18-8379-60ede34362c6', 'push_delivery_enabled', true, 'Sprint 5 activation'
 WHERE EXISTS (
-    SELECT 1 FROM ecosystem_workspaces
+    SELECT 1 FROM workspaces
     WHERE id = '6c69282c-0d60-4f18-8379-60ede34362c6'
 )
 ON CONFLICT (workspace_id, key) DO UPDATE

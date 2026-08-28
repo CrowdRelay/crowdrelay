@@ -38,15 +38,17 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // We distinguish two timestamps:
     // - `last_any_run`: the most recent task regardless of outcome. Used for
     //   the failed-run retry delay so the brain doesn't retry every cycle.
-    // - `last_effective_run`: the most recent task whose outcome had a
-    //   non-empty `items` array. The cooldown is measured from this, so a
-    //   failed/empty run does NOT reset the cooldown.
+    // - `last_effective_run`: the most recent task whose outcome produced at
+    //   least one item. The agents service writes one row per item with
+    //   `payload.item` (singular); an empty run writes a single row with
+    //   only `payload.rationale` and no `item` key. The cooldown is measured
+    //   from the last effective run, so a failed/empty run does NOT reset
+    //   the cooldown.
     let last_runs: Vec<(String, Option<OffsetDateTime>, Option<OffsetDateTime>)> = sqlx::query_as(
         r#"
         SELECT ast.template_id,
                MAX(ast.created_at) AS last_any_run,
-               MAX(CASE WHEN ao.payload ? 'items'
-                            AND jsonb_array_length(ao.payload->'items') > 0
+               MAX(CASE WHEN ao.payload ? 'item'
                         THEN ao.created_at END) AS last_effective_run
         FROM agent_service_tasks ast
         LEFT JOIN agent_outcomes ao ON ao.task_id = ast.id
