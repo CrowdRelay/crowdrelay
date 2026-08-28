@@ -97,8 +97,8 @@ use crowdrelay_domain::{
         MetricValueTier, compute_trend, velocity_ratio_basis_points,
     },
     learning::{
-        LearningPolicy, PlayRecord, PlayStanding, RetirementReason, WaveOutcomeVerdict,
-        assess_play_standing, effective_recipient_ceiling, effective_wave_ceiling,
+        OutcomeRecord, RetirementReason, Standing, StandingPolicy, WaveOutcomeVerdict,
+        assess_standing, effective_recipient_ceiling, effective_wave_ceiling,
     },
     live_opportunities::{
         BookingManagerPolicy, LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
@@ -591,5 +591,6 @@ struct ExistingOperatorActionRow {
 include!("autopilot/mapping.rs");
 
 include!("autopilot/execution.rs");
+include!("autopilot/execution_capabilities.rs");
 include!("autopilot/execution_mutations.rs");
 include!("autopilot/support.rs");

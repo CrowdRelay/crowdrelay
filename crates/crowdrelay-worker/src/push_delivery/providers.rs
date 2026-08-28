@@ -254,7 +254,7 @@ impl PushProviders {
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             provider.project_id
         );
-        let collapse_key = payload.collapse_key.unwrap_or("virya-signal");
+        let collapse_key = payload.collapse_key.unwrap_or(&provider.project_id);
         let message = serde_json::json!({
             "message": {
                 "token": delivery.endpoint_address,

@@ -5,11 +5,14 @@ umask 077
 # Blue-green CrowdRelay deploy with zero-downtime Caddy cutover.
 #
 # This script runs ON the production host (virya-crowdrelay) via SSH.
-# It starts green api+worker containers alongside the current blue ones,
-# health-checks the green API directly, runs migrations via setup, switches
-# the edge Caddy upstream to green, verifies public health, then stops blue.
 #
-# On any failure it reverts the Caddy upstream to blue and stops green,
+# Alternating blue-green: detects which color is currently active and
+# deploys to the other color. If blue (api/worker) is running, starts
+# api-green/worker-green and switches Caddy to green. If green
+# (api-green/worker-green) is running, starts api/worker (blue) and
+# switches Caddy to blue.
+#
+# On any failure it reverts the Caddy upstream and stops the new containers,
 # leaving production on the previous release with no user-visible downtime.
 #
 # Usage (called by deploy-ecosystem.sh or directly):
@@ -35,8 +38,7 @@ BLUE_WORKER="crowdrelay-worker-1"
 GREEN_ALIAS="crowdrelay-api-green"
 BLUE_ALIAS="crowdrelay-api"
 CADDY_BACKUP=""
-MUTATED=false
-GREEN_STARTED=false
+NEW_STARTED=false
 CADDY_SWITCHED=false
 
 fail() {
@@ -49,26 +51,33 @@ rollback() {
   trap - ERR INT TERM HUP
 
   if [[ "$CADDY_SWITCHED" == true ]]; then
-    printf 'ROLLBACK=START reason=caddy-switched reverting upstream to %s\n' "$BLUE_ALIAS" >&2
+    printf 'ROLLBACK=START reason=caddy-switched reverting upstream to %s\n' "${CURRENT_ALIAS:-}" >&2
     if [[ -n "$CADDY_BACKUP" && -f "$CADDY_BACKUP" ]]; then
       cp "$CADDY_BACKUP" "$EDGE_CADDYFILE"
       docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1 || true
-      printf 'ROLLBACK=CADDY_REVERTED upstream=%s\n' "$BLUE_ALIAS" >&2
+      printf 'ROLLBACK=CADDY_REVERTED upstream=%s\n' "${CURRENT_ALIAS:-}" >&2
     fi
   fi
 
-  if [[ "$GREEN_STARTED" == true ]]; then
-    printf 'ROLLBACK=STOPPING_GREEN\n' >&2
+  if [[ "$NEW_STARTED" == true ]]; then
+    printf 'ROLLBACK=STOPPING_NEW\n' >&2
     cd "$REPO_DIR"
     source .crowdrelay.local.sh 2>/dev/null || true
     local env_file compose_file
     env_file="$(absolute_path "${CROWDRELAY_ENV_FILE:-deploy/.env.production}")"
     compose_file="$(absolute_path "${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}")"
-    docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
-      stop api-green worker-green >/dev/null 2>&1 || true
-    docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
-      rm -f api-green worker-green >/dev/null 2>&1 || true
-    printf 'ROLLBACK=GREEN_STOPPED\n' >&2
+    if [[ "$DEPLOY_COLOR" == "green" ]]; then
+      docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
+        stop api-green worker-green >/dev/null 2>&1 || true
+      docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
+        rm -f api-green worker-green >/dev/null 2>&1 || true
+    else
+      docker compose --env-file "$env_file" -f "$compose_file" \
+        stop api worker >/dev/null 2>&1 || true
+      docker compose --env-file "$env_file" -f "$compose_file" \
+        rm -f api worker >/dev/null 2>&1 || true
+    fi
+    printf 'ROLLBACK=NEW_STOPPED\n' >&2
   fi
 
   printf 'ROLLBACK=COMPLETE status=%d\n' "$status" >&2
@@ -99,18 +108,39 @@ export CROWDRELAY_ENV_FILE="$env_file"
 export CROWDRELAY_DOCKER_NETWORK
 export CROWDRELAY_GREEN_TAG="sha-${TARGET}"
 
-# Verify the green images are available
+# Verify the new images are available
 for component in api worker; do
   image="ghcr.io/crowdrelay/crowdrelay-${component}:${CROWDRELAY_GREEN_TAG}"
   revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
-  [[ "$revision" == "$TARGET" ]] || fail "green image not available or revision mismatch: $image (got=${revision})"
+  [[ "$revision" == "$TARGET" ]] || fail "image not available or revision mismatch: $image (got=${revision})"
 done
-printf 'GREEN_IMAGES=PASS sha=%s\n' "$TARGET"
+printf 'NEW_IMAGES=PASS sha=%s\n' "$TARGET"
 
-# Verify blue is currently running and healthy
+# Detect which color is currently active and determine deploy direction.
 blue_health="$(docker inspect "$BLUE_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-[[ "$blue_health" == "healthy" || "$blue_health" == "running" ]] || fail "blue API is not healthy: $blue_health"
-printf 'BLUE_BASELINE=PASS health=%s\n' "$blue_health"
+green_health="$(docker inspect "$GREEN_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+
+if [[ "$blue_health" == "healthy" || "$blue_health" == "running" ]]; then
+  DEPLOY_COLOR="green"
+  CURRENT_API="$BLUE_API"
+  CURRENT_WORKER="$BLUE_WORKER"
+  CURRENT_ALIAS="$BLUE_ALIAS"
+  NEW_API="$GREEN_API"
+  NEW_WORKER="$GREEN_WORKER"
+  NEW_ALIAS="$GREEN_ALIAS"
+  printf 'BASELINE=BLUE health=%s → deploying green\n' "$blue_health"
+elif [[ "$green_health" == "healthy" || "$green_health" == "running" ]]; then
+  DEPLOY_COLOR="blue"
+  CURRENT_API="$GREEN_API"
+  CURRENT_WORKER="$GREEN_WORKER"
+  CURRENT_ALIAS="$GREEN_ALIAS"
+  NEW_API="$BLUE_API"
+  NEW_WORKER="$BLUE_WORKER"
+  NEW_ALIAS="$BLUE_ALIAS"
+  printf 'BASELINE=GREEN health=%s → deploying blue\n' "$green_health"
+else
+  fail "no running API found: blue=$blue_health green=$green_health — bootstrap with deploy-home.sh first"
+fi
 
 # Snapshot the current Caddyfile for rollback
 CADDY_BACKUP="$(mktemp -t caddyfile-blue.XXXXXX)"
@@ -119,90 +149,88 @@ printf 'CADDY_BACKUP=PASS file=%s\n' "$CADDY_BACKUP"
 
 trap 'rollback $?' ERR INT TERM HUP
 
-# --- 1. Start green containers ----------------------------------------------
+# --- 1. Start new containers ------------------------------------------------
 
-printf '\n==> 1/6 — Start green api+worker\n'
-MUTATED=true
-GREEN_STARTED=true
+printf '\n==> 1/6 — Start %s api+worker\n' "$DEPLOY_COLOR"
+NEW_STARTED=true
 
-docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
-  up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api-green worker-green
+if [[ "$DEPLOY_COLOR" == "green" ]]; then
+  docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
+    up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api-green worker-green
+else
+  # Deploy blue: override the image tag without modifying .crowdrelay.local.sh
+  export CROWDRELAY_IMAGE_TAG="sha-${TARGET}"
+  docker compose --env-file "$env_file" -f "$compose_file" \
+    up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api worker
+fi
 
-printf 'GREEN_CONTAINERS=STARTED\n'
+printf 'NEW_CONTAINERS=STARTED color=%s\n' "$DEPLOY_COLOR"
 
-# --- 2. Health-check green API directly -------------------------------------
+# --- 2. Health-check new API directly ---------------------------------------
 
-printf '\n==> 2/6 — Health-check green API\n'
-green_health=""
+printf '\n==> 2/6 — Health-check %s API\n' "$DEPLOY_COLOR"
+new_health=""
 for attempt in $(seq 1 30); do
-  green_health="$(docker inspect "$GREEN_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-  if [[ "$green_health" == "healthy" ]]; then
+  new_health="$(docker inspect "$NEW_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+  if [[ "$new_health" == "healthy" ]]; then
     break
   fi
   sleep 2
 done
-[[ "$green_health" == "healthy" ]] || fail "green API did not become healthy: $green_health"
+[[ "$new_health" == "healthy" ]] || fail "$DEPLOY_COLOR API did not become healthy: $new_health"
 
-# Direct health check via network alias (from within the Docker network)
+# Direct health check via network alias
 docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
   --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-  "http://${GREEN_ALIAS}:8080/v1/health/ready" >/dev/null
+  "http://${NEW_ALIAS}:8080/v1/health/ready" >/dev/null
 
-# Verify green serves the correct SHA in /v1/meta
-green_meta="$(docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
+# Verify new API serves the correct SHA in /v1/meta
+new_meta="$(docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
   --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-  "http://${GREEN_ALIAS}:8080/v1/meta")"
-printf '%s' "$green_meta" | python3 -c "
+  "http://${NEW_ALIAS}:8080/v1/meta")"
+printf '%s' "$new_meta" | python3 -c "
 import json, sys
 expected = sys.argv[1]
 data = json.load(sys.stdin)
 actual = data.get('gitSha', '')
 if actual != expected:
-    raise SystemExit(f'green meta mismatch: got={actual} expected={expected}')
+    raise SystemExit(f'meta mismatch: got={actual} expected={expected}')
 " "$TARGET"
 
-printf 'GREEN_HEALTH=PASS meta_sha=%s\n' "$TARGET"
+printf 'NEW_HEALTH=PASS meta_sha=%s\n' "$TARGET"
 
 # --- 3. Run migrations via setup --------------------------------------------
 
 printf '\n==> 3/6 — Run migrations (setup)\n'
-# Run setup with the green image tag so migrations from the new release
-# are applied. Without this, the setup container uses the old CROWDRELAY_IMAGE_TAG
-# from the env file and misses any new migrations added since the last deploy.
 CROWDRELAY_IMAGE_TAG="$CROWDRELAY_GREEN_TAG" \
 docker compose --env-file "$env_file" -f "$compose_file" \
   run --rm -T setup </dev/null
 printf 'MIGRATIONS=PASS\n'
 
-# --- 4. Switch edge Caddy to green ------------------------------------------
+# --- 4. Switch edge Caddy to new app ----------------------------------------
 
-printf '\n==> 4/6 — Switch edge Caddy upstream to green\n'
-# Replace the upstream in the signal-api block only
-# The pattern is specific enough to only match the CrowdRelay API block
-sed -i "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy ${GREEN_ALIAS}:8080|" "$EDGE_CADDYFILE"
+printf '\n==> 4/6 — Switch edge Caddy upstream to %s\n' "$DEPLOY_COLOR"
+sed -i "s|reverse_proxy ${CURRENT_ALIAS}:8080|reverse_proxy ${NEW_ALIAS}:8080|" "$EDGE_CADDYFILE"
 
-# Verify the sed actually changed something
-grep -Fq "reverse_proxy ${GREEN_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile was not updated to green upstream"
-grep -Fq "reverse_proxy ${BLUE_ALIAS}:8080" "$EDGE_CADDYFILE" && fail "Caddyfile still contains blue upstream — ambiguous state"
+# Verify the sed changed something
+grep -Fq "reverse_proxy ${NEW_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile was not updated to ${DEPLOY_COLOR} upstream"
+grep -Fq "reverse_proxy ${CURRENT_ALIAS}:8080" "$EDGE_CADDYFILE" && fail "Caddyfile still contains old upstream — ambiguous state"
 
 # Also update the area management proxy Caddyfile if it exists.
-# The proxy forwards control-plane requests to the CrowdRelay API via the
-# Docker DNS name "api" (blue) — after blue-green cutover the blue container
-# is gone, so the proxy must point to the green alias instead.
 AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
 AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
 if [[ -f "$AREA_CADDYFILE" ]]; then
-  sed -i "s|http://${BLUE_ALIAS}:8080|http://${GREEN_ALIAS}:8080|g" "$AREA_CADDYFILE"
+  sed -i "s|http://${CURRENT_ALIAS}:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE"
   # Also handle the bare "api" hostname used before the first green deploy
-  sed -i "s|http://api:8080|http://${GREEN_ALIAS}:8080|g" "$AREA_CADDYFILE"
+  sed -i "s|http://api:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE"
   docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
-  printf 'AREA_PROXY=PASS upstream=%s\n' "$GREEN_ALIAS"
+  printf 'AREA_PROXY=PASS upstream=%s\n' "$NEW_ALIAS"
 fi
 
-# Graceful Caddy reload (zero-downtime: in-flight requests complete, new ones go to green)
+# Graceful Caddy reload (zero-downtime: in-flight requests complete, new ones go to new app)
 docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force
 CADDY_SWITCHED=true
-printf 'CADDY_SWITCH=PASS upstream=%s\n' "$GREEN_ALIAS"
+printf 'CADDY_SWITCH=PASS upstream=%s\n' "$NEW_ALIAS"
 
 # --- 5. Verify public health ------------------------------------------------
 
@@ -234,27 +262,19 @@ if [[ -n "$public_meta" ]]; then
   fi
 fi
 
-# --- 6. Stop blue, finalize -------------------------------------------------
+# --- 6. Stop old containers, finalize ---------------------------------------
 
-printf '\n==> 6/6 — Stop blue containers, finalize\n'
-docker stop "$BLUE_API" "$BLUE_WORKER" >/dev/null 2>&1 || true
-docker rm "$BLUE_API" "$BLUE_WORKER" >/dev/null 2>&1 || true
+printf '\n==> 6/6 — Stop old containers, finalize\n'
+docker stop "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
+docker rm "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 
 # Update the pin to the new SHA
 sed -i "s|^CROWDRELAY_IMAGE_SHA=.*|CROWDRELAY_IMAGE_SHA=\"${TARGET}\"|" .crowdrelay.local.sh
 sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=\"sha-\${CROWDRELAY_IMAGE_SHA}\"|" .crowdrelay.local.sh
-
-# The green containers are now the new blue. Their compose service names are
-# api-green-1 and worker-green-1, but the network alias crowdrelay-api-green
-# is what Caddy routes to. On the next deploy, the new green will be started
-# and the current green (now serving) will become the old blue to stop.
-# The Caddyfile already points to crowdrelay-api-green, which is correct.
-# When the next deploy starts, it will create a new green and switch Caddy
-# to the new green alias, then stop the current one.
 
 # Clean up rollback temp file
 rm -f "$CADDY_BACKUP"
 
 trap - ERR INT TERM HUP
 
-printf '\nBLUEGREEN_DEPLOY=PASS sha=%s cutover=zero-downtime blue=stopped green=active\n' "$TARGET"
+printf '\nBLUEGREEN_DEPLOY=PASS sha=%s cutover=zero-downtime old=%s stopped new=%s active\n' "$TARGET" "$CURRENT_API" "$NEW_API"

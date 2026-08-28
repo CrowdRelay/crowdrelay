@@ -46,6 +46,7 @@ macro_rules! decision_persist {
                         decision_created: false,
                         action_created: false,
                         quota_throttled: true,
+                        action_id: None,
                     });
                 }
             }
@@ -83,7 +84,10 @@ macro_rules! decision_persist {
 
             let Some(decision_id) = inserted_decision else {
                 transaction.commit().await.map_err(map_sqlx)?;
-                return Ok(CandidatePersistence::default());
+                return Ok(CandidatePersistence {
+                    action_id: None,
+                    ..Default::default()
+                });
             };
 
             let status = match candidate.disposition {
@@ -99,6 +103,7 @@ macro_rules! decision_persist {
                     decision_created: true,
                     action_created: false,
                     quota_throttled: false,
+                    action_id: None,
                 });
             };
 
@@ -174,6 +179,7 @@ macro_rules! decision_persist {
                 decision_created: true,
                 action_created: inserted.is_some(),
                 quota_throttled: false,
+                action_id: inserted.or(Some(action_id)),
             })
         })
         .await

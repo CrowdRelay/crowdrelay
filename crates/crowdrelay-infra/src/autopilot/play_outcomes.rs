@@ -761,10 +761,10 @@ pub(super) async fn record_play_outcome(
     // assumed: a workspace that widened the sample size before retiring a play
     // must not have that overruled by a default sitting in this file.
     let policy = play_learning_policy(transaction, workspace_id).await?;
-    let standing = assess_play_standing(record, policy);
+    let standing = assess_standing(record, policy);
     let (retired_reason, weight) = match standing {
-        PlayStanding::Retired { reason } => (Some(reason.as_str()), 0_i32),
-        PlayStanding::Untested { .. } | PlayStanding::Weighted { .. } => {
+        Standing::Retired { reason } => (Some(reason.as_str()), 0_i32),
+        Standing::Untested { .. } | Standing::Weighted { .. } => {
             (None, i32::from(standing.weight_basis_points()))
         }
     };
@@ -822,9 +822,9 @@ struct PlayLearningRow {
     retired_reason: Option<String>,
 }
 
-fn play_record(row: &PlayLearningRow) -> Result<PlayRecord, RepositoryError> {
+fn play_record(row: &PlayLearningRow) -> Result<OutcomeRecord, RepositoryError> {
     let count = |value: i32| u32::try_from(value).map_err(|_| RepositoryError::Unexpected);
-    Ok(PlayRecord {
+    Ok(OutcomeRecord {
         improved: count(row.improved_count)?,
         neutral: count(row.neutral_count)?,
         worsened: count(row.worsened_count)?,
@@ -840,7 +840,7 @@ fn play_record(row: &PlayLearningRow) -> Result<PlayRecord, RepositoryError> {
 async fn play_learning_policy(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
-) -> Result<LearningPolicy, RepositoryError> {
+) -> Result<StandingPolicy, RepositoryError> {
     let config = sqlx::query_scalar::<_, Value>(
         "SELECT config FROM viryaos_autopilot_policies WHERE workspace_id=$1 AND context='plays'",
     )
@@ -907,7 +907,7 @@ impl PostgresAutopilotRepository {
                         .map(play_record)
                         .transpose()?
                         .unwrap_or_default();
-                    let standing = assess_play_standing(record, policy.learning);
+                    let standing = assess_standing(record, policy.learning);
                     Ok(PlayKindStanding {
                         kind,
                         record,
@@ -939,9 +939,9 @@ struct OutreachKindLearningRow {
     retired_reason: Option<String>,
 }
 
-fn outreach_kind_record(row: &OutreachKindLearningRow) -> Result<PlayRecord, RepositoryError> {
+fn outreach_kind_record(row: &OutreachKindLearningRow) -> Result<OutcomeRecord, RepositoryError> {
     let count = |value: i32| u32::try_from(value).map_err(|_| RepositoryError::Unexpected);
-    Ok(PlayRecord {
+    Ok(OutcomeRecord {
         improved: count(row.improved_count)?,
         neutral: count(row.neutral_count)?,
         worsened: count(row.worsened_count)?,
@@ -983,7 +983,7 @@ impl PostgresAutopilotRepository {
                         .map(outreach_kind_record)
                         .transpose()?
                         .unwrap_or_default();
-                    let standing = assess_play_standing(record, LearningPolicy::default());
+                    let standing = assess_standing(record, StandingPolicy::default());
                     Ok(OutreachKindStanding {
                         kind,
                         record,
@@ -1304,10 +1304,10 @@ async fn record_outreach_kind_outcome(
         .unwrap_or_default()
         .observe(assessment);
 
-    let standing = assess_play_standing(record, LearningPolicy::default());
+    let standing = assess_standing(record, StandingPolicy::default());
     let (retired_reason, weight) = match standing {
-        PlayStanding::Retired { reason } => (Some(reason.as_str()), 0_i32),
-        PlayStanding::Untested { .. } | PlayStanding::Weighted { .. } => {
+        Standing::Retired { reason } => (Some(reason.as_str()), 0_i32),
+        Standing::Untested { .. } | Standing::Weighted { .. } => {
             (None, i32::from(standing.weight_basis_points()))
         }
     };

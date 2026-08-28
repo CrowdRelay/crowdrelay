@@ -301,6 +301,41 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         outcome_ids: &[uuid::Uuid],
     ) -> Result<u64, RepositoryError>;
 
+    /// Loads the causal model from past dispatch predictions and their
+    /// measured outcomes. The brain uses this to predict how many fans
+    /// each worker dispatch will produce, and to learn from prediction
+    /// errors (the dopamine loop).
+    async fn load_causal_model(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crowdrelay_domain::growth_intelligence::CausalModel, RepositoryError>;
+
+    /// Records a dispatch prediction. Called when the brain dispatches a
+    /// worker — stores the prediction so it can be compared with the
+    /// measured outcome later.
+    async fn record_dispatch_prediction(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: uuid::Uuid,
+        prediction: &crowdrelay_domain::growth_intelligence::DispatchPrediction,
+    ) -> Result<(), RepositoryError>;
+
+    /// Loads the exploration memory from past dispatch predictions.
+    /// The brain uses this to compute novelty: unexplored (template,
+    /// context) pairs get an exploration bonus in the EFE score.
+    async fn load_exploration_memory(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crowdrelay_domain::growth_intelligence::ExplorationMemory, RepositoryError>;
+
+    /// Loads the most recently dispatched template's ID, used to infer
+    /// the previous growth strategy for hysteresis. Returns `None` if
+    /// no dispatches have been recorded yet.
+    async fn load_last_dispatched_template(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<String>, RepositoryError>;
+
     /// What the pitcher currently has to work with. One row per workspace
     /// rather than a list: supply is not a property of any single target, and
     /// counting it per target is how a starved pipeline stays invisible.

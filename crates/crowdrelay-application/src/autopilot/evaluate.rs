@@ -30,6 +30,7 @@ use crowdrelay_domain::{
     },
     funding::{FundingDecision, FundingOpportunitySnapshot, evaluate_funding},
     growth_envelope::{EnvelopeUsage, EnvelopeVerdict, GrowthEnvelope, check_envelope},
+    growth_intelligence::{DispatchContext, DispatchPrediction, GrowthStrategy, context_hash},
     live_opportunities::{
         LiveOpportunityDecision, LiveOpportunitySnapshot, evaluate_live_opportunity,
         live_opportunity_score,
@@ -528,23 +529,107 @@ where
                         .repository
                         .load_growth_intelligence_snapshots(self.workspace_id, now)
                         .await?;
+                    // Load the causal model from past predictions + outcomes.
+                    // The brain uses this to predict how many fans each
+                    // dispatch will produce, and learns from prediction errors.
+                    let causal_model = self.repository.load_causal_model(self.workspace_id).await?;
+                    // Load the exploration memory from past dispatch
+                    // predictions. The brain uses this to compute novelty:
+                    // unexplored (template, context) pairs get an exploration
+                    // bonus in the EFE score.
+                    let exploration_memory = self
+                        .repository
+                        .load_exploration_memory(self.workspace_id)
+                        .await
+                        .unwrap_or_default();
+                    // Derive the growth strategy from the world model, with
+                    // hysteresis — the brain doesn't flip-flop between
+                    // strategies every cycle when conditions are borderline.
+                    // The previous strategy is inferred from the most
+                    // recently dispatched template.
+                    let last_template = self
+                        .repository
+                        .load_last_dispatched_template(self.workspace_id)
+                        .await
+                        .unwrap_or(None);
+                    let previous_strategy = last_template
+                        .as_deref()
+                        .map(GrowthStrategy::infer_from_template);
+                    let strategy = if let Some(first) = snapshots.first() {
+                        GrowthStrategy::from_world_model_with_hysteresis(
+                            &first.world_model,
+                            previous_strategy,
+                        )
+                    } else {
+                        GrowthStrategy::default()
+                    };
                     // Collect all unconsumed insight IDs across all snapshots.
-                    // After the evaluator has factored them into dispatch
-                    // decisions (or decided not to dispatch), mark them
-                    // consumed so the brain doesn't re-read stale insights
-                    // and the retention worker can clean them up.
                     let mut consumed_ids: Vec<Uuid> = Vec::new();
+                    // Collect all eligible candidates with their EFE scores
+                    // and strategy ranks, then sort by (strategy_rank,
+                    // efe_score) so the brain dispatches the best
+                    // opportunities first. When budget limits kick in,
+                    // the worst opportunities are the ones that get gated.
+                    let mut scored_candidates: Vec<(
+                        DecisionCandidate,
+                        DispatchPrediction,
+                        f64,
+                        usize,
+                    )> = Vec::new();
                     for snapshot in &snapshots {
                         for insight in &snapshot.recent_insights {
                             consumed_ids.push(insight.outcome_id);
                         }
-                        if let Some(candidate) = growth_intelligence_candidate(
-                            snapshot,
-                            &policy,
-                            self.workspace_id,
-                            now,
-                        )? {
-                            self.persist(&candidate, &mut limits, &mut report).await?;
+                        // Compute exploration novelty for this (template, context) pair.
+                        let ctx_hash = context_hash(&DispatchContext {
+                            days_to_event: snapshot.days_to_next_event,
+                            fan_growth_trend: snapshot.world_model.fan_growth_trend,
+                            subreddit_type: None,
+                            post_format: None,
+                            time_of_day_bps: 0,
+                            community_novelty_bps: 0,
+                        });
+                        let novelty = exploration_memory.novelty(&snapshot.template_id, &ctx_hash);
+                        if let Some((candidate, prediction, efe_score, strategy_rank)) =
+                            growth_intelligence_candidate(
+                                snapshot,
+                                &policy,
+                                self.workspace_id,
+                                now,
+                                &causal_model,
+                                strategy,
+                                novelty,
+                            )?
+                        {
+                            scored_candidates.push((
+                                candidate,
+                                prediction,
+                                efe_score,
+                                strategy_rank,
+                            ));
+                        }
+                    }
+                    // Sort by strategy rank (primary), then EFE score
+                    // (secondary — lower EFE = better). This dispatches
+                    // strategy-prioritized, lowest-EFE opportunities first.
+                    scored_candidates.sort_by(|a, b| {
+                        a.3.cmp(&b.3).then_with(|| {
+                            a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    });
+                    for (candidate, prediction, _efe, _rank) in scored_candidates {
+                        let persisted = self.persist(&candidate, &mut limits, &mut report).await?;
+                        // Record the prediction for later comparison with
+                        // measured outcomes (the dopamine loop).
+                        if let Some(action_id) = persisted {
+                            let _ = self
+                                .repository
+                                .record_dispatch_prediction(
+                                    self.workspace_id,
+                                    action_id,
+                                    &prediction,
+                                )
+                                .await;
                         }
                     }
                     // Mark all loaded insights as consumed, regardless of
@@ -782,12 +867,15 @@ where
     /// Doing it here rather than inside each of the twenty candidate functions
     /// means a new detector cannot forget it, and a detector author cannot
     /// choose to skip it.
+    ///
+    /// Returns the action_id if one was created or already existed. Callers
+    /// that don't need it can ignore the return value.
     async fn persist(
         &self,
         candidate: &DecisionCandidate,
         limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
-    ) -> Result<(), AutopilotError> {
+    ) -> Result<Option<Uuid>, AutopilotError> {
         let class = candidate.action.action_class();
         let ceiling = limits
             .ceilings
@@ -880,70 +968,11 @@ where
         if persisted.quota_throttled {
             report.actions_throttled = report.actions_throttled.saturating_add(1);
         }
-        Ok(())
+        Ok(persisted.action_id)
     }
 }
 
-/// The cycle-wide limits every candidate is measured against.
-///
-/// Carried as one value because they are read together and, in the envelope's
-/// case, spent together: passing them separately through a call chain is how a
-/// budget ends up topped up on one path and not on another.
-struct CycleLimits<'a> {
-    ceilings: &'a [(ActionClass, AutonomyLevel)],
-    envelope: &'a GrowthEnvelope,
-    usage: &'a mut EnvelopeUsage,
-    touch_ages: &'a [(uuid::Uuid, u32)],
-    touched_this_cycle: &'a mut std::collections::HashSet<uuid::Uuid>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AutopilotCycleReport {
-    pub decisions: u32,
-    pub actions_enqueued: u32,
-    pub actions_throttled: u32,
-    /// Campaigns the agent committed to this cycle. Counted apart from
-    /// decisions because starting a play emits nothing: it is the agent taking
-    /// on work, and an operator should be able to see that happen before the
-    /// first message goes anywhere.
-    pub plays_started: u32,
-    /// Steps settled without being sent. The number that matters most on this
-    /// report: it is the agent saying what it did not do, which is the fact
-    /// every other counter here would otherwise hide.
-    pub play_steps_skipped: u32,
-    pub plays_completed: u32,
-    /// Claimed placements that reached an answer — confirmed and gone, or never
-    /// confirmed at all. Counted apart from anything else because a placement
-    /// that cannot be verified must never reach a result.
-    pub placements_settled: u32,
-    /// Free-reach waves opened, closed for review, and ended without ever
-    /// reaching a human. The last is the one worth watching: it is the agent
-    /// saying it drafted work nobody got to.
-    pub waves_opened: u32,
-    pub waves_sealed: u32,
-    pub waves_expired: u32,
-    /// Negotiations ended without an acceptance — declined for a stated reason,
-    /// or expired because the promoter stopped waiting. Settlements rather than
-    /// actions, so nothing else on this report would show them.
-    pub terms_settled: u32,
-    /// Decisions the volume envelope held back — the agent was switched off,
-    /// rehearsing, out of budget, or inside a subject's cooldown.
-    pub actions_held: u32,
-    /// Decisions the class ceiling lowered — an action the context was willing
-    /// to take unattended that now waits for a human. Counted separately from
-    /// quota throttling because the two mean different things: throttled work
-    /// is deferred, gated work is somebody's decision to make.
-    pub actions_gated: u32,
-}
-
-#[derive(Debug, Error)]
-pub enum AutopilotError {
-    #[error("autopilot repository failed")]
-    Repository(#[from] RepositoryError),
-    #[error("autopilot decision serialization failed")]
-    Serialization(#[from] serde_json::Error),
-}
-
+include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/growth_metrics_tests.rs");

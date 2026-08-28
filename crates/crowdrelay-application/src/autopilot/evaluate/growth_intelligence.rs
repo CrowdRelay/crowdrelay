@@ -7,9 +7,28 @@
 //! This evaluator produces `RequestAgentRun` candidates that dispatch LLM
 //! workers. Each candidate carries a deterministic prompt built from the
 //! workspace's data, not from an LLM.
+//!
+//! # Scoring: Expected Free Energy (EFE)
+//!
+//! Each eligible dispatch is scored by EFE, an Active Inference metric that
+//! balances pragmatic value (expected fan growth) against epistemic value
+//! (information gain from reducing uncertainty). Lower EFE = better
+//! opportunity. The brain dispatches the lowest-EFE opportunities first,
+//! so when budget limits kick in the best opportunities are already
+//! enqueued.
+//!
+//! # Strategy: hierarchical planning
+//!
+//! The brain derives a `GrowthStrategy` from the world model each cycle.
+//! The strategy determines template priority order — which workers the
+//! brain dispatches first when multiple are eligible. This is the
+//! hierarchical layer: strategy → template priority → EFE tie-break.
 
 use crowdrelay_domain::growth_intelligence::{
-    AgentTier, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot, RecentInsight, UnengagedTarget,
+    AgentTier, CausalModel, DispatchContext, DispatchPrediction, EfeWeights,
+    GrowthIntelligencePolicy, GrowthIntelligenceSnapshot, GrowthOpportunity, GrowthStrategy,
+    RecentInsight, UnengagedTarget, effective_agent_cooldown, effective_agent_tier,
+    information_gain,
 };
 use time::OffsetDateTime;
 
@@ -32,6 +51,17 @@ pub struct IntelligenceRequest {
     /// Intelligent token optimization: basic tasks go to free models,
     /// premium tasks go to connected paid providers. Defaults to basic.
     pub tier: AgentTier,
+    /// The brain's prediction for this dispatch: how many new fans and
+    /// Signal installs it expects. Recorded before dispatch so the
+    /// prediction error can be computed after measurement.
+    pub prediction: DispatchPrediction,
+    /// Expected Free Energy score: lower = better opportunity.
+    /// Combines expected fan growth (pragmatic) with information gain
+    /// (epistemic). The brain dispatches lowest-EFE opportunities first.
+    pub efe_score: f64,
+    /// The strategy-derived priority rank for this template (0 = highest
+    /// priority). Used as the primary sort key before EFE.
+    pub strategy_rank: usize,
 }
 
 /// Formats the unengaged outreach targets into a context block for the
@@ -91,10 +121,97 @@ fn insights_block(insights: &[RecentInsight]) -> String {
 /// and situational logic — no LLM is involved in this decision. Recent
 /// insights from previous worker runs are included in the dispatch prompt
 /// so the worker can build on them rather than repeating itself.
+///
+/// # EFE scoring
+///
+/// Each eligible dispatch gets an EFE score that combines:
+/// - **Pragmatic value**: expected fan growth from the causal model.
+/// - **Epistemic value**: information gain from reducing uncertainty
+///   (1/(1+confidence) — unmeasured templates have maximum information gain).
+/// - **Exploration bonus**: novelty from the exploration memory, so the
+///   brain prefers unexplored (template, context) combinations.
+///
+/// Lower EFE = better opportunity. The caller sorts by EFE before
+/// persisting, so budget limits hit the worst opportunities first.
 pub fn evaluate_growth_intelligence(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &GrowthIntelligencePolicy,
+    causal_model: &CausalModel,
+    strategy: GrowthStrategy,
+    exploration_novelty: f64,
 ) -> Option<IntelligenceRequest> {
+    // A retired worker is never dispatched. The standing is computed from
+    // past measurement outcomes — a worker that consistently produces no fan
+    // growth or worsens it is retired until an operator reinstates it.
+    if snapshot.standing.is_retired() {
+        return None;
+    }
+
+    // Build the dispatch context from the world model for prediction.
+    let dispatch_context = DispatchContext {
+        days_to_event: snapshot.days_to_next_event,
+        fan_growth_trend: snapshot.world_model.fan_growth_trend,
+        subreddit_type: None,
+        post_format: None,
+        time_of_day_bps: 0,
+        community_novelty_bps: 0,
+    };
+    // Predict expected new fans using the causal model.
+    let expected_new_fans = causal_model.predict(&snapshot.template_id, &dispatch_context);
+    // Predict expected Signal installs using the learned Signal model.
+    let expected_signal_installs =
+        causal_model.predict_signal(&snapshot.template_id, &dispatch_context);
+
+    // ── EFE scoring with uncertainty ──
+    // The full EFE formula:
+    //   EFE = -(w_prag * expected_fans
+    //         + w_epist * info_gain * predict_std
+    //         + w_explore * novelty)
+    //         + w_risk * predict_std
+    //
+    // - Pragmatic: expected fan growth (exploitation).
+    // - Epistemic: information gain × prediction uncertainty (exploration
+    //   drive — the brain dispatches workers it's uncertain about).
+    // - Exploration: novelty from the exploration memory (Go-Explore bonus).
+    // - Risk: penalizes uncertain outcomes (risk aversion).
+    let confidence = causal_model.confidence(&snapshot.template_id);
+    let info_gain = information_gain(confidence);
+    let predict_std = causal_model.predict_std(&snapshot.template_id);
+    let efe_weights = EfeWeights::default();
+    let efe_score = GrowthOpportunity::compute_efe(
+        expected_new_fans,
+        info_gain,
+        predict_std,
+        exploration_novelty,
+        efe_weights,
+    );
+
+    // ── Strategy rank ──
+    // The strategy determines which templates the brain prioritizes.
+    // Rank 0 = highest priority. Templates not in the strategy list get
+    // a rank of usize::MAX so they sort last.
+    let strategy_priority = strategy.template_priority();
+    let strategy_rank = strategy_priority
+        .iter()
+        .position(|t| *t == snapshot.template_id)
+        .unwrap_or(usize::MAX);
+
+    // Adaptive cadence: the effective cooldown is adjusted by the worker's
+    // measured standing. Effective workers get shorter cooldowns (dispatched
+    // more often), ineffective ones get longer cooldowns (dispatched less).
+    let reddit_scanner_cd =
+        effective_agent_cooldown(policy.reddit_scanner_cooldown_hours, snapshot.standing);
+    let press_pitch_cd =
+        effective_agent_cooldown(policy.press_pitch_cooldown_hours, snapshot.standing);
+    let social_post_cd =
+        effective_agent_cooldown(policy.social_post_cooldown_hours, snapshot.standing);
+    let community_engager_cd =
+        effective_agent_cooldown(policy.community_engager_cooldown_hours, snapshot.standing);
+    let signal_inviter_cd =
+        effective_agent_cooldown(policy.signal_inviter_cooldown_hours, snapshot.standing);
+    let growth_strategist_cd =
+        effective_agent_cooldown(policy.growth_strategist_cooldown_hours, snapshot.standing);
+
     // Layered cooldown: the effective cooldown only counts runs that produced
     // items (outreach targets, social posts, etc.). A failed/empty run does
     // NOT reset the cooldown, but the retry delay prevents 5-minute retry
@@ -110,9 +227,24 @@ pub fn evaluate_growth_intelligence(
     let is_retry = snapshot.hours_since_last_effective_run.is_none();
     let retry_window = policy.failed_run_retry_hours.max(1);
 
+    /// Builds a DispatchPrediction for the given template.
+    fn make_prediction(
+        template_id: &str,
+        expected_new_fans: f64,
+        expected_signal_installs: f64,
+        context: &DispatchContext,
+    ) -> DispatchPrediction {
+        DispatchPrediction {
+            template_id: template_id.to_owned(),
+            expected_new_fans,
+            expected_signal_installs,
+            context: context.clone(),
+        }
+    }
+
     // Rule 1: Scan Reddit communities on a 7-day cadence.
     if snapshot.template_id == "reddit-scanner"
-        && effective_hours >= policy.reddit_scanner_cooldown_hours
+        && effective_hours >= reddit_scanner_cd
         && retry_ready
     {
         let mut prompt = "Find Polish and Central-European metal subreddits and forums relevant to the band's genre and upcoming events. Report subscriber estimates, activity levels, and self-promo policies.".to_owned();
@@ -124,21 +256,29 @@ pub fn evaluate_growth_intelligence(
             template_id: "reddit-scanner",
             priority: 3,
             prompt,
-            cooldown_hours: policy.reddit_scanner_cooldown_hours,
+            cooldown_hours: reddit_scanner_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
-                policy.reddit_scanner_cooldown_hours
+                reddit_scanner_cd
             },
             reason: "Reddit community scan is due (7-day cadence)",
-            tier: AgentTier::Basic,
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "reddit-scanner",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
         });
     }
 
     // Rule 2: If there's an upcoming event within the lead window, pitch press.
     if snapshot.template_id == "press-pitch"
         && snapshot.has_upcoming_event
-        && effective_hours >= policy.press_pitch_cooldown_hours
+        && effective_hours >= press_pitch_cd
         && retry_ready
     {
         let days = snapshot.days_to_next_event.unwrap_or(u32::MAX);
@@ -153,25 +293,32 @@ pub fn evaluate_growth_intelligence(
                 template_id: "press-pitch",
                 priority,
                 prompt,
-                cooldown_hours: policy.press_pitch_cooldown_hours,
+                cooldown_hours: press_pitch_cd,
                 key_window_hours: if is_retry {
                     retry_window
                 } else {
-                    policy.press_pitch_cooldown_hours
+                    press_pitch_cd
                 },
                 reason: "Upcoming event within press lead window",
                 // Premium: press pitches go to real human contacts. A bad
                 // pitch burns a relationship permanently — quality matters.
-                tier: AgentTier::Premium,
+                // The standing may escalate or maintain this; a worker with
+                // poor standing stays at base tier even for press pitches.
+                tier: effective_agent_tier(AgentTier::Premium, snapshot.standing),
+                prediction: make_prediction(
+                    "press-pitch",
+                    expected_new_fans,
+                    expected_signal_installs,
+                    &dispatch_context,
+                ),
+                efe_score,
+                strategy_rank,
             });
         }
     }
 
     // Rule 3: Draft social content on a 2-day cadence.
-    if snapshot.template_id == "social-post"
-        && effective_hours >= policy.social_post_cooldown_hours
-        && retry_ready
-    {
+    if snapshot.template_id == "social-post" && effective_hours >= social_post_cd && retry_ready {
         let mut prompt = "Create social media content for the band. Reference upcoming events, recent releases, or fan milestones. Write in Polish for the primary audience. Include suggested hashtags.".to_owned();
         if !insights.is_empty() {
             prompt.push_str("\n\n");
@@ -181,21 +328,29 @@ pub fn evaluate_growth_intelligence(
             template_id: "social-post",
             priority: 2,
             prompt,
-            cooldown_hours: policy.social_post_cooldown_hours,
+            cooldown_hours: social_post_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
-                policy.social_post_cooldown_hours
+                social_post_cd
             },
             reason: "Social content cadence is due (2-day cycle)",
-            tier: AgentTier::Basic,
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "social-post",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
         });
     }
 
     // Rule 4: If fan growth is stagnant, dispatch community engagement.
     if snapshot.template_id == "community-engager"
         && snapshot.fan_growth_stagnant
-        && effective_hours >= policy.community_engager_cooldown_hours
+        && effective_hours >= community_engager_cd
         && retry_ready
     {
         let mut prompt = "Draft authentic community posts for accepted outreach targets. Write like a band member, not a marketer. Match each community's tone and language. One post per community.".to_owned();
@@ -213,23 +368,31 @@ pub fn evaluate_growth_intelligence(
             template_id: "community-engager",
             priority: 2,
             prompt,
-            cooldown_hours: policy.community_engager_cooldown_hours,
+            cooldown_hours: community_engager_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
-                policy.community_engager_cooldown_hours
+                community_engager_cd
             },
             reason: "Fan growth stagnant — community engagement needed",
             // Premium: posts to somebody else's community (Reddit). A bad
             // post gets banned and damages reputation — quality matters.
-            tier: AgentTier::Premium,
+            tier: effective_agent_tier(AgentTier::Premium, snapshot.standing),
+            prediction: make_prediction(
+                "community-engager",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
         });
     }
 
     // Rule 5: If there are unengaged outreach targets, draft community posts.
     if snapshot.template_id == "community-engager"
         && snapshot.unengaged_outreach_targets > 0
-        && effective_hours >= policy.community_engager_cooldown_hours
+        && effective_hours >= community_engager_cd
         && retry_ready
     {
         let mut prompt = "Draft authentic community posts for the unengaged outreach targets. Write like a band member, not a marketer. Match each community's tone and language.".to_owned();
@@ -247,20 +410,28 @@ pub fn evaluate_growth_intelligence(
             template_id: "community-engager",
             priority: 2,
             prompt,
-            cooldown_hours: policy.community_engager_cooldown_hours,
+            cooldown_hours: community_engager_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
-                policy.community_engager_cooldown_hours
+                community_engager_cd
             },
             reason: "Unengaged outreach targets need community posts",
-            tier: AgentTier::Premium,
+            tier: effective_agent_tier(AgentTier::Premium, snapshot.standing),
+            prediction: make_prediction(
+                "community-engager",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
         });
     }
 
     // Rule 6: Signal inviter on a 7-day cadence.
     if snapshot.template_id == "signal-inviter"
-        && effective_hours >= policy.signal_inviter_cooldown_hours
+        && effective_hours >= signal_inviter_cd
         && retry_ready
     {
         let mut prompt = "Draft Signal push invites for fans near upcoming events. Keep messages personal and under 200 characters. Include a smart link to the Signal install page. Write in Polish.".to_owned();
@@ -272,14 +443,22 @@ pub fn evaluate_growth_intelligence(
             template_id: "signal-inviter",
             priority: 3,
             prompt,
-            cooldown_hours: policy.signal_inviter_cooldown_hours,
+            cooldown_hours: signal_inviter_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
-                policy.signal_inviter_cooldown_hours
+                signal_inviter_cd
             },
             reason: "Signal invite cadence is due (7-day cycle)",
-            tier: AgentTier::Basic,
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "signal-inviter",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
         });
     }
 
@@ -290,11 +469,11 @@ pub fn evaluate_growth_intelligence(
     // period (>= 2x the stagnation threshold), escalate to premium for deeper
     // analysis — the situation is serious and warrants a more powerful model.
     if snapshot.template_id == "growth-strategist"
-        && effective_hours >= policy.growth_strategist_cooldown_hours
+        && effective_hours >= growth_strategist_cd
         && retry_ready
     {
         let stagnant_escalation = snapshot.fan_growth_stagnant;
-        let tier = if stagnant_escalation {
+        let base_tier = if stagnant_escalation {
             AgentTier::Premium
         } else {
             AgentTier::Basic
@@ -311,18 +490,26 @@ pub fn evaluate_growth_intelligence(
             template_id: "growth-strategist",
             priority: 4,
             prompt,
-            cooldown_hours: policy.growth_strategist_cooldown_hours,
+            cooldown_hours: growth_strategist_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
-                policy.growth_strategist_cooldown_hours
+                growth_strategist_cd
             },
             reason: if stagnant_escalation {
                 "Daily intelligence analysis is due (escalated to premium: stagnant growth)"
             } else {
                 "Daily intelligence analysis is due"
             },
-            tier,
+            tier: effective_agent_tier(base_tier, snapshot.standing),
+            prediction: make_prediction(
+                "growth-strategist",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
         });
     }
 
@@ -334,13 +521,25 @@ pub(super) fn growth_intelligence_candidate(
     policy: &AutopilotPolicy,
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
-) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    causal_model: &CausalModel,
+    strategy: GrowthStrategy,
+    exploration_novelty: f64,
+) -> Result<Option<(DecisionCandidate, DispatchPrediction, f64, usize)>, serde_json::Error> {
     let AutopilotPolicyConfig::GrowthIntelligence(domain_policy) = policy.config else {
         return Ok(None);
     };
-    let Some(request) = evaluate_growth_intelligence(snapshot, &domain_policy) else {
+    let Some(request) = evaluate_growth_intelligence(
+        snapshot,
+        &domain_policy,
+        causal_model,
+        strategy,
+        exploration_novelty,
+    ) else {
         return Ok(None);
     };
+    let prediction = request.prediction.clone();
+    let efe_score = request.efe_score;
+    let strategy_rank = request.strategy_rank;
     let disposition = disposition(
         policy.autonomy_level,
         Confidence::MAX,
@@ -352,28 +551,36 @@ pub(super) fn growth_intelligence_candidate(
         priority: request.priority,
         tier: request.tier,
     };
-    Ok(Some(DecisionCandidate {
-        context: policy.context,
-        subject: ActionSubject::Workspace(workspace_id),
-        decision_kind: "request_agent_run",
-        confidence: Confidence::MAX,
-        disposition,
-        reason: request.reason,
-        input_snapshot: serde_json::to_value(snapshot)?,
-        policy_snapshot: policy_evidence(policy, domain_policy)?,
-        action,
-        decision_key: format!(
-            "decision:growth-intelligence:v{}:{}:{}",
-            policy.version,
-            request.template_id,
-            cooldown_window(now, request.key_window_hours),
-        ),
-        action_idempotency_key: format!(
-            "action:agent-run:{}:{}",
-            request.template_id,
-            cooldown_window(now, request.key_window_hours),
-        ),
-    }))
+    Ok(Some((
+        DecisionCandidate {
+            context: policy.context,
+            subject: ActionSubject::Workspace(workspace_id),
+            decision_kind: "request_agent_run",
+            confidence: Confidence::MAX,
+            disposition,
+            reason: request.reason,
+            input_snapshot: serde_json::json!({
+                "snapshot": snapshot,
+                "prediction": &request.prediction,
+            }),
+            policy_snapshot: policy_evidence(policy, domain_policy)?,
+            action,
+            decision_key: format!(
+                "decision:growth-intelligence:v{}:{}:{}",
+                policy.version,
+                request.template_id,
+                cooldown_window(now, request.key_window_hours),
+            ),
+            action_idempotency_key: format!(
+                "action:agent-run:{}:{}",
+                request.template_id,
+                cooldown_window(now, request.key_window_hours),
+            ),
+        },
+        prediction,
+        efe_score,
+        strategy_rank,
+    )))
 }
 
 /// Index of the cooldown window `now` falls in. Gives the action key a coarse

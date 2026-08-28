@@ -337,6 +337,37 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::mark_insights_consumed(self, workspace_id, outcome_ids).await
     }
 
+    async fn load_causal_model(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crowdrelay_domain::growth_intelligence::CausalModel, RepositoryError> {
+        super::operations::load_causal_model(self, workspace_id).await
+    }
+
+    async fn record_dispatch_prediction(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: uuid::Uuid,
+        prediction: &crowdrelay_domain::growth_intelligence::DispatchPrediction,
+    ) -> Result<(), RepositoryError> {
+        super::operations::record_dispatch_prediction(self, workspace_id, action_id, prediction)
+            .await
+    }
+
+    async fn load_exploration_memory(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crowdrelay_domain::growth_intelligence::ExplorationMemory, RepositoryError> {
+        super::operations::load_exploration_memory(self, workspace_id).await
+    }
+
+    async fn load_last_dispatched_template(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<String>, RepositoryError> {
+        super::operations::load_last_dispatched_template(self, workspace_id).await
+    }
+
     async fn load_outreach_supply_snapshot(
         &self,
         workspace_id: WorkspaceId,

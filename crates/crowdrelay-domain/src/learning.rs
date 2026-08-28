@@ -1,5 +1,6 @@
-//! What the agent has learned about its own plays, and what it is allowed to do
-//! with that.
+//! What the agent has learned from measured outcomes — about its own plays,
+//! outreach kinds, and dispatched workers — and what it is allowed to do with
+//! that learning.
 //!
 //! Everything before this phase decides from the present: a series moved, a
 //! step is due, a pipeline is empty. Nothing carried a memory of whether a kind
@@ -14,7 +15,7 @@
 //!    not work — and being unable to measure something is a reason to fix the
 //!    measurement, not to stop acting.
 //! 2. **One result changes nothing.** Below a minimum measured record the
-//!    standing is [`PlayStanding::Untested`] and the play runs at full reach.
+//!    standing is [`Standing::Untested`] and the play runs at full reach.
 //!    A single bad fortnight is noise.
 //! 3. **A record may only ever narrow.** The weight caps at full and scales the
 //!    play's recipient ceiling downward; there is no number of good results that
@@ -24,15 +25,23 @@
 //! 4. **Retirement is a stated fact, not a decayed weight.** A play retires on a
 //!    run of measured `worsened` outcomes, with the reason recorded, and comes
 //!    back only when an operator says so.
+//!
+//! The same `Standing` / `OutcomeRecord` / `StandingPolicy` types serve every
+//! learning loop in the system: plays, outreach kinds, and agent dispatches.
+//! The discipline is identical — only the ceiling function differs (recipient
+//! count for plays, cooldown hours for agents).
 
 use serde::{Deserialize, Serialize};
 
 use crate::performance::EffectAssessment;
 
-/// What the measured record says about one kind of play.
+/// What the measured record says about one kind of play, outreach kind, or
+/// dispatched worker. One type serves every learning loop because the
+/// discipline is the same: counts not a score, a run of `worsened` that
+/// retires, and a weight that only narrows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "standing", rename_all = "snake_case")]
-pub enum PlayStanding {
+pub enum Standing {
     /// Too few measured outcomes to say anything. Runs at full reach: the
     /// alternative is an agent that throttles every new play before it has had
     /// a chance to work.
@@ -44,7 +53,7 @@ pub enum PlayStanding {
     Retired { reason: RetirementReason },
 }
 
-impl PlayStanding {
+impl Standing {
     /// `10_000` when nothing is holding the play back, and zero when it is
     /// retired.
     #[must_use]
@@ -80,24 +89,16 @@ impl RetirementReason {
             Self::OperatorRetired => "operator_retired",
         }
     }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "repeatedly_worsened" => Some(Self::RepeatedlyWorsened),
-            "operator_retired" => Some(Self::OperatorRetired),
-            _ => None,
-        }
-    }
 }
 
-/// The record one kind of play has accumulated.
+/// The record one kind of play, outreach kind, or dispatched worker has
+/// accumulated from measured outcomes.
 ///
 /// Counts rather than a score, because a score cannot be argued with. An
 /// operator who disagrees with a standing can see exactly which outcomes
 /// produced it.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PlayRecord {
+pub struct OutcomeRecord {
     pub improved: u32,
     pub neutral: u32,
     pub worsened: u32,
@@ -112,7 +113,7 @@ pub struct PlayRecord {
     pub operator_retired: bool,
 }
 
-impl PlayRecord {
+impl OutcomeRecord {
     /// Outcomes that actually said something.
     #[must_use]
     pub const fn measured(self) -> u32 {
@@ -153,7 +154,7 @@ impl PlayRecord {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
-pub struct LearningPolicy {
+pub struct StandingPolicy {
     /// Measured outcomes required before the record moves anything at all.
     pub minimum_measured_record: u32,
     /// However bad the record, a play that is still running reaches at least
@@ -164,7 +165,7 @@ pub struct LearningPolicy {
     pub retire_after_consecutive_worsened: u32,
 }
 
-impl Default for LearningPolicy {
+impl Default for StandingPolicy {
     fn default() -> Self {
         Self {
             // Three is enough to distinguish a run from an accident and few
@@ -176,11 +177,27 @@ impl Default for LearningPolicy {
     }
 }
 
+impl StandingPolicy {
+    /// Defaults tuned for agent dispatch measurement (14-day windows vs
+    /// 7-day play windows). The minimum is lower because waiting for three
+    /// full measurements means six weeks before the brain can adapt, and
+    /// the floor is lower because a worker that produces zero growth is
+    /// less harmful than a play that actively worsens a metric.
+    #[must_use]
+    pub const fn agent_defaults() -> Self {
+        Self {
+            minimum_measured_record: 2,
+            floor_basis_points: 2_000,
+            retire_after_consecutive_worsened: 3,
+        }
+    }
+}
+
 /// Turns a record into a standing.
 #[must_use]
-pub fn assess_play_standing(record: PlayRecord, policy: LearningPolicy) -> PlayStanding {
+pub fn assess_standing(record: OutcomeRecord, policy: StandingPolicy) -> Standing {
     if record.operator_retired {
-        return PlayStanding::Retired {
+        return Standing::Retired {
             reason: RetirementReason::OperatorRetired,
         };
     }
@@ -188,13 +205,13 @@ pub fn assess_play_standing(record: PlayRecord, policy: LearningPolicy) -> PlayS
     // number worse every time it was measured does not get to keep running
     // because it has not been measured often enough yet.
     if record.consecutive_worsened >= policy.retire_after_consecutive_worsened.max(1) {
-        return PlayStanding::Retired {
+        return Standing::Retired {
             reason: RetirementReason::RepeatedlyWorsened,
         };
     }
     let measured = record.measured();
     if measured < policy.minimum_measured_record.max(1) {
-        return PlayStanding::Untested { measured };
+        return Standing::Untested { measured };
     }
     // Neutral counts as half. A play that reliably does nothing is not as good
     // as one that works and not as bad as one that harms, and scoring it as
@@ -204,7 +221,7 @@ pub fn assess_play_standing(record: PlayRecord, policy: LearningPolicy) -> PlayS
         .saturating_add(u64::from(record.neutral));
     let basis_points = credit.saturating_mul(10_000) / u64::from(measured).max(1) / 2;
     let basis_points = u16::try_from(basis_points.min(10_000)).unwrap_or(10_000);
-    PlayStanding::Weighted {
+    Standing::Weighted {
         basis_points: basis_points.max(policy.floor_basis_points.min(10_000)),
         measured,
     }
@@ -216,7 +233,7 @@ pub fn assess_play_standing(record: PlayRecord, policy: LearningPolicy) -> PlayS
 /// ceiling downward and can never raise it: a play with a perfect record still
 /// reaches exactly the number an operator configured.
 #[must_use]
-pub fn effective_recipient_ceiling(max_recipients_per_step: u32, standing: PlayStanding) -> u32 {
+pub fn effective_recipient_ceiling(max_recipients_per_step: u32, standing: Standing) -> u32 {
     if standing.is_retired() {
         return 0;
     }
@@ -248,14 +265,14 @@ pub fn effective_recipient_ceiling(max_recipients_per_step: u32, standing: PlayS
 // ---------------------------------------------------------------------------
 
 /// The record one kind of outreach target has accumulated. Identical in shape
-/// to [`PlayRecord`] because the discipline is the same: counts not a score,
+/// to [`OutcomeRecord`] because the discipline is the same: counts not a score,
 /// `insufficient` carried but never counted, and a run of `worsened` that
 /// resets on any measured result that is not.
-pub type OutreachKindRecord = PlayRecord;
+pub type OutreachKindRecord = OutcomeRecord;
 
-/// The standing of one kind of outreach target. Same shape as [`PlayStanding`]
+/// The standing of one kind of outreach target. Same shape as [`Standing`]
 /// for the same reasons.
-pub type OutreachKindStanding = PlayStanding;
+pub type OutreachKindStanding = Standing;
 
 /// How many pitches a wave of this kind may carry, given its standing.
 ///
@@ -365,30 +382,30 @@ pub fn assess_wave_outcome(counts: WaveReplyCounts, pitches_sent: u32) -> WaveOu
 mod tests {
     use super::*;
 
-    fn policy() -> LearningPolicy {
-        LearningPolicy::default()
+    fn policy() -> StandingPolicy {
+        StandingPolicy::default()
     }
 
-    fn record(improved: u32, neutral: u32, worsened: u32) -> PlayRecord {
-        PlayRecord {
+    fn record(improved: u32, neutral: u32, worsened: u32) -> OutcomeRecord {
+        OutcomeRecord {
             improved,
             neutral,
             worsened,
-            ..PlayRecord::default()
+            ..OutcomeRecord::default()
         }
     }
 
     #[test]
     fn a_play_nobody_has_measured_runs_at_full_reach() {
-        let standing = assess_play_standing(record(1, 0, 0), policy());
-        assert!(matches!(standing, PlayStanding::Untested { measured: 1 }));
+        let standing = assess_standing(record(1, 0, 0), policy());
+        assert!(matches!(standing, Standing::Untested { measured: 1 }));
         assert_eq!(standing.weight_basis_points(), 10_000);
         assert_eq!(effective_recipient_ceiling(150, standing), 150);
     }
 
     #[test]
     fn an_unmeasurable_outcome_counts_neither_way() {
-        let observed = PlayRecord::default()
+        let observed = OutcomeRecord::default()
             .observe(None)
             .observe(None)
             .observe(None)
@@ -396,14 +413,14 @@ mod tests {
         assert_eq!(observed.measured(), 0);
         assert_eq!(observed.insufficient, 4);
         assert!(matches!(
-            assess_play_standing(observed, policy()),
-            PlayStanding::Untested { measured: 0 }
+            assess_standing(observed, policy()),
+            Standing::Untested { measured: 0 }
         ));
     }
 
     #[test]
     fn an_unmeasurable_outcome_neither_breaks_nor_extends_a_run_of_failures() {
-        let observed = PlayRecord::default()
+        let observed = OutcomeRecord::default()
             .observe(Some(EffectAssessment::Worsened))
             .observe(None)
             .observe(Some(EffectAssessment::Worsened));
@@ -414,20 +431,20 @@ mod tests {
 
     #[test]
     fn a_play_that_keeps_making_the_number_worse_retires_itself() {
-        let mut observed = PlayRecord::default();
+        let mut observed = OutcomeRecord::default();
         for _ in 0..3 {
             observed = observed.observe(Some(EffectAssessment::Worsened));
         }
         assert_eq!(
-            assess_play_standing(observed, policy()),
-            PlayStanding::Retired {
+            assess_standing(observed, policy()),
+            Standing::Retired {
                 reason: RetirementReason::RepeatedlyWorsened
             }
         );
         assert_eq!(
             effective_recipient_ceiling(
                 150,
-                PlayStanding::Retired {
+                Standing::Retired {
                     reason: RetirementReason::RepeatedlyWorsened
                 }
             ),
@@ -437,15 +454,15 @@ mod tests {
 
     #[test]
     fn one_bad_result_changes_nothing() {
-        let standing = assess_play_standing(record(0, 0, 1), policy());
-        assert!(matches!(standing, PlayStanding::Untested { .. }));
+        let standing = assess_standing(record(0, 0, 1), policy());
+        assert!(matches!(standing, Standing::Untested { .. }));
         assert_eq!(standing.weight_basis_points(), 10_000);
     }
 
     #[test]
     fn a_mixed_record_narrows_reach_without_stopping_the_play() {
-        let standing = assess_play_standing(record(1, 1, 1), policy());
-        let PlayStanding::Weighted { basis_points, .. } = standing else {
+        let standing = assess_standing(record(1, 1, 1), policy());
+        let Standing::Weighted { basis_points, .. } = standing else {
             panic!("three measured outcomes are a record");
         };
         assert!(basis_points < 10_000, "a mixed record is not a full record");
@@ -456,7 +473,7 @@ mod tests {
 
     #[test]
     fn a_perfect_record_never_widens_anything() {
-        let standing = assess_play_standing(record(20, 0, 0), policy());
+        let standing = assess_standing(record(20, 0, 0), policy());
         assert_eq!(standing.weight_basis_points(), 10_000);
         assert_eq!(
             effective_recipient_ceiling(150, standing),
@@ -469,7 +486,7 @@ mod tests {
     fn a_running_play_always_reaches_somebody() {
         // The worst survivable record still sends to at least one fan, so a
         // play that stopped is always a retirement somebody can read.
-        let standing = assess_play_standing(
+        let standing = assess_standing(
             record(0, 0, 2).observe(Some(EffectAssessment::Neutral)),
             policy(),
         );
@@ -482,8 +499,8 @@ mod tests {
         // so a record can overrule an operator who deliberately set nothing.
         let silent = 0u32;
         for standing in [
-            PlayStanding::Untested { measured: 0 },
-            PlayStanding::Weighted {
+            Standing::Untested { measured: 0 },
+            Standing::Weighted {
                 basis_points: 10_000,
                 measured: 9,
             },
@@ -494,22 +511,16 @@ mod tests {
 
     #[test]
     fn an_operator_retirement_is_never_claimed_as_the_agents_conclusion() {
-        let observed = PlayRecord {
+        let observed = OutcomeRecord {
             operator_retired: true,
             ..record(9, 0, 0)
         };
         assert_eq!(
-            assess_play_standing(observed, policy()),
-            PlayStanding::Retired {
+            assess_standing(observed, policy()),
+            Standing::Retired {
                 reason: RetirementReason::OperatorRetired
             }
         );
-        for reason in [
-            RetirementReason::RepeatedlyWorsened,
-            RetirementReason::OperatorRetired,
-        ] {
-            assert_eq!(RetirementReason::parse(reason.as_str()), Some(reason));
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -518,7 +529,7 @@ mod tests {
 
     #[test]
     fn an_outreach_kind_with_no_record_runs_at_full_wave_size() {
-        let standing = assess_play_standing(OutreachKindRecord::default(), policy());
+        let standing = assess_standing(OutreachKindRecord::default(), policy());
         assert_eq!(standing.weight_basis_points(), 10_000);
         assert_eq!(effective_wave_ceiling(50, standing), 50);
     }
@@ -531,7 +542,7 @@ mod tests {
             worsened: 4,
             ..OutreachKindRecord::default()
         };
-        let standing = assess_play_standing(record, policy());
+        let standing = assess_standing(record, policy());
         // Below 10_000 but above the floor (2_500).
         assert!(standing.weight_basis_points() < 10_000);
         assert!(standing.weight_basis_points() >= 2_500);
@@ -547,7 +558,7 @@ mod tests {
             consecutive_worsened: 3,
             ..OutreachKindRecord::default()
         };
-        let standing = assess_play_standing(record, policy());
+        let standing = assess_standing(record, policy());
         assert!(standing.is_retired());
         assert_eq!(effective_wave_ceiling(50, standing), 0);
     }
@@ -555,7 +566,7 @@ mod tests {
     #[test]
     fn an_operator_zero_wave_size_stays_zero_regardless_of_record() {
         // A configured zero is a deliberate choice, not a floor to override.
-        let standing = PlayStanding::Untested { measured: 0 };
+        let standing = Standing::Untested { measured: 0 };
         assert_eq!(effective_wave_ceiling(0, standing), 0);
     }
 

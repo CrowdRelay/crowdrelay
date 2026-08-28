@@ -4,12 +4,34 @@
 //! Each snapshot carries the hours since the last run and the workspace's
 //! current situation (upcoming events, fan growth, unengaged targets).
 //! The deterministic evaluator consumes these to decide whether to dispatch.
+//!
+//! # Architecture
+//!
+//! The brain is a closed-loop learning system with five layers:
+//!
+//! 1. **World Model** — the brain's belief about the world: fan counts,
+//!    signal installs, community reach, outreach pipeline, event state,
+//!    and growth target progress. Loaded once per cycle from real data.
+//! 2. **Causal Model** — P(new_fan | template, context) with EMA learning.
+//!    The brain predicts before dispatch and learns from prediction error
+//!    after measurement (the dopamine loop).
+//! 3. **Opportunity Queue + EFE** — each eligible dispatch is scored by
+//!    Expected Free Energy, balancing pragmatic value (expected fans)
+//!    against epistemic value (information gain). Lower EFE = better.
+//! 4. **Exploration Memory** — tracks which (template, context) pairs have
+//!    been explored, so the brain prefers novel territory (Go-Explore).
+//! 5. **Hierarchical Planning** — a `GrowthStrategy` derived from the world
+//!    model determines template priority order. Strategy → priority → EFE.
+//!
+//! All five layers are deterministic Rust. LLMs are workers that gather
+//! intelligence and draft content — the brain decides strategy.
 
 use super::*;
 use crowdrelay_domain::growth_intelligence::{
-    AgentStanding, CommunityEngagementSummary, GrowthIntelligenceSnapshot, RecentInsight,
-    UnengagedTarget,
+    CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
+    GrowthTrend, RecentInsight, UnengagedTarget, WorldModel, agent_standing_policy,
 };
+use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
 
 /// The worker templates the brain may dispatch, in the order the evaluator
 /// checks them. Adding a new worker template means adding it here and to the
@@ -26,7 +48,7 @@ const WORKER_TEMPLATES: &[&str] = &[
 pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-    _now: OffsetDateTime,
+    now: OffsetDateTime,
 ) -> Result<Vec<GrowthIntelligenceSnapshot>, RepositoryError> {
     let pool = &repo.pool;
 
@@ -78,21 +100,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .await
     .map_err(map_sqlx)?;
 
-    let unengaged_count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)::bigint FROM agent_outreach_targets
-        WHERE workspace_id = $1 AND status = 'promoted'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)?;
-
     // Load the actual promoted community targets with a subreddit so the
     // community-engager prompt can include concrete target_id + subreddit
     // pairs. The LLM needs these to produce social_post outcomes that
-    // result in community.engage.request actions.
+    // result in community.engage.request actions. The count of promoted
+    // targets is derived from this query's row count, so we don't need a
+    // separate count query.
     let unengaged_target_rows: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
         r#"
         SELECT id, display_name, subreddit
@@ -119,7 +132,6 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         })
         .collect();
 
-    let now = OffsetDateTime::now_utc();
     let next_event_time = upcoming_event.and_then(|(t,)| t);
     let has_upcoming_event = next_event_time
         .map(|t| (t - now).whole_days())
@@ -128,24 +140,6 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         .map(|t| (t - now).whole_days())
         .filter(|d| *d >= 0)
         .map(|d| d as u32);
-
-    // Fan growth stagnation: check if fan count has not grown in 14 days.
-    // This is a simplified heuristic — the real check would compare fan
-    // counts over time. For now, we use whether any new fans were added
-    // in the last 14 days.
-    let recent_fans: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)::bigint FROM fans
-        WHERE workspace_id = $1 AND created_at > now() - interval '14 days'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)?;
-    let fan_growth_stagnant = recent_fans.0 == 0;
-
-    let unengaged = u32::try_from(unengaged_count.0.max(0)).unwrap_or(0);
 
     // Load unconsumed insights from agent_outcomes. The brain feeds these
     // into the next worker dispatch prompt ("here's what we already know")
@@ -243,6 +237,232 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         )
         .collect();
 
+    // Load agent standings from past measurement outcomes. The brain learns
+    // which worker templates produce fan growth and which don't, and adjusts
+    // dispatch cadence accordingly. We load raw outcomes ordered by
+    // observed_at DESC and compute the OutcomeRecord (with
+    // consecutive_worsened) in Rust — simpler and more testable than a
+    // window-function SQL approach.
+    let standing_rows: Vec<(String, String, OffsetDateTime)> = sqlx::query_as(
+        r#"
+        SELECT action.payload->>'template_id' AS template_id,
+               outcome.effect_assessment,
+               outcome.observed_at
+        FROM viryaos_autopilot_outcomes outcome
+        JOIN viryaos_autopilot_actions action ON action.id = outcome.action_id
+        WHERE action.workspace_id = $1
+          AND action.action_kind = 'agent.run.request'
+          AND outcome.effect_assessment IS NOT NULL
+        ORDER BY action.payload->>'template_id', outcome.observed_at DESC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    // Build OutcomeRecord per template by iterating the ordered rows.
+    let policy = agent_standing_policy();
+    let standings: std::collections::HashMap<String, Standing> = {
+        let mut records: std::collections::HashMap<String, OutcomeRecord> =
+            std::collections::HashMap::new();
+        for (template_id, assessment, _observed_at) in &standing_rows {
+            let record = records.entry(template_id.clone()).or_default();
+            record.improved += u32::from(assessment == "improved");
+            record.neutral += u32::from(assessment == "neutral");
+            record.worsened += u32::from(assessment == "worsened");
+            // consecutive_worsened: count from the most recent (first in the
+            // DESC-ordered rows) until we hit a non-worsened outcome.
+            if assessment == "worsened" {
+                // Only increment if all prior rows (more recent) were also
+                // worsened. We check by seeing if improved+neutral is still 0.
+                if record.improved == 0 && record.neutral == 0 {
+                    record.consecutive_worsened += 1;
+                }
+            }
+            // else: the streak is broken — but we've already counted the
+            // improved/neutral, so the condition above naturally stops
+            // incrementing consecutive_worsened for any older worsened rows.
+        }
+        records
+            .into_iter()
+            .map(|(template_id, record)| (template_id, assess_standing(record, policy)))
+            .collect()
+    };
+
+    // ── World Model data ──
+    // The brain's belief about the world: fan counts, signal installs,
+    // community reach, outreach pipeline, and growth target progress.
+    // Loaded once and shared across all template snapshots. The recent_fans
+    // count (last 14 days) is merged into this query to save a round-trip.
+    let fan_counts: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*)::bigint AS total_fans,
+            COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS fans_this_month,
+            COUNT(*) FILTER (WHERE created_at > now() - interval '30 days'
+                             AND created_at <= now() - interval '14 days')::bigint AS fans_prev_window,
+            COUNT(*) FILTER (WHERE created_at > now() - interval '14 days')::bigint AS recent_fans
+        FROM fans
+        WHERE workspace_id = $1 AND status != 'suppressed'
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let total_fans = u32::try_from(fan_counts.0.max(0)).unwrap_or(0);
+    let fans_this_month = u32::try_from(fan_counts.1.max(0)).unwrap_or(0);
+    let fans_prev_window = u32::try_from(fan_counts.2.max(0)).unwrap_or(0);
+    let fan_growth_stagnant = fan_counts.3 == 0;
+
+    // Signal install counts.
+    let signal_counts: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*)::bigint AS total_installs,
+            COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS installs_this_month
+        FROM fan_push_endpoints
+        WHERE workspace_id = $1 AND active = true AND invalidated_at IS NULL
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let total_signal_installs = u32::try_from(signal_counts.0.max(0)).unwrap_or(0);
+    let signal_installs_this_month = u32::try_from(signal_counts.1.max(0)).unwrap_or(0);
+
+    // Discovered communities.
+    let community_counts: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*)::bigint AS discovered,
+            COUNT(DISTINCT cp.subreddit)::bigint AS active
+        FROM discovery_places dp
+        LEFT JOIN community_posts cp ON cp.subreddit = dp.name
+            AND cp.workspace_id = dp.workspace_id
+            AND cp.posted_at > now() - interval '30 days'
+        WHERE dp.workspace_id = $1 AND dp.status = 'active'
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let discovered_communities = u32::try_from(community_counts.0.max(0)).unwrap_or(0);
+    let active_communities = u32::try_from(community_counts.1.max(0)).unwrap_or(0);
+
+    // Outreach pipeline counts by status.
+    let outreach_counts: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'proposed')::bigint AS pending,
+            COUNT(*) FILTER (WHERE status = 'promoted')::bigint AS promoted,
+            COUNT(DISTINCT cp.target_id)::bigint AS engaged
+        FROM agent_outreach_targets ot
+        LEFT JOIN community_posts cp ON cp.target_id = ot.id
+            AND cp.workspace_id = ot.workspace_id
+            AND cp.status = 'posted'
+        WHERE ot.workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let pending_outreach_targets = u32::try_from(outreach_counts.0.max(0)).unwrap_or(0);
+    let promoted_outreach_targets = u32::try_from(outreach_counts.1.max(0)).unwrap_or(0);
+    let engaged_outreach_targets = u32::try_from(outreach_counts.2.max(0)).unwrap_or(0);
+
+    // Compute growth trend from fan counts.
+    let fan_growth_trend = if fan_growth_stagnant {
+        GrowthTrend::Stagnant
+    } else if fans_prev_window == 0 {
+        GrowthTrend::Accelerating
+    } else if fans_this_month as u64 * 2 > fans_prev_window as u64 * 3 {
+        // This month's pace > 1.5x previous window → accelerating
+        GrowthTrend::Accelerating
+    } else if fans_this_month as u64 * 3 < fans_prev_window as u64 * 2 {
+        // This month's pace < 0.67x previous window → decelerating
+        GrowthTrend::Decelerating
+    } else {
+        GrowthTrend::Steady
+    };
+
+    // Compute fan growth rate (basis points, monthly).
+    let fan_growth_rate_bps = if total_fans == 0 {
+        0
+    } else {
+        u16::try_from((u64::from(fans_this_month) * 10_000 / u64::from(total_fans)).min(10_000))
+            .unwrap_or(10_000)
+    };
+
+    // Signal conversion rate: fraction of fans with Signal installed.
+    let signal_conversion_rate_bps = if total_fans == 0 {
+        0
+    } else {
+        u16::try_from(
+            (u64::from(total_signal_installs) * 10_000 / u64::from(total_fans)).min(10_000),
+        )
+        .unwrap_or(10_000)
+    };
+
+    // Average community engagement (upvote ratio in basis points).
+    let avg_community_engagement_bps = if engagement_history.is_empty() {
+        0
+    } else {
+        let avg_ratio: f64 = engagement_history
+            .iter()
+            .filter_map(|e| e.avg_upvote_ratio)
+            .map(|r| r.clamp(0.0, 1.0))
+            .sum::<f64>()
+            / engagement_history
+                .iter()
+                .filter(|e| e.avg_upvote_ratio.is_some())
+                .count()
+                .max(1) as f64;
+        u16::try_from((avg_ratio * 10_000.0) as u64).unwrap_or(0)
+    };
+
+    // engagement_history is ordered by avg_score DESC (from the SQL query),
+    // so first = best, last = worst.
+    let best_performing_community = engagement_history.first().map(|e| e.subreddit.clone());
+    let worst_performing_community = engagement_history.last().map(|e| e.subreddit.clone());
+
+    // Growth target progress.
+    let growth_target = GrowthTarget::from_fan_count(total_fans);
+    let growth_target_progress = GrowthTargetProgress::from_counts(
+        growth_target,
+        fans_this_month,
+        signal_installs_this_month,
+    );
+
+    let world_model = WorldModel {
+        total_fans,
+        fans_this_month,
+        fan_growth_rate_bps,
+        fan_growth_trend,
+        total_signal_installs,
+        signal_installs_this_month,
+        signal_conversion_rate_bps,
+        discovered_communities,
+        active_communities,
+        avg_community_engagement_bps,
+        best_performing_community,
+        worst_performing_community,
+        pending_outreach_targets,
+        promoted_outreach_targets,
+        engaged_outreach_targets,
+        days_to_next_event,
+        has_upcoming_event,
+        growth_target_progress,
+    };
+
     // Build one snapshot per worker template.
     let mut snapshots = Vec::with_capacity(WORKER_TEMPLATES.len());
     for template_id in WORKER_TEMPLATES {
@@ -290,14 +510,17 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             has_upcoming_event,
             days_to_next_event,
             fan_growth_stagnant,
-            unengaged_outreach_targets: unengaged,
+            unengaged_outreach_targets: promoted_outreach_targets,
             unengaged_targets: targets,
             recent_insights: template_insights,
             community_engagement_history: history,
-            // TODO: fetch agent records from the DB and call
-            // `assess_agent_standing` to compute the real standing. Until
-            // the infra wiring is complete, all workers are untested.
-            standing: AgentStanding::Untested { measured: 0 },
+            // The measured standing from past dispatch outcomes. Workers
+            // with no measured outcomes are untested (run at base cadence).
+            standing: standings
+                .get(*template_id)
+                .copied()
+                .unwrap_or(Standing::Untested { measured: 0 }),
+            world_model: world_model.clone(),
         });
     }
 
@@ -331,4 +554,177 @@ pub(in crate::autopilot) async fn mark_insights_consumed(
     .await
     .map_err(map_sqlx)?;
     Ok(result.rows_affected())
+}
+
+/// Loads the causal model from past dispatch predictions and their measured
+/// outcomes. The brain uses this to predict how many fans each worker
+/// dispatch will produce. The model is recomputed from the prediction
+/// history each cycle — no separate storage needed.
+pub(in crate::autopilot) async fn load_causal_model(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<crowdrelay_domain::growth_intelligence::CausalModel, RepositoryError> {
+    use crowdrelay_domain::growth_intelligence::{
+        CausalModel, DispatchPrediction, PredictionOutcome,
+    };
+
+    let pool = &repo.pool;
+
+    // Load all resolved predictions with their observed outcomes, ordered
+    // oldest-first so the EMA update processes them in chronological order.
+    /// Prediction row: (template_id, expected_fans, expected_signal, observed_fans, observed_signal)
+    type PredictionRow = (String, f64, f64, Option<f64>, Option<f64>);
+    let rows: Vec<PredictionRow> = sqlx::query_as(
+        r#"
+        SELECT template_id,
+               expected_new_fans,
+               expected_signal_installs,
+               observed_new_fans,
+               observed_signal_installs
+        FROM viryaos_dispatch_predictions
+        WHERE workspace_id = $1
+          AND resolved_at IS NOT NULL
+          AND observed_new_fans IS NOT NULL
+        ORDER BY predicted_at ASC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let mut model = CausalModel::default();
+    for (template_id, expected_fans, expected_signal, observed_fans, observed_signal) in rows {
+        let prediction = DispatchPrediction {
+            template_id: template_id.clone(),
+            expected_new_fans: expected_fans,
+            expected_signal_installs: expected_signal,
+            ..Default::default()
+        };
+        let outcome = PredictionOutcome::from_observation(
+            prediction,
+            observed_fans.unwrap_or(0.0),
+            observed_signal.unwrap_or(0.0),
+        );
+        model.update(&outcome);
+    }
+
+    Ok(model)
+}
+
+/// Records a dispatch prediction. Called when the brain dispatches a worker
+/// — stores the prediction so it can be compared with the measured outcome
+/// later (after the measurement window elapses).
+pub(in crate::autopilot) async fn record_dispatch_prediction(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    prediction: &crowdrelay_domain::growth_intelligence::DispatchPrediction,
+) -> Result<(), RepositoryError> {
+    let pool = &repo.pool;
+    let context_json = serde_json::to_value(&prediction.context).unwrap_or(serde_json::json!({}));
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_dispatch_predictions
+            (workspace_id, action_id, template_id,
+             expected_new_fans, expected_signal_installs, context)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (action_id) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(&prediction.template_id)
+    .bind(prediction.expected_new_fans)
+    .bind(prediction.expected_signal_installs)
+    .bind(&context_json)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Loads the exploration memory from past dispatch predictions. Each
+/// prediction is a "visit" to a (template, context) pair. The brain uses
+/// this to compute novelty: unexplored pairs get an exploration bonus.
+///
+/// The context hash is derived from the prediction's context fields, so
+/// two dispatches with the same context features count as the same visit.
+pub(in crate::autopilot) async fn load_exploration_memory(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<crowdrelay_domain::growth_intelligence::ExplorationMemory, RepositoryError> {
+    use crowdrelay_domain::growth_intelligence::{
+        DispatchContext, ExplorationMemory, context_hash,
+    };
+
+    /// Exploration row: (template_id, days_to_event, subreddit_type, trend, time_of_day_bps)
+    type ExplorationRow = (
+        String,
+        Option<i32>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+    );
+    let pool = &repo.pool;
+    let rows: Vec<ExplorationRow> = sqlx::query_as(
+        r#"
+            SELECT template_id,
+                   (context ->> 'days_to_event')::int,
+                   context ->> 'subreddit_type',
+                   context ->> 'fan_growth_trend',
+                   (context ->> 'time_of_day_bps')::int
+            FROM viryaos_dispatch_predictions
+            WHERE workspace_id = $1
+            "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let mut mem = ExplorationMemory::default();
+    for (template_id, days_to_event, subreddit_type, trend_str, time_of_day_bps) in rows {
+        let fan_growth_trend = match trend_str.as_deref().unwrap_or("steady") {
+            "stagnant" => crowdrelay_domain::growth_intelligence::GrowthTrend::Stagnant,
+            "decelerating" => crowdrelay_domain::growth_intelligence::GrowthTrend::Decelerating,
+            "accelerating" => crowdrelay_domain::growth_intelligence::GrowthTrend::Accelerating,
+            _ => crowdrelay_domain::growth_intelligence::GrowthTrend::Steady,
+        };
+        let ctx = DispatchContext {
+            days_to_event: days_to_event.map(|d| d as u32),
+            fan_growth_trend,
+            subreddit_type,
+            post_format: None,
+            time_of_day_bps: time_of_day_bps.map(|t| t as u16).unwrap_or(0),
+            community_novelty_bps: 0,
+        };
+        let hash = context_hash(&ctx);
+        mem.record_visit(&template_id, &hash);
+    }
+    Ok(mem)
+}
+
+/// Loads the most recently dispatched template's ID. Used to infer the
+/// previous growth strategy for hysteresis — the brain doesn't flip-flop
+/// between strategies every cycle when conditions are borderline.
+pub(in crate::autopilot) async fn load_last_dispatched_template(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<Option<String>, RepositoryError> {
+    let pool = &repo.pool;
+    let template: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT template_id
+        FROM viryaos_dispatch_predictions
+        WHERE workspace_id = $1
+        ORDER BY predicted_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(template)
 }

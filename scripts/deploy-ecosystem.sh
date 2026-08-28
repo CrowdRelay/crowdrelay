@@ -283,14 +283,13 @@ if [[ -n "$CP_REPO" ]]; then
       sleep 3
     done
 
-    # Get the image digest
+    # Get the image digest (optional — the deploy script can pull by tag)
     cp_artifact="control-plane-image-digest-${cp_target}"
     cp_digest="$(gh api -H 'Accept: application/vnd.github+json' \
       "/repos/${CP_REPO}/actions/artifacts?name=${cp_artifact}&per_page=10" \
-      --jq '[.artifacts[] | select(.expired == false)] | .[0] | "placeholder" // empty' \
+      --jq '[.artifacts[] | select(.expired == false)] | .[0].archive_download_url // empty' \
       2>/dev/null || true)"
 
-    # For now, use the SHA-based tag directly
     printf '\n==> 2b — Blue-green Control Plane deploy\n'
     # Transfer the blue-green script to production
     scp -q "$ROOT_DIR/../crowdrelay-control-plane/scripts/deploy-bluegreen.sh" \
@@ -298,22 +297,22 @@ if [[ -n "$CP_REPO" ]]; then
     scp -q "$ROOT_DIR/../crowdrelay-control-plane/deploy/compose.bluegreen.yml" \
       "$CONTROL_PLANE_REMOTE:/tmp/cp-compose-bluegreen.yml" 2>/dev/null || true
 
-    ssh -T "$CONTROL_PLANE_REMOTE" sudo bash -s -- "$cp_target" "sha256:0000000000000000000000000000000000000000000000000000000000000000" "$CONTROL_PLANE_DIR" <<'CP_DEPLOY'
+    ssh -T "$CONTROL_PLANE_REMOTE" sudo bash -s -- "$cp_target" "$CONTROL_PLANE_DIR" <<'CP_DEPLOY'
 set -Eeuo pipefail
-target="$1"; digest="$2"; root="$3"
+target="$1"; root="$2"
 # Install the blue-green compose overlay if transferred
 if [[ -f /tmp/cp-compose-bluegreen.yml ]]; then
   cp /tmp/cp-compose-bluegreen.yml "$root/deploy/compose.bluegreen.yml"
 fi
-# Pull the green image
+# Pull the image by tag (digest is optional in the deploy script)
 green_image="crowdrelay-control-plane:sha-${target}"
 if ! docker image inspect "$green_image" >/dev/null 2>&1; then
   docker pull "ghcr.io/crowdrelay/crowdrelay-control-plane:sha-${target}" >/dev/null 2>&1 && \
     docker tag "ghcr.io/crowdrelay/crowdrelay-control-plane:sha-${target}" "$green_image" || true
 fi
-# Run the blue-green deploy
+# Run the blue-green deploy (no digest — pulls by tag)
 if [[ -f /tmp/cp-deploy-bluegreen.sh ]]; then
-  bash /tmp/cp-deploy-bluegreen.sh "$target" "$digest" "$root"
+  bash /tmp/cp-deploy-bluegreen.sh "$target" "" "$root"
 else
   printf 'CP_BLUEGREEN=SKIP (script not available, using existing deploy)\n'
   cd "$root"
@@ -403,6 +402,14 @@ if [[ "$SKIP_LEDGERGUARD" != true ]]; then
       sleep 5
     done
     printf '\n==> 5b — Deploy LedgerGuard\n'
+    # Transfer the blue-green script and compose overlay to production
+    scp -q "$ROOT_DIR/../ledgerguard/scripts/deploy-bluegreen.sh" \
+      "$LEDGERGUARD_REMOTE:/tmp/lg-deploy-bluegreen.sh" 2>/dev/null || true
+    scp -q "$ROOT_DIR/../ledgerguard/compose.bluegreen.yaml" \
+      "$LEDGERGUARD_REMOTE:/tmp/lg-compose-bluegreen.yaml" 2>/dev/null || true
+    scp -q "$ROOT_DIR/../ledgerguard/Caddyfile" \
+      "$LEDGERGUARD_REMOTE:/tmp/lg-Caddyfile" 2>/dev/null || true
+
     ssh -T "$LEDGERGUARD_REMOTE" bash -s -- "$LEDGERGUARD_DIR" "$lg_sha" <<'LG_DEPLOY'
 set -Eeuo pipefail
 root="$1"; target="$2"
@@ -412,7 +419,24 @@ git fetch --quiet origin main
 fetched="$(git rev-parse FETCH_HEAD)"
 [[ "$fetched" == "$target" ]] || { echo "ERROR: origin/main moved"; exit 1; }
 git merge --ff-only "$target"
-bash scripts/deploy-home.sh "$target"
+
+# Install the blue-green overlay and Caddyfile if transferred
+if [[ -f /tmp/lg-compose-bluegreen.yaml ]]; then
+  cp /tmp/lg-compose-bluegreen.yaml "$root/compose.bluegreen.yaml"
+fi
+if [[ -f /tmp/lg-Caddyfile ]]; then
+  # Only install Caddyfile if it doesn't exist (first blue-green deploy)
+  [[ -f "$root/Caddyfile" ]] || cp /tmp/lg-Caddyfile "$root/Caddyfile"
+fi
+
+# Try blue-green deploy; fall back to deploy-home.sh if no blue is running
+# (first deploy or after a restart)
+if [[ -f /tmp/lg-deploy-bluegreen.sh ]] && docker inspect ledgerguard-app-1 >/dev/null 2>&1; then
+  bash /tmp/lg-deploy-bluegreen.sh "$target"
+else
+  printf 'LG_BLUEGREEN=SKIP (no blue running, using deploy-home.sh)\n'
+  bash scripts/deploy-home.sh "$target"
+fi
 printf 'LEDGERGUARD_DEPLOY=PASS sha=%s\n' "$target"
 LG_DEPLOY
   else

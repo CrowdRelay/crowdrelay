@@ -67,7 +67,7 @@ class PlayLearningContract(unittest.TestCase):
 
     def test_one_bad_result_changes_nothing(self) -> None:
         self.assertIn("minimum_measured_record", self.domain)
-        self.assertIn("PlayStanding::Untested", self.domain)
+        self.assertIn("Standing::Untested", self.domain)
         self.assertIn("one_bad_result_changes_nothing", self.domain)
 
     def test_a_record_may_only_narrow(self) -> None:
@@ -116,7 +116,7 @@ class PlayLearningContract(unittest.TestCase):
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", stored.group(1))), self.reasons())
 
     def test_an_operator_retirement_is_never_the_agents_conclusion(self) -> None:
-        rule = self.domain.split("pub fn assess_play_standing", 1)[1]
+        rule = self.domain.split("pub fn assess_standing", 1)[1]
         operator = rule.index("operator_retired")
         self_retire = rule.index("RepeatedlyWorsened")
         self.assertLess(
@@ -129,7 +129,7 @@ class PlayLearningContract(unittest.TestCase):
         )
 
     def test_a_run_of_failures_retires_before_the_sample_guard_forgives_it(self) -> None:
-        rule = self.domain.split("pub fn assess_play_standing", 1)[1]
+        rule = self.domain.split("pub fn assess_standing", 1)[1]
         retire = rule.index("policy.retire_after_consecutive_worsened")
         sample = rule.index("policy.minimum_measured_record")
         self.assertLess(
@@ -160,7 +160,7 @@ class PlayLearningContract(unittest.TestCase):
         self.assertIn("filter(|standing| !standing.standing.is_retired())", arm)
 
     def test_the_policy_is_the_operators(self) -> None:
-        self.assertIn("pub learning: LearningPolicy", read(PLAYS_DOMAIN))
+        self.assertIn("pub learning: StandingPolicy", read(PLAYS_DOMAIN))
         self.assertIn("async fn load_play_standings(", read(PORTS))
         self.assertIn("fn play_learning_policy", self.infra)
 

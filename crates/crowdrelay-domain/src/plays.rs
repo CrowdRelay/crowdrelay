@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use crate::{
-    PlayId, action_class::ActionClass, autonomy::Confidence, learning::LearningPolicy,
+    PlayId, action_class::ActionClass, autonomy::Confidence, learning::StandingPolicy,
     play_measurement::PlayMeasurementPolicy,
 };
 
@@ -693,7 +693,7 @@ pub struct PlayPolicy {
     pub measurement: PlayMeasurementPolicy,
     /// What the measured record is allowed to change about how often and how
     /// widely this kind of play runs.
-    pub learning: LearningPolicy,
+    pub learning: StandingPolicy,
 }
 
 impl Default for PlayPolicy {
@@ -706,7 +706,7 @@ impl Default for PlayPolicy {
             // window, so a show under seven days away can never use it.
             minimum_lead_hours: 7 * 24,
             measurement: PlayMeasurementPolicy::default(),
-            learning: LearningPolicy::default(),
+            learning: StandingPolicy::default(),
         }
     }
 }

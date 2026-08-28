@@ -56,6 +56,7 @@ CONTRACT = {
     "crates/crowdrelay-infra/src/autopilot.rs": [
         "autopilot/mapping.rs",
         "autopilot/execution.rs",
+        "autopilot/execution_capabilities.rs",
         "autopilot/support.rs",
     ],
     "crates/crowdrelay-infra/src/autopilot/decisions.rs": [
@@ -116,6 +117,7 @@ CONTRACT = {
         "read_model/views.rs",
     ],
     "crates/crowdrelay-application/src/autopilot/evaluate.rs": [
+        "evaluate/types.rs",
         "evaluate/candidates.rs",
         "evaluate/tests.rs",
     ],

@@ -103,7 +103,10 @@ class EcosystemDeployContract(unittest.TestCase):
         self.assertLess(green_start, caddy_switch, "green must start before Caddy switch")
 
     def test_bluegreen_health_checks_green_directly(self) -> None:
-        self.assertIn("GREEN_HEALTH=PASS", BLUEGREEN_TEXT)
+        # Alternating blue-green: the new color is health-checked directly
+        # before the Caddy switch. The log line uses NEW_HEALTH since the
+        # new color may be green or blue depending on which is active.
+        self.assertIn("NEW_HEALTH=PASS", BLUEGREEN_TEXT)
         self.assertIn("crowdrelay-api-green", BLUEGREEN_TEXT)
         self.assertIn("v1/health/ready", BLUEGREEN_TEXT)
 

@@ -18,7 +18,7 @@ use crowdrelay_domain::{
     growth_debt::{GrowthDebtKind, GrowthDebtPolicy, GrowthDebtSubject},
     growth_intelligence::{AgentTier, GrowthIntelligencePolicy},
     growth_metrics::{GrowthMetricPolicy, GrowthSignal, MetricDirection, MetricPlatform},
-    learning::{PlayRecord, PlayStanding},
+    learning::{OutcomeRecord, Standing},
     live_opportunities::{LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot},
     merch_bundle::MerchBundlePolicy,
     merchandising::{MerchPricePolicy, MerchReorderPolicy},
@@ -892,6 +892,10 @@ pub struct CandidatePersistence {
     pub decision_created: bool,
     pub action_created: bool,
     pub quota_throttled: bool,
+    /// The action ID, if an action was created or already existed.
+    /// Used by the growth intelligence evaluator to record dispatch
+    /// predictions linked to the action for later measurement comparison.
+    pub action_id: Option<uuid::Uuid>,
 }
 
 /// One kind of play, its measured record and what that record is allowed to
@@ -899,8 +903,8 @@ pub struct CandidatePersistence {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct PlayKindStanding {
     pub kind: PlayKind,
-    pub record: PlayRecord,
-    pub standing: PlayStanding,
+    pub record: OutcomeRecord,
+    pub standing: Standing,
     /// The operator's ceiling narrowed by the record. Never widened: a perfect
     /// record still reaches exactly the number an operator configured.
     pub effective_max_recipients_per_step: u32,
@@ -911,8 +915,8 @@ pub struct PlayKindStanding {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct OutreachKindStanding {
     pub kind: OutreachTargetKind,
-    pub record: PlayRecord,
-    pub standing: PlayStanding,
+    pub record: OutcomeRecord,
+    pub standing: Standing,
     /// The operator's wave-size ceiling narrowed by the record.
     pub effective_max_pitches_per_wave: u32,
 }

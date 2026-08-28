@@ -172,7 +172,7 @@ class OutreachKindLearningContract(unittest.TestCase):
     def test_record_outreach_kind_outcome_uses_upsert(self) -> None:
         fn = self.infra.split("async fn record_outreach_kind_outcome", 1)[1]
         self.assertIn("ON CONFLICT (workspace_id, target_kind) DO UPDATE", fn)
-        self.assertIn("assess_play_standing", fn)
+        self.assertIn("assess_standing", fn)
 
 
 if __name__ == "__main__":
