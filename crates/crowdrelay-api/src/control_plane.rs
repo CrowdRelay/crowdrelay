@@ -259,6 +259,84 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/growth-envelope",
             post(crate::autopilot::set_growth_envelope),
         )
+        // ── Outreach & booking discovery ──────────────────────────────
+        // Candidate queues for the growth pipeline: what the agent found,
+        // and the two decisions a human can make about one finding.
+        .route(
+            "/v1/control-plane/autopilot/outreach/candidates",
+            get(crate::autopilot::list_outreach_candidates),
+        )
+        .route(
+            "/v1/control-plane/autopilot/outreach/candidates/{candidate_id}/confirm",
+            post(crate::autopilot::confirm_outreach_candidate),
+        )
+        .route(
+            "/v1/control-plane/autopilot/booking-discovery/candidates",
+            get(crate::autopilot::list_booking_candidates),
+        )
+        .route(
+            "/v1/control-plane/autopilot/booking-discovery/candidates/{candidate_id}/confirm",
+            post(crate::autopilot::confirm_booking_candidate),
+        )
+        // ── Beacon signal network ─────────────────────────────────────
+        // The press and industry relationship pipeline: who the agent is
+        // talking to, what they asked for, and what the agent committed to.
+        .route(
+            "/v1/control-plane/autopilot/beacon-signal",
+            get(crate::beacon_signal::admin_dashboard),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-signal/candidates",
+            get(crate::beacon_signal::admin_candidates),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-press-requests",
+            get(crate::beacon_signal::admin_press_requests),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-press-requests/{press_request_id}/resolve",
+            post(crate::beacon_signal::admin_resolve_press_request),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-press-assets",
+            get(crate::beacon_signal::admin_press_assets),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-signal-engagements",
+            get(crate::beacon_signal::admin_engagements),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-coverage",
+            get(crate::beacon_signal::admin_coverage),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-network",
+            get(crate::beacon_signal::admin_beacon_network),
+        )
+        // ── Release campaigns ─────────────────────────────────────────
+        .route(
+            "/v1/control-plane/autopilot/beacon-release-campaigns",
+            get(crate::beacon_signal::admin_list_release_campaigns),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-release-campaigns/{campaign_id}/launch",
+            post(crate::beacon_signal::admin_launch_release_campaign),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-release-campaigns/{campaign_id}/close",
+            post(crate::beacon_signal::admin_close_release_campaign),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacon-release-campaigns/{campaign_id}/recipients",
+            get(crate::beacon_signal::admin_list_release_recipients),
+        )
+        // ── Play ledger ───────────────────────────────────────────────
+        // What the agent committed to, what it did, and what each number
+        // is allowed to prove.
+        .route(
+            "/v1/control-plane/autopilot/plays",
+            get(crate::autopilot::play_ledger),
+        )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
         // makes adding a route here fail closed even if the global path matcher

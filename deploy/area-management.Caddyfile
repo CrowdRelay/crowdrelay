@@ -16,6 +16,21 @@
         /v1/control-plane/autopilot/show-economics \
         /v1/control-plane/autopilot/chief-of-staff \
         /v1/control-plane/autopilot/growth-envelope \
+        /v1/control-plane/autopilot/outreach/candidates \
+        /v1/control-plane/autopilot/outreach/candidates/* \
+        /v1/control-plane/autopilot/booking-discovery/candidates \
+        /v1/control-plane/autopilot/booking-discovery/candidates/* \
+        /v1/control-plane/autopilot/beacon-signal \
+        /v1/control-plane/autopilot/beacon-signal/candidates \
+        /v1/control-plane/autopilot/beacon-press-requests \
+        /v1/control-plane/autopilot/beacon-press-requests/* \
+        /v1/control-plane/autopilot/beacon-press-assets \
+        /v1/control-plane/autopilot/beacon-signal-engagements \
+        /v1/control-plane/autopilot/beacon-coverage \
+        /v1/control-plane/autopilot/beacon-network \
+        /v1/control-plane/autopilot/beacon-release-campaigns \
+        /v1/control-plane/autopilot/beacon-release-campaigns/* \
+        /v1/control-plane/autopilot/plays \
         /v1/control-plane/portfolio/overview \
         /v1/control-plane/portfolio/amplification \
         /v1/control-plane/portfolio/amplification/* \
