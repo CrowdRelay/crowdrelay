@@ -49,7 +49,7 @@ impl OutcomeKind {
             Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets => "booking_opportunity",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => {
-                "growth_opportunity"
+                "growth_intelligence"
             }
         }
     }

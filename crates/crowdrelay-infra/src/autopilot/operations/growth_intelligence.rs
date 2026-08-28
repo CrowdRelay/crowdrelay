@@ -46,10 +46,14 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .map_err(map_sqlx)?;
 
     // Load workspace situation: upcoming events, fan growth, unengaged targets.
-    let upcoming_event: Option<(OffsetDateTime,)> = sqlx::query_as(
+    // Only `published` events are publicly announced and promotable; the
+    // `events` table has no `scheduled` status (valid: draft/published/
+    // cancelled/completed), so filtering by `published` + `starts_at > now()`
+    // gives us the next real upcoming show.
+    let upcoming_event: Option<(Option<OffsetDateTime>,)> = sqlx::query_as(
         r#"
         SELECT MIN(starts_at) FROM events
-        WHERE workspace_id = $1 AND starts_at > now() AND status = 'scheduled'
+        WHERE workspace_id = $1 AND starts_at > now() AND status = 'published'
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -69,13 +73,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .map_err(map_sqlx)?;
 
     let now = OffsetDateTime::now_utc();
-    let has_upcoming_event = upcoming_event
-        .as_ref()
-        .map(|(t,)| (*t - now).whole_days())
+    let next_event_time = upcoming_event.and_then(|(t,)| t);
+    let has_upcoming_event = next_event_time
+        .map(|t| (t - now).whole_days())
         .is_some_and(|d| (0..=30).contains(&d));
-    let days_to_next_event = upcoming_event
-        .as_ref()
-        .map(|(t,)| (*t - now).whole_days())
+    let days_to_next_event = next_event_time
+        .map(|t| (t - now).whole_days())
         .filter(|d| *d >= 0)
         .map(|d| d as u32);
 
