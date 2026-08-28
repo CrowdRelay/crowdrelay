@@ -148,8 +148,7 @@ impl AgentOutcomeWorker {
 
             match self.map_outcome(&outcome).await {
                 Ok((decision_id, action_id)) => {
-                    self.mark_processed(outcome.id, decision_id, action_id)
-                        .await?;
+                    let _ = (decision_id, action_id);
                     processed += 1;
                 }
                 Err(error) => {
@@ -219,6 +218,22 @@ impl AgentOutcomeWorker {
         .bind(json!({}))
         .fetch_optional(&mut *tx)
         .await?;
+
+        // On a crash-recovery re-run the decision row already exists (conflict).
+        // Use the existing id so the action row's FK is valid.
+        let decision_id = match inserted_decision {
+            Some(id) => id,
+            None => {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM viryaos_autopilot_decisions \
+                     WHERE workspace_id = $1 AND decision_key = $2",
+                )
+                .bind(outcome.workspace_id)
+                .bind(&outcome.idempotency_key)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+        };
 
         // Side tables per kind. Single-writer: only this worker inserts here.
         match outcome.kind {
@@ -296,6 +311,26 @@ impl AgentOutcomeWorker {
         } else {
             None
         };
+
+        // Mark the outcome processed in the same transaction so a crash
+        // between the decision/action inserts and the status update can
+        // never leave the row stuck in 'processing' (which the poll query
+        // never re-selects).
+        sqlx::query(
+            r#"
+            UPDATE agent_outcomes
+            SET status = 'processed',
+                processed_decision_id = $2,
+                processed_action_id = $3,
+                processed_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(outcome.id)
+        .bind(inserted_decision)
+        .bind(action_id)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok((inserted_decision, action_id))
@@ -379,30 +414,6 @@ impl AgentOutcomeWorker {
         .bind(&evidence)
         .bind(outcome.task_id)
         .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    async fn mark_processed(
-        &self,
-        outcome_id: Uuid,
-        decision_id: Option<Uuid>,
-        action_id: Option<Uuid>,
-    ) -> Result<(), AgentOutcomeError> {
-        sqlx::query(
-            r#"
-            UPDATE agent_outcomes
-            SET status = 'processed',
-                processed_decision_id = $2,
-                processed_action_id = $3,
-                processed_at = now()
-            WHERE id = $1
-            "#,
-        )
-        .bind(outcome_id)
-        .bind(decision_id)
-        .bind(action_id)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }
