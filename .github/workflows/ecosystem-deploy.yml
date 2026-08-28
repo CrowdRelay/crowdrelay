@@ -1,0 +1,127 @@
+name: Ecosystem deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Full 40-char SHA to deploy (defaults to latest main)
+        required: false
+        default: ""
+      allow_contract_migrations:
+        description: Allow destructive DB migrations
+        required: false
+        type: boolean
+        default: false
+      skip_virya:
+        description: Skip Virya website deploy
+        required: false
+        type: boolean
+        default: false
+      skip_synesthesia:
+        description: Skip Synesthesia web deploy
+        required: false
+        type: boolean
+        default: false
+      skip_ledgerguard:
+        description: Skip LedgerGuard deploy
+        required: false
+        type: boolean
+        default: false
+      skip_n8n:
+        description: Skip n8n workflow verification
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+concurrency:
+  group: ecosystem-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Ecosystem blue-green deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment:
+      name: production
+    steps:
+      - name: Check out CrowdRelay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha || github.ref }}
+
+      - name: Resolve target SHA
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.target_sha }}" ]]; then
+            target="${{ inputs.target_sha }}"
+          else
+            target="$(git rev-parse HEAD)"
+          fi
+          [[ "$target" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid SHA: $target"; exit 1; }
+          echo "sha=$target" >> "$GITHUB_OUTPUT"
+          echo "TARGET_SHA=$target"
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          SSH_KEY: ${{ secrets.CROWDRELAY_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.CROWDRELAY_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'SSH'
+          Host virya-crowdrelay
+              HostName 152.70.162.119
+              User ubuntu
+              IdentityFile ~/.ssh/deploy_key
+              IdentitiesOnly yes
+              ServerAliveInterval 30
+              ServerAliveCountMax 3
+          Host virya-home
+              HostName 192.168.100.27
+              User wojtek
+              IdentityFile ~/.ssh/deploy_key
+              IdentitiesOnly yes
+              ServerAliveInterval 30
+              ServerAliveCountMax 3
+          SSH
+          chmod 600 ~/.ssh/config
+
+      - name: Run ecosystem deploy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=()
+          [[ "${{ inputs.allow_contract_migrations }}" == "true" ]] && args+=(--allow-contract-migrations)
+          [[ "${{ inputs.skip_virya }}" == "true" ]] && args+=(--skip-virya)
+          [[ "${{ inputs.skip_synesthesia }}" == "true" ]] && args+=(--skip-synesthesia)
+          [[ "${{ inputs.skip_ledgerguard }}" == "true" ]] && args+=(--skip-ledgerguard)
+          [[ "${{ inputs.skip_n8n }}" == "true" ]] && args+=(--skip-n8n)
+          bash scripts/deploy-ecosystem.sh "${{ steps.target.outputs.sha }}" "${args[@]}"
+
+      - name: Report deploy status
+        if: always()
+        shell: bash
+        run: |
+          if [[ ${{ job.status }} == "success" ]]; then
+            echo "✅ Ecosystem deploy succeeded for ${{ steps.target.outputs.sha }}"
+          else
+            echo "❌ Ecosystem deploy failed for ${{ steps.target.outputs.sha }}"
+            echo "The failing phase was rolled back by its own rollback handler."
+            echo "Components before the failure are at the new SHA; after remain at the previous."
+          fi

@@ -1,0 +1,95 @@
+# Blue-green overlay for CrowdRelay production deploy.
+#
+# Defines api-green and worker-green services identical to api and worker
+# but with the green image tag and a -green network alias. The blue-green
+# deploy script starts these alongside the current (blue) containers,
+# health-checks them directly, then switches the edge Caddy upstream to
+# the green alias. On success the blue containers are stopped; on failure
+# the Caddyfile is reverted and the green containers are removed.
+#
+# Usage:
+#   CROWDRELAY_GREEN_TAG=sha-<new-sha> \
+#   docker compose --env-file deploy/.env.production \
+#     -f compose.production.yaml -f compose.bluegreen.yaml \
+#     up -d --no-deps api-green worker-green
+
+services:
+  api-green:
+    image: ${CROWDRELAY_API_IMAGE:-ghcr.io/crowdrelay/crowdrelay-api}:${CROWDRELAY_GREEN_TAG:?Set CROWDRELAY_GREEN_TAG to sha-<full commit SHA>}
+    labels:
+      io.crowdrelay.release.ref: ${CROWDRELAY_GREEN_TAG}
+      io.crowdrelay.deploy.role: green
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
+    environment:
+      TOKIO_WORKER_THREADS: ${CROWDRELAY_API_TOKIO_THREADS:-2}
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/v1/health/live"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 10s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: ${CROWDRELAY_API_MEMORY:-256m}
+    cpus: ${CROWDRELAY_API_CPUS:-0.75}
+    stop_grace_period: 25s
+    restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      runtime:
+        aliases: [crowdrelay-api-green]
+
+  worker-green:
+    image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_GREEN_TAG:?Set CROWDRELAY_GREEN_TAG to sha-<full commit SHA>}
+    labels:
+      io.crowdrelay.release.ref: ${CROWDRELAY_GREEN_TAG}
+      io.crowdrelay.deploy.role: green
+    command: ["run"]
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
+    environment:
+      TOKIO_WORKER_THREADS: ${CROWDRELAY_WORKER_TOKIO_THREADS:-1}
+    volumes:
+      - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
+      - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          for executable in /proc/[0-9]*/exe; do
+            target=$$(readlink "$$executable" 2>/dev/null || true);
+            [ "$$target" = /usr/local/bin/crowdrelay-worker ] && exit 0;
+          done;
+          exit 1
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: ${CROWDRELAY_WORKER_MEMORY:-256m}
+    cpus: ${CROWDRELAY_WORKER_CPUS:-0.35}
+    stop_grace_period: 30s
+    restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks: [runtime]
