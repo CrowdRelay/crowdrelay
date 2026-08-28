@@ -19,7 +19,7 @@ README = (ROOT / "n8n/README.md").read_text()
 PRODUCTION_MANIFEST_PATH = ROOT / "n8n/viryaos-production-workflow-manifest.tsv"
 EXECUTOR_MANIFEST_PATH = ROOT / "n8n/viryaos-executor-manifest.tsv"
 GITIGNORE = (ROOT / ".gitignore").read_text()
-EXECUTOR = (ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs").read_text()
+EXECUTOR = (ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs").read_text() + "\n" + (ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs").read_text()
 OPERATOR = (ROOT / "scripts/latarnik_operator.py").read_text()
 
 

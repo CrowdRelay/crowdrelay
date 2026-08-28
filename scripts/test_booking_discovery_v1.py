@@ -30,6 +30,7 @@ INGRESS = (
     ROOT / "crates/crowdrelay-infra/src/autopilot/operations/ingress/booking_discovery.rs"
 )
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
+EXECUTION_CAPS = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
 ACTIONS_EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
 API = ROOT / "crates/crowdrelay-api/src/autopilot/booking_discovery.rs"
 ROUTING = ROOT / "crates/crowdrelay-api/src/routing.rs"
@@ -109,7 +110,7 @@ class BookingDiscoveryContract(unittest.TestCase):
         self.assertIn("pay_to_apply_must_be_reported_as_such", emission)
 
     def test_executor_capability_mapping_closed_loop(self) -> None:
-        execution = read(EXECUTION)
+        execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn('AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery"', execution)
         self.assertIn('"crowdrelay.booking.target_discovery_requested" => "booking.discovery"', execution)
 

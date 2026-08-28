@@ -16,6 +16,7 @@ MIGRATION = ROOT / "migrations/0075_viryaos_growth_autonomy.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/action_class.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
+EVALUATE_TYPES = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/types.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/opportunity_reads.rs"
 
 CLASSES = ("first_party_reversible", "owned_audience", "third_party", "paid")
@@ -150,7 +151,7 @@ class GrowthAutonomyContract(unittest.TestCase):
 
     def test_gated_decisions_are_counted_apart_from_throttled_ones(self) -> None:
         # Throttled work is deferred; gated work is somebody's decision to make.
-        report = read(EVALUATE).split("pub struct AutopilotCycleReport {", 1)[1].split(
+        report = read(EVALUATE_TYPES).split("pub struct AutopilotCycleReport {", 1)[1].split(
             "}", 1
         )[0]
         self.assertIn("actions_gated", report)

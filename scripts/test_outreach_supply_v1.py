@@ -32,6 +32,7 @@ MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 VALIDATION = ROOT / "crates/crowdrelay-api/src/autopilot/validation.rs"
 MAPPING = ROOT / "crates/crowdrelay-infra/src/autopilot/mapping.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
+EXECUTION_CAPS = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
 ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/discovery.rs"
 CANDIDATE = (
@@ -135,7 +136,7 @@ class OutreachSupplyContract(unittest.TestCase):
     def test_the_capability_is_named_identically_on_both_gates(self) -> None:
         # The pre-claim check and the emission check must agree, or the action
         # is parked under one name and gated under another.
-        execution = read(EXECUTION)
+        execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn(
             'AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery"',
             execution,

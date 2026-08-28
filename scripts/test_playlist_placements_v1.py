@@ -31,6 +31,7 @@ CANDIDATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/placeme
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/placements.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
+EXECUTION_CAPS = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
 OPENAPI = ROOT / "openapi/openapi.yaml"
 
 
@@ -195,7 +196,7 @@ class PlaylistPlacementContract(unittest.TestCase):
             "ActionClass::FirstPartyReversible", 1
         )[0]
         self.assertIn("Self::VerifyPlaylistPlacement { .. }", classes)
-        execution = read(EXECUTION)
+        execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn(
             'AutopilotActionPayload::VerifyPlaylistPlacement { .. } => "playlist.verify"',
             execution,

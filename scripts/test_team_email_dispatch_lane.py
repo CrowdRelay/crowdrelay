@@ -39,7 +39,7 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
 
     def test_dispatch_event_and_capability_mapping_are_closed_loop(self):
         actions = text("crates/crowdrelay-infra/src/autopilot/actions_execution.rs")
-        execution = text("crates/crowdrelay-infra/src/autopilot/execution.rs")
+        execution = text("crates/crowdrelay-infra/src/autopilot/execution.rs") + "\n" + text("crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs")
         self.assertIn('"crowdrelay.team.assignment_email_requested"', actions)
         self.assertIn('"crowdrelay.team.assignment_email_requested" => "team.email"', execution)
         self.assertIn("SendTeamAssignmentEmail", execution)

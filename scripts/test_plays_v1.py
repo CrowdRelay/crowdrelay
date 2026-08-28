@@ -41,6 +41,7 @@ PORTS = ROOT / "crates/crowdrelay-application/src/autopilot/ports.rs"
 VALIDATION = ROOT / "crates/crowdrelay-api/src/autopilot/validation.rs"
 MAPPING = ROOT / "crates/crowdrelay-infra/src/autopilot/mapping.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
+EXECUTION_CAPS = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
 ACTIONS = ROOT / "crates/crowdrelay-infra/src/autopilot/actions.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/plays.rs"
 CONTRACT = ROOT / "n8n/viryaos-executor-contract.md"
@@ -235,7 +236,7 @@ class PlaysContract(unittest.TestCase):
         self.assertIn("event.status = 'published'", dispatch)
 
     def test_the_send_is_external_work_behind_a_named_capability(self) -> None:
-        execution = read(EXECUTION)
+        execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn("AutopilotActionPayload::RunPlayStep { .. }", execution)
         self.assertIn('AutopilotActionPayload::RunPlayStep { .. } => "play.step"', execution)
         self.assertIn('"crowdrelay.play.step_requested" => "play.step"', execution)

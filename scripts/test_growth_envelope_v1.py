@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations/0076_viryaos_growth_envelope.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/growth_envelope.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
+EVALUATE_TYPES = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/types.rs"
 LOADER = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/opportunity_reads.rs"
 PERSIST = ROOT / "crates/crowdrelay-infra/src/autopilot/decisions/persist.rs"
 MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
@@ -32,7 +33,7 @@ class GrowthEnvelopeContract(unittest.TestCase):
     def setUp(self) -> None:
         self.migration = read(MIGRATION)
         self.domain = read(DOMAIN)
-        self.evaluate = read(EVALUATE)
+        self.evaluate = read(EVALUATE) + "\n" + read(EVALUATE_TYPES)
 
     def test_a_new_workspace_starts_switched_off_and_rehearsing(self) -> None:
         # Both, not either: switching the agent on must not also be the moment
@@ -181,7 +182,7 @@ class GrowthEnvelopeContract(unittest.TestCase):
         # Silent when nothing is parked; one line when work is actually waiting.
         self.assertIn("if !approvals.is_empty()", team)
         self.assertIn("if !rows.is_empty()", team)
-        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs")
+        execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs") + "\n" + read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs")
         available = execution.split("async fn executor_capability_available", 1)[1].split(
             "\n}", 1
         )[0]
@@ -215,10 +216,11 @@ class GrowthEnvelopeContract(unittest.TestCase):
         # identically, or an action is parked under one name and gated under
         # another.
         execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs")
+        execution_caps = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs")
         by_payload = execution.split("fn executor_capability_for_payload", 1)[1].split(
             "\nfn executor_capability_for_event", 1
         )[0]
-        by_event = execution.split("fn executor_capability_for_event", 1)[1].split("\n}", 1)[0]
+        by_event = execution_caps.split("fn executor_capability_for_event", 1)[1].split("\n}", 1)[0]
         advertised = set(re.findall(r'=> "([a-z][a-z0-9_.]+)"', by_event))
         for capability in set(re.findall(r'=> "([a-z][a-z0-9_.]+)"', by_payload)):
             self.assertIn(capability, advertised)

@@ -15,7 +15,7 @@ class ViryaOsExecutorManifestContract(unittest.TestCase):
     def test_public_manifest_matches_rust_event_capabilities(self):
         manifest = ROOT / "n8n/viryaos-executor-manifest.tsv"
         self._skip_if_private(manifest)
-        source = (ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs").read_text()
+        source = (ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs").read_text()
         start = source.index("fn executor_capability_for_event")
         end = source.index("pub(in crate::autopilot) async fn ensure_executor_capability", start)
         body = source[start:end]

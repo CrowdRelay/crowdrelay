@@ -30,6 +30,7 @@ INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/terms.rs"
 INGRESS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/ingress/team.rs"
 EXECUTOR = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/execution.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
+EXECUTION_CAPS = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs"
 OPENAPI = ROOT / "openapi/openapi.yaml"
 
 
@@ -213,7 +214,7 @@ class LiveOpportunityTermsContract(unittest.TestCase):
         self.assertIn("WHERE viryaos_team_opportunity_terms.settled_at IS NULL", upsert)
 
     def test_the_send_is_external_work_behind_a_named_capability(self) -> None:
-        execution = read(EXECUTION)
+        execution = read(EXECUTION) + "\n" + read(EXECUTION_CAPS)
         self.assertIn(
             'AutopilotActionPayload::CounterLiveOpportunityTerms { .. } => "opportunity.terms"',
             execution,
