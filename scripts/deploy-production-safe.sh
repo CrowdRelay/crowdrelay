@@ -170,7 +170,13 @@ tunnel="crowdrelay-control-plane-virya-area-tunnel-1"
 [[ "$(docker inspect "$tunnel" --format '{{.State.Status}}')" == "running" ]] || fail 'Control Plane tunnel is not running'
 app_id="$(docker inspect "$app" --format '{{.Id}}')"
 network_mode="$(docker inspect "$tunnel" --format '{{.HostConfig.NetworkMode}}')"
-[[ "$network_mode" == "container:${app_id}" ]] || fail "Control Plane tunnel namespace drift: $network_mode"
+# The tunnel either shares the app's network namespace (network_mode:
+# container:<app_id>) or uses standalone Docker networks (internal +
+# virya-edge) that decouple it from the app container's lifecycle.
+if [[ "$network_mode" != "container:${app_id}" ]]; then
+  tunnel_networks="$(docker inspect "$tunnel" --format '{{json .NetworkSettings.Networks}}')"
+  printf '%s' "$tunnel_networks" | grep -Fq '"internal"' || fail "Control Plane tunnel is not on the internal network: $network_mode"
+fi
 tunnel_caddy="$(docker exec "$tunnel" cat /etc/caddy/Caddyfile)" || fail 'cannot read Control Plane tunnel Caddyfile'
 for route in \
   '/v1/control-plane/area' \
@@ -187,7 +193,7 @@ management_master="$(printf '%s\n' "$runtime_env" | sed -n 's/^CONTROL_PLANE_MAN
 management_url="$(printf '%s\n' "$runtime_env" | sed -n 's/^CONTROL_PLANE_VIRYA_MANAGEMENT_URL=//p')"
 [[ -n "$area_master" ]] || fail 'Control Plane AREA management master is missing from runtime'
 [[ -n "$management_master" ]] || fail 'Control Plane operations management master is missing from runtime'
-[[ "$management_url" == "http://127.0.0.1:18080" ]] || fail "Control Plane management URL drifted: $management_url"
+[[ "$management_url" == "http://127.0.0.1:18080" || "$management_url" == "http://virya-area-tunnel:18080" ]] || fail "Control Plane management URL drifted: $management_url"
 unset runtime_env area_master management_master management_url
 
 published="$(docker port "$app" 8090/tcp | head -n1)"
