@@ -257,6 +257,13 @@ impl AgentOutcomeWorker {
         .fetch_optional(&mut *tx)
         .await?;
 
+        tracing::debug!(
+            outcome_id = %outcome.id,
+            idempotency_key = %outcome.idempotency_key,
+            inserted = inserted_decision.is_some(),
+            "decision INSERT result"
+        );
+
         // On a crash-recovery re-run the decision row already exists (conflict).
         // Use the existing id so the action row's FK is valid.
         let decision_id = match inserted_decision {
@@ -512,6 +519,12 @@ impl AgentOutcomeWorker {
                 .fetch_optional(&mut *tx)
                 .await?
             };
+            tracing::debug!(
+                outcome_id = %outcome.id,
+                idempotency_key = %outcome.idempotency_key,
+                action_inserted = inserted_action.is_some(),
+                "action INSERT result"
+            );
             // On a re-run the action row already exists (conflict). Resolve
             // the existing id so processed_action_id is not NULL.
             match inserted_action {
