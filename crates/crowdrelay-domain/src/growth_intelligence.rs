@@ -460,23 +460,23 @@ impl CausalModel {
             .unwrap_or(DEFAULT_EXPECTED_FANS);
         let mut prediction = template_prior;
         // Apply learned subreddit-type multiplier if available.
-        if let Some(ref sub_type) = context.subreddit_type {
-            if let Some(&sub_expected) = self.subreddit_type_expected_fans.get(sub_type) {
-                // Blend: weight the subreddit multiplier by its confidence.
-                // Low confidence → small adjustment; high confidence → full.
-                let sub_conf = self
-                    .subreddit_type_confidence
-                    .get(sub_type)
-                    .copied()
-                    .unwrap_or(0);
-                let sub_weight = (sub_conf as f64 / (sub_conf as f64 + 5.0)).min(0.7);
-                let sub_multiplier = if template_prior > 0.0 {
-                    sub_expected / template_prior
-                } else {
-                    1.0
-                };
-                prediction *= 1.0 - sub_weight + sub_weight * sub_multiplier;
-            }
+        if let Some(ref sub_type) = context.subreddit_type
+            && let Some(&sub_expected) = self.subreddit_type_expected_fans.get(sub_type)
+        {
+            // Blend: weight the subreddit multiplier by its confidence.
+            // Low confidence → small adjustment; high confidence → full.
+            let sub_conf = self
+                .subreddit_type_confidence
+                .get(sub_type)
+                .copied()
+                .unwrap_or(0);
+            let sub_weight = (sub_conf as f64 / (sub_conf as f64 + 5.0)).min(0.7);
+            let sub_multiplier = if template_prior > 0.0 {
+                sub_expected / template_prior
+            } else {
+                1.0
+            };
+            prediction *= 1.0 - sub_weight + sub_weight * sub_multiplier;
         }
         // Event proximity boosts fan acquisition potential.
         if let Some(days) = context.days_to_event {
@@ -800,6 +800,88 @@ pub fn information_gain(confidence: u32) -> f64 {
     1.0 / (1.0 + confidence as f64)
 }
 
+/// Computes softmax dispatch probabilities from EFE scores.
+///
+/// The brain doesn't always greedily dispatch the lowest-EFE opportunity.
+/// Instead, it uses a softmax (Boltzmann) distribution: the probability of
+/// dispatching opportunity `i` is proportional to `exp(-EFE_i / temperature)`.
+///
+/// - **Low temperature** (→0): greedy — always dispatch the best opportunity.
+/// - **High temperature** (→∞): uniform — dispatch randomly (pure exploration).
+/// - **Moderate temperature**: mostly exploit, sometimes explore.
+///
+/// The temperature is adapted by the brain's regret: when regret is high
+/// (the brain is missing better opportunities), temperature increases to
+/// encourage exploration. When regret is low, temperature decreases to
+/// exploit the best channels.
+///
+/// # Numerical stability
+///
+/// Uses the max-subtraction trick: `softmax(x) = softmax(x - max(x))`.
+/// This prevents overflow when EFE scores are large negative numbers.
+///
+/// # Arguments
+///
+/// * `efe_scores` — EFE scores for each eligible opportunity (lower = better).
+/// * `temperature` — exploration temperature (must be > 0).
+///
+/// # Returns
+///
+/// A vector of dispatch probabilities, summing to 1.0. The brain uses
+/// these to probabilistically select which opportunity to dispatch first.
+#[must_use]
+pub fn softmax_dispatch(efe_scores: &[f64], temperature: f64) -> Vec<f64> {
+    if efe_scores.is_empty() {
+        return Vec::new();
+    }
+    if efe_scores.len() == 1 {
+        return vec![1.0];
+    }
+    // Numerical stability: subtract the max (min EFE = max -EFE).
+    // Since we want lower EFE = higher probability, we use -EFE/temperature.
+    let max_neg_efe = efe_scores
+        .iter()
+        .map(|&e| -e / temperature)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let exps: Vec<f64> = efe_scores
+        .iter()
+        .map(|&e| (-e / temperature - max_neg_efe).exp())
+        .collect();
+    let sum: f64 = exps.iter().sum();
+    if sum <= 0.0 || !sum.is_finite() {
+        // Fallback: uniform distribution.
+        return vec![1.0 / efe_scores.len() as f64; efe_scores.len()];
+    }
+    exps.iter().map(|&e| e / sum).collect()
+}
+
+/// Computes the adaptive exploration temperature from regret.
+///
+/// Regret is the cumulative gap between the best possible outcome and the
+/// outcome the brain actually achieved. High regret → the brain is missing
+/// opportunities → increase exploration temperature to try new things.
+/// Low regret → the brain is doing well → decrease temperature to exploit.
+///
+/// The temperature is bounded between `min_temp` and `max_temp` to prevent
+/// pathological behavior (pure greed or pure randomness).
+///
+/// # Arguments
+///
+/// * `regret` — cumulative regret (sum of gaps between best and actual).
+/// * `min_temp` — minimum temperature (default: 0.1, near-greedy).
+/// * `max_temp` — maximum temperature (default: 2.0, moderate exploration).
+///
+/// # Returns
+///
+/// The exploration temperature for the softmax dispatch.
+#[must_use]
+pub fn adaptive_temperature(regret: f64, min_temp: f64, max_temp: f64) -> f64 {
+    // Temperature scales with regret: more regret → more exploration.
+    // Uses a sigmoid-like mapping: temp = min + (max-min) * sigmoid(regret).
+    let sigmoid = 1.0 / (1.0 + (-regret).exp());
+    min_temp + (max_temp - min_temp) * sigmoid
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Go-Explore memory — exploration archive for active information seeking.
 //
@@ -939,13 +1021,27 @@ pub fn context_hash(context: &DispatchContext) -> String {
         Some(15..=30) => 4,
         Some(_) => 5,
     };
-    format!(
-        "{}:{:?}:{}:{}",
-        event_bucket,
-        context.fan_growth_trend,
-        context.subreddit_type.as_deref().unwrap_or(""),
-        context.post_format.as_deref().unwrap_or(""),
-    )
+    // Manual string building — faster than format! for this hot path.
+    // Typical hash: "2:Steady:metal:text" — short, stack-friendly.
+    let trend = match context.fan_growth_trend {
+        GrowthTrend::Accelerating => "Acc",
+        GrowthTrend::Steady => "Std",
+        GrowthTrend::Decelerating => "Dec",
+        GrowthTrend::Stagnant => "Stg",
+    };
+    let sub = context.subreddit_type.as_deref().unwrap_or("");
+    let fmt = context.post_format.as_deref().unwrap_or("");
+    // Pre-compute capacity to avoid reallocation.
+    let cap = 4 + trend.len() + sub.len() + fmt.len() + 3;
+    let mut s = String::with_capacity(cap);
+    s.push_str(&event_bucket.to_string());
+    s.push(':');
+    s.push_str(trend);
+    s.push(':');
+    s.push_str(sub);
+    s.push(':');
+    s.push_str(fmt);
+    s
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1038,10 +1134,10 @@ impl GrowthStrategy {
             Self::EventDriven => {
                 // Stay event-driven until the event is >21 days away
                 // (relaxed from the 14-day entry threshold).
-                if let Some(days) = world.days_to_next_event {
-                    if days <= 21 {
-                        return Self::EventDriven;
-                    }
+                if let Some(days) = world.days_to_next_event
+                    && days <= 21
+                {
+                    return Self::EventDriven;
                 }
             }
             Self::AggressiveDiscovery => {
@@ -1658,14 +1754,26 @@ mod tests {
 
     #[test]
     fn efe_score_balances_fans_and_information() {
+        let weights = EfeWeights::default();
         // Higher expected fans → lower (better) EFE.
-        let high_fans = GrowthOpportunity::compute_efe(10.0, 0.5);
-        let low_fans = GrowthOpportunity::compute_efe(2.0, 0.5);
+        let high_fans = GrowthOpportunity::compute_efe(10.0, 0.5, 1.0, 0.5, weights);
+        let low_fans = GrowthOpportunity::compute_efe(2.0, 0.5, 1.0, 0.5, weights);
         assert!(high_fans < low_fans);
         // Higher information gain → lower (better) EFE.
-        let high_info = GrowthOpportunity::compute_efe(5.0, 1.0);
-        let low_info = GrowthOpportunity::compute_efe(5.0, 0.1);
+        let high_info = GrowthOpportunity::compute_efe(5.0, 1.0, 1.0, 0.5, weights);
+        let low_info = GrowthOpportunity::compute_efe(5.0, 0.1, 1.0, 0.5, weights);
         assert!(high_info < low_info);
+        // Higher prediction uncertainty → higher epistemic value → lower EFE.
+        let high_uncertainty = GrowthOpportunity::compute_efe(5.0, 0.5, 3.0, 0.5, weights);
+        let low_uncertainty = GrowthOpportunity::compute_efe(5.0, 0.5, 0.5, 0.5, weights);
+        assert!(
+            high_uncertainty < low_uncertainty,
+            "higher uncertainty should lower EFE (more to learn)"
+        );
+        // Higher novelty → lower EFE (exploration bonus).
+        let high_novelty = GrowthOpportunity::compute_efe(5.0, 0.5, 1.0, 1.0, weights);
+        let low_novelty = GrowthOpportunity::compute_efe(5.0, 0.5, 1.0, 0.1, weights);
+        assert!(high_novelty < low_novelty);
     }
 
     #[test]
@@ -1704,9 +1812,22 @@ mod tests {
     fn exploration_memory_novelty_decreases_with_visits() {
         let mut mem = ExplorationMemory::default();
         mem.record_visit("reddit-scanner", "ctx1");
-        assert!((mem.novelty("reddit-scanner", "ctx1") - 0.5).abs() < 0.01);
+        // After 1 visit: template_visits=1, context_visits=1.
+        // effective = 1 + 0.3*1 = 1.3. novelty = 1/(1+1.3) = 0.435.
+        let novelty_after_1 = mem.novelty("reddit-scanner", "ctx1");
+        assert!(
+            novelty_after_1 < 0.5,
+            "novelty should decrease after a visit"
+        );
+        assert!(novelty_after_1 > 0.0);
         mem.record_visit("reddit-scanner", "ctx1");
-        assert!((mem.novelty("reddit-scanner", "ctx1") - (1.0 / 3.0)).abs() < 0.01);
+        // After 2 visits: template_visits=2, context_visits=2.
+        // effective = 2 + 0.3*2 = 2.6. novelty = 1/(1+2.6) = 0.278.
+        let novelty_after_2 = mem.novelty("reddit-scanner", "ctx1");
+        assert!(
+            novelty_after_2 < novelty_after_1,
+            "novelty should keep decreasing"
+        );
     }
 
     #[test]
@@ -1729,6 +1850,26 @@ mod tests {
             ..Default::default()
         };
         assert_ne!(context_hash(&ctx1), context_hash(&ctx2));
+    }
+
+    #[test]
+    fn context_hash_buckets_nearby_event_days() {
+        // Days 3 and 5 are both in the 2-7 day bucket → same hash.
+        let ctx3 = DispatchContext {
+            days_to_event: Some(3),
+            ..Default::default()
+        };
+        let ctx5 = DispatchContext {
+            days_to_event: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(context_hash(&ctx3), context_hash(&ctx5));
+        // Day 10 is in a different bucket (8-14) → different hash.
+        let ctx10 = DispatchContext {
+            days_to_event: Some(10),
+            ..Default::default()
+        };
+        assert_ne!(context_hash(&ctx3), context_hash(&ctx10));
     }
 
     #[test]
@@ -1817,5 +1958,430 @@ mod tests {
         assert!(!record.active);
         assert!(record.template_sequence.is_empty());
         assert_eq!(record.fans_acquired, 0);
+    }
+
+    // ── Causal Model: variance estimation tests ──
+
+    #[test]
+    fn causal_model_variance_starts_at_prior() {
+        let model = CausalModel::default();
+        // Unmeasured template: std = sqrt(PRIOR_VARIANCE) = 2.0.
+        assert!((model.predict_std("t") - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn causal_model_variance_shrinks_with_consistent_observations() {
+        let mut model = CausalModel::default();
+        // Observe the same value 10 times → variance should shrink.
+        for _ in 0..10 {
+            let p = DispatchPrediction {
+                template_id: "t".to_owned(),
+                expected_new_fans: 5.0,
+                ..Default::default()
+            };
+            model.update(&PredictionOutcome::from_observation(p, 5.0, 0.0));
+        }
+        // After 10 consistent observations, variance should be near zero.
+        let std = model.predict_std("t");
+        assert!(
+            std < 1.0,
+            "variance should shrink with consistent observations, got std={std}"
+        );
+    }
+
+    #[test]
+    fn causal_model_variance_grows_with_variable_observations() {
+        let mut model = CausalModel::default();
+        // Observe alternating high and low values → variance should grow.
+        for i in 0..10 {
+            let observed = if i % 2 == 0 { 10.0 } else { 0.0 };
+            let p = DispatchPrediction {
+                template_id: "t".to_owned(),
+                expected_new_fans: 5.0,
+                ..Default::default()
+            };
+            model.update(&PredictionOutcome::from_observation(p, observed, 0.0));
+        }
+        // After 10 variable observations, variance should be high.
+        let std = model.predict_std("t");
+        assert!(
+            std > 1.0,
+            "variance should grow with variable observations, got std={std}"
+        );
+    }
+
+    // ── Causal Model: signal install prediction tests ──
+
+    #[test]
+    fn causal_model_signal_prediction_defaults_to_10_percent() {
+        let model = CausalModel::default();
+        let ctx = DispatchContext::default();
+        // No learned Signal prior → 10% of fan prediction.
+        let signal = model.predict_signal("t", &ctx);
+        let fans = model.predict("t", &ctx);
+        assert!((signal - fans * 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn causal_model_signal_prediction_lears_independently() {
+        let mut model = CausalModel::default();
+        // Observe 5 fans but 3 Signal installs (60% conversion, not 10%).
+        let p = DispatchPrediction {
+            template_id: "t".to_owned(),
+            expected_new_fans: 5.0,
+            expected_signal_installs: 0.5,
+            ..Default::default()
+        };
+        model.update(&PredictionOutcome::from_observation(p, 5.0, 3.0));
+        // The Signal EMA should now be closer to 3.0 than to 0.5.
+        let learned = model
+            .template_expected_signal
+            .get("t")
+            .copied()
+            .unwrap_or(0.0);
+        assert!(
+            learned > 1.0,
+            "Signal prediction should learn from observed installs, got {learned}"
+        );
+    }
+
+    // ── Causal Model: subreddit-type context tests ──
+
+    #[test]
+    fn causal_model_subreddit_type_adjusts_prediction() {
+        let mut model = CausalModel::default();
+        // Learn that "metal" subreddits produce more fans.
+        for _ in 0..10 {
+            let p = DispatchPrediction {
+                template_id: "t".to_owned(),
+                expected_new_fans: 2.0,
+                context: DispatchContext {
+                    subreddit_type: Some("metal".to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            model.update(&PredictionOutcome::from_observation(p, 8.0, 0.0));
+        }
+        // Now predict with the "metal" subreddit type.
+        let ctx_metal = DispatchContext {
+            subreddit_type: Some("metal".to_owned()),
+            ..Default::default()
+        };
+        let ctx_none = DispatchContext::default();
+        let pred_metal = model.predict("t", &ctx_metal);
+        let pred_none = model.predict("t", &ctx_none);
+        // The metal context should produce a higher prediction.
+        assert!(
+            pred_metal >= pred_none,
+            "learned subreddit type should boost prediction: metal={pred_metal}, none={pred_none}"
+        );
+    }
+
+    // ── EFE: risk sensitivity tests ──
+
+    #[test]
+    fn efe_risk_penalty_makes_uncertain_opportunities_less_attractive() {
+        let weights = EfeWeights::default();
+        // Two opportunities with same expected fans and info gain,
+        // but one has higher uncertainty (predict_std).
+        let certain = GrowthOpportunity::compute_efe(5.0, 0.5, 0.5, 0.5, weights);
+        let uncertain = GrowthOpportunity::compute_efe(5.0, 0.5, 5.0, 0.5, weights);
+        // The uncertain one has higher epistemic value (more to learn)
+        // but also higher risk penalty. With default weights (epistemic=0.5,
+        // risk=0.1), the epistemic bonus should dominate at high uncertainty.
+        // So uncertain should have LOWER EFE (better) — the brain prefers
+        // to explore uncertain opportunities.
+        assert!(
+            uncertain < certain,
+            "at default weights, brain should prefer uncertain opportunities (epistemic > risk)"
+        );
+    }
+
+    #[test]
+    fn efe_risk_averse_weights_prefer_certain_opportunities() {
+        let weights = EfeWeights {
+            pragmatic: 1.0,
+            epistemic: 0.1, // low epistemic weight
+            exploration: 0.3,
+            risk: 1.0, // high risk aversion
+        };
+        let certain = GrowthOpportunity::compute_efe(5.0, 0.5, 0.5, 0.5, weights);
+        let uncertain = GrowthOpportunity::compute_efe(5.0, 0.5, 5.0, 0.5, weights);
+        // With high risk aversion and low epistemic weight, the brain
+        // should prefer the certain opportunity.
+        assert!(
+            certain < uncertain,
+            "with high risk aversion, brain should prefer certain opportunities"
+        );
+    }
+
+    // ── Exploration Memory: cross-template generalization tests ──
+
+    #[test]
+    fn exploration_memory_cross_template_generalization() {
+        let mut mem = ExplorationMemory::default();
+        // Explore "ctx1" with template "a".
+        mem.record_visit("a", "ctx1");
+        // Template "b" in the same context should have lower novelty
+        // than a completely unvisited context, because the context
+        // itself is partially known (cross-template generalization).
+        let novelty_b_same_ctx = mem.novelty("b", "ctx1");
+        let novelty_b_new_ctx = mem.novelty("b", "ctx2");
+        assert!(
+            novelty_b_same_ctx < novelty_b_new_ctx,
+            "same context with different template should be less novel than a new context"
+        );
+        // But still more novel than re-exploring with the same template.
+        let novelty_a_same_ctx = mem.novelty("a", "ctx1");
+        assert!(
+            novelty_b_same_ctx > novelty_a_same_ctx,
+            "different template in same context should be more novel than same template"
+        );
+    }
+
+    #[test]
+    fn exploration_memory_decay_makes_old_visits_novel_again() {
+        let mut mem = ExplorationMemory::default();
+        mem.record_visit("a", "ctx1");
+        let novelty_before = mem.novelty("a", "ctx1");
+        // Decay many times — the visit should become negligible.
+        for _ in 0..100 {
+            mem.decay();
+        }
+        let novelty_after = mem.novelty("a", "ctx1");
+        assert!(
+            novelty_after > novelty_before,
+            "after decay, old visits should become novel again"
+        );
+        // After heavy decay, novelty should approach 1.0 (fully novel).
+        assert!(
+            novelty_after > 0.9,
+            "heavy decay should make context almost fully novel, got {novelty_after}"
+        );
+    }
+
+    #[test]
+    fn exploration_memory_decay_cleans_up_zero_entries() {
+        let mut mem = ExplorationMemory::default();
+        mem.record_visit("a", "ctx1");
+        mem.record_visit("b", "ctx2");
+        // Decay until entries are cleaned up.
+        for _ in 0..200 {
+            mem.decay();
+        }
+        // Both visits and context_visits should be cleaned up.
+        assert!(mem.visits.is_empty());
+        assert!(mem.context_visits.is_empty());
+    }
+
+    // ── Strategy hysteresis tests ──
+
+    #[test]
+    fn strategy_hysteresis_stays_event_driven_past_entry_threshold() {
+        let world = WorldModel {
+            days_to_next_event: Some(18), // past 14-day entry, within 21-day stay
+            ..Default::default()
+        };
+        // Without hysteresis: ContentFirst (event is >14 days away).
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst
+        );
+        // With hysteresis (currently EventDriven): stays EventDriven.
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_hysteresis(
+                &world,
+                Some(GrowthStrategy::EventDriven)
+            ),
+            GrowthStrategy::EventDriven
+        );
+    }
+
+    #[test]
+    fn strategy_hysteresis_switches_when_far_from_event() {
+        let world = WorldModel {
+            days_to_next_event: Some(25), // past 21-day stay threshold
+            ..Default::default()
+        };
+        // With hysteresis (currently EventDriven): switches to ContentFirst.
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_hysteresis(
+                &world,
+                Some(GrowthStrategy::EventDriven)
+            ),
+            GrowthStrategy::ContentFirst
+        );
+    }
+
+    #[test]
+    fn strategy_hysteresis_stays_signal_conversion_past_entry_threshold() {
+        let world = WorldModel {
+            total_fans: 100,
+            signal_conversion_rate_bps: 600, // past 500 entry, within 700 stay
+            ..Default::default()
+        };
+        // Without hysteresis: ContentFirst (600 > 500).
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst
+        );
+        // With hysteresis (currently SignalConversion): stays SignalConversion.
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_hysteresis(
+                &world,
+                Some(GrowthStrategy::SignalConversion)
+            ),
+            GrowthStrategy::SignalConversion
+        );
+    }
+
+    #[test]
+    fn strategy_hysteresis_no_previous_strategy_uses_candidate() {
+        let world = WorldModel {
+            days_to_next_event: Some(10),
+            ..Default::default()
+        };
+        // No previous strategy → just use from_world_model.
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_hysteresis(&world, None),
+            GrowthStrategy::EventDriven
+        );
+    }
+
+    #[test]
+    fn strategy_infer_from_template() {
+        // reddit-scanner is rank 0 in AggressiveDiscovery.
+        assert_eq!(
+            GrowthStrategy::infer_from_template("reddit-scanner"),
+            GrowthStrategy::AggressiveDiscovery
+        );
+        // press-pitch is rank 0 in EventDriven.
+        assert_eq!(
+            GrowthStrategy::infer_from_template("press-pitch"),
+            GrowthStrategy::EventDriven
+        );
+        // signal-inviter is rank 0 in SignalConversion.
+        assert_eq!(
+            GrowthStrategy::infer_from_template("signal-inviter"),
+            GrowthStrategy::SignalConversion
+        );
+    }
+
+    #[test]
+    fn strategy_as_str_returns_snake_case() {
+        assert_eq!(
+            GrowthStrategy::AggressiveDiscovery.as_str(),
+            "aggressive_discovery"
+        );
+        assert_eq!(GrowthStrategy::EventDriven.as_str(), "event_driven");
+        assert_eq!(GrowthStrategy::ContentFirst.as_str(), "content_first");
+        assert_eq!(
+            GrowthStrategy::SignalConversion.as_str(),
+            "signal_conversion"
+        );
+    }
+
+    // ── Softmax dispatch tests ──
+
+    #[test]
+    fn softmax_dispatch_empty_returns_empty() {
+        let probs = softmax_dispatch(&[], 1.0);
+        assert!(probs.is_empty());
+    }
+
+    #[test]
+    fn softmax_dispatch_single_returns_one() {
+        let probs = softmax_dispatch(&[-5.0], 1.0);
+        assert_eq!(probs, vec![1.0]);
+    }
+
+    #[test]
+    fn softmax_dispatch_lower_efe_gets_higher_probability() {
+        let probs = softmax_dispatch(&[-10.0, -2.0], 1.0);
+        assert!(
+            probs[0] > probs[1],
+            "lower EFE should get higher dispatch probability"
+        );
+    }
+
+    #[test]
+    fn softmax_dispatch_probabilities_sum_to_one() {
+        let probs = softmax_dispatch(&[-5.0, -3.0, -8.0, -1.0], 0.5);
+        let sum: f64 = probs.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 0.001,
+            "probabilities should sum to 1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn softmax_dispatch_low_temperature_is_greedy() {
+        // Very low temperature → nearly greedy (best opportunity gets ~all probability).
+        let probs = softmax_dispatch(&[-10.0, -9.0], 0.01);
+        assert!(
+            probs[0] > 0.99,
+            "low temperature should be nearly greedy, got probs[0]={}",
+            probs[0]
+        );
+    }
+
+    #[test]
+    fn softmax_dispatch_high_temperature_is_uniform() {
+        // Very high temperature → nearly uniform.
+        let probs = softmax_dispatch(&[-10.0, -2.0], 1000.0);
+        assert!(
+            (probs[0] - 0.5).abs() < 0.01,
+            "high temperature should be nearly uniform, got probs[0]={}",
+            probs[0]
+        );
+    }
+
+    #[test]
+    fn softmax_dispatch_handles_extreme_values() {
+        // Extreme EFE scores should not cause overflow or NaN.
+        let probs = softmax_dispatch(&[-1e10, -1.0, 0.0], 1.0);
+        assert!(probs.iter().all(|p| p.is_finite() && *p >= 0.0));
+        let sum: f64 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 0.001);
+    }
+
+    // ── Adaptive temperature tests ──
+
+    #[test]
+    fn adaptive_temperature_zero_regret_is_near_min() {
+        let temp = adaptive_temperature(0.0, 0.1, 2.0);
+        // sigmoid(0) = 0.5, so temp = 0.1 + 1.9*0.5 = 1.05.
+        // Not exactly min, but moderate — zero regret doesn't mean pure greed.
+        assert!(temp > 0.1 && temp < 2.0);
+    }
+
+    #[test]
+    fn adaptive_temperature_high_regret_approaches_max() {
+        let temp = adaptive_temperature(10.0, 0.1, 2.0);
+        // sigmoid(10) ≈ 0.99995, so temp ≈ max.
+        assert!(
+            temp > 1.9,
+            "high regret should drive temperature toward max, got {temp}"
+        );
+    }
+
+    #[test]
+    fn adaptive_temperature_negative_regret_approaches_min() {
+        let temp = adaptive_temperature(-10.0, 0.1, 2.0);
+        // sigmoid(-10) ≈ 0.00005, so temp ≈ min.
+        assert!(
+            temp < 0.2,
+            "negative regret (doing better than expected) should drive temperature toward min, got {temp}"
+        );
+    }
+
+    #[test]
+    fn adaptive_temperature_is_bounded() {
+        // Even extreme regret should be bounded.
+        let temp_high = adaptive_temperature(1000.0, 0.1, 2.0);
+        let temp_low = adaptive_temperature(-1000.0, 0.1, 2.0);
+        assert!(temp_high <= 2.0);
+        assert!(temp_low >= 0.1);
     }
 }

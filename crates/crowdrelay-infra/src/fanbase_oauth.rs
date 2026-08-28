@@ -43,6 +43,8 @@ pub enum FanbaseOauthError {
     UnsupportedPlatform(String),
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("provider profile fetch failed")]
+    ProfileFetchFailed,
 }
 
 /// OAuth provider configuration. Loaded from env at startup.
@@ -374,8 +376,10 @@ impl FanbaseOauthRepository {
     }
 
     /// Fetch the external account reference (user/business ID) from the
-    /// provider's API. Falls back to "unknown" if the profile endpoint is
-    /// unavailable — the connection is still usable for token refresh.
+    /// provider's API. Returns an error if the profile endpoint is unavailable
+    /// so the caller can generate a unique fallback that won't collide with
+    /// other failed connections on the `(workspace_id, platform,
+    /// external_account_ref)` unique constraint.
     async fn fetch_account_ref(
         &self,
         platform: Platform,
@@ -401,7 +405,7 @@ impl FanbaseOauthRepository {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Ok("unknown".to_owned());
+            return Err(FanbaseOauthError::ProfileFetchFailed);
         }
         let body: serde_json::Value = response.json().await?;
         // Meta: { "id": "123", "name": "..." }
@@ -418,7 +422,7 @@ impl FanbaseOauthRepository {
                     .and_then(|u| u.get("open_id"))
                     .and_then(serde_json::Value::as_str)
             })
-            .unwrap_or("unknown");
+            .ok_or(FanbaseOauthError::ProfileFetchFailed)?;
         Ok(id.to_owned())
     }
 

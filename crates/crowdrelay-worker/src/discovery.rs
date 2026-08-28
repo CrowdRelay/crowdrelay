@@ -278,11 +278,16 @@ impl RedditDiscoveryWorker {
             .timeout(Duration::from_secs(5))
             .send()
             .await
+            .map_err(|error| tracing::warn!(?error, "reddit cookies fetch failed"))
             .ok()?;
         if !response.status().is_success() {
             return None;
         }
-        let body: serde_json::Value = response.json().await.ok()?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| tracing::warn!(?error, "reddit cookies response was not json"))
+            .ok()?;
         let cookies = body.get("cookies")?.as_array()?;
         let cookie_str = cookies
             .iter()

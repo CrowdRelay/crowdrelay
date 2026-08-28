@@ -287,6 +287,9 @@ fn oauth_error_response(error: FanbaseOauthError, request_id_value: Option<Strin
         FanbaseOauthError::Encryption(_) => {
             Problem::service_unavailable(request_id_value).into_response()
         }
+        FanbaseOauthError::ProfileFetchFailed => {
+            Problem::service_unavailable(request_id_value).into_response()
+        }
     }
 }
 

@@ -564,7 +564,8 @@ where
                         GrowthStrategy::default()
                     };
                     // Collect all unconsumed insight IDs across all snapshots.
-                    let mut consumed_ids: Vec<Uuid> = Vec::new();
+                    // Pre-allocate: each snapshot typically has 0-3 insights.
+                    let mut consumed_ids: Vec<Uuid> = Vec::with_capacity(snapshots.len() * 2);
                     // Collect all eligible candidates with their EFE scores
                     // and strategy ranks, then sort by (strategy_rank,
                     // efe_score) so the brain dispatches the best
@@ -575,21 +576,24 @@ where
                         DispatchPrediction,
                         f64,
                         usize,
-                    )> = Vec::new();
+                    )> = Vec::with_capacity(snapshots.len());
                     for snapshot in &snapshots {
                         for insight in &snapshot.recent_insights {
                             consumed_ids.push(insight.outcome_id);
                         }
                         // Compute exploration novelty for this (template, context) pair.
-                        let ctx_hash = context_hash(&DispatchContext {
+                        // Reuse a stack-allocated DispatchContext — only the
+                        // fields that affect the context hash are set.
+                        let ctx = DispatchContext {
                             days_to_event: snapshot.days_to_next_event,
                             fan_growth_trend: snapshot.world_model.fan_growth_trend,
                             subreddit_type: None,
                             post_format: None,
                             time_of_day_bps: 0,
                             community_novelty_bps: 0,
-                        });
-                        let novelty = exploration_memory.novelty(&snapshot.template_id, &ctx_hash);
+                        };
+                        let novelty =
+                            exploration_memory.novelty(&snapshot.template_id, &context_hash(&ctx));
                         if let Some((candidate, prediction, efe_score, strategy_rank)) =
                             growth_intelligence_candidate(
                                 snapshot,
