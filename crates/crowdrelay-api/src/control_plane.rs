@@ -168,8 +168,96 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             axum::routing::delete(crate::fanbase::delete_fanbase_connection),
         )
         .route(
+            "/v1/control-plane/community-posts/{community_post_id}/register-manual",
+            post(crate::fanbase::register_manual_community_post),
+        )
+        .route(
             "/v1/control-plane/webhook-endpoints",
             get(list_webhook_endpoints),
+        )
+        // ── Audience intelligence ──────────────────────────────────────
+        // Fan list, fan detail, fan journey, fan tags, audience segments.
+        // All reuse canonical admin handlers so this surface grows no
+        // authority path of its own.
+        .route(
+            "/v1/control-plane/audience/overview",
+            get(crate::audience::overview),
+        )
+        .route(
+            "/v1/control-plane/audience/fans",
+            get(crate::audience::list_fans),
+        )
+        .route(
+            "/v1/control-plane/audience/fans/{fan_id}",
+            get(crate::audience::fan_detail),
+        )
+        .route(
+            "/v1/control-plane/audience/fans/{fan_id}/journey",
+            get(crate::audience::fan_journey),
+        )
+        .route(
+            "/v1/control-plane/audience/fans/{fan_id}/tags",
+            post(crate::audience::add_tag),
+        )
+        .route(
+            "/v1/control-plane/audience/fans/{fan_id}/tags/{tag}/remove",
+            post(crate::audience::remove_tag),
+        )
+        .route(
+            "/v1/control-plane/audience/fans/{fan_id}/referral-code",
+            post(crate::acquisition::admin_create_fan_referral_code),
+        )
+        .route(
+            "/v1/control-plane/audience/segments",
+            get(crate::audience::list_segments),
+        )
+        .route(
+            "/v1/control-plane/audience/segments/{slug}/preview",
+            get(crate::audience::preview_segment),
+        )
+        // ── Growth metrics, objectives, posture ────────────────────────
+        // Read-only coverage and trends; objective lifecycle; posture
+        // read+write; acquisition channels; tour/show economics.
+        .route(
+            "/v1/control-plane/autopilot/growth-metrics/coverage",
+            get(crate::autopilot::growth_metric_coverage),
+        )
+        .route(
+            "/v1/control-plane/autopilot/growth-metrics/trends",
+            get(crate::autopilot::growth_metric_trends),
+        )
+        .route(
+            "/v1/control-plane/autopilot/objectives",
+            get(crate::autopilot::growth_objectives)
+                .post(crate::autopilot::declare_growth_objective),
+        )
+        .route(
+            "/v1/control-plane/autopilot/objectives/{objective_id}/retire",
+            post(crate::autopilot::retire_growth_objective),
+        )
+        .route(
+            "/v1/control-plane/autopilot/posture",
+            get(crate::autopilot::growth_posture).post(crate::autopilot::set_growth_posture),
+        )
+        .route(
+            "/v1/control-plane/autopilot/acquisition-channels",
+            get(crate::autopilot::acquisition_channels),
+        )
+        .route(
+            "/v1/control-plane/autopilot/tour-economics",
+            get(crate::autopilot::tour_economics),
+        )
+        .route(
+            "/v1/control-plane/autopilot/show-economics",
+            get(crate::autopilot::show_economics),
+        )
+        .route(
+            "/v1/control-plane/autopilot/chief-of-staff",
+            get(crate::autopilot::chief_of_staff),
+        )
+        .route(
+            "/v1/control-plane/autopilot/growth-envelope",
+            post(crate::autopilot::set_growth_envelope),
         )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard

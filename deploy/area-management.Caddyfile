@@ -6,6 +6,16 @@
 :18080 {
 	@area path /v1/control-plane/area /v1/control-plane/area/*
 	@operations path /v1/control-plane/ops/summary /v1/control-plane/ops/signal-overview /v1/control-plane/ops/attention /v1/control-plane/ops/outbox /v1/control-plane/ops/outbox/* /v1/control-plane/ops/deliveries /v1/control-plane/ops/deliveries/* /v1/control-plane/ops/operations/* /v1/control-plane/ops/push/* /v1/control-plane/ecosystem/overview /v1/control-plane/ecosystem/findings /v1/control-plane/ecosystem/reconcile /v1/control-plane/ecosystem/flags /v1/control-plane/ecosystem/flags/* /v1/control-plane/autopilot/overview /v1/control-plane/autopilot/growth /v1/control-plane/autopilot/policies/* /v1/control-plane/autopilot/next-best-actions /v1/control-plane/autopilot/scorecard /v1/control-plane/autopilot/reply-triage /v1/control-plane/autopilot/actions/* /v1/control-plane/autopilot/decisions/* \
+        /v1/control-plane/autopilot/growth-metrics/coverage \
+        /v1/control-plane/autopilot/growth-metrics/trends \
+        /v1/control-plane/autopilot/objectives \
+        /v1/control-plane/autopilot/objectives/* \
+        /v1/control-plane/autopilot/posture \
+        /v1/control-plane/autopilot/acquisition-channels \
+        /v1/control-plane/autopilot/tour-economics \
+        /v1/control-plane/autopilot/show-economics \
+        /v1/control-plane/autopilot/chief-of-staff \
+        /v1/control-plane/autopilot/growth-envelope \
         /v1/control-plane/portfolio/overview \
         /v1/control-plane/portfolio/amplification \
         /v1/control-plane/portfolio/amplification/* \
@@ -15,6 +25,11 @@
         /v1/control-plane/fanbases/* \
         /v1/control-plane/webhook-endpoints \
         /v1/control-plane/webhook-endpoints/* \
+        /v1/control-plane/audience/overview \
+        /v1/control-plane/audience/fans \
+        /v1/control-plane/audience/fans/* \
+        /v1/control-plane/audience/segments \
+        /v1/control-plane/audience/segments/* \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
