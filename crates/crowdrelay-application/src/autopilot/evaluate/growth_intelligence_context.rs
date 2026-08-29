@@ -1,6 +1,5 @@
-/// GrowthIntelligence context arm — extracted from evaluate.rs to keep
-/// the orchestrator under the modularity contract line limit.
-
+// GrowthIntelligence context arm — extracted from evaluate.rs to keep
+// the orchestrator under the modularity contract line limit.
 impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
     async fn evaluate_growth_intelligence_context(
         &self,
