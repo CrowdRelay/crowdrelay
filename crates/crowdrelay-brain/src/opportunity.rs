@@ -16,14 +16,14 @@
 //! This produces a stable string ID like:
 //! `community-engager:r_MetalMusic:post:event_2:stagnant`
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::causal_model::DispatchContext;
 use crate::exploration::context_hash;
 
 /// The kind of action an opportunity represents.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpportunityAction {
     /// Scan a community for intelligence (reddit-scanner).
@@ -57,7 +57,7 @@ impl OpportunityAction {
 /// the brain should not dispatch both. The identity is deterministic:
 /// given the same template, target, action, and context, the identity
 /// is always the same.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct OpportunityId {
     /// The worker template that would address this opportunity.
     pub template_id: String,
@@ -117,7 +117,7 @@ impl fmt::Display for OpportunityId {
 }
 
 /// The lifecycle state of an opportunity.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpportunityState {
     /// The opportunity has been identified but not yet dispatched.
@@ -150,7 +150,7 @@ impl OpportunityState {
 }
 
 /// A tracked opportunity with its current lifecycle state.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrackedOpportunity {
     pub id: OpportunityId,
     pub state: OpportunityState,
@@ -167,7 +167,7 @@ pub struct TrackedOpportunity {
 // ─── Episode / Trajectory Model ─────────────────────────────────────────────
 
 /// The kind of event in a fan's trajectory.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeEventKind {
     /// The brain dispatched a worker (treatment applied).
@@ -185,7 +185,7 @@ pub enum EpisodeEventKind {
 /// Events are ordered by `occurred_at` and record what the brain did and
 /// what happened as a result. This is the raw data for temporal credit
 /// assignment: which actions contributed to which outcomes.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EpisodeEvent {
     /// What kind of event this is.
     pub kind: EpisodeEventKind,
@@ -255,7 +255,7 @@ impl EpisodeEvent {
 }
 
 /// The lifecycle status of an episode.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeStatus {
     /// The episode is ongoing — events are still being recorded.
@@ -290,7 +290,7 @@ pub enum EpisodeStatus {
 /// The credit assignment question: how much of the +1 conversion was caused
 /// by the scanner vs. the engager vs. the inviter? The episode records the
 /// full trajectory so this can be computed in Phase 3.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpportunityEpisode {
     /// A stable identifier for this episode (e.g. the opportunity ID).
     pub id: String,
@@ -389,7 +389,7 @@ impl OpportunityEpisode {
 // ─── Temporal Credit Assignment ─────────────────────────────────────────────
 
 /// The result of credit assignment for one dispatch in an episode.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreditAssignment {
     /// The template that was dispatched.
     pub template_id: String,
@@ -547,7 +547,7 @@ pub fn credit_allocation_with_measurements(
 ///
 /// The brain records events as they happen and uses the tracker to query
 /// completed episodes for credit assignment and model updates.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct EpisodeTracker {
     /// All episodes (active + completed), keyed by episode ID.
     pub episodes: std::collections::HashMap<String, OpportunityEpisode>,

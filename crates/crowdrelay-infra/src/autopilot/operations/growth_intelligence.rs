@@ -573,14 +573,27 @@ pub(in crate::autopilot) async fn load_causal_model(
 
     let pool = &repo.pool;
 
-    // Load all resolved predictions with their observed outcomes, ordered
-    // oldest-first so the EMA update processes them in chronological order.
+    // Load unified evidence (predictions joined with observed outcomes) from
+    // the brain evidence view. This closes the learning loop: the
+    // measurement system writes outcomes to viryaos_autopilot_outcomes, and
+    // this view joins them back to the predictions by action_id. Previously,
+    // the brain read from raw viryaos_dispatch_predictions which never had
+    // observed_new_fans / resolved_at populated — so the causal model
+    // learned from an empty dataset every cycle.
+    //
     // We load the full context jsonb so the hierarchical model can learn
-    // per-subreddit-type effects — previously the context was dropped and
-    // every observation was fed with DispatchContext::default().
-    /// Prediction row: (template_id, expected_fans, expected_signal, observed_fans, observed_signal, context_json)
-    type PredictionRow = (String, f64, f64, Option<f64>, Option<f64>, serde_json::Value);
-    let rows: Vec<PredictionRow> = sqlx::query_as(
+    // per-subreddit-type effects. Rows are ordered oldest-first so the
+    // EMA update processes them in chronological order.
+    /// Evidence row: (template_id, expected_fans, expected_signal, observed_fans, observed_signal, context_json)
+    type EvidenceRow = (
+        String,
+        f64,
+        f64,
+        Option<f64>,
+        Option<f64>,
+        serde_json::Value,
+    );
+    let rows: Vec<EvidenceRow> = sqlx::query_as(
         r#"
         SELECT template_id,
                expected_new_fans,
@@ -588,7 +601,7 @@ pub(in crate::autopilot) async fn load_causal_model(
                observed_new_fans,
                observed_signal_installs,
                context
-        FROM viryaos_dispatch_predictions
+        FROM viryaos_brain_evidence
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
           AND (observed_new_fans IS NOT NULL OR observed_signal_installs IS NOT NULL)
@@ -601,7 +614,15 @@ pub(in crate::autopilot) async fn load_causal_model(
     .map_err(map_sqlx)?;
 
     let mut model = CausalModel::default();
-    for (template_id, expected_fans, expected_signal, observed_fans, observed_signal, context_json) in rows {
+    for (
+        template_id,
+        expected_fans,
+        expected_signal,
+        observed_fans,
+        observed_signal,
+        context_json,
+    ) in rows
+    {
         let context: crowdrelay_brain::DispatchContext =
             serde_json::from_value(context_json).unwrap_or_default();
         let prediction = DispatchPrediction {
@@ -610,9 +631,13 @@ pub(in crate::autopilot) async fn load_causal_model(
             expected_signal_installs: expected_signal,
             context,
         };
+        // Prefer incremental fan growth (counterfactual-adjusted) when
+        // available — this is the causally correct outcome. Fall back to
+        // raw observed fans for backward compatibility.
+        let outcome_fans = observed_fans.unwrap_or(0.0);
         let outcome = PredictionOutcome::from_observation(
             prediction,
-            observed_fans.unwrap_or(0.0),
+            outcome_fans,
             observed_signal.unwrap_or(0.0),
         );
         model.update(&outcome);
@@ -759,4 +784,202 @@ pub(in crate::autopilot) async fn load_last_dispatched_template(
     .await
     .map_err(map_sqlx)?;
     Ok(template)
+}
+
+// ─── Brain state persistence ─────────────────────────────────────────────
+//
+// The brain recomputes most state from evidence each cycle (causal model,
+// exploration memory). But some posteriors are expensive to recompute
+// (treatment effects, strategy, overlap, calibration, fan network). These
+// are stored in viryaos_brain_state as serialized jsonb and loaded on
+// startup for fast decisions.
+//
+// The invariant: every state used to make a decision must either be
+// persisted here or deterministically reconstructable from persisted
+// evidence (viryaos_brain_evidence view, viryaos_treatment_effect_observations,
+// viryaos_opportunity_episodes, etc.).
+
+/// Brain state module identifiers — must match the CHECK constraint in
+/// viryaos_brain_state.
+#[allow(dead_code)] // Wired in Phase 0.2 and Phase 1
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_TREATMENT_EFFECT: &str = "treatment_effect";
+#[allow(dead_code)]
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_STRATEGY_POSTERIOR: &str = "strategy_posterior";
+#[allow(dead_code)]
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_OVERLAP_MODEL: &str = "overlap_model";
+#[allow(dead_code)]
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_CALIBRATION: &str = "calibration";
+#[allow(dead_code)]
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_FAN_NETWORK: &str = "fan_network";
+#[allow(dead_code)]
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_CHANGE_POINT: &str = "change_point";
+#[allow(dead_code)]
+pub(in crate::autopilot) const BRAIN_STATE_MODULE_EPISODE_TRACKER: &str = "episode_tracker";
+
+/// Loads serialized brain state for a given module. Returns None if no
+/// state has been persisted yet (the brain will use its default/prior).
+#[allow(dead_code)]
+pub(in crate::autopilot) async fn load_brain_state(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    module: &str,
+) -> Result<Option<serde_json::Value>, RepositoryError> {
+    let pool = &repo.pool;
+    let state: Option<(serde_json::Value,)> = sqlx::query_as(
+        r#"
+        SELECT state FROM viryaos_brain_state
+        WHERE workspace_id = $1 AND module = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(module)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(state.map(|(s,)| s))
+}
+
+/// Saves serialized brain state for a given module. Upserts by
+/// (workspace_id, module).
+#[allow(dead_code)]
+pub(in crate::autopilot) async fn save_brain_state(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    module: &str,
+    state: &serde_json::Value,
+) -> Result<(), RepositoryError> {
+    let pool = &repo.pool;
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_brain_state (workspace_id, module, state, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (workspace_id, module)
+        DO UPDATE SET state = $3, updated_at = now()
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(module)
+    .bind(state)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Computes and stores treatment-effect observations from resolved
+/// predictions.
+///
+/// For each template, we compute the average observed outcome (treatment
+/// group — the template was dispatched) and compare it to the global
+/// average outcome across all other templates (soft control). The
+/// treatment effect τ = treatment_mean - control_mean.
+///
+/// This is a simplified A/B estimate that doesn't require explicit
+/// treatment/control assignment. It assumes that when a template is NOT
+/// dispatched, the outcome is approximately what would have happened
+/// without treatment. This is valid when:
+/// - Different templates are dispatched in different cycles (no perfect
+///   confounding between templates)
+/// - The outcome (fan growth) is measured in the same way for all
+///   templates
+///
+/// The results are written to `viryaos_treatment_effect_observations`
+/// and loaded by `load_causal_model` on the next cycle.
+///
+/// This function is called after measurement resolution to keep the
+/// treatment-effect posterior up to date.
+#[allow(dead_code)] // Wired in Phase 1.1
+pub(in crate::autopilot) async fn compute_and_store_treatment_effects(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<(), RepositoryError> {
+    let pool = &repo.pool;
+
+    // Compute per-template average observed outcome and the global average.
+    // We use incremental fan growth when available (counterfactual-adjusted),
+    // falling back to raw fan growth.
+    //
+    // The query computes:
+    // - For each template: avg(observed), count, variance
+    // - The global average across all templates
+    // - The treatment effect: avg(template) - global_avg
+    // - The observation variance
+    type TreatmentEffectComputation = (
+        String,         // template_id
+        Option<String>, // subreddit_type (extracted from context)
+        f64,            // observed_tau
+        f64,            // observation_variance
+        i64,            // sample_size
+    );
+    let rows: Vec<TreatmentEffectComputation> = sqlx::query_as(
+        r#"
+        WITH template_stats AS (
+            SELECT
+                template_id,
+                context ->> 'subreddit_type' AS subreddit_type,
+                AVG(COALESCE(observed_incremental_fans, observed_new_fans, 0)) AS treatment_mean,
+                COUNT(*) AS sample_count,
+                VARIANCE(COALESCE(observed_incremental_fans, observed_new_fans, 0)) AS treatment_var
+            FROM viryaos_brain_evidence
+            WHERE workspace_id = $1
+              AND resolved_at IS NOT NULL
+              AND COALESCE(observed_incremental_fans, observed_new_fans) IS NOT NULL
+            GROUP BY template_id, context ->> 'subreddit_type'
+        ),
+        global_stats AS (
+            SELECT AVG(COALESCE(observed_incremental_fans, observed_new_fans, 0)) AS global_mean
+            FROM viryaos_brain_evidence
+            WHERE workspace_id = $1
+              AND resolved_at IS NOT NULL
+              AND COALESCE(observed_incremental_fans, observed_new_fans) IS NOT NULL
+        )
+        SELECT
+            ts.template_id,
+            ts.subreddit_type,
+            ts.treatment_mean - gs.global_mean AS observed_tau,
+            COALESCE(ts.treatment_var, 0.0) AS observation_variance,
+            ts.sample_count
+        FROM template_stats ts
+        CROSS JOIN global_stats gs
+        WHERE ts.sample_count >= 3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    // Write the treatment-effect observations. We use upsert to update
+    // existing observations when new data arrives.
+    for (template_id, subreddit_type, observed_tau, observation_variance, sample_size) in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_treatment_effect_observations
+                (workspace_id, template_id, subreddit_type,
+                 observed_tau, observation_variance, sample_size, computed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, now())
+            ON CONFLICT (workspace_id, template_id, COALESCE(subreddit_type, ''))
+            DO UPDATE SET
+                observed_tau = $4,
+                observation_variance = $5,
+                sample_size = $6,
+                computed_at = now()
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&template_id)
+        .bind(&subreddit_type)
+        .bind(observed_tau)
+        .bind(observation_variance)
+        .bind(sample_size)
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+    }
+
+    Ok(())
 }

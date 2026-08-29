@@ -48,7 +48,7 @@
 //! - Supports non-stationarity via observation variance (recent observations
 //!   can have higher variance, effectively downweighting old evidence)
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A Normal-Normal conjugate posterior for one parameter (e.g. expected fans
 /// for one template).
@@ -57,7 +57,7 @@ use serde::Serialize;
 /// the posterior is updated using the conjugate formula. The observation
 /// variance represents the noise level — higher variance means the brain
 /// trusts the observation less and relies more on the prior.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NormalPosterior {
     /// Posterior mean — the brain's best estimate of the parameter.
     pub mean: f64,
@@ -199,7 +199,7 @@ pub fn normal_cdf(z: f64) -> f64 {
 /// global posterior. When it has many, it stands on its own. This is
 /// hierarchical Bayesian partial pooling — the gold standard for
 /// multi-level learning with unequal sample sizes.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HierarchicalPosterior {
     /// The global posterior — pooled across all observations.
     pub global: NormalPosterior,
@@ -349,7 +349,7 @@ impl HierarchicalPosterior {
 /// average; `τ = -3` means the action loses 3 fans. This is the causally
 /// correct ranking signal, unlike the outcome model which conflates
 /// correlation with causation.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TreatmentEffectPosterior {
     /// Hierarchical posterior for τ, same structure as the fan posterior.
     pub effects: HierarchicalPosterior,

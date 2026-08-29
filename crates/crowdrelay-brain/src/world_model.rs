@@ -5,7 +5,7 @@
 //! real data (fans, signal installs, community posts, outreach targets,
 //! events). The brain uses this to decide what to do next.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The brain's belief about the world — one unified picture with uncertainty.
 /// Every number carries implicit confidence (the brain knows it has exact
@@ -14,7 +14,7 @@ use serde::Serialize;
 /// This replaces the scattered per-template fields that were duplicated
 /// across `GrowthIntelligenceSnapshot` instances. The world model is loaded
 /// once per cycle and shared across all template evaluations.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorldModel {
     // ── Fan aggregation state ──
     /// Total fans in the system.
@@ -101,7 +101,7 @@ impl GrowthTrend {
 // ──────────────────────────────────────────────────────────────────────
 
 /// The brain's monthly fan acquisition target.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GrowthTarget {
     /// New fans to acquire this month.
     pub new_fans_per_month: u32,
@@ -130,7 +130,7 @@ impl GrowthTarget {
 }
 
 /// How close the brain is to its growth target this month.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GrowthTargetProgress {
     /// The target for this month.
     pub target: GrowthTarget,
@@ -146,7 +146,7 @@ pub struct GrowthTargetProgress {
 }
 
 /// How the brain is doing relative to its growth target.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetStatus {
     /// Less than 50% of target pace — the brain needs to be more aggressive.

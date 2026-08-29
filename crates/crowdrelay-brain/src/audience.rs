@@ -18,7 +18,7 @@
 //! are assumed independent). At 1.0, any overlap fully zeroes the marginal
 //! value (same audience is fully saturated).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// An audience identifier — a set of fans or potential fans that a dispatch
@@ -140,7 +140,7 @@ pub fn estimate_overlap(key_a: &AudienceKey, key_b: &AudienceKey) -> f64 {
 /// ```
 ///
 /// This is stored as a running average keyed by the sorted pair `(A, B)`.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LearnedOverlapModel {
     /// Learned overlap coefficients, keyed by "audience_a|audience_b" (sorted).
     /// Values are in [0, 1].

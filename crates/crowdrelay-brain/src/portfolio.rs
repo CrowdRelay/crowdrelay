@@ -54,12 +54,12 @@
 //! 4. "DO NOTHING" is always a candidate — if all marginal values are negative,
 //!    the brain does nothing.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::opportunity::OpportunityId;
 
 /// A candidate in the global pool, scored and ready for portfolio selection.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortfolioCandidate {
     /// The opportunity identity (stable across cycles).
     pub opportunity_id: OpportunityId,
@@ -84,7 +84,7 @@ pub struct PortfolioCandidate {
 }
 
 /// The result of portfolio optimization.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PortfolioSelection {
     /// The selected candidates, in dispatch priority order.
     pub selected: Vec<PortfolioCandidate>,
@@ -97,14 +97,14 @@ pub struct PortfolioSelection {
 }
 
 /// A rejected candidate and the reason for rejection.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortfolioRejection {
     pub opportunity_key: String,
     pub reason: RejectionReason,
 }
 
 /// Why a candidate was not selected for the portfolio.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionReason {
     /// The marginal value was negative (not worth dispatching).
@@ -118,7 +118,7 @@ pub enum RejectionReason {
 }
 
 /// Configuration for the portfolio optimizer.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct PortfolioConfig {
     /// The maximum number of dispatches per cycle.
     pub max_dispatches: u32,
@@ -157,7 +157,7 @@ impl Default for PortfolioConfig {
 
 /// The portfolio optimizer — selects the optimal set of candidates from the
 /// global pool.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PortfolioOptimizer {
     pub config: PortfolioConfig,
 }

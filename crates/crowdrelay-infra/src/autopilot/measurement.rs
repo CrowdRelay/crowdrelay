@@ -484,6 +484,65 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             if updated.rows_affected() != 1 {
                 return Err(RepositoryError::Conflict);
             }
+            // Bridge: resolve the dispatch prediction with the observed
+            // outcome. The brain records predictions in
+            // viryaos_dispatch_predictions before dispatch; the measurement
+            // system writes outcomes to viryaos_autopilot_outcomes. Without
+            // this bridge, the prediction's observed_new_fans /
+            // resolved_at columns are never populated, and the causal model
+            // learns from an empty dataset every cycle.
+            //
+            // We map measurement kinds to prediction columns:
+            //   agent_run_fan_growth_14d      → observed_new_fans
+            //   incremental_fan_growth_14d    → observed_new_fans (preferred)
+            //   agent_run_signal_installs_7d  → observed_signal_installs
+            //
+            // The evidence view (viryaos_brain_evidence) also joins these
+            // tables, so even if this bridge misses a row, the view
+            // provides the join. But updating the prediction row directly
+            // is more efficient for the brain's read path.
+            match measurement.kind {
+                AutopilotMeasurementKind::AgentRunFanGrowth14d
+                | AutopilotMeasurementKind::IncrementalFanGrowth14d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_dispatch_predictions
+                        SET observed_new_fans = $3,
+                            resolved_at = COALESCE(resolved_at, $4)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                AutopilotMeasurementKind::AgentRunSignalInstalls7d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_dispatch_predictions
+                        SET observed_signal_installs = $3,
+                            resolved_at = COALESCE(resolved_at, $4)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                _ => {}
+            }
             if effect.assessment == EffectAssessment::Worsened {
                 let demoted_context = sqlx::query_scalar::<_, String>(
                     r#"

@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 /// Minimum number of evaluations before a strategy can be recommended.
@@ -194,7 +194,7 @@ impl StrategyLearner {
 ///
 /// The prior is skeptical: `Normal(0, PRIOR_VARIANCE)` — the brain starts
 /// believing no strategy has any effect until evidence proves otherwise.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StrategyPosterior {
     /// Per-strategy Normal-Normal posteriors.
     pub posteriors: HashMap<String, crate::bayesian::NormalPosterior>,

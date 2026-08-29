@@ -57,6 +57,7 @@ pub mod opportunity;
 pub mod opportunity_graph;
 pub mod options;
 pub mod portfolio;
+pub mod reach;
 pub mod simulation;
 pub mod snapshot;
 pub mod standing;
@@ -105,6 +106,7 @@ pub use portfolio::{
     PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
     PortfolioSelection, RejectionReason,
 };
+pub use reach::{ReachChannel, ReachEvent, ReachMetrics, ReachRecipientKind, ReachStatus};
 pub use simulation::{MonthlyPrediction, SimulationResult, WorldSimulation};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,

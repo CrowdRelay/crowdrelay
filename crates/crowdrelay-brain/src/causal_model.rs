@@ -63,7 +63,7 @@ pub struct DispatchPrediction {
 /// The measured outcome of a dispatch, paired with the prediction that
 /// was made before it. The prediction errors (observed - expected) are
 /// the dopamine signals that drive learning.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PredictionOutcome {
     /// The prediction that was made before the dispatch.
     pub prediction: DispatchPrediction,
@@ -143,7 +143,7 @@ pub const MIN_TREATMENT_CONFIDENCE: u32 = 5;
 /// accumulated ([`MIN_TREATMENT_CONFIDENCE`] paired observations), the brain
 /// uses τ as the primary ranking signal. Before that, it falls back to the
 /// outcome model.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CausalModel {
     /// Hierarchical posterior for fan acquisition (outcome model).
     pub fans: HierarchicalPosterior,

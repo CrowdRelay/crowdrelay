@@ -35,10 +35,10 @@
 //! reflects what the brain *actually* expects to happen, not what its
 //! optimistic model predicts.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A single prediction-observation pair, recorded for calibration analysis.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PredictionRecord {
     /// The predicted expected value (e.g. expected fans).
     pub predicted: f64,
@@ -51,7 +51,7 @@ pub struct PredictionRecord {
 }
 
 /// The result of a calibration analysis.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CalibrationReport {
     /// The mean bias: average (predicted - observed). Positive = over-predicting.
     pub bias: f64,
@@ -71,7 +71,7 @@ pub struct CalibrationReport {
 }
 
 /// One bucket in the reliability diagram.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReliabilityBucket {
     /// The midpoint of the prediction bucket.
     pub bucket_midpoint: f64,
@@ -99,7 +99,7 @@ const RELIABILITY_BUCKETS: usize = 10;
 /// 3. **Self-criticize**: before making a decision, the brain applies the
 ///    calibration correction to its predictions, making the EFE score more
 ///    honest.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CalibrationTracker {
     /// All recorded prediction-observation pairs.
     pub records: Vec<PredictionRecord>,
