@@ -463,6 +463,7 @@ deploy() {
   fi
 
   compose up --detach --wait --wait-timeout "$CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS" --remove-orphans "${deploy_services[@]}"
+  reconcile_edge_caddyfile
   verify_management_proxy
   verify_exact_release_identity
   run_hook crowdrelay_before_verify
@@ -471,6 +472,23 @@ deploy() {
   report_control_plane_runtime
   run_hook crowdrelay_after_deploy
   run_hook crowdrelay_notify "CrowdRelay deployed: sha-${CROWDRELAY_IMAGE_SHA}"
+}
+
+# The blue-green deploy script (deploy-bluegreen.sh) switches the edge Caddyfile
+# between crowdrelay-api (blue) and crowdrelay-api-green (green). This deploy
+# function always brings up blue, so if the Caddyfile was left pointing to green
+# from a previous blue-green deploy, it must be reset to the blue upstream.
+# Without this, the edge proxy returns 503 because the green container doesn't
+# exist after a regular (non-blue-green) deploy.
+reconcile_edge_caddyfile() {
+  local edge_caddyfile="/opt/crowdrelay/ops/edge/Caddyfile"
+  local edge_container="virya-edge-caddy"
+  [[ -f "$edge_caddyfile" ]] || return 0
+  if grep -qF "reverse_proxy crowdrelay-api-green:8080" "$edge_caddyfile"; then
+    echo "Reconciling edge Caddyfile: crowdrelay-api-green → crowdrelay-api"
+    sed -i "s|reverse_proxy crowdrelay-api-green:8080|reverse_proxy crowdrelay-api:8080|" "$edge_caddyfile"
+    docker exec "$edge_container" caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1 || true
+  fi
 }
 
 package_deploy() (
