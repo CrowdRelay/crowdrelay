@@ -36,9 +36,10 @@ pub(in crate::autopilot) async fn record_growth_evidence(
             converted, converted_fan_id,
             predicted_fans, predicted_signal_installs, context,
             strategy, evidence_quality,
+            sample_size, contamination, measurement_delay_days,
             episode_id, resolved_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
         ON CONFLICT (workspace_id, action_id) DO NOTHING
         "#,
     )
@@ -63,6 +64,9 @@ pub(in crate::autopilot) async fn record_growth_evidence(
     .bind(&context_json)
     .bind(&evidence.strategy)
     .bind(evidence.evidence_quality.as_str())
+    .bind(evidence.sample_size.map(|v| v as i32))
+    .bind(evidence.contamination)
+    .bind(evidence.measurement_delay_days.map(|v| v as i32))
     .bind(&evidence.episode_id)
     .bind(evidence.resolved_at)
     .execute(pool)
@@ -133,6 +137,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         context: serde_json::Value,
         strategy: Option<String>,
         evidence_quality: String,
+        sample_size: Option<i32>,
+        contamination: Option<f64>,
+        measurement_delay_days: Option<i32>,
         episode_id: Option<String>,
         resolved_at: Option<OffsetDateTime>,
     }
@@ -143,7 +150,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                channel, estimated_reach, actual_reach, treatment, propensity,
                observed_fans, observed_incremental_fans, durable_fans_30d,
                converted, converted_fan_id, predicted_fans, predicted_signal_installs,
-               context, strategy, evidence_quality, episode_id, resolved_at
+               context, strategy, evidence_quality,
+               sample_size, contamination, measurement_delay_days,
+               episode_id, resolved_at
         FROM viryaos_growth_evidence
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
@@ -189,6 +198,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 strategy: row.strategy,
                 evidence_quality: crowdrelay_brain::EvidenceQuality::parse(&row.evidence_quality)
                     .unwrap_or(crowdrelay_brain::EvidenceQuality::Observational),
+                sample_size: row.sample_size.map(|v| v as u32),
+                contamination: row.contamination,
+                measurement_delay_days: row.measurement_delay_days.map(|v| v as u32),
                 episode_id: row.episode_id,
                 resolved_at: row.resolved_at,
             }
@@ -327,5 +339,56 @@ pub(in crate::autopilot) async fn upsert_growth_episode(
     .execute(&repo.pool)
     .await
     .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Records a credit allocation in the `viryaos_fan_credit_ledger` table.
+///
+/// CRITICAL INVARIANT: the raw observation in the evidence table is
+/// immutable. This stores attributed credit in a SEPARATE table. The
+/// learner consumes credited effects from the credit ledger, not raw
+/// observations.
+pub(in crate::autopilot) async fn record_credit_allocation(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    _outcome: &crowdrelay_brain::FanOutcome,
+    result: &crowdrelay_brain::AttributionResult,
+) -> Result<(), RepositoryError> {
+    let pool = &repo.pool;
+    let eligible_competitors = serde_json::to_string(
+        &result
+            .credits
+            .iter()
+            .map(|c| c.action_id.to_string())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string());
+
+    for credit in &result.credits {
+        sqlx::query(
+            r#"
+            INSERT INTO viryaos_fan_credit_ledger
+                (workspace_id, action_id, credited_incremental_y14,
+                 credited_incremental_y30, credit_weight,
+                 attribution_confidence, attribution_method,
+                 eligible_competitors, unattributed_residual,
+                 evidence_quality)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(credit.action_id)
+        .bind(credit.credited_incremental_y14)
+        .bind(credit.credited_incremental_y30)
+        .bind(credit.credit_weight)
+        .bind(credit.attribution_confidence)
+        .bind(result.method.as_str())
+        .bind(&eligible_competitors)
+        .bind(result.unattributed)
+        .bind("observational") // Phase 1: default quality for credited entries
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+    }
     Ok(())
 }

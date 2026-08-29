@@ -139,7 +139,7 @@ impl AutopilotContext {
 }
 
 /// Typed bounded-context configuration loaded from the policy store.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AutopilotPolicyConfig {
     TicketYield(TicketYieldPolicy),
     FanLifecycle(FanLifecyclePolicy),

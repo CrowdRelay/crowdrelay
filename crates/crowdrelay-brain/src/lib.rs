@@ -44,6 +44,8 @@ pub mod bayesian;
 pub mod calibration;
 pub mod causal_model;
 pub mod context_effect;
+pub mod credit_ledger;
+pub mod decision_value;
 pub mod efe;
 pub mod evidence;
 pub mod experiment;
@@ -51,6 +53,7 @@ pub mod exploration;
 pub mod opportunity;
 pub mod portfolio;
 pub mod reach;
+pub mod resource_cost;
 pub mod snapshot;
 pub mod standing;
 pub mod strategy;
@@ -69,18 +72,26 @@ pub use causal_model::{
     TreatmentAwareStats,
 };
 pub use context_effect::ContextGLM;
+pub use credit_ledger::{
+    ActionExposure, AttributionMethod, AttributionResult, CreditAllocator, CreditEntry, FanOutcome,
+    ProportionalCreditAllocator,
+};
+pub use decision_value::DecisionValue;
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
 pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence};
-pub use experiment::TreatmentAssignment;
+pub use experiment::{
+    ExperimentAssignment, ExperimentKind, ExperimentUnitKind, TreatmentAssignment,
+};
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
 pub use opportunity::{OpportunityAction, OpportunityId};
 pub use portfolio::{
     DecisionMode, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
-    PortfolioSelection, RejectionReason,
+    PortfolioSelection, RejectionReason, WaitCandidateValue,
 };
 pub use reach::{ReachChannel, ReachMetrics};
+pub use resource_cost::{CostSource, ResourceCost};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,
     RecentInsight, UnengagedTarget,

@@ -135,6 +135,12 @@ pub const MEANINGFUL_EFFECT_THRESHOLD: f64 = 1.0;
 /// back to the outcome model. This prevents oscillation near the threshold.
 pub const HYSTERESIS_BAND: u32 = 2;
 
+/// The minimum number of paired (Y14, Y30) observations before the Y14→Y30
+/// bridge model is considered reliable. Below this, the bridge's predictive
+/// variance is inflated (up to 3× at 0 observations) to reflect that the
+/// bridge is still a guess, not a calibrated model.
+pub const MIN_BRIDGE_CONFIDENCE: u32 = 10;
+
 /// The brain's causal model: P(incremental_fan | template, context).
 ///
 /// Uses a `HierarchicalNegBinPosterior` for proper Bayesian learning with partial
@@ -243,6 +249,16 @@ pub struct TreatmentAwareStats {
     /// posterior. This is a more decision-relevant signal than just the
     /// mean treatment effect.
     pub p_meaningful_effect: f64,
+    /// The Y14→Y30 bridge confidence (number of paired observations).
+    /// 0 = the bridge is a pure prior (Y30 ≈ Y14 guess). 10+ = the bridge
+    /// has been calibrated from real paired data.
+    pub bridge_confidence: u32,
+    /// Whether the bridge is reliable enough to trust Y14-bridged Y30
+    /// estimates. True when `bridge_confidence >= MIN_BRIDGE_CONFIDENCE`.
+    /// When false, the portfolio optimizer should weight Y14-bridged
+    /// candidates lower — the bridge is a temporary belief, not a
+    /// semi-factual substitute for Y30.
+    pub bridge_is_reliable: bool,
 }
 
 /// A Bayesian linear regression bridge model: Y30 = α + β·Y14 + ε.
@@ -292,6 +308,12 @@ impl Y14Y30Bridge {
     /// The variance includes both the posterior uncertainty in (α, β) and
     /// the residual variance σ². This is the honest predictive uncertainty
     /// for Y30 given Y14.
+    ///
+    /// When the bridge has few paired observations (`confidence < 10`), the
+    /// variance is inflated to reflect that the bridge is still a guess.
+    /// At confidence=0: 3× variance. At confidence≥10: 1× variance.
+    /// This prevents the brain from treating Y14-bridged Y30 estimates as
+    /// reliable when the bridge hasn't been calibrated yet.
     #[must_use]
     pub fn predict(&self, y14: f64) -> (f64, f64) {
         let x = [1.0, y14];
@@ -301,7 +323,10 @@ impl Y14Y30Bridge {
             + 2.0 * x[0] * x[1] * self.sigma[0][1]
             + x[1] * x[1] * self.sigma[1][1]
             + self.residual_variance;
-        (mean, var.max(0.01))
+        // Confidence-based variance inflation: 3× at n=0, 1× at n≥10.
+        let confidence_factor = (self.n as f64 / MIN_BRIDGE_CONFIDENCE as f64).min(1.0);
+        let inflation = 1.0 + (1.0 - confidence_factor) * 2.0;
+        (mean, (var * inflation).max(0.01))
     }
 
     /// Updates the bridge from a paired (Y14, Y30) observation.
@@ -688,6 +713,8 @@ impl CausalModel {
             treatment_confidence_y30: conf_y30,
             uses_y30,
             p_meaningful_effect: p_meaningful,
+            bridge_confidence: self.bridge.confidence(),
+            bridge_is_reliable: self.bridge.confidence() >= MIN_BRIDGE_CONFIDENCE,
         }
     }
 }

@@ -110,28 +110,30 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             }
         }
         // Sort by EFE score only (lower EFE = better).
-        // Strategy alignment is already baked into the EFE score
-        // via a strategy multiplier — the evaluator applies a
-        // bonus to strategy-aligned templates rather than using
-        // strategy as a primary sort key. This ensures the North
-        // Star (incremental fans via EFE) is never overridden by
-        // strategy preference.
+        // Strategy alignment no longer modifies the EFE score — the
+        // strategy multiplier was removed because it was a second
+        // prediction model sitting on top of the causal model. The
+        // causal model is now the sole authority for expected fans.
+        // Strategy enters via `strategy_rank` for candidate eligibility
+        // and exploration allocation, not as a score modifier.
         scored_candidates
             .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        // Extract the GI policy for resource costs and holdout config.
+        // When the autopilot isn't in GrowthIntelligence mode, use the
+        // default GI policy (which has sensible default costs).
+        let gi_policy = match &policy.config {
+            AutopilotPolicyConfig::GrowthIntelligence(gi) => gi.clone(),
+            _ => GrowthIntelligencePolicy::default(),
+        };
         // Run the portfolio optimizer to select the optimal set
-        // of candidates, accounting for audience overlap and
-        // fatigue. See `evaluate/portfolio.rs` for the selection
-        // logic.
-        let selection = portfolio::select_portfolio(&scored_candidates);
+        // of candidates, accounting for audience overlap, fatigue,
+        // and resource costs. See `evaluate/portfolio.rs` for the
+        // selection logic.
+        let selection = portfolio::select_portfolio(&scored_candidates, &gi_policy);
         let selected_keys = portfolio::selected_keys(&selection);
         // Extract the holdout probability from the policy.
         // Guardrails: clamped to [0.0, 0.10] — 0% = off, max 10%.
-        let holdout_probability = match &policy.config {
-            AutopilotPolicyConfig::GrowthIntelligence(gi) => {
-                gi.randomized_holdout_probability.clamp(0.0, 0.10)
-            }
-            _ => 0.0,
-        };
+        let holdout_probability = gi_policy.randomized_holdout_probability.clamp(0.0, 0.10);
         let mut dispatched_count = 0usize;
         for (candidate, prediction, _efe, _rank, _stats) in scored_candidates {
             // Skip candidates that the portfolio optimizer

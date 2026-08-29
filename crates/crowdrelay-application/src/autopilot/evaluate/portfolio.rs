@@ -8,11 +8,18 @@
 use std::collections::HashSet;
 
 use crowdrelay_brain::{
-    DecisionMode, OpportunityAction, OpportunityId, PortfolioCandidate, PortfolioOptimizer,
-    PortfolioSelection, context_hash,
+    DecisionMode, GrowthIntelligencePolicy, OpportunityAction, OpportunityId, PortfolioCandidate,
+    PortfolioOptimizer, PortfolioSelection, ResourceCost, WaitCandidateValue, context_hash,
 };
 
 use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
+
+/// Returns the operator-configured resource cost for a template, as a
+/// `ResourceCost` with `CostSource::Configured`. Falls back to 1.0 when
+/// the template is not in the policy's cost map.
+fn template_cost(policy: &GrowthIntelligencePolicy, template_id: &str) -> ResourceCost {
+    ResourceCost::configured(policy.template_cost(template_id))
+}
 
 /// Builds portfolio candidates from scored growth intelligence candidates
 /// and runs the optimizer to select the optimal dispatch set.
@@ -27,7 +34,10 @@ use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
 /// candidates whose `decision_key` appears in the selection's `selected`
 /// list, and skip all candidates if `do_nothing` is true.
 #[must_use]
-pub(super) fn select_portfolio(scored: &[ScoredCandidate]) -> PortfolioSelection {
+pub(super) fn select_portfolio(
+    scored: &[ScoredCandidate],
+    policy: &GrowthIntelligencePolicy,
+) -> PortfolioSelection {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
         .map(|(c, p, efe, _, stats)| {
@@ -75,7 +85,7 @@ pub(super) fn select_portfolio(scored: &[ScoredCandidate]) -> PortfolioSelection
                 efe_score: *efe,
                 expected_fans: p.expected_new_fans,
                 audience_key,
-                cost: 1,
+                resource_cost: template_cost(policy, &p.template_id),
                 source_context: c.decision_kind.to_string(),
                 action_key: c.decision_key.clone(),
                 expected_durable_fans,
@@ -90,8 +100,36 @@ pub(super) fn select_portfolio(scored: &[ScoredCandidate]) -> PortfolioSelection
             }
         })
         .collect();
+    // Compute WAIT candidate value. Every term is in expected Y30 fans.
+    // Phase 1: conservative — VOI from pending measurements is not yet
+    // wired (count=0), fatigue recovery is not yet computed (0.0).
+    // The WAIT candidate still competes via opportunity cost: if the
+    // best action candidate has very low expected Y30, WAIT can win.
+    let best_y30 = candidates
+        .iter()
+        .map(|c| {
+            if c.expected_durable_fans > 0.0 {
+                c.expected_durable_fans
+            } else {
+                c.expected_fans
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    let avg_treatment_std = {
+        let stds: Vec<f64> = candidates
+            .iter()
+            .filter(|c| c.treatment_std > 0.0)
+            .map(|c| c.treatment_std)
+            .collect();
+        if stds.is_empty() {
+            0.0
+        } else {
+            stds.iter().sum::<f64>() / stds.len() as f64
+        }
+    };
+    let wait = WaitCandidateValue::compute(best_y30, 0, avg_treatment_std, 0.0);
     let optimizer = PortfolioOptimizer::default();
-    optimizer.select(candidates)
+    optimizer.select_with_wait(candidates, wait)
 }
 
 /// Extracts the selected decision keys from a portfolio selection for

@@ -382,6 +382,31 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn record_experiment_assignment(
+        &self,
+        workspace_id: WorkspaceId,
+        assignment: &crowdrelay_brain::ExperimentAssignment,
+        strategy: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        super::operations::experiment_assignments::record_experiment_assignment(
+            self,
+            workspace_id,
+            assignment,
+            strategy,
+        )
+        .await
+    }
+
+    async fn record_credit_allocation(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &crowdrelay_brain::FanOutcome,
+        result: &crowdrelay_brain::AttributionResult,
+    ) -> Result<(), RepositoryError> {
+        super::operations::evidence::record_credit_allocation(self, workspace_id, outcome, result)
+            .await
+    }
+
     async fn load_exploration_memory(
         &self,
         workspace_id: WorkspaceId,

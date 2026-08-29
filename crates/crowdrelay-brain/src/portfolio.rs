@@ -57,6 +57,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::opportunity::OpportunityId;
+use crate::resource_cost::ResourceCost;
 
 /// The decision mode for a portfolio candidate — why the brain is
 /// dispatching this candidate.
@@ -92,13 +93,12 @@ pub struct PortfolioCandidate {
     /// The audience key — candidates with the same audience key overlap.
     /// E.g. "subreddit:r_MetalMusic" or "venue:Warsaw_Palladium".
     pub audience_key: String,
-    /// The cost in "dispatch budget" units (typically 1 per dispatch).
-    ///
-    /// Not yet enforced by [`PortfolioOptimizer::select`], which currently
-    /// only caps `max_dispatches`. Reserved for a future cost-budget
-    /// constraint so the candidate shape is stable before the constraint
-    /// is wired in.
-    pub cost: u32,
+    /// The resource cost of this candidate — operator-configured effective
+    /// resource units, not measured costs. Used by the portfolio optimizer
+    /// for budget constraints and tie-breaking among candidates with similar
+    /// absolute fan value. The North Star is `expected_durable_fans`
+    /// (absolute fans), NOT a cost ratio.
+    pub resource_cost: ResourceCost,
     /// The context that produced this candidate (for tracing).
     pub source_context: String,
     /// The action payload key (for linking to the persist layer).
@@ -131,6 +131,87 @@ pub struct PortfolioSelection {
     pub total_expected_fans: f64,
     /// Whether "DO NOTHING" was selected (all candidates had negative value).
     pub do_nothing: bool,
+    /// When `do_nothing` is true, the economic rationale for WAIT.
+    /// Explains why waiting produces more expected Y30 fan value than
+    /// dispatching any available candidate.
+    pub wait_reason: Option<String>,
+}
+
+/// The value of WAIT (doing nothing) expressed in expected incremental
+/// Y30 fans. Every term is in the **same fan-value utility space** —
+/// no mixed-unit scalar soup.
+///
+/// WAIT does NOT become more valuable merely because many expensive
+/// candidates exist. `avoided_cost` is NOT a term — resource cost is
+/// already captured in the action's value. WAIT's value comes from
+/// information, fatigue recovery, and option value, minus the
+/// opportunity cost of not acting.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct WaitCandidateValue {
+    /// Value of information from pending measurements, expressed
+    /// in expected incremental Y30 fans. Computed as:
+    ///   VOI = count_pending * avg_treatment_std * DECISION_SENSITIVITY
+    /// where DECISION_SENSITIVITY converts uncertainty to expected
+    /// fan value — calibrated empirically later.
+    pub value_of_information: f64,
+    /// Fatigue recovery value in expected Y30 fans. Computed as:
+    ///   sum(audience_fatigue * fatigue_recovery_per_cycle * expected_fans)
+    /// This is in fan-value space because it multiplies fatigue count
+    /// by the expected fan value of a recovered audience.
+    pub fatigue_recovery_value: f64,
+    /// Opportunity cost of NOT acting now. This is NEGATIVE.
+    ///   -best_candidate_expected_y30
+    /// Waiting costs the fan value we could have gained now.
+    pub opportunity_cost: f64,
+    /// Preserved option value — placeholder, 0.0 for now.
+    /// Future: V(wait) = E[best_future_action] - immediate_action_value
+    pub option_value: f64,
+}
+
+impl WaitCandidateValue {
+    /// The total WAIT utility — sum of all components.
+    /// Every term is in expected incremental Y30 fans.
+    #[must_use]
+    pub fn total(&self) -> f64 {
+        self.value_of_information
+            + self.fatigue_recovery_value
+            + self.option_value
+            + self.opportunity_cost
+    }
+
+    /// The decision sensitivity constant — converts treatment uncertainty
+    /// to expected fan value. Conservative: 0.1 means VOI is small relative
+    /// to typical fan values (2-5). Monitor in production — if WAIT never
+    /// wins, increase; if it always wins, decrease.
+    const DECISION_SENSITIVITY: f64 = 0.1;
+
+    /// Computes the WAIT candidate value from the current state.
+    ///
+    /// - `best_candidate_expected_y30`: the highest expected Y30 among
+    ///   available action candidates (0.0 if no candidates).
+    /// - `count_pending_measurements`: number of measurements whose
+    ///   outcomes haven't been observed yet.
+    /// - `avg_treatment_std`: average treatment-effect std across
+    ///   pending candidates.
+    /// - `fatigue_recovery_value`: pre-computed fatigue recovery in
+    ///   fan-value space (sum of audience fatigue × recovery × expected
+    ///   fans per audience).
+    #[must_use]
+    pub fn compute(
+        best_candidate_expected_y30: f64,
+        count_pending_measurements: u32,
+        avg_treatment_std: f64,
+        fatigue_recovery_value: f64,
+    ) -> Self {
+        Self {
+            value_of_information: f64::from(count_pending_measurements)
+                * avg_treatment_std
+                * Self::DECISION_SENSITIVITY,
+            fatigue_recovery_value,
+            opportunity_cost: -best_candidate_expected_y30,
+            option_value: 0.0,
+        }
+    }
 }
 
 /// A rejected candidate and the reason for rejection.
@@ -161,11 +242,11 @@ pub enum RejectionReason {
 pub struct PortfolioConfig {
     /// The maximum number of dispatches per cycle.
     pub max_dispatches: u32,
-    /// The maximum total cost per cycle. Candidates have a `cost` field;
-    /// the optimizer stops when the total cost of selected candidates
-    /// exceeds this budget. Set to 0 to disable cost budgeting (use only
-    /// `max_dispatches`).
-    pub cost_budget: u32,
+    /// The maximum total resource cost per cycle. Candidates have a
+    /// `resource_cost` field; the optimizer stops when the total cost of
+    /// selected candidates exceeds this budget. Set to 0.0 to disable cost
+    /// budgeting (use only `max_dispatches`).
+    pub cost_budget: f64,
     /// The audience overlap penalty: each additional candidate targeting the
     /// same audience gets its expected fans multiplied by (1 - penalty × count).
     /// 0.0 = no penalty, 1.0 = full penalty (second dispatch to same audience
@@ -186,7 +267,7 @@ impl Default for PortfolioConfig {
     fn default() -> Self {
         Self {
             max_dispatches: 5,
-            cost_budget: 0, // 0 = disabled (use max_dispatches only)
+            cost_budget: 0.0, // 0 = disabled (use max_dispatches only)
             audience_overlap_penalty: 0.3,
             fatigue_decay: 0.9,
             min_marginal_value: 0.1,
@@ -238,7 +319,7 @@ impl PortfolioOptimizer {
         let mut selected: Vec<PortfolioCandidate> = Vec::new();
         let mut rejected: Vec<PortfolioRejection> = Vec::new();
         let mut remaining: Vec<PortfolioCandidate> = candidates;
-        let mut total_cost: u32 = 0;
+        let mut total_cost: f64 = 0.0;
         // Sort by North Star (durable fans) when available, else expected fans.
         remaining.sort_by(|a, b| {
             let val_a = if a.expected_durable_fans > 0.0 {
@@ -262,8 +343,8 @@ impl PortfolioOptimizer {
             let mut best_marginal = f64::NEG_INFINITY;
             for (i, candidate) in remaining.iter().enumerate() {
                 // Check cost budget — skip candidates that would exceed it.
-                if self.config.cost_budget > 0
-                    && total_cost + candidate.cost > self.config.cost_budget
+                if self.config.cost_budget > 0.0
+                    && total_cost + candidate.resource_cost.units > self.config.cost_budget
                 {
                     continue;
                 }
@@ -320,7 +401,7 @@ impl PortfolioOptimizer {
             // iteration anyway.
             if let Some(idx) = best_idx {
                 let candidate = remaining.swap_remove(idx);
-                total_cost += candidate.cost;
+                total_cost += candidate.resource_cost.units;
                 *audience_counts
                     .entry(candidate.audience_key.clone())
                     .or_insert(0) += 1;
@@ -363,7 +444,85 @@ impl PortfolioOptimizer {
             rejected,
             total_expected_fans,
             do_nothing,
+            wait_reason: None,
         }
+    }
+
+    /// Selects the optimal portfolio, comparing action candidates against
+    /// a WAIT candidate. If WAIT has higher total value than the best
+    /// action's marginal value, the brain does nothing with an economic
+    /// rationale.
+    ///
+    /// See [`WaitCandidateValue::compute`] for the WAIT value computation.
+    #[must_use]
+    pub fn select_with_wait(
+        &self,
+        candidates: Vec<PortfolioCandidate>,
+        wait: WaitCandidateValue,
+    ) -> PortfolioSelection {
+        if candidates.is_empty() {
+            let wait_total = wait.total();
+            return PortfolioSelection {
+                do_nothing: true,
+                wait_reason: if wait_total > 0.0 {
+                    Some(format!(
+                        "WAIT wins: no action candidates. VOI={:.2}, fatigue_recovery={:.2}, \
+                         opportunity_cost={:.2}, total={:.2}",
+                        wait.value_of_information,
+                        wait.fatigue_recovery_value,
+                        wait.opportunity_cost,
+                        wait_total,
+                    ))
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+        }
+        // Compute the best candidate's expected Y30 (before overlap/fatigue).
+        let best_y30 = candidates
+            .iter()
+            .map(|c| {
+                if c.expected_durable_fans > 0.0 {
+                    c.expected_durable_fans
+                } else {
+                    c.expected_fans
+                }
+            })
+            .fold(0.0_f64, f64::max);
+        let wait_total = wait.total();
+        // If WAIT has higher value than the best action candidate, do nothing.
+        // This is the economic WAIT decision: the brain waits because the
+        // expected value of information + fatigue recovery exceeds the
+        // opportunity cost of not acting.
+        if wait_total > best_y30 && wait_total > self.config.min_marginal_value {
+            let reason = format!(
+                "WAIT wins: VOI={:.2}, fatigue_recovery={:.2}, option_value={:.2}, \
+                 opportunity_cost={:.2}, total={:.2} > best_action_y30={:.2}",
+                wait.value_of_information,
+                wait.fatigue_recovery_value,
+                wait.option_value,
+                wait.opportunity_cost,
+                wait_total,
+                best_y30,
+            );
+            let rejected: Vec<PortfolioRejection> = candidates
+                .into_iter()
+                .map(|c| PortfolioRejection {
+                    opportunity_key: c.opportunity_id.to_string(),
+                    reason: RejectionReason::NegativeMarginalValue,
+                })
+                .collect();
+            return PortfolioSelection {
+                selected: Vec::new(),
+                rejected,
+                total_expected_fans: 0.0,
+                do_nothing: true,
+                wait_reason: Some(reason),
+            };
+        }
+        // WAIT doesn't win — proceed with normal selection.
+        self.select(candidates)
     }
 }
 
@@ -385,7 +544,7 @@ mod tests {
             efe_score: -expected_fans,
             expected_fans,
             audience_key: audience.to_owned(),
-            cost: 1,
+            resource_cost: ResourceCost::configured(1.0),
             source_context: "GrowthIntelligence".to_owned(),
             action_key: format!("action:{template}:{target}"),
             expected_durable_fans: 0.0,
@@ -558,7 +717,7 @@ mod tests {
     fn portfolio_config_defaults_are_sensible() {
         let config = PortfolioConfig::default();
         assert_eq!(config.max_dispatches, 5);
-        assert_eq!(config.cost_budget, 0);
+        assert_eq!(config.cost_budget, 0.0);
         assert!((config.audience_overlap_penalty - 0.3).abs() < 0.01);
         assert!((config.fatigue_decay - 0.9).abs() < 0.01);
         assert!((config.min_marginal_value - 0.1).abs() < 0.01);
@@ -568,7 +727,7 @@ mod tests {
     fn cost_budget_limits_selection() {
         let config = PortfolioConfig {
             max_dispatches: 10,
-            cost_budget: 3, // only 3 cost units
+            cost_budget: 3.0, // only 3 cost units
             ..Default::default()
         };
         let optimizer = PortfolioOptimizer::new(config);
@@ -589,19 +748,19 @@ mod tests {
     fn cost_budget_with_variable_costs() {
         let config = PortfolioConfig {
             max_dispatches: 10,
-            cost_budget: 5,
+            cost_budget: 5.0,
             min_marginal_value: 0.01,
             ..Default::default()
         };
         let optimizer = PortfolioOptimizer::new(config);
         let mut expensive = make_candidate("a", "x", 10.0, "aud1");
-        expensive.cost = 3;
+        expensive.resource_cost = ResourceCost::configured(3.0);
         let mut cheap1 = make_candidate("b", "y", 4.0, "aud2");
-        cheap1.cost = 1;
+        cheap1.resource_cost = ResourceCost::configured(1.0);
         let mut cheap2 = make_candidate("c", "z", 3.0, "aud3");
-        cheap2.cost = 1;
+        cheap2.resource_cost = ResourceCost::configured(1.0);
         let mut cheap3 = make_candidate("d", "w", 2.0, "aud4");
-        cheap3.cost = 1;
+        cheap3.resource_cost = ResourceCost::configured(1.0);
         let result = optimizer.select(vec![expensive, cheap1, cheap2, cheap3]);
         // expensive (cost 3) + cheap1 (cost 1) + cheap2 (cost 1) = cost 5.
         // cheap3 would exceed budget.
@@ -612,7 +771,7 @@ mod tests {
     fn fatigue_reduces_repeated_dispatches() {
         let config = PortfolioConfig {
             max_dispatches: 5,
-            cost_budget: 0,
+            cost_budget: 0.0,
             audience_overlap_penalty: 0.0, // disable overlap to isolate fatigue
             fatigue_decay: 0.5,            // 50% reduction per additional dispatch
             min_marginal_value: 1.0,
@@ -636,7 +795,7 @@ mod tests {
     fn fatigue_combined_with_overlap() {
         let config = PortfolioConfig {
             max_dispatches: 5,
-            cost_budget: 0,
+            cost_budget: 0.0,
             audience_overlap_penalty: 0.3,
             fatigue_decay: 0.8,
             min_marginal_value: 0.5,
@@ -656,7 +815,7 @@ mod tests {
     fn cost_budget_zero_uses_max_dispatches_only() {
         let config = PortfolioConfig {
             max_dispatches: 2,
-            cost_budget: 0, // disabled
+            cost_budget: 0.0, // disabled
             ..Default::default()
         };
         let optimizer = PortfolioOptimizer::new(config);

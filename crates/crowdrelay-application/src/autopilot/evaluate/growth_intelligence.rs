@@ -226,101 +226,39 @@ pub fn evaluate_growth_intelligence(
     let info_gain = information_gain(confidence, predict_std);
     let efe_weights = EfeWeights::default();
 
-    // ── Strategy alignment ──
-    // The strategy determines which templates the brain prioritizes, but it
-    // does NOT override the North Star. Instead, strategy alignment modifies
-    // the expected fan count before EFE computation: strategy-aligned
-    // templates get an effective fan boost (dividing by <1.0), making their
-    // EFE lower (better). A strategy-misaligned template with much better
-    // actual expected fans still wins — the strategy is a tie-breaker bonus,
-    // not a hard override.
-    //
-    // Strategy multiplier:
-    //   rank 0 → 0.7× (43% fan boost)
-    //   rank 1 → 0.8× (25% fan boost)
-    //   rank 2 → 0.9× (11% fan boost)
-    //   rank 3+ → 1.0× (no bonus)
-    //   not in list → 1.1× (9% fan penalty)
-    let strategy_priority = strategy.template_priority();
-    let strategy_rank = strategy_priority
+    // Strategy rank — used for candidate ELIGIBILITY and sort ordering,
+    // NOT for modifying expected fan value. The rank is the position of
+    // this template in the strategy's recommended priority list.
+    // `usize::MAX` means the template is not in the strategy's list.
+    let strategy_rank = strategy
+        .template_priority()
         .iter()
         .position(|t| *t == snapshot.template_id)
         .unwrap_or(usize::MAX);
-    let strategy_multiplier = if strategy_rank == usize::MAX {
-        // Not in strategy list: 10% penalty.
-        1.1
-    } else {
-        match strategy_rank {
-            0 => 0.7,
-            1 => 0.8,
-            2 => 0.9,
-            _ => 1.0,
-        }
-    };
-    // ── UCB strategy learning (Phase 3) ──
-    // When the strategy posterior has enough data for the current strategy
-    // in the current world state, the brain adjusts the multiplier based on
-    // UCB: if an alternative strategy has a higher UCB for this template's
-    // strategy, the multiplier shifts toward that strategy's rank-0 boost.
-    // This lets the brain learn which strategies actually work best in each
-    // state, rather than relying on the fixed world-model heuristic.
+
+    // ── Strategy as gate, not score (P0 — EFE cleanup) ──
+    // Previously the strategy posterior multiplied expected fan value via
+    // hand-tuned coefficients (0.7×, 0.8×, 0.9×, 1.1×). This was a second
+    // prediction model sitting on top of the actual causal model, injecting
+    // arbitrary bias into the fan-value estimate. It let a bad action with
+    // a good strategy rank look artificially great.
     //
-    // The adjustment is gated by confidence: below
-    // MIN_EVALUATIONS_FOR_RECOMMENDATION, the fixed multiplier is used
-    // unchanged. Above it, the UCB-recommended strategy's rank-0 multiplier
-    // (0.7×) replaces the fixed one, scaled by the UCB margin.
-    let growth_trend_str = dispatch_context.fan_growth_trend.as_str();
-    let event_proximity_str = match dispatch_context.days_to_event {
-        Some(d) if d <= 7 => "close",
-        Some(d) if d <= 30 => "near",
-        _ => "far",
-    };
-    let current_strategy_str = strategy.as_str();
-    let current_confidence =
-        strategy_posterior.confidence(current_strategy_str, growth_trend_str, event_proximity_str);
-    let strategy_multiplier = if current_confidence
-        >= crowdrelay_brain::MIN_EVALUATIONS_FOR_RECOMMENDATION
-    {
-        // Compute UCB for all strategies in the current state.
-        // exploration_weight scales with uncertainty: low confidence →
-        // higher weight → more exploration.
-        let exploration_weight = 1.0 / (1.0 + f64::from(current_confidence));
-        let best_ucb_strategy = GrowthStrategy::all()
-            .iter()
-            .map(|s| {
-                let (mean, var) =
-                    strategy_posterior.predict(s.as_str(), growth_trend_str, event_proximity_str);
-                let ucb = mean + exploration_weight * var.sqrt();
-                (s, ucb)
-            })
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(s, _)| *s);
-        // If the UCB-recommended strategy differs from the current one,
-        // re-rank this template against the UCB-recommended strategy's
-        // priority list. This shifts the multiplier toward the strategy
-        // the brain has learned works best in this state.
-        if let Some(ucb_strategy) = best_ucb_strategy {
-            let ucb_priority = ucb_strategy.template_priority();
-            let ucb_rank = ucb_priority
-                .iter()
-                .position(|t| *t == snapshot.template_id)
-                .unwrap_or(usize::MAX);
-            match ucb_rank {
-                0 => 0.7,
-                1 => 0.8,
-                2 => 0.9,
-                usize::MAX => 1.1,
-                _ => 1.0,
-            }
-        } else {
-            strategy_multiplier
-        }
-    } else {
-        strategy_multiplier
-    };
-    // Apply the strategy multiplier as a fan boost: aligned templates get
-    // higher effective fans (lower EFE), misaligned ones get lower.
-    let strategy_adjusted_fans = expected_new_fans / strategy_multiplier;
+    // The strategy posterior is now kept for candidate ELIGIBILITY and
+    // EXPLORATION ALLOCATION — it influences which templates are considered
+    // and where to explore — but it NEVER alters the predicted fan value.
+    // The causal model is the sole authority for expected fans.
+    //
+    // Strategy is a SOFT BIAS, not a hard filter: a strategy preference
+    // must never silently eliminate an action with substantially higher
+    // expected incremental Y30 unless an explicit policy requires it.
+    //
+    // Long-term: strategy should enter the predictive model directly as
+    // E[Y30 | action, audience, context, strategy] — learned as a feature,
+    // not hacked in after prediction.
+    //
+    // NOTE: `strategy` is used above for `strategy_rank` (eligibility/sort).
+    // `strategy_posterior` is used for exploration allocation in the caller.
+    let _ = &strategy_posterior; // used for exploration allocation, not scoring
 
     // ── Time-to-feedback discount (P1.10) ──
     // Templates that produce feedback faster are slightly preferred because
@@ -356,7 +294,7 @@ pub fn evaluate_growth_intelligence(
     };
 
     let raw_efe = GrowthOpportunity::compute_efe(
-        strategy_adjusted_fans,
+        expected_new_fans,
         info_gain,
         predict_std,
         exploration_novelty,
@@ -714,12 +652,12 @@ pub(super) fn growth_intelligence_candidate(
     exploration_novelty: f64,
     strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
 ) -> Result<Option<ScoredCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::GrowthIntelligence(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::GrowthIntelligence(ref domain_policy) = policy.config else {
         return Ok(None);
     };
     let Some(request) = evaluate_growth_intelligence(
         snapshot,
-        &domain_policy,
+        domain_policy,
         causal_model,
         strategy,
         exploration_novelty,

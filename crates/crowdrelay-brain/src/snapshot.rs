@@ -4,6 +4,8 @@
 //! the application-layer evaluator. They carry everything the brain needs
 //! to decide what to dispatch.
 
+use std::collections::HashMap;
+
 use crowdrelay_domain::learning::Standing;
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +59,7 @@ pub struct CommunityEngagementSummary {
 }
 
 /// Cooldown intervals (in hours) for each worker template.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct GrowthIntelligencePolicy {
     pub reddit_scanner_cooldown_hours: u32,
@@ -84,6 +86,24 @@ pub struct GrowthIntelligencePolicy {
     /// out — they don't directly acquire fans, so there's no treatment to
     /// withhold.
     pub randomized_holdout_probability: f64,
+    /// Per-template operator-configured resource costs. These are NOT
+    /// measured costs — they are tunable knobs for the portfolio optimizer.
+    /// The architecture can learn/calibrate them later.
+    /// Keys are template IDs (e.g. "reddit-scanner", "community-engager").
+    /// Missing keys default to 1.0.
+    #[serde(default = "default_template_costs")]
+    pub template_costs: HashMap<String, f64>,
+}
+
+fn default_template_costs() -> HashMap<String, f64> {
+    let mut m = HashMap::new();
+    m.insert("reddit-scanner".to_string(), 0.5);
+    m.insert("community-engager".to_string(), 2.0);
+    m.insert("press-pitch".to_string(), 3.0);
+    m.insert("signal-inviter".to_string(), 1.5);
+    m.insert("social-post".to_string(), 1.5);
+    m.insert("growth-strategist".to_string(), 4.0);
+    m
 }
 
 impl Default for GrowthIntelligencePolicy {
@@ -99,6 +119,16 @@ impl Default for GrowthIntelligencePolicy {
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,
             randomized_holdout_probability: 0.0,
+            template_costs: default_template_costs(),
         }
+    }
+}
+
+impl GrowthIntelligencePolicy {
+    /// Returns the operator-configured resource cost for a template.
+    /// Falls back to 1.0 if the template is not in the cost map.
+    #[must_use]
+    pub fn template_cost(&self, template_id: &str) -> f64 {
+        self.template_costs.get(template_id).copied().unwrap_or(1.0)
     }
 }

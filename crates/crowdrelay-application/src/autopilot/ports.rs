@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use crowdrelay_brain::{
-    CausalModel, DispatchPrediction, ExplorationMemory, GrowthIntelligenceSnapshot,
+    AttributionResult, CausalModel, DispatchPrediction, ExperimentAssignment, ExplorationMemory,
+    FanOutcome, GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, PlayId, WorkspaceId,
@@ -344,6 +345,29 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         prediction: &DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
+    ) -> Result<(), RepositoryError>;
+
+    /// Records a first-class experiment assignment. The experimental unit
+    /// is explicitly defined (audience, community, campaign, etc.) — not
+    /// always workspace-wide. When `is_interference_controllable` is false,
+    /// the assignment is recorded as a matched quasi-experiment.
+    async fn record_experiment_assignment(
+        &self,
+        workspace_id: WorkspaceId,
+        assignment: &ExperimentAssignment,
+        strategy: Option<&str>,
+    ) -> Result<(), RepositoryError>;
+
+    /// Records a credit allocation — attributed credit for a fan outcome.
+    /// CRITICAL: the raw observation in the evidence table is immutable.
+    /// This stores attributed credit in a SEPARATE table
+    /// (`viryaos_fan_credit_ledger`). The learner consumes credited
+    /// effects from the credit ledger, not raw observations.
+    async fn record_credit_allocation(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome: &FanOutcome,
+        result: &AttributionResult,
     ) -> Result<(), RepositoryError>;
 
     /// Loads the exploration memory from past dispatch predictions.

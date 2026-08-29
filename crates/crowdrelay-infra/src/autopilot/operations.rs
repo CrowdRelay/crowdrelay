@@ -35,6 +35,7 @@ mod chief;
 mod discovery;
 pub(in crate::autopilot) mod evidence;
 mod execution;
+pub(in crate::autopilot) mod experiment_assignments;
 mod growth_debt;
 pub(in crate::autopilot) mod growth_intelligence;
 mod ingress;

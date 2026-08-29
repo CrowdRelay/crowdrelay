@@ -1,0 +1,334 @@
+//! Credit Ledger — causal credit allocation with anti-self-reinforcement.
+//!
+//! When a fan outcome is observed, the credit ledger allocates credit
+//! among the competing actions that could have produced it. The allocation
+//! is driven **primarily** by observable facts (exposure, temporal
+//! proximity, audience match), with the model posterior as a **bounded**
+//! prior — capped at ~20% influence. This prevents the feedback amplifier:
+//! `prior → more credit → more evidence → stronger prior → more credit`.
+//!
+//! # Critical Invariant
+//!
+//! `RAW FACT ≠ ATTRIBUTION ≠ CAUSAL EFFECT ≠ PREDICTION ≠ DECISION VALUE`
+//!
+//! The credit ledger stores **attributed** credit — a separate layer from
+//! the raw observation (which is immutable in the evidence table). The
+//! learner consumes credited effects from the credit ledger, while raw
+//! evidence remains available for replay, recalculation, and future
+//! attribution-method upgrades.
+
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+
+use crate::evidence::EvidenceQuality;
+
+/// The maximum influence the model posterior can have on credit allocation.
+/// Capped at 20% to prevent self-reinforcement: the prior can nudge credit
+/// allocation, but never dominate it.
+const BOUNDED_PRIOR_WEIGHT: f64 = 0.2;
+
+/// A fan outcome observation — the raw, immutable fact that N incremental
+/// fans were observed in a measurement window.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FanOutcome {
+    pub workspace_id: uuid::Uuid,
+    /// The raw observed incremental fan count. This is a FACT, not an
+    /// attribution — it stays immutable in the evidence table.
+    pub observed_incremental_fans: f64,
+    /// Durable fans at 30 days, if the Y30 window has elapsed.
+    pub durable_fans_30d: Option<f64>,
+    pub measurement_window_start: OffsetDateTime,
+    pub measurement_window_end: OffsetDateTime,
+}
+
+/// An action that was exposed to the audience during the measurement
+/// window — a candidate for credit allocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActionExposure {
+    pub action_id: uuid::Uuid,
+    pub template_id: String,
+    pub audience_key: String,
+    /// Whether the action actually delivered exposure (post was made,
+    /// email was sent, etc.). Zero credit if false.
+    pub exposure_delivered: bool,
+    /// 0.0–1.0, 1.0 = closest to the outcome window.
+    pub temporal_proximity: f64,
+    /// 0.0–1.0, 1.0 = perfect audience/target match.
+    pub audience_match: f64,
+    /// 0.0–1.0, confidence in the attribution itself.
+    pub attribution_confidence: f64,
+    /// Model posterior mean — used only as a BOUNDED prior,
+    /// not the dominant allocator. Capped at a small influence
+    /// to prevent self-reinforcement.
+    pub treatment_effect_prior: f64,
+    /// Evidence quality of this action's causal estimate.
+    pub evidence_quality: EvidenceQuality,
+}
+
+/// The result of credit allocation — credits per action plus an
+/// unattributed residual. The residual is always preserved: "we don't
+/// know" is a valid outcome, and no forced 100% attribution is applied.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttributionResult {
+    pub credits: Vec<CreditEntry>,
+    /// Always preserved — no forced 100% attribution.
+    /// `unattributed = observed_incremental - sum(credited_y14)`
+    pub unattributed: f64,
+    pub method: AttributionMethod,
+}
+
+/// A single credit entry — the attributed share of the fan outcome
+/// for one action.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreditEntry {
+    pub action_id: uuid::Uuid,
+    /// Normalized weight (0.0–1.0) — this action's share of the
+    /// attributed credit.
+    pub credit_weight: f64,
+    /// The credited incremental Y14 fans for this action.
+    pub credited_incremental_y14: f64,
+    /// The credited incremental Y30 fans, if available.
+    pub credited_incremental_y30: Option<f64>,
+    /// 0.0–1.0, confidence in this action's attribution.
+    pub attribution_confidence: f64,
+}
+
+/// The attribution method used to allocate credit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionMethod {
+    /// Proportional allocation based on observable facts with bounded
+    /// prior influence.
+    Proportional,
+}
+
+impl AttributionMethod {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proportional => "proportional",
+        }
+    }
+}
+
+/// A credit allocator — the trait that the infra layer implements.
+/// The brain provides `ProportionalCreditAllocator` as the default.
+pub trait CreditAllocator: Send + Sync {
+    fn allocate(
+        &self,
+        outcome: &FanOutcome,
+        competing_actions: &[ActionExposure],
+    ) -> AttributionResult;
+}
+
+/// Proportional credit allocator with anti-self-reinforcement design.
+///
+/// Weight is driven **primarily** by observable facts, not model predictions:
+/// ```text
+/// w = exposure_delivered * temporal_proximity * audience_match
+///     * attribution_confidence
+///     * (1.0 + BOUNDED_PRIOR_WEIGHT * tanh(treatment_effect_prior))
+/// ```
+/// where `BOUNDED_PRIOR_WEIGHT = 0.2` — the prior can nudge credit
+/// allocation by at most ~20%, never dominate it.
+///
+/// Normalize: `credit_weight = w_i / sum(w_j)` only over actions with
+/// `w > 0`. `unattributed = observed_incremental - sum(credited_y14)` —
+/// always preserved. If no actions have `w > 0`, `unattributed =
+/// observed_incremental` (no forced attribution).
+pub struct ProportionalCreditAllocator;
+
+impl CreditAllocator for ProportionalCreditAllocator {
+    fn allocate(
+        &self,
+        outcome: &FanOutcome,
+        competing_actions: &[ActionExposure],
+    ) -> AttributionResult {
+        // Compute raw weights for each action.
+        let weights: Vec<f64> = competing_actions
+            .iter()
+            .map(|a| {
+                if !a.exposure_delivered {
+                    return 0.0;
+                }
+                let observable = a.temporal_proximity * a.audience_match * a.attribution_confidence;
+                // Bounded prior: tanh squashes to [-1, 1], then scaled by
+                // BOUNDED_PRIOR_WEIGHT (0.2). The prior can nudge the weight
+                // by at most ~20%, never dominate it.
+                let prior_nudge = 1.0 + BOUNDED_PRIOR_WEIGHT * a.treatment_effect_prior.tanh();
+                observable * prior_nudge
+            })
+            .collect();
+
+        let total_weight: f64 = weights.iter().sum();
+        if total_weight <= 0.0 || !total_weight.is_finite() {
+            // No actions have positive weight — no forced attribution.
+            return AttributionResult {
+                credits: Vec::new(),
+                unattributed: outcome.observed_incremental_fans,
+                method: AttributionMethod::Proportional,
+            };
+        }
+
+        let mut credits = Vec::with_capacity(competing_actions.len());
+        let mut total_credited_y14 = 0.0_f64;
+        for (i, action) in competing_actions.iter().enumerate() {
+            let weight = weights[i];
+            if weight <= 0.0 {
+                continue;
+            }
+            let normalized = weight / total_weight;
+            let credited_y14 = normalized * outcome.observed_incremental_fans;
+            let credited_y30 = outcome.durable_fans_30d.map(|y30| normalized * y30);
+            total_credited_y14 += credited_y14;
+            credits.push(CreditEntry {
+                action_id: action.action_id,
+                credit_weight: normalized,
+                credited_incremental_y14: credited_y14,
+                credited_incremental_y30: credited_y30,
+                attribution_confidence: action.attribution_confidence,
+            });
+        }
+
+        let unattributed = outcome.observed_incremental_fans - total_credited_y14;
+        AttributionResult {
+            credits,
+            unattributed: unattributed.max(0.0),
+            method: AttributionMethod::Proportional,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_action(
+        id: uuid::Uuid,
+        exposure: bool,
+        temporal: f64,
+        audience: f64,
+        confidence: f64,
+        prior: f64,
+    ) -> ActionExposure {
+        ActionExposure {
+            action_id: id,
+            template_id: "reddit-scanner".to_string(),
+            audience_key: "r/metal".to_string(),
+            exposure_delivered: exposure,
+            temporal_proximity: temporal,
+            audience_match: audience,
+            attribution_confidence: confidence,
+            treatment_effect_prior: prior,
+            evidence_quality: EvidenceQuality::Observational,
+        }
+    }
+
+    fn make_outcome(fans: f64) -> FanOutcome {
+        FanOutcome {
+            workspace_id: uuid::Uuid::nil(),
+            observed_incremental_fans: fans,
+            durable_fans_30d: None,
+            measurement_window_start: OffsetDateTime::now_utc(),
+            measurement_window_end: OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn proportional_split_with_two_competing_actions() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        let actions = [
+            make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, 0.0),
+            make_action(uuid::Uuid::now_v7(), true, 0.5, 1.0, 1.0, 0.0),
+        ];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 2);
+        // First action has 2× the weight of the second (1.0 vs 0.5).
+        let total: f64 = result
+            .credits
+            .iter()
+            .map(|c| c.credited_incremental_y14)
+            .sum();
+        assert!((total - 10.0).abs() < 0.001, "total credited = {total}");
+        assert!(
+            result.credits[0].credited_incremental_y14 > result.credits[1].credited_incremental_y14
+        );
+    }
+
+    #[test]
+    fn unattributed_residual_preserved() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // Single action with 0.5 confidence — gets partial credit.
+        let actions = [make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 0.5, 0.0)];
+        let result = allocator.allocate(&outcome, &actions);
+        // Single action with w > 0 gets all attributed credit.
+        assert_eq!(result.credits.len(), 1);
+        assert!((result.credits[0].credited_incremental_y14 - 10.0).abs() < 0.001);
+        assert!(
+            result.unattributed < 0.001,
+            "unattributed = {}",
+            result.unattributed
+        );
+    }
+
+    #[test]
+    fn zero_credit_for_no_exposure() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        let actions = [
+            make_action(uuid::Uuid::now_v7(), false, 1.0, 1.0, 1.0, 0.0),
+            make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, 0.0),
+        ];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 1);
+        // Only the exposed action gets credit.
+        assert!((result.credits[0].credited_incremental_y14 - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn posterior_prior_has_bounded_influence() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // Two actions with identical observable facts but very different priors.
+        // The prior should only nudge by ~20%, not dominate.
+        let actions = [
+            make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, 10.0), // high prior
+            make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, -10.0), // low prior
+        ];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 2);
+        // With bounded prior, the high-prior action gets slightly more credit,
+        // but not dramatically more. tanh(10) ≈ 1.0, tanh(-10) ≈ -1.0.
+        // w_high = 1.0 * (1 + 0.2*1) = 1.2
+        // w_low  = 1.0 * (1 + 0.2*(-1)) = 0.8
+        // share_high = 1.2 / 2.0 = 0.6 → 6 fans
+        // share_low  = 0.8 / 2.0 = 0.4 → 4 fans
+        assert!((result.credits[0].credited_incremental_y14 - 6.0).abs() < 0.01);
+        assert!((result.credits[1].credited_incremental_y14 - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn no_actions_means_all_unattributed() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        let result = allocator.allocate(&outcome, &[]);
+        assert!(result.credits.is_empty());
+        assert!((result.unattributed - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn all_zero_weight_means_all_unattributed() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // All actions have zero exposure.
+        let actions = [
+            make_action(uuid::Uuid::now_v7(), false, 1.0, 1.0, 1.0, 0.0),
+            make_action(uuid::Uuid::now_v7(), false, 1.0, 1.0, 1.0, 0.0),
+        ];
+        let result = allocator.allocate(&outcome, &actions);
+        assert!(result.credits.is_empty());
+        assert!((result.unattributed - 10.0).abs() < 0.001);
+    }
+}

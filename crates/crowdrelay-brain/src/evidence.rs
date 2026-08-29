@@ -62,6 +62,14 @@ pub enum EvidenceQuality {
     RandomizedHoldout,
     /// Matched comparison unit was used. Strong quasi-experimental design.
     MatchedQuasiExperiment,
+    /// Direct conversion — no counterfactual needed. The action directly
+    /// caused the outcome (e.g. a fan clicked a specific link and converted).
+    /// Strong evidence for that particular metric, but narrow scope.
+    DeterministicAttribution,
+    /// Proportional credit from the credit ledger. The outcome was
+    /// attributed among competing actions using observable facts with
+    /// bounded prior influence. Weaker than direct attribution.
+    ModeledAttribution,
     /// Before/after comparison on the same unit. Confounded by
     /// seasonality and concurrent campaigns.
     PrePost,
@@ -71,20 +79,63 @@ pub enum EvidenceQuality {
 }
 
 impl EvidenceQuality {
-    /// Returns the weight applied to treatment-effect observations of
-    /// this quality. Higher = more trust = lower effective variance.
+    /// Returns the default prior weight for this method, before modifiers.
+    /// Higher = more trust = lower effective variance.
     ///
-    /// The weight is used to scale the observation variance: a weight of
-    /// 0.3 means the variance is divided by 0.3 (≈3.3×), making the
-    /// observation move the posterior less.
+    /// The hierarchy is:
+    /// `RandomizedHoldout > DeterministicAttribution > MatchedQuasiExperiment
+    /// > ModeledAttribution > PrePost > Observational`
+    ///
+    /// This is a **default prior**, not absolute truth. The runtime derives
+    /// effective weight from method + modifiers via [`effective_weight`].
     #[must_use]
-    pub const fn weight(self) -> f64 {
+    pub const fn base_weight(self) -> f64 {
         match self {
             Self::RandomizedHoldout => 1.0,
+            Self::DeterministicAttribution => 0.9,
             Self::MatchedQuasiExperiment => 0.7,
+            Self::ModeledAttribution => 0.2,
             Self::PrePost => 0.3,
             Self::Observational => 0.1,
         }
+    }
+
+    /// Alias for [`base_weight`] — backwards compatibility.
+    #[must_use]
+    pub const fn weight(self) -> f64 {
+        self.base_weight()
+    }
+
+    /// Computes the effective evidence weight from method + modifiers.
+    /// The base weight comes from the method (the default hierarchy),
+    /// but it is qualified by sample size, contamination, and measurement
+    /// quality. A randomized holdout with 90% contamination is downgraded
+    /// below a clean deterministic attribution.
+    ///
+    /// - `sample_size`: number of observations supporting this estimate.
+    ///   Saturates at 20 — small samples are less reliable.
+    /// - `contamination`: 0.0–1.0, estimated contamination from concurrent
+    ///   actions. At 1.0, weight is halved.
+    /// - `measurement_delay_days`: delay between action and measurement.
+    ///   Long delays introduce noise. Saturates at 44 days (Y30 horizon).
+    #[must_use]
+    pub fn effective_weight(
+        self,
+        sample_size: u32,
+        contamination: f64,
+        measurement_delay_days: u32,
+    ) -> f64 {
+        let base = self.base_weight();
+        // Contamination penalty: high contamination downgrades even
+        // randomized evidence. At contamination=1.0, weight is halved.
+        let contamination_factor = 1.0 - 0.5 * contamination.clamp(0.0, 1.0);
+        // Sample size factor: small samples are less reliable.
+        // Saturates at 20 observations.
+        let sample_factor = (sample_size as f64 / 20.0).min(1.0);
+        // Measurement delay penalty: long delays introduce noise.
+        // Saturates at 44 days (Y30 horizon).
+        let delay_factor = 1.0 - 0.2 * (measurement_delay_days as f64 / 44.0).min(1.0);
+        base * contamination_factor * sample_factor * delay_factor
     }
 
     /// Returns the variance multiplier — how much to scale the base
@@ -101,6 +152,8 @@ impl EvidenceQuality {
         match self {
             Self::RandomizedHoldout => "randomized_holdout",
             Self::MatchedQuasiExperiment => "matched_quasi_experiment",
+            Self::DeterministicAttribution => "deterministic_attribution",
+            Self::ModeledAttribution => "modeled_attribution",
             Self::PrePost => "pre_post",
             Self::Observational => "observational",
         }
@@ -112,6 +165,8 @@ impl EvidenceQuality {
         match value {
             "randomized_holdout" => Some(Self::RandomizedHoldout),
             "matched_quasi_experiment" => Some(Self::MatchedQuasiExperiment),
+            "deterministic_attribution" => Some(Self::DeterministicAttribution),
+            "modeled_attribution" => Some(Self::ModeledAttribution),
             "pre_post" => Some(Self::PrePost),
             "observational" => Some(Self::Observational),
             _ => None,
@@ -183,6 +238,15 @@ pub struct GrowthEvidence {
     /// How the outcome was measured — the causal strength of the evidence.
     /// The learning loop weights observations by this quality.
     pub evidence_quality: EvidenceQuality,
+    /// Sample size supporting this evidence's effect estimate.
+    /// Used by `effective_weight` to qualify the method-based hierarchy.
+    pub sample_size: Option<u32>,
+    /// Estimated contamination from concurrent actions (0.0–1.0).
+    /// High contamination downgrades even randomized evidence.
+    pub contamination: Option<f64>,
+    /// Delay between action and measurement (days). Long delays
+    /// introduce noise and reduce evidence weight.
+    pub measurement_delay_days: Option<u32>,
 
     // ── Episode linkage ──
     /// The episode this evidence belongs to (links to the episode model).
@@ -215,6 +279,9 @@ impl Default for GrowthEvidence {
             context: DispatchContext::default(),
             strategy: None,
             evidence_quality: EvidenceQuality::default(),
+            sample_size: None,
+            contamination: None,
+            measurement_delay_days: None,
             episode_id: None,
             resolved_at: None,
         }
@@ -263,6 +330,9 @@ impl GrowthEvidence {
             context,
             strategy,
             evidence_quality,
+            sample_size: None,
+            contamination: None,
+            measurement_delay_days: None,
             episode_id: None,
             resolved_at: None,
         }
