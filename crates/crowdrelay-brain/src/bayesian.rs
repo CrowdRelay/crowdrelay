@@ -247,15 +247,18 @@ impl HierarchicalPosterior {
 
         // Update template posterior, using the current global posterior as prior.
         if let Some(tid) = template_id {
-            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
-            let entry = self.by_template.entry(tid.to_owned()).or_insert(prior);
+            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self.by_template.entry(tid.to_owned()).or_insert_with(prior);
             entry.update(observation, observation_variance);
         }
 
         // Update subreddit-type posterior, using the current global posterior as prior.
         if let Some(st) = subreddit_type {
-            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
-            let entry = self.by_subreddit_type.entry(st.to_owned()).or_insert(prior);
+            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self
+                .by_subreddit_type
+                .entry(st.to_owned())
+                .or_insert_with(prior);
             entry.update(observation, observation_variance);
         }
     }
@@ -272,13 +275,16 @@ impl HierarchicalPosterior {
     ) {
         self.global.update_signed(observation, observation_variance);
         if let Some(tid) = template_id {
-            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
-            let entry = self.by_template.entry(tid.to_owned()).or_insert(prior);
+            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self.by_template.entry(tid.to_owned()).or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
         if let Some(st) = subreddit_type {
-            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
-            let entry = self.by_subreddit_type.entry(st.to_owned()).or_insert(prior);
+            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self
+                .by_subreddit_type
+                .entry(st.to_owned())
+                .or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
     }
@@ -302,8 +308,8 @@ impl HierarchicalPosterior {
         );
         if let (Some(tid), Some(ch)) = (template_id, channel) {
             let key = format!("{tid}:{ch}");
-            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
-            let entry = self.by_template_channel.entry(key).or_insert(prior);
+            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self.by_template_channel.entry(key).or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
     }
@@ -576,23 +582,26 @@ impl HierarchicalNegBinPosterior {
 
         // Update template posterior, using the current global posterior as prior.
         if let Some(tid) = template_id {
-            let prior = NegBinPosterior {
+            let prior = || NegBinPosterior {
                 alpha: self.global.alpha,
                 beta: self.global.beta,
                 n: 0,
             };
-            let entry = self.by_template.entry(tid.to_owned()).or_insert(prior);
+            let entry = self.by_template.entry(tid.to_owned()).or_insert_with(prior);
             entry.update(observation);
         }
 
         // Update subreddit-type posterior.
         if let Some(st) = subreddit_type {
-            let prior = NegBinPosterior {
+            let prior = || NegBinPosterior {
                 alpha: self.global.alpha,
                 beta: self.global.beta,
                 n: 0,
             };
-            let entry = self.by_subreddit_type.entry(st.to_owned()).or_insert(prior);
+            let entry = self
+                .by_subreddit_type
+                .entry(st.to_owned())
+                .or_insert_with(prior);
             entry.update(observation);
         }
     }

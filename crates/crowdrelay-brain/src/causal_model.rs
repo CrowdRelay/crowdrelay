@@ -254,10 +254,7 @@ impl CausalModel {
     /// before the coefficients exist.
     #[must_use]
     pub fn predict(&self, template_id: &str, context: &DispatchContext) -> f64 {
-        let (mean, _var) = self
-            .fans
-            .predict(template_id, context.subreddit_type.as_deref());
-        self.context_effects.predict(mean, context)
+        self.predict_stats(template_id, context).0
     }
 
     /// Predicts expected new fans with calibration correction applied.
@@ -273,19 +270,16 @@ impl CausalModel {
     }
 
     /// Predicts expected durable fans (Y30) with Y30 calibration correction.
-    ///
-    /// Uses the Y30 calibration tracker (`calibration_y30`) which learns the
-    /// mapping between predicted and observed durable fans. When no Y30
-    /// calibration data is available, this falls back to the Y14-calibrated
-    /// prediction.
+    /// Falls back to Y14 calibration when Y30 data is unavailable.
     #[must_use]
     pub fn predict_calibrated_y30(&self, template_id: &str, context: &DispatchContext) -> f64 {
         let raw = self.predict(template_id, context);
-        if !self.calibration_y30.is_empty() {
-            self.calibration_y30.correct_prediction(raw).max(0.0)
+        let cal = if self.calibration_y30.is_empty() {
+            &self.calibration
         } else {
-            self.calibration.correct_prediction(raw).max(0.0)
-        }
+            &self.calibration_y30
+        };
+        cal.correct_prediction(raw).max(0.0)
     }
 
     /// Predicts expected Signal installs for a dispatch. Uses the
