@@ -659,7 +659,8 @@ pub enum AutopilotActionPayload {
     /// appropriate channel via the agent.content executor capability — the
     /// agent itself never sends anything, the autopilot does, after approval.
     RequestAgentContent {
-        template_id: String,
+        #[serde(default)]
+        template_id: Option<String>,
         task_id: uuid::Uuid,
         draft: serde_json::Value,
     },
