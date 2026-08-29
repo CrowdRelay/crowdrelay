@@ -233,8 +233,10 @@ impl HierarchicalPosterior {
     /// 3. The subreddit-type posterior (if subreddit_type is provided)
     ///
     /// Each level uses a prior derived from its parent: the template posterior
-    /// uses the global posterior as its prior, the subreddit-type posterior
-    /// also uses the global posterior as its prior.
+    /// uses the **pre-update** global posterior as its prior, the
+    /// subreddit-type posterior also uses the pre-update global posterior as
+    /// its prior. This avoids double-counting: the observation must not
+    /// participate in the parent prior AND be applied to the child.
     pub fn update(
         &mut self,
         template_id: Option<&str>,
@@ -242,19 +244,25 @@ impl HierarchicalPosterior {
         observation: f64,
         observation_variance: f64,
     ) {
+        // Snapshot the global posterior BEFORE updating it. The child's prior
+        // must be the pre-update global — otherwise the observation is
+        // counted once in the global (becoming the child's prior) and again
+        // in the child's update, giving early observations extra weight.
+        let global_prior = (self.global.mean, self.global.variance);
+
         // Update global posterior.
         self.global.update(observation, observation_variance);
 
-        // Update template posterior, using the current global posterior as prior.
+        // Update template posterior, using the PRE-update global as prior.
         if let Some(tid) = template_id {
-            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
             let entry = self.by_template.entry(tid.to_owned()).or_insert_with(prior);
             entry.update(observation, observation_variance);
         }
 
-        // Update subreddit-type posterior, using the current global posterior as prior.
+        // Update subreddit-type posterior, using the PRE-update global as prior.
         if let Some(st) = subreddit_type {
-            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
             let entry = self
                 .by_subreddit_type
                 .entry(st.to_owned())
@@ -265,7 +273,8 @@ impl HierarchicalPosterior {
 
     /// Signed update — same as [`update`](Self::update) but allows negative
     /// observations. Used by the treatment-effect model where τ can be
-    /// negative.
+    /// negative. Uses the pre-update global as the child prior to avoid
+    /// double-counting.
     pub fn update_signed(
         &mut self,
         template_id: Option<&str>,
@@ -273,14 +282,15 @@ impl HierarchicalPosterior {
         observation: f64,
         observation_variance: f64,
     ) {
+        let global_prior = (self.global.mean, self.global.variance);
         self.global.update_signed(observation, observation_variance);
         if let Some(tid) = template_id {
-            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
             let entry = self.by_template.entry(tid.to_owned()).or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
         if let Some(st) = subreddit_type {
-            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
             let entry = self
                 .by_subreddit_type
                 .entry(st.to_owned())
@@ -291,7 +301,9 @@ impl HierarchicalPosterior {
 
     /// Signed update with channel — same as [`update_signed`](Self::update_signed)
     /// but also updates the template-channel posterior. Used by the
-    /// hierarchical contextual treatment effect model (P2.1).
+    /// hierarchical contextual treatment effect model (P2.1). Uses the
+    /// pre-update global as the child prior to avoid double-counting.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     pub fn update_signed_with_channel(
         &mut self,
         template_id: Option<&str>,
@@ -300,6 +312,7 @@ impl HierarchicalPosterior {
         observation: f64,
         observation_variance: f64,
     ) {
+        let global_prior = (self.global.mean, self.global.variance);
         self.update_signed(
             template_id,
             subreddit_type,
@@ -308,7 +321,7 @@ impl HierarchicalPosterior {
         );
         if let (Some(tid), Some(ch)) = (template_id, channel) {
             let key = format!("{tid}:{ch}");
-            let prior = || NormalPosterior::prior(self.global.mean, self.global.variance);
+            let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
             let entry = self.by_template_channel.entry(key).or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
@@ -318,6 +331,7 @@ impl HierarchicalPosterior {
     /// using partial pooling across all three levels. When the
     /// template-channel posterior has many observations, it stands on its
     /// own; otherwise it shrinks toward the template or global posterior.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn predict_with_channel(
         &self,
@@ -510,6 +524,7 @@ impl NegBinPosterior {
 
     /// P(λ > threshold) — probability that the rate exceeds a threshold.
     /// Uses the Normal approximation to the Gamma posterior.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn p_exceeds(&self, threshold: f64) -> f64 {
         let mean = self.mean();
@@ -569,33 +584,41 @@ impl HierarchicalNegBinPosterior {
     ///
     /// The observation updates the global posterior, the template-level
     /// posterior (if provided), and the subreddit-type posterior (if provided).
-    /// Each level's posterior is the global posterior updated with that level's
-    /// observations — the correct hierarchical Gamma-Poisson model.
+    /// Each child's prior is the **pre-update** global posterior — this avoids
+    /// double-counting, where the observation would participate in the parent
+    /// prior (via the global update) AND be applied to the child.
     pub fn update(
         &mut self,
         template_id: Option<&str>,
         subreddit_type: Option<&str>,
         observation: u32,
     ) {
+        // Snapshot the global posterior BEFORE updating it. The child's prior
+        // must be the pre-update global — otherwise the observation is
+        // counted once in the global (becoming the child's prior) and again
+        // in the child's update, giving early observations extra weight.
+        let global_alpha = self.global.alpha;
+        let global_beta = self.global.beta;
+
         // Update global posterior.
         self.global.update(observation);
 
-        // Update template posterior, using the current global posterior as prior.
+        // Update template posterior, using the PRE-update global as prior.
         if let Some(tid) = template_id {
             let prior = || NegBinPosterior {
-                alpha: self.global.alpha,
-                beta: self.global.beta,
+                alpha: global_alpha,
+                beta: global_beta,
                 n: 0,
             };
             let entry = self.by_template.entry(tid.to_owned()).or_insert_with(prior);
             entry.update(observation);
         }
 
-        // Update subreddit-type posterior.
+        // Update subreddit-type posterior, using the PRE-update global as prior.
         if let Some(st) = subreddit_type {
             let prior = || NegBinPosterior {
-                alpha: self.global.alpha,
-                beta: self.global.beta,
+                alpha: global_alpha,
+                beta: global_beta,
                 n: 0,
             };
             let entry = self
@@ -645,6 +668,7 @@ impl HierarchicalNegBinPosterior {
     /// observation. The predictive variance includes both epistemic
     /// uncertainty about λ and Poisson sampling noise:
     /// `Var[y_pred] = mean + mean²/α` (NegBin over-dispersion).
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn predict_predictive(
         &self,
@@ -728,6 +752,7 @@ impl TreatmentEffectPosterior {
     /// Returns `(tau_mean, tau_var)` — the expected treatment effect and its
     /// variance. Positive `tau_mean` means the action increases fans;
     /// negative means it backfires.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn predict(&self, template_id: &str, subreddit_type: Option<&str>) -> (f64, f64) {
         self.effects.predict(template_id, subreddit_type)
@@ -739,6 +764,7 @@ impl TreatmentEffectPosterior {
     /// When the template-channel pair has many observations, the prediction
     /// reflects the channel-specific effect. When it has few, it shrinks
     /// toward the template-level prediction.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn predict_with_channel(
         &self,
@@ -772,6 +798,7 @@ impl TreatmentEffectPosterior {
 
     /// Updates the treatment-effect posterior from an observed τ, with
     /// channel context (P2.1). Also updates the template-channel posterior.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     pub fn update_with_channel(
         &mut self,
         template_id: &str,
@@ -808,6 +835,35 @@ impl TreatmentEffectPosterior {
         let std = var.sqrt().max(0.1);
         let confidence = self.effects.confidence(template_id);
         (mean, std, confidence)
+    }
+
+    /// Returns P(τ > δ) — the probability that the treatment effect exceeds
+    /// a meaningful threshold δ. This is the **meaningful-effect probability**,
+    /// a more decision-relevant signal than just P(τ > 0).
+    ///
+    /// For example, if δ = 1.0 (we only care about effects that produce at
+    /// least 1 durable fan), then P(τ > 1.0) tells us the probability that
+    /// this template is worth dispatching at all.
+    ///
+    /// The posterior over τ is approximately Normal(μ, σ²), so:
+    ///
+    /// ```text
+    /// P(τ > δ) = 1 - Φ((δ - μ) / σ)
+    /// ```
+    ///
+    /// where Φ is the standard Normal CDF.
+    #[must_use]
+    pub fn p_meaningful_effect(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        delta: f64,
+    ) -> f64 {
+        let (mean, var) = self.effects.predict(template_id, subreddit_type);
+        let std = var.sqrt().max(0.1);
+        // Standard Normal CDF: Φ(z) = 0.5 * (1 + erf(z / sqrt(2)))
+        let z = (delta - mean) / std;
+        1.0 - normal_cdf(z)
     }
 }
 
@@ -1051,14 +1107,20 @@ mod tests {
     #[test]
     fn treatment_effect_posterior_subreddit_type_pools() {
         let mut tep = TreatmentEffectPosterior::new();
+        // Observe high values for "metal" subreddit type.
         for _ in 0..10 {
             tep.update("a", Some("metal"), 8.0, 1.0);
         }
-        let (mean_b_metal, _, _) = tep.predict_stats("b", Some("metal"));
-        let (mean_b_none, _, _) = tep.predict_stats("b", None);
+        // Observe low values for "pop" subreddit type — this moves the global
+        // downward, so "metal" should be above the global average.
+        for _ in 0..10 {
+            tep.update("b", Some("pop"), 0.0, 1.0);
+        }
+        let (mean_b_metal, _, _) = tep.predict_stats("c", Some("metal"));
+        let (mean_b_none, _, _) = tep.predict_stats("c", None);
         assert!(
             mean_b_metal > mean_b_none,
-            "metal subreddit type should boost prediction"
+            "metal subreddit type should boost prediction above global, got metal={mean_b_metal} global={mean_b_none}"
         );
     }
 
@@ -1184,5 +1246,94 @@ mod tests {
             (mean - 7.0).abs() < 2.0,
             "unknown template should use global, got {mean}"
         );
+    }
+
+    // ── Double-counting regression tests (P0.1) ───────────────────────────
+    //
+    // The hierarchical update must use the PRE-update global as the child's
+    // prior. If it uses the post-update global, the observation is counted
+    // twice — once in the global (which becomes the child's prior) and again
+    // in the child's update. These tests verify the fix.
+
+    #[test]
+    fn hierarchical_no_double_counting_normal() {
+        // With one observation of y=10 for template "a":
+        // CORRECT: global prior = (2.0, 4.0), global post = update((2,4), 10, 1)
+        //          template "a" prior = (2.0, 4.0), template "a" post = update((2,4), 10, 1)
+        // WRONG (double-count): template "a" prior = global_post, then update again
+        //   → template "a" would be closer to 10 than it should be.
+        let mut hier = HierarchicalPosterior::new(NormalPosterior::prior(2.0, 4.0));
+        hier.update(Some("a"), None, 10.0, 1.0);
+
+        // The template posterior should be the result of updating the
+        // PRE-update global prior (2.0, 4.0) with observation 10.0, var 1.0.
+        // prior_precision = 1/4 = 0.25, obs_precision = 1/1 = 1.0
+        // post_precision = 1.25
+        // post_mean = (2.0 * 0.25 + 10.0 * 1.0) / 1.25 = (0.5 + 10) / 1.25 = 8.4
+        let template_post = hier.by_template.get("a").unwrap();
+        assert!(
+            (template_post.mean - 8.4).abs() < 0.01,
+            "template posterior should use pre-update global prior, got mean={}",
+            template_post.mean
+        );
+        // If double-counted, the prior would be the post-update global
+        // (mean=8.4, var=0.8), and updating with 10.0 would give:
+        // precision = 1/0.8 + 1 = 2.25, mean = (8.4*1.25 + 10) / 2.25 = 9.156
+        // So 8.4 vs 9.156 is the distinguishing assertion.
+    }
+
+    #[test]
+    fn hierarchical_no_double_counting_signed() {
+        let mut hier = HierarchicalPosterior::new(NormalPosterior::prior(0.0, 4.0));
+        hier.update_signed(Some("a"), None, 5.0, 1.0);
+
+        // Same math: prior (0, 4), obs 5, var 1
+        // post_mean = (0*0.25 + 5*1.0) / 1.25 = 4.0
+        let template_post = hier.by_template.get("a").unwrap();
+        assert!(
+            (template_post.mean - 4.0).abs() < 0.01,
+            "signed template posterior should use pre-update global prior, got mean={}",
+            template_post.mean
+        );
+    }
+
+    #[test]
+    fn hierarchical_no_double_counting_channel() {
+        let mut hier = HierarchicalPosterior::new(NormalPosterior::prior(0.0, 4.0));
+        hier.update_signed_with_channel(Some("a"), None, Some("reddit"), 5.0, 1.0);
+
+        // The channel posterior should also use the pre-update global (0, 4).
+        let channel_post = hier.by_template_channel.get("a:reddit").unwrap();
+        assert!(
+            (channel_post.mean - 4.0).abs() < 0.01,
+            "channel posterior should use pre-update global prior, got mean={}",
+            channel_post.mean
+        );
+    }
+
+    #[test]
+    fn hierarchical_no_double_counting_negbin() {
+        // NegBin: prior(mean=3.0, dispersion=2.0) → alpha=2.0, beta=2/3.
+        // Observe y=10.
+        // CORRECT: template prior = (alpha=2, beta=2/3), then update:
+        //   alpha = 2+10 = 12, beta = 2/3+1 = 5/3
+        // WRONG (double-count): global updated first → alpha=12, beta=5/3
+        //   template prior = (12, 5/3), then update: alpha=22, beta=8/3
+        let mut hier = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(3.0, 2.0));
+        hier.update(Some("a"), None, 10);
+
+        let template_post = hier.by_template.get("a").unwrap();
+        // Correct: alpha = 2 + 10 = 12, beta = 2/3 + 1 ≈ 1.667
+        assert_eq!(
+            template_post.alpha, 12.0,
+            "template alpha should be 12 (pre-update global + obs), got {}",
+            template_post.alpha
+        );
+        assert!(
+            (template_post.beta - 5.0 / 3.0).abs() < 0.01,
+            "template beta should be 5/3 (pre-update global + 1), got {}",
+            template_post.beta
+        );
+        // If double-counted: alpha would be 22, beta would be 8/3.
     }
 }

@@ -46,6 +46,16 @@ pub(super) fn select_portfolio(
                 cost: 1,
                 source_context: c.decision_kind.to_string(),
                 action_key: c.decision_key.clone(),
+                // P1.4: North Star fields — wired from the treatment-aware
+                // stats when available. For now, these default to 0/empty
+                // which makes the portfolio optimizer fall back to
+                // expected_fans. The growth intelligence evaluator will
+                // populate these in a future iteration.
+                expected_durable_fans: 0.0,
+                treatment_confidence: 0,
+                treatment_std: 0.0,
+                p_meaningful_effect: 0.0,
+                decision_mode: crowdrelay_brain::DecisionMode::Exploit,
             }
         })
         .collect();

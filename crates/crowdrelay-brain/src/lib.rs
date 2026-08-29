@@ -49,10 +49,12 @@ pub mod causal_model;
 pub mod change_point;
 pub mod context_effect;
 pub mod efe;
+pub mod epistemic;
 pub mod evidence;
 pub mod experiment;
 pub mod exploration;
 pub mod fan_network;
+pub mod funnel;
 pub mod hypothesis;
 pub mod metacognition;
 pub mod north_star;
@@ -86,6 +88,7 @@ pub use context_effect::ContextGLM;
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
+pub use epistemic::EpistemicFrontier;
 pub use evidence::{EvidenceEvent, EvidenceEventType, GrowthEvidence};
 pub use experiment::{
     DEFAULT_TREATMENT_PROBABILITY, ExperimentEngine, MIN_CONFIDENCE_FOR_EXPERIMENT,
@@ -95,6 +98,7 @@ pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, con
 pub use fan_network::{
     ChannelReproductionModel, FanNetworkModel, NetworkEffect, RecruitmentChannel,
 };
+pub use funnel::FunnelModel;
 pub use hypothesis::{Hypothesis, HypothesisRegistry, HypothesisStatus};
 pub use metacognition::{MetacognitionMonitor, MetacognitiveState};
 pub use north_star::NorthStarMetric;
@@ -111,7 +115,7 @@ pub use options::{
     OptionStepStatus,
 };
 pub use portfolio::{
-    PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
+    DecisionMode, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
     PortfolioSelection, RejectionReason,
 };
 pub use reach::{
@@ -134,7 +138,8 @@ pub use voi::{
     knowledge_gradient_ranking, option_value, portfolio_kg, value_of_information,
 };
 pub use world_model::{
-    GrowthTarget, GrowthTargetProgress, GrowthTrend, StateTransitionModel, TargetStatus, WorldModel,
+    EventProximity, FanbaseTier, GrowthTarget, GrowthTargetProgress, GrowthTrend, RichState,
+    RichStateTransitionModel, StateTransitionModel, TargetProgress, TargetStatus, WorldModel,
 };
 
 // Re-export shared domain types the brain depends on.

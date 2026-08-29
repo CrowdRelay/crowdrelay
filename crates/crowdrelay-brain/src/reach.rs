@@ -351,6 +351,7 @@ impl Default for ReachEvent {
 /// A single fan conversion attributed to a reach event. A broadcast reach
 /// event can produce multiple conversions — each is a separate row linked
 /// to the reach event by `reach_event_id`.
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReachConversion {
     /// The workspace this conversion belongs to.
@@ -570,6 +571,7 @@ impl ReachMetrics {
     /// converted / unique_reach. This is more accurate than
     /// [`reach_to_fan_rate`](Self::reach_to_fan_rate) because it
     /// doesn't double-count the same recipient across multiple events.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn unique_reach_to_fan_rate(&self) -> f64 {
         if self.unique_reach == 0 {
@@ -581,6 +583,7 @@ impl ReachMetrics {
     /// Returns the positive response rate:
     /// (positive_replies + converted) / total_events.
     /// This measures engagement quality, not just conversion.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn positive_response_rate(&self) -> f64 {
         if self.total_events == 0 {
@@ -601,6 +604,7 @@ impl ReachMetrics {
     /// Returns the true conversion rate: total_conversions / total_reach.
     /// This uses the `total_conversions` field from the conversions table,
     /// which correctly handles broadcasts (one event → many conversions).
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn true_conversion_rate(&self) -> f64 {
         if self.total_reach == 0 {
@@ -611,6 +615,7 @@ impl ReachMetrics {
 
     /// Returns the incremental conversion fraction:
     /// incremental_conversions / total_conversions.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn incremental_fraction(&self) -> f64 {
         if self.total_conversions == 0 {
@@ -621,6 +626,7 @@ impl ReachMetrics {
 
     /// Returns the durable conversion fraction:
     /// durable_conversions / total_conversions.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     #[must_use]
     pub fn durable_fraction(&self) -> f64 {
         if self.total_conversions == 0 {
@@ -631,6 +637,7 @@ impl ReachMetrics {
 
     /// Updates the conversion counts from a list of `ReachConversion` rows.
     /// Call this after `from_events` to populate the conversion fields.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     pub fn apply_conversions(&mut self, conversions: &[ReachConversion]) {
         self.total_conversions = conversions.len() as u64;
         self.incremental_conversions = conversions.iter().filter(|c| c.incremental).count() as u64;
@@ -773,6 +780,38 @@ impl ReachConversionModel {
     ) -> f64 {
         let rate = self.conversion_rate(channel, template_id);
         f64::from(estimated_reach) * rate
+    }
+
+    /// Returns the fan acquisition elasticity: ∂fans/∂reach.
+    ///
+    /// This is the marginal fan return per additional unit of reach. For the
+    /// linear model `E[fans] = reach × rate`, the elasticity is simply the
+    /// conversion rate. But this method exists as a separate API because:
+    ///
+    /// 1. Future models may have diminishing returns (concave reach curves),
+    ///    where ∂fans/∂reach decreases with reach.
+    /// 2. The brain uses elasticity to decide whether to invest in more
+    ///    reach (e.g. posting to a larger subreddit) vs. better conversion
+    ///    (e.g. improving the template).
+    /// 3. The portfolio optimizer uses elasticity to allocate reach across
+    ///    channels.
+    ///
+    /// Returns `(elasticity, is_confident)`. When the conversion rate
+    /// posterior has low confidence, `is_confident` is false and the brain
+    /// should treat the elasticity as uncertain.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
+    #[must_use]
+    pub fn fan_elasticity(
+        &self,
+        channel: ReachChannel,
+        template_id: &str,
+        _estimated_reach: u32,
+    ) -> (f64, bool) {
+        let rate = self.conversion_rate(channel, template_id);
+        let conf = self.confidence(channel, template_id);
+        // For the linear model, elasticity = conversion rate.
+        // Confidence: at least 10 observations to trust the elasticity.
+        (rate, conf >= 10)
     }
 }
 
@@ -1193,5 +1232,29 @@ mod tests {
     fn email_is_direct() {
         assert!(ReachChannel::Email.is_direct());
         assert!(!ReachChannel::Email.is_broadcast());
+    }
+
+    // ── Fan acquisition elasticity tests (P1.9) ──────────────────────────
+
+    #[test]
+    fn fan_elasticity_equals_conversion_rate() {
+        let mut model = ReachConversionModel::new();
+        // 10 conversions out of 100 reached.
+        model.update_count(ReachChannel::RedditPost, "t", 100, 10);
+        let (elasticity, confident) = model.fan_elasticity(ReachChannel::RedditPost, "t", 1000);
+        // Elasticity should be close to 10/100 = 0.1 (with prior shrinkage).
+        assert!(
+            (elasticity - 0.1).abs() < 0.05,
+            "elasticity should be close to conversion rate, got {elasticity}"
+        );
+        assert!(confident, "should be confident with 100 observations");
+    }
+
+    #[test]
+    fn fan_elasticity_not_confident_with_low_observations() {
+        let mut model = ReachConversionModel::new();
+        model.update(ReachChannel::RedditPost, "t", true);
+        let (_, confident) = model.fan_elasticity(ReachChannel::RedditPost, "t", 100);
+        assert!(!confident, "should not be confident with 1 observation");
     }
 }

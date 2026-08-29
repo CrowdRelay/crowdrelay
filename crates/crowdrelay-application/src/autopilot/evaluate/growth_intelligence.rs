@@ -257,13 +257,34 @@ pub fn evaluate_growth_intelligence(
     // Apply the strategy multiplier as a fan boost: aligned templates get
     // higher effective fans (lower EFE), misaligned ones get lower.
     let strategy_adjusted_fans = expected_new_fans / strategy_multiplier;
-    let efe_score = GrowthOpportunity::compute_efe(
+
+    // ── Time-to-feedback discount (P1.10) ──
+    // Templates that produce feedback faster are slightly preferred because
+    // the brain can learn from them sooner. The discount factor is based on
+    // the treatment confidence: templates with low confidence have faster
+    // feedback loops (the brain learns more from each observation), so they
+    // get a small exploration boost. Templates with high confidence are
+    // already well-learned, so the discount is minimal.
+    //
+    // The discount is multiplicative on the EFE score (lower = better):
+    //   low confidence → 0.95× (5% boost — learn faster)
+    //   high confidence → 1.0× (no boost — already learned)
+    let feedback_discount = if confidence < 10 {
+        0.95 // 5% boost for fast-learning templates
+    } else if confidence < 30 {
+        0.98 // 2% boost
+    } else {
+        1.0 // no boost for well-learned templates
+    };
+
+    let raw_efe = GrowthOpportunity::compute_efe(
         strategy_adjusted_fans,
         info_gain,
         predict_std,
         exploration_novelty,
         efe_weights,
     );
+    let efe_score = raw_efe * feedback_discount;
 
     // Adaptive cadence: the effective cooldown is adjusted by the worker's
     // measured standing. Effective workers get shorter cooldowns (dispatched

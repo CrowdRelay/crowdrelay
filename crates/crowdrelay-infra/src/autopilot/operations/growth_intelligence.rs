@@ -583,7 +583,7 @@ pub(in crate::autopilot) async fn load_causal_model(
 
     // Try to load a brain state checkpoint for fast startup.
     let checkpoint = super::evidence::load_brain_state(repo, workspace_id, "causal_model").await?;
-    let mut model = if let Some((state_json, checkpoint_time)) = checkpoint {
+    let model = if let Some((state_json, checkpoint_time)) = checkpoint {
         match serde_json::from_value::<CausalModel>(state_json) {
             Ok(mut model) => {
                 // Load only delta evidence since the checkpoint.
@@ -610,35 +610,13 @@ pub(in crate::autopilot) async fn load_causal_model(
         full_replay(repo, workspace_id).await?
     };
 
-    // Load treatment-effect observations and update the treatment-effect
-    // posterior. Each row is a pre-computed τ estimate from paired
-    // treatment/control experiments.
-    let pool = &repo.pool;
-    type TreatmentEffectRow = (String, Option<String>, f64, f64);
-    let te_rows: Vec<TreatmentEffectRow> = sqlx::query_as(
-        r#"
-        SELECT template_id,
-               subreddit_type,
-               observed_tau,
-               observation_variance
-        FROM viryaos_treatment_effect_observations
-        WHERE workspace_id = $1
-        ORDER BY computed_at ASC
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    for (template_id, subreddit_type, observed_tau, observation_variance) in te_rows {
-        model.update_treatment_effect(
-            &template_id,
-            subreddit_type.as_deref(),
-            observed_tau,
-            observation_variance,
-        );
-    }
+    // P0.5: The separate viryaos_treatment_effect_observations table load
+    // has been deprecated. Treatment-effect updates now come from the
+    // evidence-based path in `apply_evidence_to_model`, which uses the
+    // `observed_incremental_fans` field from GrowthEvidence as the τ
+    // estimate. This avoids double-counting: the evidence row already
+    // carries the treatment assignment + outcome, making the TE table
+    // redundant. The evidence-based path is the single source of truth.
 
     Ok(model)
 }
@@ -652,50 +630,61 @@ fn apply_evidence_to_model(
     use crowdrelay_brain::{DispatchPrediction, PredictionOutcome};
 
     for ev in evidence {
+        let template = extract_template_from_opportunity(&ev.opportunity_id);
+        let subreddit_type = ev.context.subreddit_type.as_deref();
+
         // Update the outcome model from the Y14 (incremental) outcome.
         // Y14 is the early leading signal — available 14 days after dispatch.
-        // Y30 (durable) is the North Star target but takes 30 days to arrive.
-        // We learn from Y14 as soon as it's available, and from Y30 later.
         if let Some(y14_fans) = ev.y14_outcome() {
             let prediction = DispatchPrediction {
-                template_id: extract_template_from_opportunity(&ev.opportunity_id),
+                template_id: template.clone(),
                 expected_new_fans: ev.predicted_fans,
                 expected_signal_installs: ev.predicted_signal_installs,
                 context: ev.context.clone(),
             };
-            let outcome = PredictionOutcome::from_observation(
-                prediction, y14_fans, 0.0, // signal installs not tracked in evidence yet
-            );
+            let outcome = PredictionOutcome::from_observation(prediction, y14_fans, 0.0);
             model.update(&outcome);
         }
-        // When Y30 (durable) is available, also update the calibration
-        // tracker for the durable target. This is a separate learning path
-        // — the Y30 outcome is the North Star, but it arrives later.
+
+        // Update the Y14 treatment-effect posterior from the incremental
+        // outcome. The `observed_incremental_fans` field is the
+        // counterfactual-adjusted τ estimate (already IPW-corrected if
+        // propensity is available). This is the evidence-based replacement
+        // for the separate treatment_effect_observations table (P0.5).
+        if let Some(tau_y14) = ev.observed_incremental_fans {
+            let obs_var = 2.0 * tau_y14.abs().max(1.0); // adaptive variance
+            model.update_treatment_effect(&template, subreddit_type, tau_y14, obs_var);
+        }
+
+        // When Y30 (durable) is available, update the Y30 treatment-effect
+        // posterior, the Y30 calibration tracker, and the Y14→Y30 bridge.
         if let Some(y30_fans) = ev.y30_outcome() {
-            let template = extract_template_from_opportunity(&ev.opportunity_id);
+            // Y30 treatment-effect update (North Star).
+            let obs_var = 2.0 * y30_fans.abs().max(1.0);
+            model.update_treatment_effect_y30(&template, subreddit_type, y30_fans, obs_var);
+            // Y30 calibration.
             model
                 .calibration_y30
                 .record(&template, ev.predicted_fans, 2.0, y30_fans);
+            // Y14→Y30 bridge: update when both outcomes are available.
+            if let Some(y14_fans) = ev.y14_outcome() {
+                model.update_bridge(y14_fans, y30_fans);
+            }
         }
 
         // Update the reach conversion model from conversion outcomes.
-        // For broadcast channels (Reddit post, Signal push, social post),
-        // use the Beta-Binomial update with actual exposure and conversion
-        // counts. For direct channels (email, DM, SMS), use the Bernoulli
-        // update.
-        let template = extract_template_from_opportunity(&ev.opportunity_id);
+        // For broadcast channels, use the Beta-Binomial update with actual
+        // exposure and conversion counts. For direct channels, use Bernoulli.
+        // P0.4: use the boolean converted flag, NOT the Y14 incremental fan
+        // count — incremental fans are a population-level causal uplift,
+        // not individual-level conversion counts.
         if ev.channel.is_broadcast() {
             let n_exposed = ev.estimated_reach.max(1);
-            // Use Y14 (incremental) for conversion count — it's the earliest
-            // reliable conversion signal. Fall back to raw observed fans,
-            // then to the boolean converted flag.
-            let k_converted = if let Some(fans) = ev.y14_outcome() {
-                fans.round().max(0.0) as u32
-            } else if ev.converted {
-                1
-            } else {
-                0
-            };
+            // Use the boolean converted flag as the conversion signal.
+            // When actual conversion counts are available (from the reach
+            // conversions table), those should be used instead — but the
+            // evidence row doesn't yet carry that field (P0.4 migration).
+            let k_converted = if ev.converted { 1 } else { 0 };
             model
                 .reach_model
                 .update_count(ev.channel, &template, n_exposed, k_converted);

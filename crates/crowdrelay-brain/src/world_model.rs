@@ -69,7 +69,7 @@ pub struct WorldModel {
 /// The trend of fan growth over time. The brain uses this to decide
 /// urgency: stagnant growth → more aggressive dispatch; accelerating →
 /// maintain the current approach.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrowthTrend {
     /// Growth rate is increasing month-over-month.
@@ -212,6 +212,7 @@ impl GrowthTargetProgress {
 /// The action is discretized as "dispatch" vs "no_dispatch" — the key
 /// question is whether dispatching moves the system from stagnant to
 /// accelerating.
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StateTransitionModel {
     /// Transition counts: key = "current_state:action:next_state" → count.
@@ -220,6 +221,7 @@ pub struct StateTransitionModel {
     totals: std::collections::HashMap<String, u32>,
 }
 
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
 impl StateTransitionModel {
     /// Creates a new state-transition model.
     #[must_use]
@@ -239,6 +241,7 @@ impl StateTransitionModel {
 
     /// Records a state transition: the system was in `current_state`, action
     /// `action` was taken, and the system transitioned to `next_state`.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
     pub fn update(&mut self, current: GrowthTrend, action: &str, next: GrowthTrend) {
         let tkey = Self::transition_key(current, action, next);
         let totkey = Self::total_key(current, action);
@@ -283,6 +286,236 @@ impl StateTransitionModel {
     #[must_use]
     pub fn confidence(&self, current: GrowthTrend, action: &str) -> u32 {
         let key = Self::total_key(current, action);
+        self.totals.get(&key).copied().unwrap_or(0)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Rich State-Transition Model (P1.5)
+//
+// The simple StateTransitionModel above only uses GrowthTrend as the state.
+// The RichStateTransitionModel uses a multi-dimensional state that captures
+// the brain's full situation: growth trend, fanbase size tier, target
+// progress, and event proximity. This lets the brain learn more nuanced
+// transition probabilities (e.g. "when the fanbase is small and stagnant
+// and an event is close, dispatching is more likely to accelerate growth").
+// ──────────────────────────────────────────────────────────────────────
+
+/// A rich, multi-dimensional state descriptor for the world model.
+///
+/// This captures the brain's full situation at a decision point, enabling
+/// more nuanced strategy conditioning (P1.3) and state-transition learning
+/// (P1.5) than the simple `GrowthTrend` alone.
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct RichState {
+    /// Growth trend (stagnant, steady, decelerating, accelerating).
+    pub growth_trend: GrowthTrend,
+    /// Fanbase size tier.
+    pub fanbase_tier: FanbaseTier,
+    /// Target progress (how close to the monthly target).
+    pub target_progress: TargetProgress,
+    /// Event proximity.
+    pub event_proximity: EventProximity,
+}
+
+impl RichState {
+    /// Computes a string key for HashMap storage.
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.growth_trend.as_str(),
+            self.fanbase_tier.as_str(),
+            self.target_progress.as_str(),
+            self.event_proximity.as_str()
+        )
+    }
+}
+
+/// Fanbase size tier — discretized for state conditioning.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum FanbaseTier {
+    /// 0-100 fans (just starting).
+    Seedling,
+    /// 100-1000 fans (growing).
+    #[default]
+    Emerging,
+    /// 1000-10000 fans (established).
+    Established,
+    /// 10000+ fans (large).
+    Large,
+}
+
+impl FanbaseTier {
+    /// Classifies a fan count into a tier.
+    #[must_use]
+    pub fn from_fan_count(fans: u32) -> Self {
+        match fans {
+            0..=100 => Self::Seedling,
+            101..=1000 => Self::Emerging,
+            1001..=10000 => Self::Established,
+            _ => Self::Large,
+        }
+    }
+
+    /// Returns the string representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Seedling => "seedling",
+            Self::Emerging => "emerging",
+            Self::Established => "established",
+            Self::Large => "large",
+        }
+    }
+}
+
+/// Target progress — how close the brain is to the monthly target.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum TargetProgress {
+    /// Behind schedule (<50% of target).
+    Behind,
+    /// On track (50-100% of target).
+    #[default]
+    OnTrack,
+    /// Ahead of schedule (>100% of target).
+    Ahead,
+}
+
+impl TargetProgress {
+    /// Classifies a progress ratio into a tier.
+    #[must_use]
+    pub fn from_ratio(actual: f64, target: f64) -> Self {
+        if target <= 0.0 {
+            return Self::OnTrack;
+        }
+        let ratio = actual / target;
+        if ratio < 0.5 {
+            Self::Behind
+        } else if ratio > 1.0 {
+            Self::Ahead
+        } else {
+            Self::OnTrack
+        }
+    }
+
+    /// Returns the string representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Behind => "behind",
+            Self::OnTrack => "on_track",
+            Self::Ahead => "ahead",
+        }
+    }
+}
+
+/// Event proximity — how close the next event is.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum EventProximity {
+    /// No event scheduled.
+    #[default]
+    None,
+    /// Event is far (>30 days).
+    Far,
+    /// Event is near (7-30 days).
+    Near,
+    /// Event is close (≤7 days).
+    Close,
+}
+
+impl EventProximity {
+    /// Classifies days-to-event into a proximity tier.
+    #[must_use]
+    pub fn from_days(days: Option<i64>) -> Self {
+        match days {
+            None => Self::None,
+            Some(d) if d <= 7 => Self::Close,
+            Some(d) if d <= 30 => Self::Near,
+            Some(_) => Self::Far,
+        }
+    }
+
+    /// Returns the string representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "no_event",
+            Self::Far => "far",
+            Self::Near => "near",
+            Self::Close => "close",
+        }
+    }
+}
+
+/// A rich state-transition model that learns transition probabilities
+/// conditioned on the full `RichState`, not just `GrowthTrend`.
+///
+/// This lets the brain learn nuanced patterns like "when the fanbase is
+/// small and stagnant and an event is close, dispatching is more likely to
+/// accelerate growth than when the fanbase is large and ahead of target."
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RichStateTransitionModel {
+    /// Transition counts: key = "state_key:action:next_trend" → count.
+    transitions: std::collections::HashMap<String, u32>,
+    /// Total counts per (state, action): key = "state_key:action" → count.
+    totals: std::collections::HashMap<String, u32>,
+}
+
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
+impl RichStateTransitionModel {
+    /// Creates a new rich state-transition model.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a state transition.
+    pub fn update(&mut self, state: &RichState, action: &str, next: GrowthTrend) {
+        let tkey = format!("{}:{action}:{}", state.key(), next.as_str());
+        let totkey = format!("{}:{action}", state.key());
+        *self.transitions.entry(tkey).or_insert(0) += 1;
+        *self.totals.entry(totkey).or_insert(0) += 1;
+    }
+
+    /// Predicts the probability of transitioning to `next` given the state
+    /// and action. Returns 0.0 when no data is available.
+    #[must_use]
+    pub fn probability(&self, state: &RichState, action: &str, next: GrowthTrend) -> f64 {
+        let tkey = format!("{}:{action}:{}", state.key(), next.as_str());
+        let totkey = format!("{}:{action}", state.key());
+        let count = self.transitions.get(&tkey).copied().unwrap_or(0);
+        let total = self.totals.get(&totkey).copied().unwrap_or(0);
+        if total == 0 {
+            return 0.0;
+        }
+        f64::from(count) / f64::from(total)
+    }
+
+    /// Predicts the most likely next trend given the state and action.
+    #[must_use]
+    pub fn predict_transition(&self, state: &RichState, action: &str) -> Option<GrowthTrend> {
+        let mut best: Option<(GrowthTrend, f64)> = None;
+        for next in [
+            GrowthTrend::Stagnant,
+            GrowthTrend::Decelerating,
+            GrowthTrend::Steady,
+            GrowthTrend::Accelerating,
+        ] {
+            let p = self.probability(state, action, next);
+            if p > 0.0 && (best.is_none() || p > best.unwrap().1) {
+                best = Some((next, p));
+            }
+        }
+        best.map(|(s, _)| s)
+    }
+
+    /// Returns the confidence (total observations) for a (state, action) pair.
+    #[must_use]
+    pub fn confidence(&self, state: &RichState, action: &str) -> u32 {
+        let key = format!("{}:{action}", state.key());
         self.totals.get(&key).copied().unwrap_or(0)
     }
 }
@@ -454,5 +687,109 @@ mod tests {
             p_no_dispatch < 0.1,
             "no_dispatch should not lead to accelerating, got {p_no_dispatch}"
         );
+    }
+
+    // ── Rich state-transition model tests (P1.5) ─────────────────────────
+
+    #[test]
+    fn fanbase_tier_classification() {
+        assert_eq!(FanbaseTier::from_fan_count(50), FanbaseTier::Seedling);
+        assert_eq!(FanbaseTier::from_fan_count(500), FanbaseTier::Emerging);
+        assert_eq!(FanbaseTier::from_fan_count(5000), FanbaseTier::Established);
+        assert_eq!(FanbaseTier::from_fan_count(50000), FanbaseTier::Large);
+    }
+
+    #[test]
+    fn target_progress_classification() {
+        assert_eq!(
+            TargetProgress::from_ratio(10.0, 100.0),
+            TargetProgress::Behind
+        );
+        assert_eq!(
+            TargetProgress::from_ratio(60.0, 100.0),
+            TargetProgress::OnTrack
+        );
+        assert_eq!(
+            TargetProgress::from_ratio(120.0, 100.0),
+            TargetProgress::Ahead
+        );
+    }
+
+    #[test]
+    fn event_proximity_classification() {
+        assert_eq!(EventProximity::from_days(None), EventProximity::None);
+        assert_eq!(EventProximity::from_days(Some(3)), EventProximity::Close);
+        assert_eq!(EventProximity::from_days(Some(20)), EventProximity::Near);
+        assert_eq!(EventProximity::from_days(Some(60)), EventProximity::Far);
+    }
+
+    #[test]
+    fn rich_state_key_is_deterministic() {
+        let s1 = RichState {
+            growth_trend: GrowthTrend::Stagnant,
+            fanbase_tier: FanbaseTier::Seedling,
+            target_progress: TargetProgress::Behind,
+            event_proximity: EventProximity::Close,
+        };
+        let s2 = RichState {
+            growth_trend: GrowthTrend::Stagnant,
+            fanbase_tier: FanbaseTier::Seedling,
+            target_progress: TargetProgress::Behind,
+            event_proximity: EventProximity::Close,
+        };
+        assert_eq!(s1.key(), s2.key());
+    }
+
+    #[test]
+    fn rich_state_transition_learns_probabilities() {
+        let mut model = RichStateTransitionModel::new();
+        let state = RichState {
+            growth_trend: GrowthTrend::Stagnant,
+            fanbase_tier: FanbaseTier::Seedling,
+            target_progress: TargetProgress::Behind,
+            event_proximity: EventProximity::Close,
+        };
+        // Dispatch → accelerating 8 times, dispatch → stagnant 2 times.
+        for _ in 0..8 {
+            model.update(&state, "dispatch", GrowthTrend::Accelerating);
+        }
+        for _ in 0..2 {
+            model.update(&state, "dispatch", GrowthTrend::Stagnant);
+        }
+        let p_accel = model.probability(&state, "dispatch", GrowthTrend::Accelerating);
+        assert!(
+            (p_accel - 0.8).abs() < 0.01,
+            "P(accelerating|dispatch) should be 0.8, got {p_accel}"
+        );
+    }
+
+    #[test]
+    fn rich_state_transition_separates_states() {
+        let mut model = RichStateTransitionModel::new();
+        let state_small = RichState {
+            growth_trend: GrowthTrend::Stagnant,
+            fanbase_tier: FanbaseTier::Seedling,
+            target_progress: TargetProgress::Behind,
+            event_proximity: EventProximity::Close,
+        };
+        let state_large = RichState {
+            growth_trend: GrowthTrend::Stagnant,
+            fanbase_tier: FanbaseTier::Large,
+            target_progress: TargetProgress::Ahead,
+            event_proximity: EventProximity::None,
+        };
+        // Small fanbase: dispatch → accelerating.
+        for _ in 0..10 {
+            model.update(&state_small, "dispatch", GrowthTrend::Accelerating);
+        }
+        // Large fanbase: dispatch → steady (saturated).
+        for _ in 0..10 {
+            model.update(&state_large, "dispatch", GrowthTrend::Steady);
+        }
+        // The predictions should differ.
+        let small_pred = model.predict_transition(&state_small, "dispatch");
+        let large_pred = model.predict_transition(&state_large, "dispatch");
+        assert_eq!(small_pred, Some(GrowthTrend::Accelerating));
+        assert_eq!(large_pred, Some(GrowthTrend::Steady));
     }
 }

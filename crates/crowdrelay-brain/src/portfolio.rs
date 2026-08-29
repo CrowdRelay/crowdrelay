@@ -58,6 +58,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::opportunity::OpportunityId;
 
+/// The decision mode for a portfolio candidate — why the brain is
+/// dispatching this candidate.
+///
+/// This explicit mode helps the brain reason about its decisions:
+/// - **Exploit**: dispatching because the expected value is high.
+/// - **Learn**: dispatching because the uncertainty is high (information gain).
+/// - **Explore**: dispatching because the candidate is novel (Go-Explore).
+/// - **DoNothing**: not dispatching (the candidate was rejected).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionMode {
+    /// Exploit: dispatching for expected fan growth (high expected value).
+    #[default]
+    Exploit,
+    /// Learn: dispatching for information gain (high uncertainty, low confidence).
+    Learn,
+    /// Explore: dispatching for novelty (Go-Explore bonus).
+    Explore,
+    /// DoNothing: the candidate was not selected.
+    DoNothing,
+}
+
 /// A candidate in the global pool, scored and ready for portfolio selection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortfolioCandidate {
@@ -81,6 +103,21 @@ pub struct PortfolioCandidate {
     pub source_context: String,
     /// The action payload key (for linking to the persist layer).
     pub action_key: String,
+    /// The Y30 (North Star) expected durable fans. When available, the
+    /// portfolio optimizer uses this instead of `expected_fans` for ranking
+    /// and marginal value computation (P1.4).
+    pub expected_durable_fans: f64,
+    /// The treatment-effect confidence (paired observation count). Used by
+    /// the knowledge gradient computation (P1.4).
+    pub treatment_confidence: u32,
+    /// The treatment-effect std. Used by the knowledge gradient (P1.4).
+    pub treatment_std: f64,
+    /// The P(τ > δ) meaningful-effect probability. Used as a tie-breaker
+    /// in portfolio selection (P1.4).
+    pub p_meaningful_effect: f64,
+    /// The decision mode — why the brain is dispatching this candidate.
+    /// Computed by the portfolio optimizer during selection (P2.6).
+    pub decision_mode: DecisionMode,
 }
 
 /// The result of portfolio optimization.
@@ -174,11 +211,19 @@ impl PortfolioOptimizer {
     /// Selects the optimal portfolio from the global candidate pool.
     ///
     /// Uses greedy selection with marginal value:
-    /// 1. Sort candidates by expected fans (descending).
+    /// 1. Sort candidates by expected durable fans (North Star) when available,
+    ///    falling back to expected fans.
     /// 2. At each step, pick the candidate with the highest marginal value
     ///    (expected fans minus audience overlap and fatigue with already-selected).
     /// 3. Stop when marginal value < min_marginal_value, dispatch count
     ///    budget exhausted, or cost budget exhausted.
+    ///
+    /// # North Star objective (P1.4)
+    ///
+    /// When `expected_durable_fans > 0`, the optimizer uses Y30 durable fans
+    /// as the ranking signal instead of raw expected fans. This ensures the
+    /// portfolio optimizes for the long-term North Star, not short-term
+    /// incremental fans.
     #[must_use]
     pub fn select(&self, candidates: Vec<PortfolioCandidate>) -> PortfolioSelection {
         if candidates.is_empty() {
@@ -194,10 +239,20 @@ impl PortfolioOptimizer {
         let mut rejected: Vec<PortfolioRejection> = Vec::new();
         let mut remaining: Vec<PortfolioCandidate> = candidates;
         let mut total_cost: u32 = 0;
-        // Sort by expected fans descending — greedy starts with the best.
+        // Sort by North Star (durable fans) when available, else expected fans.
         remaining.sort_by(|a, b| {
-            b.expected_fans
-                .partial_cmp(&a.expected_fans)
+            let val_a = if a.expected_durable_fans > 0.0 {
+                a.expected_durable_fans
+            } else {
+                a.expected_fans
+            };
+            let val_b = if b.expected_durable_fans > 0.0 {
+                b.expected_durable_fans
+            } else {
+                b.expected_fans
+            };
+            val_b
+                .partial_cmp(&val_a)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut total_expected_fans = 0.0;
@@ -221,7 +276,13 @@ impl PortfolioOptimizer {
                     1.0 - self.config.audience_overlap_penalty * audience_count as f64;
                 // Fatigue: exponential decay for repeated dispatches.
                 let fatigue_factor = self.config.fatigue_decay.powi(audience_count as i32);
-                let marginal = candidate.expected_fans * overlap_factor.max(0.0) * fatigue_factor;
+                // Use North Star (durable fans) when available.
+                let base_value = if candidate.expected_durable_fans > 0.0 {
+                    candidate.expected_durable_fans
+                } else {
+                    candidate.expected_fans
+                };
+                let marginal = base_value * overlap_factor.max(0.0) * fatigue_factor;
                 if marginal > best_marginal {
                     best_marginal = marginal;
                     best_idx = Some(i);
@@ -264,6 +325,19 @@ impl PortfolioOptimizer {
                     .entry(candidate.audience_key.clone())
                     .or_insert(0) += 1;
                 total_expected_fans += best_marginal;
+                // Compute the decision mode (P2.6):
+                // - Learn: low treatment confidence (< 10) → information gain
+                // - Explore: high treatment std relative to expected value
+                // - Exploit: high confidence, high expected value
+                let mode = if candidate.treatment_confidence < 10 && candidate.treatment_std > 0.0 {
+                    DecisionMode::Learn
+                } else if candidate.treatment_std > best_marginal.abs().max(1.0) {
+                    DecisionMode::Explore
+                } else {
+                    DecisionMode::Exploit
+                };
+                let mut candidate = candidate;
+                candidate.decision_mode = mode;
                 selected.push(candidate);
             } else {
                 // No candidate fits the cost budget — reject the rest.
@@ -291,6 +365,42 @@ impl PortfolioOptimizer {
             do_nothing,
         }
     }
+
+    /// Computes the knowledge gradient (KG) for a candidate — the expected
+    /// improvement in the portfolio's North Star objective from learning
+    /// about this candidate.
+    ///
+    /// The KG captures the value of information: dispatching a candidate with
+    /// high uncertainty but potentially high durable-fan effect teaches the
+    /// brain about the Y30 North Star, improving future decisions.
+    ///
+    /// ```text
+    /// KG = treatment_std × φ(z) + (treatment_effect - δ) × Φ(z)
+    /// ```
+    ///
+    /// where z = (δ - treatment_effect) / treatment_std, and φ/Φ are the
+    /// standard Normal PDF/CDF. This is the standard KG formula for a
+    /// Normal posterior with measurement cost = 0.
+    ///
+    /// Candidates with high KG are worth dispatching even if their current
+    /// expected value is low, because the brain learns from the outcome.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
+    #[must_use]
+    pub fn knowledge_gradient(candidate: &PortfolioCandidate) -> f64 {
+        if candidate.treatment_std <= 0.0 {
+            return 0.0;
+        }
+        // Use the meaningful-effect threshold δ = 1.0 (from causal_model).
+        let delta = 1.0;
+        let z = (delta - candidate.expected_durable_fans) / candidate.treatment_std;
+        // Standard Normal PDF: φ(z) = exp(-z²/2) / √(2π)
+        let phi = (-z * z / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
+        // Standard Normal CDF: Φ(z) — using the existing normal_cdf from bayesian.
+        let cdf = crate::bayesian::normal_cdf(z);
+        // KG = σ × φ(z) + (μ - δ) × (1 - Φ(z))
+        // = σ × φ(z) + (μ - δ) × Φ(-z)
+        candidate.treatment_std * phi + (candidate.expected_durable_fans - delta) * (1.0 - cdf)
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +424,11 @@ mod tests {
             cost: 1,
             source_context: "GrowthIntelligence".to_owned(),
             action_key: format!("action:{template}:{target}"),
+            expected_durable_fans: 0.0,
+            treatment_confidence: 0,
+            treatment_std: 0.0,
+            p_meaningful_effect: 0.0,
+            decision_mode: DecisionMode::Exploit,
         }
     }
 

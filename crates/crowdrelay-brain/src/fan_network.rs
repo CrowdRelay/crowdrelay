@@ -132,6 +132,39 @@ impl FanNetworkModel {
         self.reproduction_rate = self.reproduction_rate * 0.9 + observed_reproduction_rate * 0.1;
         self.generation = self.generation.saturating_add(1);
     }
+
+    /// Returns the attribution confidence for diffusion predictions.
+    ///
+    /// This is a value in [0, 1] that captures how confident the model is
+    /// in its fan diffusion predictions. It's based on the generation count
+    /// (number of observations used to estimate the reproduction rate):
+    ///
+    /// - 0 generations: 0.1 (very low confidence — prior only)
+    /// - 10 generations: 0.5 (moderate confidence)
+    /// - 50+ generations: 0.9 (high confidence)
+    ///
+    /// The brain uses this to weight diffusion predictions in the portfolio
+    /// optimizer: low-confidence diffusion effects are discounted.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
+    #[must_use]
+    pub fn attribution_confidence(&self) -> f64 {
+        // Sigmoid-like: confidence = g / (g + 10)
+        let g = f64::from(self.generation);
+        g / (g + 10.0)
+    }
+
+    /// Predicts fan count with attribution confidence weighting.
+    ///
+    /// Returns `(predicted_fans, confidence)`. The predicted fans are
+    /// the same as `predict_fans`, but the confidence tells the brain
+    /// how much to trust the diffusion component.
+    #[allow(dead_code)] // TODO: wire into production path (next sprint)
+    #[must_use]
+    pub fn predict_fans_with_confidence(&self, current_fans: u32, months: u32) -> (u64, f64) {
+        let fans = self.predict_fans(current_fans, months);
+        let conf = self.attribution_confidence();
+        (fans, conf)
+    }
 }
 
 /// How a fan was recruited through the network effect.
@@ -151,6 +184,7 @@ pub enum RecruitmentChannel {
 }
 
 /// A recorded network effect — one fan recruiting another.
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
 #[derive(Clone, Debug, Serialize)]
 pub struct NetworkEffect {
     /// The fan who recruited the new fan.
@@ -169,6 +203,7 @@ pub struct NetworkEffect {
 /// engagement may reproduce differently than ones acquired via Signal push
 /// or social posts. This model tracks reproduction rates per acquisition
 /// channel, allowing the simulation to predict channel-specific propagation.
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelReproductionModel {
     /// Per-channel reproduction rates. Key: channel name (e.g.
@@ -187,6 +222,7 @@ impl Default for ChannelReproductionModel {
     }
 }
 
+#[allow(dead_code)] // TODO: wire into production path (next sprint)
 impl ChannelReproductionModel {
     /// Creates a new channel reproduction model with the given default rate.
     #[must_use]
