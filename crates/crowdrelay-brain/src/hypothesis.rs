@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 /// Posterior threshold above which a hypothesis is considered `Supported`.
@@ -46,7 +46,7 @@ const BASE_LIKELIHOOD: f64 = 0.7;
 const WEIGHT_LIKELIHOOD_SPAN: f64 = 0.3;
 
 /// The status of a hypothesis as the brain accumulates evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HypothesisStatus {
     /// No evidence has been observed yet.
@@ -78,7 +78,7 @@ impl HypothesisStatus {
 /// The brain maintains a prior belief (`prior_probability`) and updates it
 /// into a posterior belief (`posterior_probability`) as evidence accumulates.
 /// Initially the posterior equals the prior.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hypothesis {
     /// Stable identifier (e.g. "reddit_metal_vs_prog").
     pub id: String,
@@ -124,7 +124,7 @@ impl Hypothesis {
 /// Each hypothesis is keyed by its stable `id`. The registry applies Bayesian
 /// updates as evidence arrives and tracks which hypotheses are supported,
 /// refuted, or still inconclusive.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HypothesisRegistry {
     /// All registered hypotheses, keyed by stable id.
     pub hypotheses: HashMap<String, Hypothesis>,

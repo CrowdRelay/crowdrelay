@@ -1173,7 +1173,7 @@ impl CommunityExecutorWorker {
                     finished_at = now(),
                     last_error_kind = $3,
                     updated_at = now()
-                WHERE id = $1 AND status = 'succeeded'
+                WHERE id = $1 AND workspace_id = $2 AND status = 'succeeded'
                 "#,
             )
             .bind(action_id)

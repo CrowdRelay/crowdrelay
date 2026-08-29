@@ -109,10 +109,12 @@ pub struct PortfolioRejection {
 pub enum RejectionReason {
     /// The marginal value was negative (not worth dispatching).
     NegativeMarginalValue,
-    /// The budget was exhausted.
+    /// The marginal value was positive but below the minimum threshold.
+    BelowThreshold,
+    /// The dispatch count budget (max_dispatches) was exhausted.
+    MaxDispatchesReached,
+    /// The cost budget was exhausted.
     BudgetExhausted,
-    /// The audience overlap penalty made this candidate not worth it.
-    AudienceOverlap,
     /// The candidate was superseded by a better candidate for the same audience.
     Superseded,
 }
@@ -246,7 +248,7 @@ impl PortfolioOptimizer {
                         reason: if best_marginal < 0.0 {
                             RejectionReason::NegativeMarginalValue
                         } else {
-                            RejectionReason::AudienceOverlap
+                            RejectionReason::BelowThreshold
                         },
                     });
                 }
@@ -274,11 +276,11 @@ impl PortfolioOptimizer {
                 break;
             }
         }
-        // Reject any remaining candidates.
+        // Reject any remaining candidates (max_dispatches was reached).
         for candidate in remaining {
             rejected.push(PortfolioRejection {
                 opportunity_key: candidate.opportunity_id.to_string(),
-                reason: RejectionReason::BudgetExhausted,
+                reason: RejectionReason::MaxDispatchesReached,
             });
         }
         let do_nothing = selected.is_empty();
@@ -356,7 +358,10 @@ mod tests {
         ]);
         assert_eq!(result.selected.len(), 2);
         assert_eq!(result.rejected.len(), 1);
-        assert_eq!(result.rejected[0].reason, RejectionReason::BudgetExhausted);
+        assert_eq!(
+            result.rejected[0].reason,
+            RejectionReason::MaxDispatchesReached
+        );
     }
 
     #[test]

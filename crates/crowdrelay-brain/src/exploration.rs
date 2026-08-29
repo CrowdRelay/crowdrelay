@@ -5,7 +5,7 @@
 //! Novel combinations get an exploration bonus; well-explored ones get
 //! diminishing returns.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::causal_model::DispatchContext;
@@ -18,7 +18,7 @@ pub const VISIT_DECAY: f64 = 0.95;
 pub const CROSS_TEMPLATE_FACTOR: f64 = 0.3;
 
 /// The brain's exploration memory.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExplorationMemory {
     /// Map of (template_id, context_hash) → effective visit count.
     pub visits: HashMap<String, f64>,
@@ -57,16 +57,27 @@ impl ExplorationMemory {
     }
 
     /// Returns the novelty score for a (template, context) pair.
+    ///
+    /// Novelty decreases with both template-specific visits (how many times
+    /// this exact template+context was explored) and cross-template context
+    /// visits (how many times *other* templates explored the same context).
+    /// The cross-template term is weighted by [`CROSS_TEMPLATE_FACTOR`] to
+    /// avoid double-counting: the current template's visits are already
+    /// captured in `template_visits`, so we subtract them from the context
+    /// total before applying the cross-template weight.
     #[must_use]
     pub fn novelty(&self, template_id: &str, context_hash: &str) -> f64 {
         let key = format!("{template_id}:{context_hash}");
         let template_visits = self.visits.get(&key).copied().unwrap_or(0.0);
-        let context_visits = self
+        let total_context_visits = self
             .context_visits
             .get(context_hash)
             .copied()
             .unwrap_or(0.0);
-        let effective = template_visits + CROSS_TEMPLATE_FACTOR * context_visits;
+        // Subtract this template's own visits from the context total to
+        // avoid double-counting.
+        let other_template_visits = (total_context_visits - template_visits).max(0.0);
+        let effective = template_visits + CROSS_TEMPLATE_FACTOR * other_template_visits;
         1.0 / (1.0 + effective)
     }
 
@@ -144,7 +155,8 @@ mod tests {
         let mut mem = ExplorationMemory::default();
         mem.record_visit("reddit-scanner", "ctx1");
         let novelty_after_1 = mem.novelty("reddit-scanner", "ctx1");
-        assert!(novelty_after_1 < 0.5 && novelty_after_1 > 0.0);
+        // After 1 visit: effective = 1.0, novelty = 1/(1+1) = 0.5.
+        assert!((novelty_after_1 - 0.5).abs() < 0.01);
         mem.record_visit("reddit-scanner", "ctx1");
         let novelty_after_2 = mem.novelty("reddit-scanner", "ctx1");
         assert!(novelty_after_2 < novelty_after_1);

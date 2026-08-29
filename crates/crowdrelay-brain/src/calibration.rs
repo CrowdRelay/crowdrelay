@@ -86,6 +86,12 @@ pub struct ReliabilityBucket {
 /// The number of buckets for the reliability diagram.
 const RELIABILITY_BUCKETS: usize = 10;
 
+/// Maximum number of raw records kept for the reliability diagram.
+/// The online accumulators track all history for O(1) bias/slope/intercept,
+/// but the reliability diagram needs raw records. This ring buffer caps
+/// memory usage while still providing a recent reliability picture.
+const MAX_RECORDS: usize = 500;
+
 /// The calibration tracker — accumulates prediction-observation pairs and
 /// produces calibration reports.
 ///
@@ -99,10 +105,27 @@ const RELIABILITY_BUCKETS: usize = 10;
 /// 3. **Self-criticize**: before making a decision, the brain applies the
 ///    calibration correction to its predictions, making the EFE score more
 ///    honest.
+///
+/// # Performance
+///
+/// The tracker maintains online accumulators (Σx, Σy, Σx², Σxy, Σerror,
+/// Σabs_error, Σerror²) so that [`correct_prediction`] and [`correct_bias`]
+/// are O(1). A bounded ring buffer of the most recent records is kept for
+/// the reliability diagram in [`report`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CalibrationTracker {
-    /// All recorded prediction-observation pairs.
+    /// Bounded ring buffer of recent records for the reliability diagram.
     pub records: Vec<PredictionRecord>,
+    /// Total number of predictions ever recorded (may exceed records.len()).
+    pub total_count: usize,
+    /// Online accumulators for O(1) calibration correction.
+    sum_predicted: f64,
+    sum_observed: f64,
+    sum_predicted_sq: f64,
+    sum_predicted_observed: f64,
+    sum_error: f64,
+    sum_abs_error: f64,
+    sum_error_sq: f64,
 }
 
 impl CalibrationTracker {
@@ -114,6 +137,21 @@ impl CalibrationTracker {
 
     /// Records a prediction-observation pair.
     pub fn record(&mut self, template_id: &str, predicted: f64, predicted_std: f64, observed: f64) {
+        // Update online accumulators.
+        let error = predicted - observed;
+        self.total_count += 1;
+        self.sum_predicted += predicted;
+        self.sum_observed += observed;
+        self.sum_predicted_sq += predicted * predicted;
+        self.sum_predicted_observed += predicted * observed;
+        self.sum_error += error;
+        self.sum_abs_error += error.abs();
+        self.sum_error_sq += error * error;
+
+        // Maintain bounded ring buffer for reliability diagram.
+        if self.records.len() >= MAX_RECORDS {
+            self.records.remove(0);
+        }
         self.records.push(PredictionRecord {
             predicted,
             predicted_std,
@@ -122,44 +160,48 @@ impl CalibrationTracker {
         });
     }
 
-    /// Returns the number of recorded predictions.
+    /// Returns the total number of recorded predictions.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.total_count
     }
 
     /// Returns true if no predictions have been recorded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.total_count == 0
     }
 
-    /// Produces a calibration report from the recorded predictions.
+    /// Produces a calibration report from the accumulated statistics.
     ///
     /// Computes bias, MAE, RMSE, calibration slope/intercept (via OLS
     /// regression of observed on predicted), and a reliability diagram
-    /// with [`RELIABILITY_BUCKETS`] buckets.
+    /// with [`RELIABILITY_BUCKETS`] buckets from the recent record buffer.
     #[must_use]
     pub fn report(&self) -> CalibrationReport {
-        if self.records.is_empty() {
+        let n = self.total_count;
+        if n == 0 {
             return CalibrationReport::default();
         }
+        let nf = n as f64;
+        let bias = self.sum_error / nf;
+        let mae = self.sum_abs_error / nf;
+        let rmse = (self.sum_error_sq / nf).sqrt();
 
-        let n = self.records.len();
-        let errors: Vec<f64> = self
-            .records
-            .iter()
-            .map(|r| r.predicted - r.observed)
-            .collect();
+        // OLS regression from online accumulators:
+        // slope = cov(x,y) / var(x), intercept = mean_y - slope * mean_x
+        let mean_x = self.sum_predicted / nf;
+        let mean_y = self.sum_observed / nf;
+        let var_x = self.sum_predicted_sq / nf - mean_x * mean_x;
+        let cov_xy = self.sum_predicted_observed / nf - mean_x * mean_y;
+        let (slope, intercept) = if var_x < 1e-10 {
+            (1.0, 0.0)
+        } else {
+            let s = cov_xy / var_x;
+            (s, mean_y - s * mean_x)
+        };
 
-        let bias = errors.iter().sum::<f64>() / n as f64;
-        let mae = errors.iter().map(|e| e.abs()).sum::<f64>() / n as f64;
-        let rmse = (errors.iter().map(|e| e * e).sum::<f64>() / n as f64).sqrt();
-
-        // OLS regression: observed = slope * predicted + intercept
-        let (slope, intercept) = ols_regression(&self.records);
-
-        // Reliability diagram: bucket predictions and compare means.
+        // Reliability diagram from the bounded record buffer.
         let reliability = reliability_diagram(&self.records, RELIABILITY_BUCKETS);
 
         CalibrationReport {
@@ -182,13 +224,23 @@ impl CalibrationTracker {
     /// ```
     ///
     /// If no data has been recorded, returns the prediction unchanged.
+    /// This is O(1) — it uses online accumulators, not a full history scan.
     #[must_use]
     pub fn correct_prediction(&self, predicted: f64) -> f64 {
-        if self.records.is_empty() {
+        if self.total_count == 0 {
             return predicted;
         }
-        let report = self.report();
-        report.calibration_slope * predicted + report.calibration_intercept
+        let nf = self.total_count as f64;
+        let mean_x = self.sum_predicted / nf;
+        let mean_y = self.sum_observed / nf;
+        let var_x = self.sum_predicted_sq / nf - mean_x * mean_x;
+        if var_x < 1e-10 {
+            return predicted;
+        }
+        let cov_xy = self.sum_predicted_observed / nf - mean_x * mean_y;
+        let slope = cov_xy / var_x;
+        let intercept = mean_y - slope * mean_x;
+        slope * predicted + intercept
     }
 
     /// Applies bias correction to a prediction.
@@ -200,19 +252,14 @@ impl CalibrationTracker {
     /// ```
     ///
     /// This is simpler than [`correct_prediction`] but more robust when the
-    /// calibration slope is noisy (few observations).
+    /// calibration slope is noisy (few observations). O(1) via online
+    /// accumulators.
     #[must_use]
     pub fn correct_bias(&self, predicted: f64) -> f64 {
-        if self.records.is_empty() {
+        if self.total_count == 0 {
             return predicted;
         }
-        let n = self.records.len() as f64;
-        let bias: f64 = self
-            .records
-            .iter()
-            .map(|r| r.predicted - r.observed)
-            .sum::<f64>()
-            / n;
+        let bias = self.sum_error / self.total_count as f64;
         predicted - bias
     }
 

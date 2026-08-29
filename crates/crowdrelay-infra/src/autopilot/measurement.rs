@@ -278,10 +278,13 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT COALESCE(SUM(attributed_clicks),0)::double precision
                         FROM viryaos_show_growth_surfaces
                         WHERE workspace_id=$1 AND event_id=$2
+                          AND measured_at >= $3
+                          AND measured_at < $3 + INTERVAL '7 days'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
                     .fetch_one(&self.pool)
                     .await
                     .map_err(map_sqlx)?
@@ -292,10 +295,13 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT COALESCE(SUM(attributed_ticket_orders),0)::double precision
                         FROM viryaos_show_growth_surfaces
                         WHERE workspace_id=$1 AND event_id=$2
+                          AND measured_at >= $3
+                          AND measured_at < $3 + INTERVAL '7 days'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
                     .fetch_one(&self.pool)
                     .await
                     .map_err(map_sqlx)?
@@ -332,6 +338,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         WHERE workspace_id = $1
                           AND created_at >= $2
                           AND created_at < $2 + INTERVAL '14 days'
+                          AND status != 'suppressed'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -352,6 +359,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         WHERE workspace_id = $1
                           AND created_at >= $2
                           AND created_at < $2 + INTERVAL '14 days'
+                          AND status != 'suppressed'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -373,6 +381,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT COUNT(*)::double precision
                         FROM fan_push_endpoints
                         WHERE workspace_id = $1
+                          AND active = true
                           AND invalidated_at IS NULL
                           AND created_at >= $2
                           AND created_at < $2 + INTERVAL '7 days'
@@ -415,7 +424,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .map_err(map_sqlx)?
                 }
             };
-            if observed.is_finite() && observed >= 0.0 {
+            if observed.is_finite() {
                 Ok(observed)
             } else {
                 Err(RepositoryError::Unexpected)
@@ -433,13 +442,13 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
-            if !observed_value.is_finite() || observed_value < 0.0 {
+            if !observed_value.is_finite() {
                 return Err(RepositoryError::Unexpected);
             }
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
-            sqlx::query(
+            let outcome_inserted = sqlx::query(
                 r#"
                 INSERT INTO viryaos_autopilot_outcomes (
                     workspace_id, decision_id, action_id, measurement_id, metric_key,
@@ -468,6 +477,12 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            if outcome_inserted.rows_affected() == 0 {
+                // The action row is missing — the outcome INSERT...SELECT
+                // produced no rows. Fail the measurement instead of marking
+                // it succeeded with no outcome recorded.
+                return Err(RepositoryError::NotFound);
+            }
             let updated = sqlx::query(
                 r#"
                 UPDATE viryaos_autopilot_measurements

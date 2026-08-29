@@ -622,6 +622,7 @@ where
                     // logic.
                     let selection = portfolio::select_portfolio(&scored_candidates);
                     let selected_keys = portfolio::selected_keys(&selection);
+                    let mut dispatched_count = 0usize;
                     for (candidate, prediction, _efe, _rank) in scored_candidates {
                         // Skip candidates that the portfolio optimizer
                         // rejected (negative marginal value, audience
@@ -645,12 +646,14 @@ where
                                 )
                                 .await;
                         }
+                        dispatched_count += 1;
                     }
-                    // Mark all loaded insights as consumed, regardless of
-                    // whether a dispatch was produced. The brain has read
-                    // them and made its decision — keeping them unconsumed
-                    // would just re-feed the same data next cycle.
-                    if !consumed_ids.is_empty() {
+                    // Only mark insights as consumed when the brain actually
+                    // acted on them (at least one dispatch was produced).
+                    // When do_nothing is true, the brain chose not to act —
+                    // keeping insights unconsumed lets them be re-evaluated
+                    // next cycle with potentially different context.
+                    if !consumed_ids.is_empty() && dispatched_count > 0 {
                         let _ = self
                             .repository
                             .mark_insights_consumed(self.workspace_id, &consumed_ids)
