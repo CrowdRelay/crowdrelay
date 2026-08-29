@@ -47,8 +47,8 @@ impl OutcomeKind {
     #[must_use]
     pub const fn autopilot_context(self) -> &'static str {
         match self {
-            Self::PressPitch | Self::SocialPost | Self::SignalPush => "promotion_budget",
-            Self::AudienceSegments => "fan_lifecycle",
+            Self::PressPitch | Self::SocialPost => "promotion_budget",
+            Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets => "booking_opportunity",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => {
                 "growth_intelligence"
@@ -75,7 +75,8 @@ impl OutcomeKind {
     #[must_use]
     pub const fn decision_kind(self) -> &'static str {
         match self {
-            Self::PressPitch | Self::SocialPost | Self::SignalPush => "agent_content_proposal",
+            Self::PressPitch | Self::SocialPost => "agent_content_proposal",
+            Self::SignalPush => "agent_signal_push_proposal",
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
@@ -315,7 +316,7 @@ mod tests {
         assert_eq!(outcome.kind, OutcomeKind::SignalPush);
         assert_eq!(outcome.kind.as_str(), "signal_push");
         assert_eq!(outcome.kind.disposition(), "require_approval");
-        assert_eq!(outcome.kind.decision_kind(), "agent_content_proposal");
-        assert_eq!(outcome.kind.autopilot_context(), "promotion_budget");
+        assert_eq!(outcome.kind.decision_kind(), "agent_signal_push_proposal");
+        assert_eq!(outcome.kind.autopilot_context(), "fan_lifecycle");
     }
 }

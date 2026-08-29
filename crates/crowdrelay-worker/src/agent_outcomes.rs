@@ -328,16 +328,26 @@ impl AgentOutcomeWorker {
                 None
             };
 
-            // Check if the workspace's promotion_budget policy is set to
-            // bounded_auto. If so, Reddit community engagement posts skip
-            // the approval step and go straight to queued. The community
-            // executor's anti-spam guardrails (3 posts/24h, 7-day subreddit
-            // cooldown) serve as the bounds. Only Reddit community posts
-            // are eligible — press pitches and signal pushes always require
-            // human approval because they reach people directly.
+            // Check if the workspace's policy for the outcome's context is
+            // set to bounded_auto. If so, the action skips the approval step
+            // and goes straight to queued. Two cases:
+            //   1. Reddit community posts (promotion_budget context) — the
+            //      community executor's anti-spam guardrails (3 posts/24h,
+            //      7-day subreddit cooldown) serve as the bounds.
+            //   2. Signal pushes (fan_lifecycle context) — pushing to an
+            //      existing fan who opted in is fan lifecycle engagement,
+            //      not promotion spend. The push delivery rate limits and
+            //      the fan's own opt-in serve as the bounds.
+            // Press pitches and regular social posts always require human
+            // approval because they reach external audiences directly.
             let is_reddit_community_post = community_target_id.is_some();
+            let is_signal_push = outcome.kind == OutcomeKind::SignalPush;
             let auto_execute = if is_reddit_community_post {
-                self.is_promotion_budget_bounded_auto(&mut tx).await?
+                self.is_context_bounded_auto(&mut tx, "promotion_budget")
+                    .await?
+            } else if is_signal_push {
+                self.is_context_bounded_auto(&mut tx, "fan_lifecycle")
+                    .await?
             } else {
                 false
             };
@@ -742,27 +752,27 @@ impl AgentOutcomeWorker {
         Ok(())
     }
 
-    /// Checks whether the workspace's `promotion_budget` autopilot policy
-    /// is set to `bounded_auto`. This is the gate for autonomous Reddit
-    /// community engagement: if the operator has set the policy to
-    /// `bounded_auto`, community engagement posts skip the approval step
-    /// and go straight to `queued`. The community executor's anti-spam
-    /// guardrails (3 posts/24h, 7-day subreddit cooldown) serve as the
-    /// bounds. Returns `false` if the policy is missing or not
-    /// `bounded_auto` — fail-closed to `require_approval`.
-    async fn is_promotion_budget_bounded_auto(
+    /// Checks whether the workspace's autopilot policy for the given context
+    /// is set to `bounded_auto`. This is the gate for autonomous execution:
+    /// if the operator has set the policy to `bounded_auto`, the action
+    /// skips the approval step and goes straight to `queued`. Returns
+    /// `false` if the policy is missing or not `bounded_auto` — fail-closed
+    /// to `require_approval`.
+    async fn is_context_bounded_auto(
         &self,
         tx: &mut Transaction<'_, Postgres>,
+        context: &str,
     ) -> Result<bool, AgentOutcomeError> {
         let autonomy: Option<String> = sqlx::query_scalar(
             r#"
             SELECT autonomy_level
             FROM viryaos_autopilot_policies
-            WHERE workspace_id = $1 AND context = 'promotion_budget'
+            WHERE workspace_id = $1 AND context = $2
             LIMIT 1
             "#,
         )
         .bind(self.workspace_id.into_uuid())
+        .bind(context)
         .fetch_optional(&mut **tx)
         .await?;
         Ok(autonomy.as_deref() == Some("bounded_auto"))

@@ -597,11 +597,20 @@ pub fn evaluate_growth_intelligence(
         });
     }
 
-    // Rule 6: Signal inviter on a 7-day cadence.
+    // Rule 6: Signal inviter on a 2-day cadence, escalated near events.
+    // When an event is within 14 days, the cadence tightens to 1 day and
+    // priority rises — fans need time to plan attendance, and a push sent
+    // the day before is too late.
     if snapshot.template_id == "signal-inviter"
         && effective_hours >= signal_inviter_cd
         && retry_ready
     {
+        let days_to_event = snapshot.days_to_next_event.unwrap_or(u32::MAX);
+        let (priority, reason) = if days_to_event <= 14 {
+            (1, "Signal invite escalated — event within 14 days")
+        } else {
+            (3, "Signal invite cadence is due (2-day cycle)")
+        };
         let mut prompt = "Draft Signal push invites for fans near upcoming events. Keep messages personal and under 200 characters. Include a smart link to the Signal install page. Write in Polish.".to_owned();
         if !insights.is_empty() {
             prompt.push_str("\n\n");
@@ -609,14 +618,14 @@ pub fn evaluate_growth_intelligence(
         }
         return Some(IntelligenceRequest {
             template_id: "signal-inviter",
-            priority: 3,
+            priority,
             prompt,
             key_window_hours: if is_retry {
                 retry_window
             } else {
                 signal_inviter_cd
             },
-            reason: "Signal invite cadence is due (7-day cycle)",
+            reason,
             tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
             prediction: make_prediction(
                 "signal-inviter",

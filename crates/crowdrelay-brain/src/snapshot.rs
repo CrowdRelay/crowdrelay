@@ -93,7 +93,7 @@ impl Default for GrowthIntelligencePolicy {
             community_engager_cooldown_hours: 120,
             press_pitch_cooldown_hours: 72,
             social_post_cooldown_hours: 48,
-            signal_inviter_cooldown_hours: 168,
+            signal_inviter_cooldown_hours: 48,
             growth_strategist_cooldown_hours: 24,
             press_pitch_event_lead_days: 30,
             fan_growth_stagnant_days: 14,
