@@ -153,6 +153,9 @@ pub struct CausalModel {
     /// Per-template Signal install EMA. Learned independently from fan
     /// counts because Signal adoption has different drivers.
     pub template_expected_signal: HashMap<String, f64>,
+    /// Calibration tracker — learns the mapping between predicted and
+    /// observed fans and corrects future predictions to reduce bias.
+    pub calibration: crate::calibration::CalibrationTracker,
 }
 
 /// Treatment-aware prediction statistics — the result of querying both the
@@ -191,6 +194,7 @@ impl CausalModel {
             )),
             treatment_effects: TreatmentEffectPosterior::new(),
             template_expected_signal: HashMap::new(),
+            calibration: crate::calibration::CalibrationTracker::new(),
         }
     }
 
@@ -213,6 +217,18 @@ impl CausalModel {
             .fans
             .predict(template_id, context.subreddit_type.as_deref());
         apply_context_adjustments(mean, context)
+    }
+
+    /// Predicts expected new fans with calibration correction applied.
+    ///
+    /// This is the same as [`predict`](Self::predict) but applies the
+    /// calibration tracker's slope/intercept correction to reduce
+    /// systematic prediction bias. When no calibration data is available,
+    /// this is identical to `predict`.
+    #[must_use]
+    pub fn predict_calibrated(&self, template_id: &str, context: &DispatchContext) -> f64 {
+        let raw = self.predict(template_id, context);
+        self.calibration.correct_prediction(raw).max(0.0)
     }
 
     /// Predicts expected Signal installs for a dispatch. Uses the
@@ -281,6 +297,15 @@ impl CausalModel {
             signal_current + lr * (outcome.observed_signal_installs - signal_current);
         self.template_expected_signal
             .insert(template.clone(), signal_updated.max(0.0));
+        // Record the prediction-observation pair for calibration. This
+        // lets the brain detect and correct systematic prediction bias
+        // (e.g. consistently over-predicting fan growth).
+        self.calibration.record(
+            template,
+            outcome.prediction.expected_new_fans,
+            self.predict_std(template),
+            outcome.observed_new_fans,
+        );
     }
 
     /// Returns the confidence (measurement count) for a template.
@@ -405,6 +430,11 @@ impl CausalModel {
         context: &DispatchContext,
     ) -> TreatmentAwareStats {
         let (expected_fans, predict_std, confidence) = self.predict_stats(template_id, context);
+        // Apply calibration correction to the outcome model prediction.
+        // This reduces systematic prediction bias (e.g. consistently
+        // over-predicting fan growth). When no calibration data is
+        // available, correct_prediction returns the input unchanged.
+        let expected_fans = self.calibration.correct_prediction(expected_fans).max(0.0);
         let (treatment_effect, treatment_std, treatment_confidence) = self
             .treatment_effects
             .predict_stats(template_id, context.subreddit_type.as_deref());
