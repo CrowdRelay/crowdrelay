@@ -27,6 +27,9 @@
     "crates/crowdrelay-api/src/acquisition.rs": 1213,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
     "crates/crowdrelay-worker/src/community_executor.rs": 1322,
-    "crates/crowdrelay-application/src/autopilot/model.rs": 1231
+    "crates/crowdrelay-application/src/autopilot/model.rs": 1231,
+    "crates/crowdrelay-brain/src/causal_model.rs": 1311,
+    "crates/crowdrelay-brain/src/reach.rs": 1260,
+    "crates/crowdrelay-brain/src/bayesian.rs": 1339
   }
 }
