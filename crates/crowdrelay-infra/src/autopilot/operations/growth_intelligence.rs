@@ -584,11 +584,17 @@ pub(in crate::autopilot) async fn load_causal_model(
     // We load the full context jsonb so the hierarchical model can learn
     // per-subreddit-type effects. Rows are ordered oldest-first so the
     // EMA update processes them in chronological order.
-    /// Evidence row: (template_id, expected_fans, expected_signal, observed_fans, observed_signal, context_json)
+    //
+    // We prefer `observed_incremental_fans` (counterfactual-adjusted) over
+    // `observed_new_fans` (raw count) when available — this is the causally
+    // correct outcome that isolates the dispatch's effect from organic
+    // growth.
+    /// Evidence row: (template_id, expected_fans, expected_signal, observed_fans, observed_incremental_fans, observed_signal, context_json)
     type EvidenceRow = (
         String,
         f64,
         f64,
+        Option<f64>,
         Option<f64>,
         Option<f64>,
         serde_json::Value,
@@ -599,12 +605,15 @@ pub(in crate::autopilot) async fn load_causal_model(
                expected_new_fans,
                expected_signal_installs,
                observed_new_fans,
+               observed_incremental_fans,
                observed_signal_installs,
                context
         FROM viryaos_brain_evidence
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
-          AND (observed_new_fans IS NOT NULL OR observed_signal_installs IS NOT NULL)
+          AND (observed_new_fans IS NOT NULL
+               OR observed_incremental_fans IS NOT NULL
+               OR observed_signal_installs IS NOT NULL)
         ORDER BY predicted_at ASC
         "#,
     )
@@ -619,6 +628,7 @@ pub(in crate::autopilot) async fn load_causal_model(
         expected_fans,
         expected_signal,
         observed_fans,
+        observed_incremental_fans,
         observed_signal,
         context_json,
     ) in rows
@@ -634,7 +644,7 @@ pub(in crate::autopilot) async fn load_causal_model(
         // Prefer incremental fan growth (counterfactual-adjusted) when
         // available — this is the causally correct outcome. Fall back to
         // raw observed fans for backward compatibility.
-        let outcome_fans = observed_fans.unwrap_or(0.0);
+        let outcome_fans = observed_incremental_fans.or(observed_fans).unwrap_or(0.0);
         let outcome = PredictionOutcome::from_observation(
             prediction,
             outcome_fans,

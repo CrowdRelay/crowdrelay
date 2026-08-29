@@ -8,12 +8,13 @@
 //! See `crates/crowdrelay-brain/src/reach.rs` for the domain types.
 
 use crowdrelay_brain::{ReachChannel, ReachEvent, ReachMetrics, ReachRecipientKind, ReachStatus};
+use crowdrelay_domain::WorkspaceId;
 use serde::Deserialize;
+use sqlx::FromRow;
 use time::OffsetDateTime;
 
-use crate::autopilot::support::map_sqlx;
-use crate::autopilot::{PostgresAutopilotRepository, RepositoryError};
-use crowdrelay_domain::WorkspaceId;
+use super::{PostgresAutopilotRepository, map_sqlx};
+use crowdrelay_application::RepositoryError;
 
 /// Records a new reach event. Returns the database-generated ID.
 ///
@@ -21,6 +22,7 @@ use crowdrelay_domain::WorkspaceId;
 /// push delivery, outreach execution) after they perform an outbound
 /// contact attempt. The reach event is the brain's unified view of "who
 /// did we contact, how, and what happened?"
+#[allow(dead_code)]
 pub(in crate::autopilot) async fn record_reach_event(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -66,6 +68,7 @@ pub(in crate::autopilot) async fn record_reach_event(
 
 /// Updates the status of a reach event. Used when a delivery confirmation,
 /// reply, or conversion is received.
+#[allow(dead_code)]
 pub(in crate::autopilot) async fn update_reach_status(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -94,6 +97,7 @@ pub(in crate::autopilot) async fn update_reach_status(
 
 /// Marks a reach event as converted to a fan. This closes the
 /// reach-to-fan attribution loop.
+#[allow(dead_code)]
 pub(in crate::autopilot) async fn convert_reach_to_fan(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -125,6 +129,7 @@ pub(in crate::autopilot) async fn convert_reach_to_fan(
 
 /// Loads reach events for a workspace within a time window, optionally
 /// filtered by channel or template.
+#[allow(dead_code)]
 pub(in crate::autopilot) async fn load_reach_events(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -166,6 +171,7 @@ pub(in crate::autopilot) async fn load_reach_events(
 /// This is the brain's primary read path for reach analytics. It returns
 /// counts of each status type (sent, delivered, opened, clicked, replied,
 /// converted, bounced, etc.) and the total estimated reach.
+#[allow(dead_code)]
 pub(in crate::autopilot) async fn load_reach_metrics(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -211,6 +217,7 @@ pub(in crate::autopilot) async fn load_reach_metrics(
 /// This searches for reach events in the `delivered` or `clicked` status
 /// that were sent before the fan's `created_at`, matching by metadata
 /// (e.g. subreddit name) or timing.
+#[allow(dead_code)]
 pub(in crate::autopilot) async fn find_convertible_reach_events(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -248,7 +255,7 @@ pub(in crate::autopilot) async fn find_convertible_reach_events(
 // ─── Internal types ──────────────────────────────────────────────────────
 
 /// Database row for a reach event.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, FromRow, Deserialize)]
 struct ReachEventRow {
     workspace_id: uuid::Uuid,
     action_id: Option<uuid::Uuid>,
@@ -288,7 +295,7 @@ impl From<ReachEventRow> for ReachEvent {
 }
 
 /// Database row for aggregated reach metrics.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, FromRow, Deserialize)]
 struct ReachMetricsRow {
     total_events: i64,
     total_reach: i64,

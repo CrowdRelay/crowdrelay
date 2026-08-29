@@ -132,6 +132,9 @@ pub(in crate::autopilot) async fn record_outreach_sent(
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(now).bind(followup).execute(&mut **tx).await.map_err(map_sqlx)?;
     sqlx::query(r#"INSERT INTO viryaos_outreach_interactions(workspace_id,target_id,opportunity_id,direction,phase,source_key,occurred_at) VALUES($1,$2,$3,'outbound',$4,$5,$6) ON CONFLICT(workspace_id,target_id,source_key) DO NOTHING"#)
       .bind(workspace_id.into_uuid()).bind(target_id.into_uuid()).bind(opportunity_id.into_uuid()).bind(outreach_phase_str(phase)).bind(format!("autopilot:{}",action_id)).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
+    // Record reach event for the unified reach ledger.
+    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'outreach_target', $3::text, 'email', 'outreach', 1, 'sent', jsonb_build_object('phase', $4, 'opportunity_id', $5)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+      .bind(workspace_id.into_uuid()).bind(action_id.into_uuid()).bind(target_id.into_uuid()).bind(outreach_phase_str(phase)).bind(opportunity_id.into_uuid()).execute(&mut **tx).await.map_err(map_sqlx)?;
     Ok(())
 }
 
@@ -1090,6 +1093,17 @@ pub(in crate::autopilot) async fn execute_signal_push(
     }
 
     query.execute(&mut **tx).await.map_err(map_sqlx)?;
+
+    // Record a reach event for the unified reach ledger. Signal pushes are
+    // broadcast reaches — one action reaches many fans. The estimated_reach
+    // is the number of eligible endpoints (approximate).
+    sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', 1, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+        .bind(workspace_id.into_uuid())
+        .bind(action_uuid)
+        .bind(title)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
 
     Ok(())
 }
