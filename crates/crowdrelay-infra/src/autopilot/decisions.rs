@@ -377,6 +377,52 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::reach::load_reach_metrics(self, workspace_id, since, until).await
     }
 
+    async fn record_growth_evidence(
+        &self,
+        workspace_id: WorkspaceId,
+        evidence: &crowdrelay_brain::GrowthEvidence,
+    ) -> Result<(), RepositoryError> {
+        super::operations::evidence::record_growth_evidence(self, workspace_id, evidence).await
+    }
+
+    async fn load_growth_evidence(
+        &self,
+        workspace_id: WorkspaceId,
+        since: Option<OffsetDateTime>,
+    ) -> Result<Vec<crowdrelay_brain::GrowthEvidence>, RepositoryError> {
+        super::operations::evidence::load_growth_evidence(self, workspace_id, since).await
+    }
+
+    async fn save_brain_state(
+        &self,
+        workspace_id: WorkspaceId,
+        module: &str,
+        state: &serde_json::Value,
+    ) -> Result<(), RepositoryError> {
+        super::operations::evidence::save_brain_state(self, workspace_id, module, state).await
+    }
+
+    async fn load_brain_state(
+        &self,
+        workspace_id: WorkspaceId,
+        module: &str,
+    ) -> Result<Option<(serde_json::Value, OffsetDateTime)>, RepositoryError> {
+        super::operations::evidence::load_brain_state(self, workspace_id, module).await
+    }
+
+    async fn save_brain_state_checkpoint(
+        &self,
+        workspace_id: WorkspaceId,
+        model: &crowdrelay_brain::CausalModel,
+    ) -> Result<(), RepositoryError> {
+        super::operations::growth_intelligence::save_causal_model_checkpoint(
+            self,
+            workspace_id,
+            model,
+        )
+        .await
+    }
+
     async fn load_outreach_supply_snapshot(
         &self,
         workspace_id: WorkspaceId,

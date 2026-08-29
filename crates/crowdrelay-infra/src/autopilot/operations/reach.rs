@@ -36,6 +36,7 @@ pub(in crate::autopilot) async fn load_reach_metrics(
         SELECT
             COUNT(*)::bigint AS total_events,
             COALESCE(SUM(estimated_reach), 0)::bigint AS total_reach,
+            COUNT(DISTINCT recipient_id)::bigint AS unique_reach,
             COUNT(*) FILTER (WHERE status = 'delivered')::bigint AS delivered,
             COUNT(*) FILTER (WHERE status = 'opened')::bigint AS opened,
             COUNT(*) FILTER (WHERE status = 'clicked')::bigint AS clicked,
@@ -69,6 +70,7 @@ pub(in crate::autopilot) async fn load_reach_metrics(
 struct ReachMetricsRow {
     total_events: i64,
     total_reach: i64,
+    unique_reach: i64,
     delivered: i64,
     opened: i64,
     clicked: i64,
@@ -87,6 +89,7 @@ impl From<ReachMetricsRow> for ReachMetrics {
         ReachMetrics {
             total_events: row.total_events.max(0) as u64,
             total_reach: row.total_reach.max(0) as u64,
+            unique_reach: row.unique_reach.max(0) as u64,
             delivered: row.delivered.max(0) as u64,
             opened: row.opened.max(0) as u64,
             clicked: row.clicked.max(0) as u64,

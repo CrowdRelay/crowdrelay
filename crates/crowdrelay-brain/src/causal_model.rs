@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::bayesian::{HierarchicalPosterior, NormalPosterior, TreatmentEffectPosterior};
+use crate::context_effect::ContextEffectPosterior;
 use crate::world_model::GrowthTrend;
 
 /// Context features that the causal model uses to predict fan acquisition
@@ -156,6 +157,16 @@ pub struct CausalModel {
     /// Calibration tracker — learns the mapping between predicted and
     /// observed fans and corrects future predictions to reduce bias.
     pub calibration: crate::calibration::CalibrationTracker,
+    /// Learned context effects — replaces hardcoded multipliers (×1.5 event,
+    /// ×0.8 stagnant, etc.) with Bayesian posteriors that learn the true
+    /// context effect from data. Falls back to the hardcoded values as
+    /// priors when confidence is low.
+    pub context_effects: ContextEffectPosterior,
+    /// Reach conversion model — learns per-channel, per-template
+    /// reach-to-fan conversion rates. When reach data is available, the
+    /// brain predicts `E[fans] = reach × P(conversion)` instead of a raw
+    /// template mean.
+    pub reach_model: crate::reach::ReachConversionModel,
 }
 
 /// Treatment-aware prediction statistics — the result of querying both the
@@ -195,6 +206,8 @@ impl CausalModel {
             treatment_effects: TreatmentEffectPosterior::new(),
             template_expected_signal: HashMap::new(),
             calibration: crate::calibration::CalibrationTracker::new(),
+            context_effects: ContextEffectPosterior::new(),
+            reach_model: crate::reach::ReachConversionModel::new(),
         }
     }
 
@@ -216,7 +229,7 @@ impl CausalModel {
         let (mean, _var) = self
             .fans
             .predict(template_id, context.subreddit_type.as_deref());
-        apply_context_adjustments(mean, context)
+        self.context_effects.predict(context) * mean
     }
 
     /// Predicts expected new fans with calibration correction applied.
@@ -278,12 +291,23 @@ impl CausalModel {
     pub fn update(&mut self, outcome: &PredictionOutcome) {
         let template = &outcome.prediction.template_id;
         let subreddit_type = outcome.prediction.context.subreddit_type.as_deref();
+        // Get the base prediction (posterior mean before context adjustment)
+        // so we can learn the context effect from the ratio.
+        let (base_mean, _) = self.fans.predict(template, subreddit_type);
         // Update the hierarchical fan posterior.
         self.fans.update(
             Some(template),
             subreddit_type,
             outcome.observed_new_fans,
             OBSERVATION_VARIANCE,
+        );
+        // Update the learned context effects from the implied multiplier.
+        // base_mean is the raw posterior mean before context adjustment;
+        // the ratio observed/base implies the context multiplier.
+        self.context_effects.update(
+            &outcome.prediction.context,
+            base_mean,
+            outcome.observed_new_fans,
         );
         // Update the Signal install EMA.
         let confidence = self.fans.confidence(template);
@@ -324,7 +348,7 @@ impl CausalModel {
         let (mean, var) = self
             .fans
             .predict(template_id, context.subreddit_type.as_deref());
-        let expected_fans = apply_context_adjustments(mean, context);
+        let expected_fans = self.context_effects.predict(context) * mean;
         let predict_std = var.sqrt().max(0.1);
         let confidence = self.fans.confidence(template_id);
         (expected_fans, predict_std, confidence)
@@ -452,30 +476,18 @@ impl CausalModel {
 }
 
 /// Applies the context adjustments (event proximity, growth trend) to a
-/// raw posterior mean. This is the single source of truth for the
-/// multiplicative context adjustments — both [`CausalModel::predict`] and
-/// [`crate::simulation::WorldSimulation`] call this so the adjustments
-/// never drift out of sync.
+/// raw posterior mean using the default (prior) context effect posteriors.
 ///
-/// - Event proximity (≤7 days) boosts by 1.5x
-/// - Event proximity (≤30 days) boosts by 1.2x
-/// - Stagnant/Decelerating growth reduces by 0.8x
-/// - Accelerating growth boosts by 1.1x
+/// This is used by [`crate::simulation::WorldSimulation`] which doesn't
+/// have access to a learned `CausalModel`. The [`CausalModel::predict`]
+/// method uses the learned `ContextEffectPosterior` instead.
+///
+/// When the posteriors have no data, they fall back to the same hardcoded
+/// values (1.5, 1.2, 0.8, 1.1) as before.
 #[must_use]
-pub(crate) fn apply_context_adjustments(mut prediction: f64, context: &DispatchContext) -> f64 {
-    if let Some(days) = context.days_to_event {
-        if days <= 7 {
-            prediction *= 1.5;
-        } else if days <= 30 {
-            prediction *= 1.2;
-        }
-    }
-    match context.fan_growth_trend {
-        GrowthTrend::Stagnant | GrowthTrend::Decelerating => prediction *= 0.8,
-        GrowthTrend::Accelerating => prediction *= 1.1,
-        GrowthTrend::Steady => {}
-    }
-    prediction.max(0.0)
+pub(crate) fn apply_context_adjustments(prediction: f64, context: &DispatchContext) -> f64 {
+    let ctx = ContextEffectPosterior::new();
+    ctx.predict(context) * prediction
 }
 
 #[cfg(test)]

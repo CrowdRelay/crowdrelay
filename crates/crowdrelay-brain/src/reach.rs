@@ -231,10 +231,32 @@ impl ReachStatus {
         }
     }
 
+    /// Returns true if this status indicates a positive response (reply,
+    /// positive reply, or conversion). This is the broad "engaged" signal.
+    #[must_use]
+    pub const fn is_positive_response(self) -> bool {
+        matches!(self, Self::Replied | Self::PositiveReply | Self::Converted)
+    }
+
+    /// Returns true if this status indicates a fan conversion.
+    ///
+    /// Only `Converted` is a true conversion — the recipient became a fan.
+    /// `PositiveReply` is a positive response but NOT a conversion: someone
+    /// replying positively to an outreach email has not necessarily become
+    /// a fan. Conflating these inflates the brain's effective conversion
+    /// rate and poisons the reach-to-fan learning.
+    #[must_use]
+    pub const fn is_conversion(self) -> bool {
+        matches!(self, Self::Converted)
+    }
+
     /// Returns true if this status indicates a successful conversion.
+    ///
+    /// Delegates to [`is_conversion`](Self::is_conversion). Kept for
+    /// backward compatibility with code that checks `is_converted()`.
     #[must_use]
     pub const fn is_converted(self) -> bool {
-        matches!(self, Self::Converted | Self::PositiveReply)
+        self.is_conversion()
     }
 
     /// Returns true if this status indicates a negative outcome.
@@ -396,12 +418,20 @@ impl ReachEvent {
 ///
 /// This is the summary the brain uses to learn which channels and templates
 /// produce the best reach-to-fan conversion rates.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReachMetrics {
     /// Total reach events.
     pub total_events: u64,
-    /// Total estimated people reached (sum of `estimated_reach`).
+    /// Total estimated people reached (sum of `estimated_reach`). This is
+    /// **gross** potential reach — the same person may be counted multiple
+    /// times across events. Use [`unique_reach`](Self::unique_reach) for
+    /// deduplicated reach.
     pub total_reach: u64,
+    /// Unique recipients reached (count of distinct `recipient_id` values).
+    /// This is the deduplicated reach — how many distinct people/audiences
+    /// were contacted. For broadcasts, each subreddit/audience counts as
+    /// one unique recipient regardless of subscriber count.
+    pub unique_reach: u64,
     /// Events that were delivered.
     pub delivered: u64,
     /// Events that were opened (email) or seen (push).
@@ -431,9 +461,12 @@ impl ReachMetrics {
     #[must_use]
     pub fn from_events(events: &[ReachEvent]) -> Self {
         let mut metrics = Self::default();
+        let mut unique_recipients: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
         for event in events {
             metrics.total_events += 1;
             metrics.total_reach += u64::from(event.estimated_reach);
+            unique_recipients.insert(event.recipient_id.as_str());
             match event.status {
                 ReachStatus::Sent => {}
                 ReachStatus::Delivered => metrics.delivered += 1,
@@ -449,6 +482,7 @@ impl ReachMetrics {
                 ReachStatus::Failed => metrics.failed += 1,
             }
         }
+        metrics.unique_reach = unique_recipients.len() as u64;
         metrics
     }
 
@@ -488,6 +522,29 @@ impl ReachMetrics {
         self.converted as f64 / self.total_reach as f64
     }
 
+    /// Returns the unique reach-to-fan conversion rate:
+    /// converted / unique_reach. This is more accurate than
+    /// [`reach_to_fan_rate`](Self::reach_to_fan_rate) because it
+    /// doesn't double-count the same recipient across multiple events.
+    #[must_use]
+    pub fn unique_reach_to_fan_rate(&self) -> f64 {
+        if self.unique_reach == 0 {
+            return 0.0;
+        }
+        self.converted as f64 / self.unique_reach as f64
+    }
+
+    /// Returns the positive response rate:
+    /// (positive_replies + converted) / total_events.
+    /// This measures engagement quality, not just conversion.
+    #[must_use]
+    pub fn positive_response_rate(&self) -> f64 {
+        if self.total_events == 0 {
+            return 0.0;
+        }
+        (self.positive_replies + self.converted) as f64 / self.total_events as f64
+    }
+
     /// Returns the bounce rate: bounced / total_events.
     #[must_use]
     pub fn bounce_rate(&self) -> f64 {
@@ -495,6 +552,115 @@ impl ReachMetrics {
             return 0.0;
         }
         self.bounced as f64 / self.total_events as f64
+    }
+}
+
+// ─── Reach Conversion Model ───────────────────────────────────────────────
+
+/// The prior conversion rate when no data is available. A conservative
+/// 1% — most reach events do not produce fan conversions.
+const DEFAULT_CONVERSION_RATE: f64 = 0.01;
+
+/// The prior strength (pseudo-count) for the Beta posterior. A value of 10
+/// means the prior is worth ~10 observations. This keeps the conversion
+/// rate stable when data is scarce.
+const CONVERSION_PRIOR_STRENGTH: f64 = 10.0;
+
+/// The reach conversion model — learns per-channel and per-template
+/// reach-to-fan conversion rates using Beta posteriors.
+///
+/// The brain uses this to predict `E[fans] = reach × P(conversion | channel,
+/// template)` instead of a raw template mean. This makes the prediction
+/// reach-aware: a post to a 20k-subscriber subreddit with a 0.1% conversion
+/// rate produces 20 fans, while a post to an 800-subscriber subreddit with
+/// the same rate produces 0.8 fans.
+///
+/// # Model
+///
+/// Each (channel, template) pair gets a `Beta(α, β)` posterior. The prior
+/// is `Beta(1, 99)` (mean 0.01, strength 10). When a reach event resolves
+/// with a conversion, α increases; when it resolves without, β increases.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReachConversionModel {
+    /// Per-(channel, template) Beta posterior parameters.
+    /// Key: "{channel}:{template_id}", Value: (alpha, beta).
+    pub posteriors: std::collections::HashMap<String, (f64, f64)>,
+}
+
+impl ReachConversionModel {
+    /// Creates a new reach conversion model with default priors.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the Beta prior parameters (alpha, beta) for a conversion rate.
+    /// Mean = α/(α+β) = 0.01, strength = α+β = 10.
+    #[must_use]
+    fn prior() -> (f64, f64) {
+        let mean = DEFAULT_CONVERSION_RATE;
+        let strength = CONVERSION_PRIOR_STRENGTH;
+        (mean * strength, (1.0 - mean) * strength)
+    }
+
+    /// Returns the key for a (channel, template) pair.
+    #[must_use]
+    fn key(channel: ReachChannel, template_id: &str) -> String {
+        format!("{}:{}", channel.as_str(), template_id)
+    }
+
+    /// Returns the conversion rate posterior mean for a (channel, template).
+    /// Falls back to the prior when no data is available.
+    #[must_use]
+    pub fn conversion_rate(&self, channel: ReachChannel, template_id: &str) -> f64 {
+        let key = Self::key(channel, template_id);
+        let (alpha, beta) = self
+            .posteriors
+            .get(&key)
+            .copied()
+            .unwrap_or_else(Self::prior);
+        alpha / (alpha + beta)
+    }
+
+    /// Returns the confidence (total observations) for a (channel, template).
+    #[must_use]
+    pub fn confidence(&self, channel: ReachChannel, template_id: &str) -> u32 {
+        let key = Self::key(channel, template_id);
+        let (alpha, beta) = self
+            .posteriors
+            .get(&key)
+            .copied()
+            .unwrap_or_else(Self::prior);
+        let prior_strength = CONVERSION_PRIOR_STRENGTH;
+        ((alpha + beta - prior_strength).max(0.0)) as u32
+    }
+
+    /// Updates the conversion rate posterior from a resolved reach event.
+    ///
+    /// `converted` = true → α += 1 (the event produced a fan conversion).
+    /// `converted` = false → β += 1 (the event did not convert).
+    pub fn update(&mut self, channel: ReachChannel, template_id: &str, converted: bool) {
+        let key = Self::key(channel, template_id);
+        let (alpha, beta) = self.posteriors.entry(key).or_insert_with(Self::prior);
+        if converted {
+            *alpha += 1.0;
+        } else {
+            *beta += 1.0;
+        }
+    }
+
+    /// Predicts expected fans from reach and conversion rate.
+    ///
+    /// `E[fans] = estimated_reach × P(conversion | channel, template)`
+    #[must_use]
+    pub fn predict_fans(
+        &self,
+        channel: ReachChannel,
+        template_id: &str,
+        estimated_reach: u32,
+    ) -> f64 {
+        let rate = self.conversion_rate(channel, template_id);
+        f64::from(estimated_reach) * rate
     }
 }
 
@@ -596,11 +762,30 @@ mod tests {
     }
 
     #[test]
-    fn reach_status_is_converted() {
+    fn reach_status_is_conversion() {
+        // Only Converted is a true conversion.
+        assert!(ReachStatus::Converted.is_conversion());
+        assert!(!ReachStatus::PositiveReply.is_conversion());
+        assert!(!ReachStatus::Sent.is_conversion());
+        assert!(!ReachStatus::Replied.is_conversion());
+    }
+
+    #[test]
+    fn reach_status_is_positive_response() {
+        // Positive response includes replies and conversions.
+        assert!(ReachStatus::Converted.is_positive_response());
+        assert!(ReachStatus::PositiveReply.is_positive_response());
+        assert!(ReachStatus::Replied.is_positive_response());
+        assert!(!ReachStatus::Sent.is_positive_response());
+        assert!(!ReachStatus::Declined.is_positive_response());
+    }
+
+    #[test]
+    fn reach_status_is_converted_delegates_to_is_conversion() {
+        // is_converted() is backward compat — delegates to is_conversion().
         assert!(ReachStatus::Converted.is_converted());
-        assert!(ReachStatus::PositiveReply.is_converted());
+        assert!(!ReachStatus::PositiveReply.is_converted());
         assert!(!ReachStatus::Sent.is_converted());
-        assert!(!ReachStatus::Replied.is_converted());
     }
 
     #[test]
@@ -712,10 +897,26 @@ mod tests {
         let metrics = ReachMetrics::from_events(&events);
         assert_eq!(metrics.total_events, 6);
         assert_eq!(metrics.total_reach, 1004);
+        // 4 email events all use recipient_id "fan_1" (from make_event),
+        // 2 reddit events also use "fan_1" → 1 unique recipient.
+        assert_eq!(metrics.unique_reach, 1);
         assert_eq!(metrics.delivered, 2);
         assert_eq!(metrics.opened, 1);
         assert_eq!(metrics.converted, 2);
         assert_eq!(metrics.bounced, 1);
+    }
+
+    #[test]
+    fn reach_metrics_unique_reach_counts_distinct_recipients() {
+        let mut event_a = make_event(ReachChannel::Email, ReachStatus::Delivered, 1);
+        event_a.recipient_id = "fan_a".to_owned();
+        let mut event_b = make_event(ReachChannel::Email, ReachStatus::Delivered, 1);
+        event_b.recipient_id = "fan_b".to_owned();
+        let mut event_c = make_event(ReachChannel::Email, ReachStatus::Delivered, 1);
+        event_c.recipient_id = "fan_a".to_owned(); // duplicate of a
+        let metrics = ReachMetrics::from_events(&[event_a, event_b, event_c]);
+        assert_eq!(metrics.total_events, 3);
+        assert_eq!(metrics.unique_reach, 2); // fan_a + fan_b
     }
 
     #[test]

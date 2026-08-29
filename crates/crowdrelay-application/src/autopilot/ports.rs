@@ -349,6 +349,53 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         until: Option<OffsetDateTime>,
     ) -> Result<crowdrelay_brain::ReachMetrics, RepositoryError>;
 
+    /// Records a growth evidence row at dispatch time. The evidence row
+    /// captures the prediction, context, treatment assignment, and reach
+    /// fields. Outcome fields are left NULL — they are filled in when
+    /// measurements arrive.
+    async fn record_growth_evidence(
+        &self,
+        workspace_id: WorkspaceId,
+        evidence: &crowdrelay_brain::GrowthEvidence,
+    ) -> Result<(), RepositoryError>;
+
+    /// Loads resolved growth evidence for the brain's learning loop.
+    /// Returns only evidence rows that have a resolved outcome
+    /// (observed_fans, observed_incremental_fans, or durable_fans_30d).
+    /// Ordered oldest-first so the brain can replay in chronological order.
+    async fn load_growth_evidence(
+        &self,
+        workspace_id: WorkspaceId,
+        since: Option<OffsetDateTime>,
+    ) -> Result<Vec<crowdrelay_brain::GrowthEvidence>, RepositoryError>;
+
+    /// Saves a brain state checkpoint (serialized CausalModel) for fast
+    /// startup. The brain loads the checkpoint on restart and applies
+    /// only delta evidence (evidence with timestamp > checkpoint).
+    async fn save_brain_state(
+        &self,
+        workspace_id: WorkspaceId,
+        module: &str,
+        state: &serde_json::Value,
+    ) -> Result<(), RepositoryError>;
+
+    /// Loads a brain state checkpoint. Returns the serialized state and
+    /// its timestamp, or None if no checkpoint exists.
+    async fn load_brain_state(
+        &self,
+        workspace_id: WorkspaceId,
+        module: &str,
+    ) -> Result<Option<(serde_json::Value, OffsetDateTime)>, RepositoryError>;
+
+    /// Saves a causal model checkpoint for fast startup with delta replay.
+    /// Called after each autopilot cycle. Best-effort: a failed checkpoint
+    /// just means the next cycle does a full replay.
+    async fn save_brain_state_checkpoint(
+        &self,
+        workspace_id: WorkspaceId,
+        model: &crowdrelay_brain::CausalModel,
+    ) -> Result<(), RepositoryError>;
+
     /// What the pitcher currently has to work with. One row per workspace
     /// rather than a list: supply is not a property of any single target, and
     /// counting it per target is how a starved pipeline stays invisible.
@@ -738,6 +785,11 @@ pub enum AutopilotMeasurementKind {
     /// engagement dispatch. Measures whether the posts produced meaningful
     /// engagement (upvotes, comments) rather than just existing.
     AgentRunCommunityEngagement7d,
+    /// Durable fan growth 30 days after the measurement window. Counts fans
+    /// created in the 14-day post-action window that are still active 30
+    /// days after creation (not suppressed, not deleted). This is the true
+    /// North Star — fans that stick, not just fans that sign up.
+    DurableFanGrowth30d,
 }
 
 impl AutopilotMeasurementKind {
@@ -758,6 +810,7 @@ impl AutopilotMeasurementKind {
             Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
             Self::AgentRunSignalInstalls7d => "agent_run_signal_installs_7d",
             Self::AgentRunCommunityEngagement7d => "agent_run_community_engagement_7d",
+            Self::DurableFanGrowth30d => "durable_fan_growth_30d",
         }
     }
 

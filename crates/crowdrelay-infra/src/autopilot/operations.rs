@@ -33,6 +33,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 mod acquisition_channels;
 mod chief;
 mod discovery;
+pub(in crate::autopilot) mod evidence;
 mod execution;
 mod growth_debt;
 pub(in crate::autopilot) mod growth_intelligence;

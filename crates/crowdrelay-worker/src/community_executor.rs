@@ -524,7 +524,7 @@ impl CommunityExecutorWorker {
         .bind(&reddit_result.post_url)
         .execute(&self.pool)
         .await?;
-        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', 1, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).execute(&self.pool).await?; // reach ledger
+        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).execute(&self.pool).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer)
         tracing::info!(
             subreddit = %action.subreddit,
             post_url = %reddit_result.post_url,

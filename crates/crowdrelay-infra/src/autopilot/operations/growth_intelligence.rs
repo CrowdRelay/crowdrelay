@@ -558,8 +558,18 @@ pub(in crate::autopilot) async fn mark_insights_consumed(
 
 /// Loads the causal model from past dispatch predictions and their measured
 /// outcomes. The brain uses this to predict how many fans each worker
-/// dispatch will produce. The model is recomputed from the prediction
-/// history each cycle — no separate storage needed.
+/// dispatch will produce.
+///
+/// # Checkpoint + Delta Replay
+///
+/// The brain loads a serialized checkpoint from `viryaos_brain_state` on
+/// startup, then applies only delta evidence (evidence with timestamp >
+/// checkpoint timestamp) from `viryaos_growth_evidence`. This is O(delta)
+/// instead of O(full history) every cycle.
+///
+/// If no checkpoint exists, the brain falls back to full replay from the
+/// evidence table (or the legacy `viryaos_brain_evidence` view for
+/// backward compatibility).
 ///
 /// In addition to the outcome model P(Y|action,context), this function also
 /// loads treatment-effect observations and updates the treatment-effect
@@ -569,27 +579,149 @@ pub(in crate::autopilot) async fn load_causal_model(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
+    use crowdrelay_brain::CausalModel;
+
+    // Try to load a brain state checkpoint for fast startup.
+    let checkpoint = super::evidence::load_brain_state(repo, workspace_id, "causal_model").await?;
+    let mut model = if let Some((state_json, checkpoint_time)) = checkpoint {
+        match serde_json::from_value::<CausalModel>(state_json) {
+            Ok(mut model) => {
+                // Load only delta evidence since the checkpoint.
+                let delta = super::evidence::load_growth_evidence(
+                    repo,
+                    workspace_id,
+                    Some(checkpoint_time),
+                )
+                .await?;
+                apply_evidence_to_model(&mut model, &delta);
+                tracing::debug!(
+                    delta_evidence = delta.len(),
+                    "loaded causal model from checkpoint + delta"
+                );
+                model
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to deserialize brain checkpoint, falling back to full replay");
+                full_replay(repo, workspace_id).await?
+            }
+        }
+    } else {
+        // No checkpoint — full replay from evidence table or legacy view.
+        full_replay(repo, workspace_id).await?
+    };
+
+    // Load treatment-effect observations and update the treatment-effect
+    // posterior. Each row is a pre-computed τ estimate from paired
+    // treatment/control experiments.
+    let pool = &repo.pool;
+    type TreatmentEffectRow = (String, Option<String>, f64, f64);
+    let te_rows: Vec<TreatmentEffectRow> = sqlx::query_as(
+        r#"
+        SELECT template_id,
+               subreddit_type,
+               observed_tau,
+               observation_variance
+        FROM viryaos_treatment_effect_observations
+        WHERE workspace_id = $1
+        ORDER BY computed_at ASC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    for (template_id, subreddit_type, observed_tau, observation_variance) in te_rows {
+        model.update_treatment_effect(
+            &template_id,
+            subreddit_type.as_deref(),
+            observed_tau,
+            observation_variance,
+        );
+    }
+
+    Ok(model)
+}
+
+/// Applies a batch of growth evidence to the causal model, updating the
+/// outcome model, context effects, calibration, and reach conversion model.
+fn apply_evidence_to_model(
+    model: &mut crowdrelay_brain::CausalModel,
+    evidence: &[crowdrelay_brain::GrowthEvidence],
+) {
+    use crowdrelay_brain::{DispatchPrediction, PredictionOutcome};
+
+    for ev in evidence {
+        // Update the outcome model from the best available outcome.
+        if let Some(outcome_fans) = ev.best_outcome() {
+            let prediction = DispatchPrediction {
+                template_id: extract_template_from_opportunity(&ev.opportunity_id),
+                expected_new_fans: ev.predicted_fans,
+                expected_signal_installs: ev.predicted_signal_installs,
+                context: ev.context.clone(),
+            };
+            let outcome = PredictionOutcome::from_observation(
+                prediction,
+                outcome_fans,
+                0.0, // signal installs not tracked in evidence yet
+            );
+            model.update(&outcome);
+        }
+
+        // Update the reach conversion model from conversion outcomes.
+        let template = extract_template_from_opportunity(&ev.opportunity_id);
+        model
+            .reach_model
+            .update(ev.channel, &template, ev.converted);
+    }
+}
+
+/// Extracts the template_id from an opportunity ID string.
+/// Opportunity IDs are formatted as "template:target:action:context_hash".
+fn extract_template_from_opportunity(opportunity_id: &Option<String>) -> String {
+    opportunity_id
+        .as_ref()
+        .and_then(|s| s.split(':').next())
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+/// Saves a causal model checkpoint to the brain state table for fast
+/// startup with delta replay. Called after each autopilot cycle.
+pub(in crate::autopilot) async fn save_causal_model_checkpoint(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    model: &crowdrelay_brain::CausalModel,
+) -> Result<(), RepositoryError> {
+    match serde_json::to_value(model) {
+        Ok(state) => {
+            super::evidence::save_brain_state(repo, workspace_id, "causal_model", &state).await
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize causal model checkpoint");
+            Err(RepositoryError::Unexpected)
+        }
+    }
+}
+
+/// Full replay from the growth evidence table, falling back to the legacy
+/// brain_evidence view when the table has no data.
+async fn full_replay(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
     use crowdrelay_brain::{CausalModel, DispatchPrediction, PredictionOutcome};
 
-    let pool = &repo.pool;
+    // Try the new growth evidence table first.
+    let evidence = super::evidence::load_growth_evidence(repo, workspace_id, None).await?;
+    if !evidence.is_empty() {
+        let mut model = CausalModel::default();
+        apply_evidence_to_model(&mut model, &evidence);
+        return Ok(model);
+    }
 
-    // Load unified evidence (predictions joined with observed outcomes) from
-    // the brain evidence view. This closes the learning loop: the
-    // measurement system writes outcomes to viryaos_autopilot_outcomes, and
-    // this view joins them back to the predictions by action_id. Previously,
-    // the brain read from raw viryaos_dispatch_predictions which never had
-    // observed_new_fans / resolved_at populated — so the causal model
-    // learned from an empty dataset every cycle.
-    //
-    // We load the full context jsonb so the hierarchical model can learn
-    // per-subreddit-type effects. Rows are ordered oldest-first so the
-    // EMA update processes them in chronological order.
-    //
-    // We prefer `observed_incremental_fans` (counterfactual-adjusted) over
-    // `observed_new_fans` (raw count) when available — this is the causally
-    // correct outcome that isolates the dispatch's effect from organic
-    // growth.
-    /// Evidence row: (template_id, expected_fans, expected_signal, observed_fans, observed_incremental_fans, observed_signal, context_json)
+    // Fall back to the legacy brain_evidence view for backward compatibility.
+    let pool = &repo.pool;
     type EvidenceRow = (
         String,
         f64,
@@ -641,9 +773,6 @@ pub(in crate::autopilot) async fn load_causal_model(
             expected_signal_installs: expected_signal,
             context,
         };
-        // Prefer incremental fan growth (counterfactual-adjusted) when
-        // available — this is the causally correct outcome. Fall back to
-        // raw observed fans for backward compatibility.
         let outcome_fans = observed_incremental_fans.or(observed_fans).unwrap_or(0.0);
         let outcome = PredictionOutcome::from_observation(
             prediction,
@@ -651,35 +780,6 @@ pub(in crate::autopilot) async fn load_causal_model(
             observed_signal.unwrap_or(0.0),
         );
         model.update(&outcome);
-    }
-
-    // Load treatment-effect observations and update the treatment-effect
-    // posterior. Each row is a pre-computed τ estimate from paired
-    // treatment/control experiments.
-    type TreatmentEffectRow = (String, Option<String>, f64, f64);
-    let te_rows: Vec<TreatmentEffectRow> = sqlx::query_as(
-        r#"
-        SELECT template_id,
-               subreddit_type,
-               observed_tau,
-               observation_variance
-        FROM viryaos_treatment_effect_observations
-        WHERE workspace_id = $1
-        ORDER BY computed_at ASC
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    for (template_id, subreddit_type, observed_tau, observation_variance) in te_rows {
-        model.update_treatment_effect(
-            &template_id,
-            subreddit_type.as_deref(),
-            observed_tau,
-            observation_variance,
-        );
     }
 
     Ok(model)
@@ -714,6 +814,43 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
     .execute(pool)
     .await
     .map_err(map_sqlx)?;
+
+    // Also record a growth evidence row at dispatch time. The outcome
+    // fields are left NULL — they are filled in when measurements arrive.
+    // The recipient_id and channel are derived from the context; we use
+    // a placeholder when the context doesn't specify them (the reach
+    // event recording sites will update these later).
+    let recipient_id = prediction
+        .context
+        .subreddit_type
+        .clone()
+        .unwrap_or_else(|| format!("action:{}", action_id));
+    let channel = prediction
+        .context
+        .subreddit_type
+        .as_deref()
+        .map(|s| {
+            if s.starts_with("r/") {
+                crowdrelay_brain::ReachChannel::RedditPost
+            } else {
+                crowdrelay_brain::ReachChannel::Other
+            }
+        })
+        .unwrap_or(crowdrelay_brain::ReachChannel::Other);
+    let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
+        workspace_id.into_uuid(),
+        action_id,
+        None,
+        recipient_id,
+        channel,
+        1,
+        crowdrelay_brain::TreatmentAssignment::Treatment,
+        1.0,
+        prediction.expected_new_fans,
+        prediction.expected_signal_installs,
+        prediction.context.clone(),
+    );
+    let _ = super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await;
     Ok(())
 }
 

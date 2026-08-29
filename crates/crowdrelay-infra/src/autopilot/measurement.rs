@@ -423,6 +423,30 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                 }
+                // Durable fan growth (Y30): fans created in the 14-day
+                // post-action window that are still active 30 days after
+                // creation (not suppressed, not deleted). This is the
+                // true North Star — fans that stick, not just fans that
+                // sign up. The subject_id is unused; the measurement
+                // applies to the workspace as a whole.
+                AutopilotMeasurementKind::DurableFanGrowth30d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision FROM fans
+                        WHERE workspace_id = $1
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '14 days'
+                          AND status != 'suppressed'
+                          AND created_at + INTERVAL '30 days' <= now()
+                          AND status != 'suppressed'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
             };
             if observed.is_finite() {
                 Ok(observed)
@@ -535,6 +559,24 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
+                    // Also update the growth evidence table.
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET observed_fans = $3,
+                            resolved_at = COALESCE(resolved_at, $4)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
                 }
                 // IncrementalFanGrowth14d is the counterfactual-adjusted
                 // value. It is available to the brain via the evidence
@@ -557,12 +599,84 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
+                    // Also update the growth evidence table.
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET observed_incremental_fans = $3,
+                            resolved_at = COALESCE(resolved_at, $4)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
                 }
                 AutopilotMeasurementKind::AgentRunSignalInstalls7d => {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
                         SET observed_signal_installs = $3,
+                            resolved_at = COALESCE(resolved_at, $4)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    // Also mark the growth evidence as resolved.
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET resolved_at = COALESCE(resolved_at, $3)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                // DurableFanGrowth30d writes the durable fan count to the
+                // growth evidence table's durable_fans_30d column and marks
+                // the prediction as resolved.
+                AutopilotMeasurementKind::DurableFanGrowth30d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_dispatch_predictions
+                        SET resolved_at = COALESCE(resolved_at, $3)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    // Also update the growth evidence table.
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET durable_fans_30d = $3,
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2

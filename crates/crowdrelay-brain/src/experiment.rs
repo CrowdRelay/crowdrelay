@@ -36,7 +36,7 @@
 //! IPW_estimate = Σ (treatment × outcome / propensity) / Σ (treatment / propensity)
 //! ```
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Minimum confidence (observation count) before the brain stops experimenting
 /// and dispatches greedily. Below this, the brain runs 50/50 experiments.
@@ -46,7 +46,7 @@ pub const MIN_CONFIDENCE_FOR_EXPERIMENT: u32 = 10;
 pub const DEFAULT_TREATMENT_PROBABILITY: f64 = 0.5;
 
 /// The treatment assignment for a dispatch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TreatmentAssignment {
     /// The dispatch was performed (treatment group).
@@ -150,6 +150,63 @@ impl ExperimentEngine {
         }
         // Low confidence: run experiment.
         let treatment = if random_draw < self.treatment_probability {
+            TreatmentAssignment::Treatment
+        } else {
+            TreatmentAssignment::Control
+        };
+        Some(treatment)
+    }
+
+    /// Decides whether to run an experiment using a knowledge-gradient
+    /// heuristic. Instead of the simple `n < 10 → 50/50` rule, this method
+    /// considers the posterior uncertainty and the expected outcome to
+    /// decide whether experimenting is worth it.
+    ///
+    /// The KG heuristic:
+    /// - If confidence is high (≥ min_confidence), dispatch greedily.
+    /// - If the prediction uncertainty (predict_std) is high relative to
+    ///   the expected outcome, the information gain from experimenting is
+    ///   high → experiment with higher probability.
+    /// - If the prediction uncertainty is low, the brain already knows
+    ///   enough → dispatch greedily even below min_confidence.
+    ///
+    /// `predict_std` is the posterior standard deviation of the prediction.
+    /// `expected_fans` is the posterior mean. `random_draw` is a uniform
+    /// random number in [0, 1).
+    ///
+    /// Returns `Some(TreatmentAssignment)` if the brain should experiment,
+    /// or `None` if the brain should dispatch greedily.
+    #[must_use]
+    pub fn assign_treatment_kg(
+        &self,
+        confidence: u32,
+        predict_std: f64,
+        expected_fans: f64,
+        random_draw: f64,
+    ) -> Option<TreatmentAssignment> {
+        if confidence >= self.min_confidence {
+            return None;
+        }
+        // Knowledge gradient heuristic: the value of information is
+        // proportional to the uncertainty (predict_std) relative to the
+        // expected outcome. When uncertainty is high, experiment more.
+        // When uncertainty is low (even if confidence is low), the brain
+        // already has a good estimate — dispatch greedily.
+        let uncertainty_ratio = if expected_fans.abs() > 1e-6 {
+            predict_std / expected_fans.abs()
+        } else {
+            // If expected_fans is ~0, uncertainty is always high.
+            10.0
+        };
+        // If uncertainty is very low (< 0.1), the brain is confident
+        // enough to dispatch greedily even below min_confidence.
+        if uncertainty_ratio < 0.1 {
+            return None;
+        }
+        // Scale the treatment probability by the uncertainty ratio.
+        // Higher uncertainty → higher probability of experimenting.
+        let scaled_prob = (self.treatment_probability * uncertainty_ratio).clamp(0.1, 0.9);
+        let treatment = if random_draw < scaled_prob {
             TreatmentAssignment::Treatment
         } else {
             TreatmentAssignment::Control
@@ -649,5 +706,44 @@ mod tests {
         let (tau, _) = ExperimentEngine::estimate_paired_treatment_effect(&records, &outcomes)
             .expect("should return Some");
         assert!(tau < 0.0, "negative effect expected, got {tau}");
+    }
+
+    #[test]
+    fn kg_policy_experiments_when_uncertain() {
+        let engine = ExperimentEngine::new();
+        // Low confidence, high uncertainty → should experiment.
+        let result = engine.assign_treatment_kg(2, 5.0, 1.0, 0.3);
+        assert!(result.is_some(), "should experiment with high uncertainty");
+    }
+
+    #[test]
+    fn kg_policy_dispatches_greedily_when_confident() {
+        let engine = ExperimentEngine::new();
+        // High confidence → no experiment.
+        let result = engine.assign_treatment_kg(20, 5.0, 10.0, 0.3);
+        assert!(
+            result.is_none(),
+            "should not experiment with high confidence"
+        );
+    }
+
+    #[test]
+    fn kg_policy_dispatches_greedily_when_uncertainty_low() {
+        let engine = ExperimentEngine::new();
+        // Low confidence but very low uncertainty → dispatch greedily.
+        // predict_std=0.01, expected_fans=10.0 → ratio=0.001 < 0.1.
+        let result = engine.assign_treatment_kg(2, 0.01, 10.0, 0.3);
+        assert!(
+            result.is_none(),
+            "should not experiment when uncertainty is low"
+        );
+    }
+
+    #[test]
+    fn kg_policy_experiments_when_expected_fans_near_zero() {
+        let engine = ExperimentEngine::new();
+        // expected_fans ≈ 0 → uncertainty is always high.
+        let result = engine.assign_treatment_kg(2, 0.5, 0.0, 0.3);
+        assert!(result.is_some(), "should experiment when expected is ~0");
     }
 }

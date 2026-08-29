@@ -46,7 +46,9 @@ pub mod bayesian;
 pub mod calibration;
 pub mod causal_model;
 pub mod change_point;
+pub mod context_effect;
 pub mod efe;
+pub mod evidence;
 pub mod experiment;
 pub mod exploration;
 pub mod fan_network;
@@ -78,9 +80,11 @@ pub use causal_model::{
     TreatmentAwareStats,
 };
 pub use change_point::{ChangeDirection, ChangePoint, ChangePointDetector};
+pub use context_effect::ContextEffectPosterior;
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
+pub use evidence::GrowthEvidence;
 pub use experiment::{
     DEFAULT_TREATMENT_PROBABILITY, ExperimentEngine, MIN_CONFIDENCE_FOR_EXPERIMENT,
     PropensityRecord, TreatmentAssignment,
@@ -106,7 +110,9 @@ pub use portfolio::{
     PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
     PortfolioSelection, RejectionReason,
 };
-pub use reach::{ReachChannel, ReachEvent, ReachMetrics, ReachRecipientKind, ReachStatus};
+pub use reach::{
+    ReachChannel, ReachConversionModel, ReachEvent, ReachMetrics, ReachRecipientKind, ReachStatus,
+};
 pub use simulation::{MonthlyPrediction, SimulationResult, WorldSimulation};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,

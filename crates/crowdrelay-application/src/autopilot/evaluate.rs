@@ -534,6 +534,18 @@ where
                     // The brain uses this to predict how many fans each
                     // dispatch will produce, and learns from prediction errors.
                     let causal_model = self.repository.load_causal_model(self.workspace_id).await?;
+                    // Load reach metrics for the unified reach ledger. The
+                    // brain uses these to learn reach-to-fan conversion rates
+                    // per channel and template. Loaded once per cycle — the
+                    // reach conversion model is already updated from evidence
+                    // during load_causal_model, so this is for observability
+                    // and future use (e.g. adjusting dispatch budgets based
+                    // on reach health).
+                    let _reach_metrics = self
+                        .repository
+                        .load_reach_metrics(self.workspace_id, now - time::Duration::days(30), None)
+                        .await
+                        .unwrap_or_default();
                     // Load the exploration memory from past dispatch
                     // predictions. The brain uses this to compute novelty:
                     // unexplored (template, context) pairs get an exploration
@@ -659,6 +671,14 @@ where
                             .mark_insights_consumed(self.workspace_id, &consumed_ids)
                             .await;
                     }
+                    // Save the causal model checkpoint for fast startup
+                    // with delta replay on the next cycle. This is
+                    // best-effort — a failed checkpoint just means the
+                    // next cycle does a full replay.
+                    let _ = self
+                        .repository
+                        .save_brain_state_checkpoint(self.workspace_id, &causal_model)
+                        .await;
                 }
             }
         }
