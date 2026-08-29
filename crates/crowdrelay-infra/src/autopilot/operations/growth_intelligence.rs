@@ -361,8 +361,8 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     let outreach_counts: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE status = 'proposed')::bigint AS pending,
-            COUNT(*) FILTER (WHERE status = 'promoted')::bigint AS promoted,
+            COUNT(*) FILTER (WHERE ot.status = 'proposed')::bigint AS pending,
+            COUNT(*) FILTER (WHERE ot.status = 'promoted')::bigint AS promoted,
             COUNT(DISTINCT cp.target_id)::bigint AS engaged
         FROM agent_outreach_targets ot
         LEFT JOIN community_posts cp ON cp.target_id = ot.id
