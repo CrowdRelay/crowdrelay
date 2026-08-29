@@ -2,7 +2,9 @@
 
 use uuid::Uuid;
 
-use crowdrelay_brain::{DispatchPrediction, GrowthStrategy, context_hash};
+use crowdrelay_brain::{
+    DispatchPrediction, GrowthStrategy, PortfolioCandidate, PortfolioOptimizer, context_hash,
+};
 use crowdrelay_domain::{
     FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
@@ -615,7 +617,51 @@ where
                     // strategy preference.
                     scored_candidates
                         .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+                    // Run the portfolio optimizer to select the optimal set
+                    // of candidates, accounting for audience overlap and
+                    // fatigue. The optimizer uses greedy marginal value
+                    // selection: it picks the candidate with the highest
+                    // marginal value at each step, stopping when the
+                    // marginal value drops below the threshold or the
+                    // dispatch budget is exhausted.
+                    let portfolio_candidates: Vec<PortfolioCandidate> = scored_candidates
+                        .iter()
+                        .map(|(c, p, efe, _)| {
+                            let audience_key = format!("template:{}", p.template_id);
+                            PortfolioCandidate {
+                                opportunity_id: crowdrelay_brain::OpportunityId {
+                                    template_id: p.template_id.clone(),
+                                    target: c.decision_key.clone(),
+                                    action: crowdrelay_brain::OpportunityAction::Scan,
+                                    context_hash: context_hash(&p.context),
+                                },
+                                efe_score: *efe,
+                                expected_fans: p.expected_new_fans,
+                                audience_key,
+                                cost: 1,
+                                source_context: c.decision_kind.to_string(),
+                                action_key: c.decision_key.clone(),
+                            }
+                        })
+                        .collect();
+                    let optimizer = PortfolioOptimizer::default();
+                    let selection = optimizer.select(portfolio_candidates);
+                    // Build a set of selected opportunity keys for fast
+                    // lookup. Only dispatch candidates that were selected
+                    // by the optimizer.
+                    let selected_keys: std::collections::HashSet<String> = selection
+                        .selected
+                        .iter()
+                        .map(|c| c.opportunity_id.target.clone())
+                        .collect();
                     for (candidate, prediction, _efe, _rank) in scored_candidates {
+                        // Skip candidates that the portfolio optimizer
+                        // rejected (negative marginal value, audience
+                        // overlap, budget exhausted, or superseded).
+                        if !selection.do_nothing && !selected_keys.contains(&candidate.decision_key)
+                        {
+                            continue;
+                        }
                         let persisted = self.persist(&candidate, &mut limits, &mut report).await?;
                         // Record the prediction for later comparison with
                         // measured outcomes (the dopamine loop).
