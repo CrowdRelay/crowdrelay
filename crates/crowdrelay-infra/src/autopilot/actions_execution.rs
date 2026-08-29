@@ -944,6 +944,27 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestSocialPost {
+                    task_id,
+                    platform,
+                    content,
+                    smart_link,
+                } => {
+                    emit_external_action(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        "crowdrelay.social.post_requested",
+                        json!({
+                            "action_id": action.id,
+                            "task_id": task_id,
+                            "platform": platform,
+                            "content": content,
+                            "smart_link": smart_link,
+                        }),
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RequestSignalPush {
                     task_id: _,
                     title,

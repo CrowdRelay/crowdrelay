@@ -403,6 +403,7 @@ dependencies = [
  "async-trait",
  "base64",
  "crowdrelay-application",
+ "crowdrelay-brain",
  "crowdrelay-domain",
  "crowdrelay-infra",
  "getrandom 0.4.3",

@@ -37,3 +37,4 @@ pub mod push_delivery;
 pub mod reminders;
 pub mod replay;
 pub mod retention;
+pub mod social_executor;

@@ -233,6 +233,14 @@ impl PostgresAutopilotRepository {
         }
     }
 
+    /// Returns a reference to the underlying connection pool.
+    /// Workers that need direct SQL access (e.g. attribution) use this
+    /// instead of going through the repository trait methods.
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     async fn bounded<T>(
         &self,
         operation: impl Future<Output = Result<T, RepositoryError>>,
