@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS viryaos_causal_estimates (
     computed_at timestamptz NOT NULL DEFAULT now(),
 
     -- One estimate per (workspace, template, subreddit_type, method, target).
-    UNIQUE (workspace_id, template_id, COALESCE(subreddit_type, ''), method, target)
+    -- Use a unique index with COALESCE instead of a table-level UNIQUE constraint
+    -- because PostgreSQL doesn't allow expressions in table-level UNIQUE constraints.
 );
 
 -- Indexes for the brain's causal model loading.
@@ -57,3 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_causal_estimates_workspace_template
 
 CREATE INDEX IF NOT EXISTS idx_causal_estimates_target
     ON viryaos_causal_estimates (workspace_id, target);
+
+-- Unique constraint via index (supports NULL subreddit_type).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_causal_estimates_template_method_target
+    ON viryaos_causal_estimates (workspace_id, template_id, COALESCE(subreddit_type, ''), method, target);
