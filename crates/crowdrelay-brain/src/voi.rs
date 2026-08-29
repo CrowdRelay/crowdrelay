@@ -30,13 +30,17 @@ pub struct VoiAssessment {
 /// observation. Higher uncertainty and fewer observations mean there is more
 /// to learn, so the value of gathering information is greater.
 ///
+/// This is the same computation as [`crate::efe::information_gain`],
+/// exposed here under the VoI name for callers that reason in terms of
+/// "value of information" rather than "information gain".
+///
 /// Formula: `posterior_std / sqrt(1 + n)`
 ///
 /// - `posterior_std` — the current posterior standard deviation.
 /// - `n` — the number of observations already collected.
 #[must_use]
 pub fn value_of_information(posterior_std: f64, n: u32) -> f64 {
-    posterior_std / (1.0 + n as f64).sqrt()
+    crate::efe::information_gain(n, posterior_std)
 }
 
 /// Computes the real option value of keeping a dispatch opportunity open.

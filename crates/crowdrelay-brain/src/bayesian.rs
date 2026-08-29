@@ -109,12 +109,6 @@ impl NormalPosterior {
         self.n += 1;
     }
 
-    /// Posterior mean — the brain's best estimate.
-    #[must_use]
-    pub fn mean(&self) -> f64 {
-        self.mean
-    }
-
     /// Posterior standard deviation — the brain's uncertainty.
     #[must_use]
     pub fn std(&self) -> f64 {
@@ -141,23 +135,15 @@ impl NormalPosterior {
         normal_cdf(z)
     }
 
-    /// Whether the brain has enough data to trust this posterior.
-    /// Below this threshold, the brain should explore more (high uncertainty).
-    #[must_use]
-    pub fn is_uncertain(&self, min_observations: u32) -> bool {
-        self.n < min_observations
-    }
-
     /// Expected Value of Information — how much the brain would learn from
     /// one more observation. This is a proxy for expected posterior entropy
     /// reduction.
     ///
-    /// VoI ≈ posterior_std / sqrt(1 + n) — the brain learns more when:
-    /// - It's uncertain (high std)
-    /// - It has few observations (low n)
+    /// Delegates to [`crate::efe::information_gain`] so there is one
+    /// canonical VoI approximation across the brain.
     #[must_use]
     pub fn value_of_information(&self) -> f64 {
-        self.std() / (1.0 + self.n as f64).sqrt()
+        crate::efe::information_gain(self.n, self.std())
     }
 }
 

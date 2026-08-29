@@ -72,8 +72,7 @@ pub use causal_model::{
 };
 pub use change_point::{ChangeDirection, ChangePoint, ChangePointDetector};
 pub use efe::{
-    EfeWeights, GrowthOpportunity, adaptive_temperature, compute_efe, information_gain,
-    softmax_dispatch,
+    EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
 pub use experiment::{
     DEFAULT_TREATMENT_PROBABILITY, ExperimentEngine, MIN_CONFIDENCE_FOR_EXPERIMENT,
@@ -101,7 +100,7 @@ pub use snapshot::{
 pub use standing::{
     AgentTier, agent_standing_policy, effective_agent_cooldown, effective_agent_tier,
 };
-pub use strategy::{GrowthStrategy, PathwayRecord};
+pub use strategy::GrowthStrategy;
 pub use strategy_learning::{StrategyLearner, StrategyOutcome};
 pub use voi::{expected_information_gain, exploration_bonus, option_value, value_of_information};
 pub use world_model::{GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel};

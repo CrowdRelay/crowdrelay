@@ -96,7 +96,13 @@ pub struct PropensityRecord {
 }
 
 /// The experiment engine — decides when to experiment and logs propensities.
-#[derive(Clone, Debug, Default, Serialize)]
+///
+/// `Default` returns the same configuration as [`ExperimentEngine::new`]:
+/// `policy_version = 1`, `treatment_probability = 0.5`,
+/// `min_confidence = 10`. A derived `Default` would yield
+/// `treatment_probability = 0.0`, which never runs an experiment, so it is
+/// implemented explicitly.
+#[derive(Clone, Debug, Serialize)]
 pub struct ExperimentEngine {
     /// The brain's policy version. Incremented when the policy changes.
     pub policy_version: u32,
@@ -104,6 +110,12 @@ pub struct ExperimentEngine {
     pub treatment_probability: f64,
     /// Minimum confidence before stopping experiments.
     pub min_confidence: u32,
+}
+
+impl Default for ExperimentEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ExperimentEngine {

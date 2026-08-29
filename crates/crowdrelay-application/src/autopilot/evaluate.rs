@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 
-use crowdrelay_brain::{DispatchContext, DispatchPrediction, GrowthStrategy, context_hash};
+use crowdrelay_brain::{DispatchPrediction, GrowthStrategy, context_hash};
 use crowdrelay_domain::{
     FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
@@ -83,7 +83,7 @@ use commercial::{
     merch_candidate, merch_price_candidate,
 };
 use growth_debt::growth_debt_candidate;
-use growth_intelligence::{classify_subreddit, growth_intelligence_candidate};
+use growth_intelligence::{build_dispatch_context, growth_intelligence_candidate};
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
 use placements::placement_candidate;
@@ -581,28 +581,10 @@ where
                         for insight in &snapshot.recent_insights {
                             consumed_ids.push(insight.outcome_id);
                         }
-                        // Compute exploration novelty for this (template, context) pair.
-                        // The context must match what the evaluator will build,
-                        // so the novelty score is consistent with the dispatch
-                        // context that gets recorded.
-                        let subreddit_type = snapshot
-                            .unengaged_targets
-                            .first()
-                            .map(|t| classify_subreddit(&t.subreddit))
-                            .or_else(|| {
-                                snapshot
-                                    .community_engagement_history
-                                    .first()
-                                    .map(|c| classify_subreddit(&c.subreddit))
-                            });
-                        let ctx = DispatchContext {
-                            days_to_event: snapshot.days_to_next_event,
-                            fan_growth_trend: snapshot.world_model.fan_growth_trend,
-                            subreddit_type,
-                            post_format: None,
-                            time_of_day_bps: 0,
-                            community_novelty_bps: 0,
-                        };
+                        // Build the enriched dispatch context (same as
+                        // evaluate_growth_intelligence uses) so the novelty
+                        // lookup matches the context hash that gets recorded.
+                        let ctx = build_dispatch_context(snapshot, now);
                         let novelty =
                             exploration_memory.novelty(&snapshot.template_id, &context_hash(&ctx));
                         if let Some((candidate, prediction, efe_score, strategy_rank)) =

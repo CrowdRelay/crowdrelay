@@ -98,6 +98,7 @@ impl ExplorationMemory {
 /// Computes a context hash from a DispatchContext for exploration tracking.
 #[must_use]
 pub fn context_hash(context: &DispatchContext) -> String {
+    use std::fmt::Write;
     let event_bucket = match context.days_to_event {
         None => 0u8,
         Some(0..=1) => 1,
@@ -114,15 +115,17 @@ pub fn context_hash(context: &DispatchContext) -> String {
     };
     let sub = context.subreddit_type.as_deref().unwrap_or("");
     let fmt = context.post_format.as_deref().unwrap_or("");
-    let cap = 4 + trend.len() + sub.len() + fmt.len() + 3;
+    let cap = 4 + trend.len() + sub.len() + fmt.len() + 3 + 6 + 6;
     let mut s = String::with_capacity(cap);
-    s.push_str(&event_bucket.to_string());
-    s.push(':');
-    s.push_str(trend);
-    s.push(':');
-    s.push_str(sub);
-    s.push(':');
-    s.push_str(fmt);
+    // Write directly into the pre-allocated String to avoid temporary
+    // String allocations from .to_string() on each numeric field.
+    write!(s, "{event_bucket}:{trend}:{sub}:{fmt}").unwrap();
+    write!(
+        s,
+        ":{}:{}",
+        context.time_of_day_bps, context.community_novelty_bps
+    )
+    .unwrap();
     s
 }
 

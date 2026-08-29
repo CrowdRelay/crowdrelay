@@ -158,27 +158,17 @@ impl CausalModel {
     /// - Event proximity (≤30 days) boosts by 1.2x
     /// - Stagnant growth reduces expected fans by 0.8x
     /// - Accelerating growth boosts by 1.1x
+    ///
+    /// `post_format`, `time_of_day_bps`, and `community_novelty_bps` are
+    /// carried by [`DispatchContext`] but not yet wired into the predictor —
+    /// they are reserved for a future learned-context multiplier so the
+    /// shape is stable before the coefficients exist.
     #[must_use]
     pub fn predict(&self, template_id: &str, context: &DispatchContext) -> f64 {
         let (mean, _var) = self
             .fans
             .predict(template_id, context.subreddit_type.as_deref());
-        let mut prediction = mean;
-        // Event proximity boosts fan acquisition potential.
-        if let Some(days) = context.days_to_event {
-            if days <= 7 {
-                prediction *= 1.5;
-            } else if days <= 30 {
-                prediction *= 1.2;
-            }
-        }
-        // Growth trend modulates the prediction.
-        match context.fan_growth_trend {
-            GrowthTrend::Stagnant | GrowthTrend::Decelerating => prediction *= 0.8,
-            GrowthTrend::Accelerating => prediction *= 1.1,
-            GrowthTrend::Steady => {}
-        }
-        prediction.max(0.0)
+        apply_context_adjustments(mean, context)
     }
 
     /// Predicts expected Signal installs for a dispatch. Uses the
@@ -186,14 +176,10 @@ impl CausalModel {
     /// 10% of the fan prediction (a reasonable conversion prior).
     #[must_use]
     pub fn predict_signal(&self, template_id: &str, context: &DispatchContext) -> f64 {
-        let signal_prior = self
-            .template_expected_signal
-            .get(template_id)
-            .copied()
-            .unwrap_or(DEFAULT_EXPECTED_SIGNAL);
-        // If we have a learned Signal prior, apply the same context
-        // adjustments as fans (event proximity, growth trend).
-        if self.template_expected_signal.contains_key(template_id) {
+        // Single HashMap lookup: if we have a learned Signal prior,
+        // apply the same context adjustments as fans. Otherwise fall
+        // back to 10% of the fan prediction.
+        if let Some(&signal_prior) = self.template_expected_signal.get(template_id) {
             let mut prediction = signal_prior;
             if let Some(days) = context.days_to_event {
                 if days <= 7 {
@@ -201,6 +187,12 @@ impl CausalModel {
                 } else if days <= 30 {
                     prediction *= 1.1;
                 }
+            }
+            // Growth trend modulates the Signal prediction, same as fans.
+            match context.fan_growth_trend {
+                GrowthTrend::Stagnant | GrowthTrend::Decelerating => prediction *= 0.8,
+                GrowthTrend::Accelerating => prediction *= 1.1,
+                GrowthTrend::Steady => {}
             }
             return prediction.max(0.0);
         }
@@ -213,9 +205,10 @@ impl CausalModel {
     /// Returns the posterior std dev from the hierarchical model.
     #[must_use]
     pub fn predict_std(&self, template_id: &str) -> f64 {
-        let post = self.fans.template_posterior(template_id);
-        // Add a small floor to avoid zero variance.
-        post.std().max(0.1)
+        // Use the pooled variance from predict() to avoid a separate
+        // lookup + clone. The floor matches the previous behaviour.
+        let (_mean, var) = self.fans.predict(template_id, None);
+        var.sqrt().max(0.1)
     }
 
     /// Updates the model from a prediction outcome (the dopamine loop).
@@ -252,18 +245,27 @@ impl CausalModel {
         self.fans.confidence(template_id)
     }
 
+    /// Returns `(expected_fans, predict_std, confidence)` in a single
+    /// hierarchical lookup. This is the hot path for EFE scoring — calling
+    /// [`predict`](Self::predict), [`predict_std`](Self::predict_std), and
+    /// [`confidence`](Self::confidence) separately does three HashMap
+    /// lookups for the same template. This method does one.
+    #[must_use]
+    pub fn predict_stats(&self, template_id: &str, context: &DispatchContext) -> (f64, f64, u32) {
+        let (mean, var) = self
+            .fans
+            .predict(template_id, context.subreddit_type.as_deref());
+        let expected_fans = apply_context_adjustments(mean, context);
+        let predict_std = var.sqrt().max(0.1);
+        let confidence = self.fans.confidence(template_id);
+        (expected_fans, predict_std, confidence)
+    }
+
     /// Returns the expected fan count for a template, or the default prior.
     #[must_use]
     pub fn expected_fans(&self, template_id: &str) -> f64 {
         let post = self.fans.template_posterior(template_id);
         post.mean
-    }
-
-    /// Returns the posterior variance for a template, or the prior variance.
-    #[must_use]
-    pub fn variance(&self, template_id: &str) -> f64 {
-        let post = self.fans.template_posterior(template_id);
-        post.variance
     }
 
     /// Returns P(expected_fans > 0) for a template — the probability that
@@ -273,6 +275,33 @@ impl CausalModel {
         let post = self.fans.template_posterior(template_id);
         post.p_positive()
     }
+}
+
+/// Applies the context adjustments (event proximity, growth trend) to a
+/// raw posterior mean. This is the single source of truth for the
+/// multiplicative context adjustments — both [`CausalModel::predict`] and
+/// [`crate::simulation::WorldSimulation`] call this so the adjustments
+/// never drift out of sync.
+///
+/// - Event proximity (≤7 days) boosts by 1.5x
+/// - Event proximity (≤30 days) boosts by 1.2x
+/// - Stagnant/Decelerating growth reduces by 0.8x
+/// - Accelerating growth boosts by 1.1x
+#[must_use]
+pub(crate) fn apply_context_adjustments(mut prediction: f64, context: &DispatchContext) -> f64 {
+    if let Some(days) = context.days_to_event {
+        if days <= 7 {
+            prediction *= 1.5;
+        } else if days <= 30 {
+            prediction *= 1.2;
+        }
+    }
+    match context.fan_growth_trend {
+        GrowthTrend::Stagnant | GrowthTrend::Decelerating => prediction *= 0.8,
+        GrowthTrend::Accelerating => prediction *= 1.1,
+        GrowthTrend::Steady => {}
+    }
+    prediction.max(0.0)
 }
 
 #[cfg(test)]

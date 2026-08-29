@@ -32,6 +32,10 @@
 
 use serde::Serialize;
 
+/// Cap for `uplift_ratio` when the counterfactual is zero but observed fans
+/// exist. Keeps the value finite so default JSON serialization does not fail.
+const MAX_UPLIFT_RATIO: f64 = 1_000_000.0;
+
 /// The brain's North Star metric: incremental durable fans.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct NorthStarMetric {
@@ -110,11 +114,15 @@ impl NorthStarMetric {
     /// Returns the uplift ratio: observed / counterfactual.
     /// Above 1.0 = the action increased fan arrivals above the organic rate.
     /// Below 1.0 = the action may have suppressed organic growth.
+    ///
+    /// When the counterfactual is zero but observed fans exist, returns a
+    /// large finite cap (`MAX_UPLIFT_RATIO`) instead of `f64::INFINITY` so
+    /// the value remains JSON-serializable by default.
     #[must_use]
     pub fn uplift_ratio(self) -> f64 {
         if self.counterfactual_fans <= 0.0 {
             return if self.observed_new_fans > 0.0 {
-                f64::INFINITY
+                MAX_UPLIFT_RATIO
             } else {
                 1.0
             };
@@ -192,9 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn uplift_ratio_infinity_when_counterfactual_zero() {
+    fn uplift_ratio_capped_when_counterfactual_zero() {
         let metric = NorthStarMetric::from_measurements(5.0, 3.0, 0.0, 14);
-        assert!(metric.uplift_ratio().is_infinite());
+        let ratio = metric.uplift_ratio();
+        assert!(ratio.is_finite());
+        assert_eq!(ratio, MAX_UPLIFT_RATIO);
     }
 
     #[test]

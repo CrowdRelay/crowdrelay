@@ -48,6 +48,11 @@ pub struct PortfolioCandidate {
     /// E.g. "subreddit:r_MetalMusic" or "venue:Warsaw_Palladium".
     pub audience_key: String,
     /// The cost in "dispatch budget" units (typically 1 per dispatch).
+    ///
+    /// Not yet enforced by [`PortfolioOptimizer::select`], which currently
+    /// only caps `max_dispatches`. Reserved for a future cost-budget
+    /// constraint so the candidate shape is stable before the constraint
+    /// is wired in.
     pub cost: u32,
     /// The context that produced this candidate (for tracing).
     pub source_context: String,
@@ -189,9 +194,11 @@ impl PortfolioOptimizer {
                 }
                 break;
             }
-            // Select the best candidate.
+            // Select the best candidate. swap_remove is O(1) — the
+            // remaining order doesn't matter because we rescan each
+            // iteration anyway.
             if let Some(idx) = best_idx {
-                let candidate = remaining.remove(idx);
+                let candidate = remaining.swap_remove(idx);
                 *audience_counts
                     .entry(candidate.audience_key.clone())
                     .or_insert(0) += 1;

@@ -278,25 +278,11 @@ impl WorldSimulation {
     }
 
     /// Applies the causal model's context adjustments (event proximity,
-    /// growth trend) to a raw posterior mean. This mirrors the logic in
-    /// [`CausalModel::predict`] so the simulation uses the same multiplicative
-    /// adjustments without calling `predict` (which would re-query the
-    /// hierarchical posterior).
-    fn apply_context_adjustments(&self, mut prediction: f64, context: &DispatchContext) -> f64 {
-        if let Some(days) = context.days_to_event {
-            if days <= 7 {
-                prediction *= 1.5;
-            } else if days <= 30 {
-                prediction *= 1.2;
-            }
-        }
-        match context.fan_growth_trend {
-            crate::world_model::GrowthTrend::Stagnant
-            | crate::world_model::GrowthTrend::Decelerating => prediction *= 0.8,
-            crate::world_model::GrowthTrend::Accelerating => prediction *= 1.1,
-            crate::world_model::GrowthTrend::Steady => {}
-        }
-        prediction.max(0.0)
+    /// growth trend) to a raw posterior mean. Delegates to the shared
+    /// [`crate::causal_model::apply_context_adjustments`] so the
+    /// simulation and the predictor never drift out of sync.
+    fn apply_context_adjustments(&self, prediction: f64, context: &DispatchContext) -> f64 {
+        crate::causal_model::apply_context_adjustments(prediction, context)
     }
 
     /// Computes the brain's confidence in its predictions for the given

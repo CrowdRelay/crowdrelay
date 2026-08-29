@@ -86,24 +86,32 @@ impl GrowthOpportunity {
         -(pragmatic + epistemic + exploration) + risk
     }
 
-    /// Computes a simple EFE score (legacy interface, no uncertainty).
-    #[must_use]
-    pub fn compute_efe_simple(expected_fans: f64, information_gain: f64) -> f64 {
-        -(expected_fans + information_gain)
-    }
-
     /// Creates an opportunity with EFE computed from the given values.
+    ///
+    /// Uses the full EFE formula with uncertainty-weighted epistemic value,
+    /// risk sensitivity, and exploration novelty. The `predict_std` and
+    /// `novelty` parameters are required so the score reflects the true
+    /// Expected Free Energy, not just the pragmatic term.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         template_id: String,
         description: String,
         expected_fans: f64,
         information_gain: f64,
+        predict_std: f64,
+        novelty: f64,
         context: DispatchContext,
         reason: String,
     ) -> Self {
         Self {
-            efe_score: Self::compute_efe_simple(expected_fans, information_gain),
+            efe_score: Self::compute_efe(
+                expected_fans,
+                information_gain,
+                predict_std,
+                novelty,
+                EfeWeights::default(),
+            ),
             template_id,
             description,
             expected_fans,
@@ -166,15 +174,34 @@ pub fn softmax_dispatch(efe_scores: &[f64], temperature: f64) -> Vec<f64> {
         .iter()
         .map(|&e| -e / temperature)
         .fold(f64::NEG_INFINITY, f64::max);
-    let exps: Vec<f64> = efe_scores
-        .iter()
-        .map(|&e| (-e / temperature - max_neg_efe).exp())
-        .collect();
-    let sum: f64 = exps.iter().sum();
-    if sum <= 0.0 || !sum.is_finite() {
-        return vec![1.0 / efe_scores.len() as f64; efe_scores.len()];
+    // Pre-allocate the result and compute exponentials in place.
+    let mut probs: Vec<f64> = Vec::with_capacity(efe_scores.len());
+    let mut sum = 0.0_f64;
+    for &e in efe_scores {
+        let exp = (-e / temperature - max_neg_efe).exp();
+        sum += exp;
+        probs.push(exp);
     }
-    exps.iter().map(|&e| e / sum).collect()
+    // If all exponentials underflowed to 0 (extreme EFE/temperature ratio),
+    // fall back to greedy — picking the minimum EFE — instead of a uniform
+    // distribution. A uniform draw would waste the dispatch on a bad
+    // candidate when the brain actually wanted to exploit.
+    if sum <= 0.0 || !sum.is_finite() {
+        let min_idx = efe_scores
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        probs.fill(0.0);
+        probs[min_idx] = 1.0;
+        return probs;
+    }
+    // Normalize in place.
+    for p in &mut probs {
+        *p /= sum;
+    }
+    probs
 }
 
 /// Computes the adaptive exploration temperature from regret.
@@ -185,23 +212,6 @@ pub fn softmax_dispatch(efe_scores: &[f64], temperature: f64) -> Vec<f64> {
 pub fn adaptive_temperature(regret: f64, min_temp: f64, max_temp: f64) -> f64 {
     let sigmoid = 1.0 / (1.0 + (-regret).exp());
     min_temp + (max_temp - min_temp) * sigmoid
-}
-
-/// Convenience: compute EFE with default weights.
-#[must_use]
-pub fn compute_efe(
-    expected_fans: f64,
-    information_gain: f64,
-    predict_std: f64,
-    novelty: f64,
-) -> f64 {
-    GrowthOpportunity::compute_efe(
-        expected_fans,
-        information_gain,
-        predict_std,
-        novelty,
-        EfeWeights::default(),
-    )
 }
 
 #[cfg(test)]
@@ -259,10 +269,14 @@ mod tests {
             "Scan for new communities".to_owned(),
             5.0,
             0.8,
+            1.0,
+            0.5,
             DispatchContext::default(),
             "Stagnant growth".to_owned(),
         );
-        assert!((opp.efe_score - (-5.8)).abs() < 0.01);
+        // EFE = -(1.0*5 + 0.5*0.8*1.0 + 0.3*0.5) + 0.1*1.0
+        //      = -(5.0 + 0.4 + 0.15) + 0.1 = -5.45
+        assert!((opp.efe_score - (-5.45)).abs() < 0.01);
     }
 
     #[test]

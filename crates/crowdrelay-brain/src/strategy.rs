@@ -150,16 +150,6 @@ impl GrowthStrategy {
     }
 }
 
-/// A pathway record — the brain's memory of which action sequences
-/// produced fan growth.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct PathwayRecord {
-    pub strategy: GrowthStrategy,
-    pub template_sequence: Vec<String>,
-    pub fans_acquired: u32,
-    pub active: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,14 +227,6 @@ mod tests {
             GrowthStrategy::SignalConversion.template_priority()[0],
             "signal-inviter"
         );
-    }
-
-    #[test]
-    fn pathway_record_defaults_to_inactive() {
-        let record = PathwayRecord::default();
-        assert!(!record.active);
-        assert!(record.template_sequence.is_empty());
-        assert_eq!(record.fans_acquired, 0);
     }
 
     #[test]

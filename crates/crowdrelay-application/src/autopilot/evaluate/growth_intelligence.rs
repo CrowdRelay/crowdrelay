@@ -117,6 +117,38 @@ fn insights_block(insights: &[RecentInsight]) -> String {
     lines.join("\n")
 }
 
+/// Builds the enriched dispatch context from a snapshot and the current
+/// time. This is shared between the novelty lookup in `evaluate.rs` and
+/// the prediction in `evaluate_growth_intelligence` so both use the same
+/// context hash — otherwise the novelty score would be computed against
+/// a different key than what gets recorded.
+pub(super) fn build_dispatch_context(
+    snapshot: &GrowthIntelligenceSnapshot,
+    now: OffsetDateTime,
+) -> DispatchContext {
+    let subreddit_type = snapshot
+        .unengaged_targets
+        .first()
+        .map(|t| classify_subreddit(&t.subreddit))
+        .or_else(|| {
+            snapshot
+                .community_engagement_history
+                .first()
+                .map(|c| classify_subreddit(&c.subreddit))
+        });
+    let post_format = template_post_format(&snapshot.template_id);
+    let time_of_day_bps = time_of_day_to_bps(now.hour());
+    let community_novelty_bps = community_novelty_bps(&snapshot.community_engagement_history);
+    DispatchContext {
+        days_to_event: snapshot.days_to_next_event,
+        fan_growth_trend: snapshot.world_model.fan_growth_trend,
+        subreddit_type,
+        post_format,
+        time_of_day_bps,
+        community_novelty_bps,
+    }
+}
+
 /// Evaluates a snapshot deterministically. The brain applies cooldown rules
 /// and situational logic — no LLM is involved in this decision. Recent
 /// insights from previous worker runs are included in the dispatch prompt
@@ -126,8 +158,9 @@ fn insights_block(insights: &[RecentInsight]) -> String {
 ///
 /// Each eligible dispatch gets an EFE score that combines:
 /// - **Pragmatic value**: expected fan growth from the causal model.
-/// - **Epistemic value**: information gain from reducing uncertainty
-///   (1/(1+confidence) — unmeasured templates have maximum information gain).
+/// - **Epistemic value**: information gain × prediction uncertainty
+///   (`predict_std / sqrt(1 + confidence)` — variance-aware, not just
+///   count-aware).
 /// - **Exploration bonus**: novelty from the exploration memory, so the
 ///   brain prefers unexplored (template, context) combinations.
 ///
@@ -148,35 +181,14 @@ pub fn evaluate_growth_intelligence(
         return None;
     }
 
-    // Build the dispatch context from the world model and snapshot data.
-    // Enriching the context with subreddit_type, post_format, time_of_day,
-    // and community_novelty gives the causal model and exploration memory
-    // richer keys to learn from — the brain distinguishes "reddit-scanner
-    // in a metal subreddit in the evening" from "community-engager in a
-    // prog subreddit in the morning".
-    let subreddit_type = snapshot
-        .unengaged_targets
-        .first()
-        .map(|t| classify_subreddit(&t.subreddit))
-        .or_else(|| {
-            snapshot
-                .community_engagement_history
-                .first()
-                .map(|c| classify_subreddit(&c.subreddit))
-        });
-    let post_format = template_post_format(&snapshot.template_id);
-    let time_of_day_bps = time_of_day_to_bps(now.hour());
-    let community_novelty_bps = community_novelty_bps(&snapshot.community_engagement_history);
-    let dispatch_context = DispatchContext {
-        days_to_event: snapshot.days_to_next_event,
-        fan_growth_trend: snapshot.world_model.fan_growth_trend,
-        subreddit_type,
-        post_format,
-        time_of_day_bps,
-        community_novelty_bps,
-    };
-    // Predict expected new fans using the causal model.
-    let expected_new_fans = causal_model.predict(&snapshot.template_id, &dispatch_context);
+    // Build the enriched dispatch context (shared with the novelty lookup
+    // in evaluate.rs so both use the same context hash).
+    let dispatch_context = build_dispatch_context(snapshot, now);
+    // Single-lookup EFE scoring: get expected fans, predict std, and
+    // confidence in one hierarchical lookup instead of three separate
+    // HashMap lookups.
+    let (expected_new_fans, predict_std, confidence) =
+        causal_model.predict_stats(&snapshot.template_id, &dispatch_context);
     // Predict expected Signal installs using the learned Signal model.
     let expected_signal_installs =
         causal_model.predict_signal(&snapshot.template_id, &dispatch_context);
@@ -193,8 +205,6 @@ pub fn evaluate_growth_intelligence(
     //   drive — the brain dispatches workers it's uncertain about).
     // - Exploration: novelty from the exploration memory (Go-Explore bonus).
     // - Risk: penalizes uncertain outcomes (risk aversion).
-    let confidence = causal_model.confidence(&snapshot.template_id);
-    let predict_std = causal_model.predict_std(&snapshot.template_id);
     let info_gain = information_gain(confidence, predict_std);
     let efe_weights = EfeWeights::default();
 

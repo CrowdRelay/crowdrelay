@@ -294,8 +294,11 @@ impl OptionPlanner {
     ///    `completed_at`. (Any step failure is treated as critical.)
     /// 6. Returns a reference to the next `Ready` step to dispatch, if any.
     ///
-    /// Returns `None` if the option was not found, has no dispatched step, or
-    /// has no ready step after advancing.
+    /// Returns `None` if the option was not found, is already terminal
+    /// (Completed/Abandoned), all steps are completed, or no step is ready
+    /// after advancing. When called with no currently dispatched step but a
+    /// `Ready` step exists, the ready step is returned unchanged (the call is
+    /// a no-op aside from the lookup).
     #[must_use]
     pub fn advance(&mut self, action_id: &str, success: bool) -> Option<&OptionStep> {
         let option = self.active_options.iter_mut().find(|o| o.id == action_id)?;
@@ -740,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_with_no_dispatched_step_returns_none() {
+    fn advance_with_no_dispatched_step_returns_ready_step() {
         let mut planner = OptionPlanner::new();
         planner.start_option(sequential_option());
         // Nothing is dispatched yet → advance has nothing to mark.

@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 crowdrelay-domain = { path = "../crowdrelay-domain" }
 serde.workspace = true
-serde_json.workspace = true
 time.workspace = true
 uuid.workspace = true
 
