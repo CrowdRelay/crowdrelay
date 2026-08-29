@@ -720,6 +720,10 @@ impl CausalModel {
             p_meaningful_effect: p_meaningful,
             bridge_confidence: self.bridge.confidence(),
             bridge_is_reliable: self.bridge.confidence() >= MIN_BRIDGE_CONFIDENCE,
+            // Default to Observational — the application layer overrides
+            // this via load_evidence_quality() when experiment assignments
+            // exist. This is a conservative fallback, not a fake: when no
+            // experiments have been run, Observational is the honest quality.
             evidence_quality: crate::evidence::EvidenceQuality::Observational,
         }
     }

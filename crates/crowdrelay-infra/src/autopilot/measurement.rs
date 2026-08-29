@@ -355,6 +355,17 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // not a randomized experiment — the evidence quality is
                 // `MatchedQuasiExperiment`.
                 //
+                // KNOWN LIMITATION: fans are workspace-level entities (no
+                // community_id on the fans table), so this counts ALL new
+                // fans in the workspace, not just fans attributable to the
+                // target community. When multiple community experiments
+                // run concurrently, they share the same workspace-level
+                // fan count, creating interference. The contamination
+                // estimator and InterferencePolicy detect this and
+                // downgrade evidence quality accordingly. A future schema
+                // change (fan_origins table) could enable per-community
+                // fan counting, but that is beyond the current sprint.
+                //
                 // Allows negative values — the brain must be able to learn
                 // that an action *harmed* fan growth (e.g. a community post
                 // that alienated the audience). The treatment-effect
@@ -887,7 +898,52 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .await
                 .map_err(map_sqlx)?;
             }
+            // Look up the experiment assignment for this action to
+            // evaluate contamination over the full measurement window.
+            // CONTAMINATION IS EVALUATED OVER THE FULL WINDOW — not just
+            // assignment time. A clean assignment can become contaminated
+            // later if concurrent treatment actions occur on the same unit.
+            let experiment_info: Option<(uuid::Uuid, String, time::OffsetDateTime)> =
+                if matches!(
+                    measurement.kind,
+                    AutopilotMeasurementKind::AgentRunFanGrowth14d
+                        | AutopilotMeasurementKind::IncrementalFanGrowth14d
+                        | AutopilotMeasurementKind::DurableFanGrowth30d
+                ) {
+                    sqlx::query_as::<_, (sqlx::types::Uuid, String, time::OffsetDateTime)>(
+                        r#"
+                        SELECT experiment_uuid, unit_id, assigned_at
+                        FROM viryaos_experiment_assignments
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND experiment_uuid IS NOT NULL
+                        LIMIT 1
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?
+                } else {
+                    None
+                };
             transaction.commit().await.map_err(map_sqlx)?;
+            // Evaluate contamination over the full measurement window
+            // after the transaction commits. This scans ALL treatment
+            // actions on the same unit during the window and downgrades
+            // evidence quality if contamination is high.
+            if let Some((exp_uuid, unit_id, assigned_at)) = experiment_info {
+                let _ = super::operations::experiment_assignments::evaluate_contamination(
+                    self,
+                    workspace_id,
+                    exp_uuid,
+                    &unit_id,
+                    assigned_at,
+                    now,
+                )
+                .await;
+            }
             Ok(())
         })
         .await

@@ -14,6 +14,24 @@
 //! in `total()`. No hand-tuned coefficients on quantities with
 //! different units.
 //!
+//! # EFE ≠ DecisionValue
+//!
+//! EFE (Expected Free Energy) decides what is worth *learning about*
+//! (candidate generation, exploration allocation). DecisionValue decides
+//! what is worth *doing* (portfolio ranking). The portfolio optimizer
+//! must never combine EFE with `DecisionValue.total()`. EFE signals
+//! are carried in `PortfolioCandidate::generation_signal` as non-economic
+//! provenance — the optimizer ignores them for ranking.
+//!
+//! # UNCERTAINTY ≠ RISK
+//!
+//! Uncertainty = "I don't know how large the effect is" (posterior std).
+//! Risk = "The downside if this action is wrong or harmful."
+//! These are separate concepts. Risk is NEVER derived from uncertainty.
+//! Phase 1: risk is `None` (NotModeled). Future: risk may become hard
+//! constraints (risk > ceiling → candidate ineligible) or explicit
+//! downside utility — but never a function of prediction uncertainty.
+//!
 //! # Architecture
 //!
 //! `DecisionValue` = **intrinsic** value of a candidate before portfolio
@@ -72,8 +90,8 @@ impl EstimationRegime {
 }
 
 /// The complete decision value for a single candidate — the canonical
-/// object that the portfolio optimizer compares. Every term is in
-/// expected incremental Y30 fans (or a directly comparable unit).
+/// object that the portfolio optimizer compares. Every additive term is
+/// in expected incremental Y30 fans (or a directly comparable unit).
 ///
 /// This is NOT a score. It is a transparent, inspectable record of
 /// WHY a candidate has the value it has. The optimizer selects by
@@ -83,6 +101,13 @@ impl EstimationRegime {
 /// `DecisionValue` represents the **intrinsic** value of the candidate
 /// before portfolio interactions (overlap, fatigue, budget). The
 /// optimizer computes **marginal** value from it.
+///
+/// # Provenance
+///
+/// Every DecisionValue carries full provenance: estimation regime,
+/// evidence quality, sample size, bridge confidence, contamination,
+/// and calibration bias. This lets the brain answer "why did you choose
+/// A?" with inspectable evidence, not a single confidence number.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DecisionValue {
     // ── Core prediction (from causal model) ──
@@ -90,6 +115,7 @@ pub struct DecisionValue {
     /// NOT a ratio. This is the primary decision signal.
     pub expected_incremental_y30: f64,
     /// Uncertainty (posterior std) in the Y30 prediction.
+    /// This is "I don't know how large the effect is" — NOT risk.
     pub uncertainty: f64,
     /// P(τ > δ) — probability of meaningful effect.
     pub p_meaningful_effect: f64,
@@ -111,6 +137,18 @@ pub struct DecisionValue {
     /// When false, the optimizer should apply a confidence penalty
     /// to Y14Bridged candidates.
     pub bridge_is_reliable: bool,
+    /// Estimated contamination from concurrent actions (0.0–1.0).
+    /// 0.0 = clean, 1.0 = fully contaminated. Derived from the
+    /// experiment assignment's contamination estimate. High
+    /// contamination downgrades evidence quality.
+    #[serde(default)]
+    pub contamination: f64,
+    /// Calibration bias for this template — the running mean of
+    /// (predicted - observed) Y30. Positive = overestimating,
+    /// negative = underestimating. 0.0 when no calibration data.
+    /// Applied to make predictions more honest.
+    #[serde(default)]
+    pub calibration_bias: f64,
 
     // ── Resource economics ──
     /// The resource cost of this candidate.
@@ -123,17 +161,22 @@ pub struct DecisionValue {
     // units. If a term cannot be expressed in fan-equivalents, it must
     // be a hard constraint (in PortfolioConfig), not a penalty here.
     //
+    // EFE-derived terms (epistemic_value, exploration_value) are NOT
+    // here — they belong to EFE (candidate generation), not to the
+    // economic value of a candidate. The optimizer must never add
+    // EFE signals to total().
+    //
     /// Pragmatic value: expected incremental Y30. This IS the North Star.
     pub pragmatic_value: f64,
-    /// Epistemic value: expected fan-equivalent value of information
-    /// gained by observing this action's outcome.
-    pub epistemic_value: f64,
-    /// Exploration value: expected fan-equivalent value of exploring
-    /// a novel region of the action space.
-    pub exploration_value: f64,
     /// Risk penalty: expected fan-equivalent loss from adverse outcomes.
-    /// Negative.
-    pub risk_penalty: f64,
+    /// Negative when modeled.
+    ///
+    /// `None` = risk is NotModeled (Phase 1). This does NOT mean "risk
+    /// is zero" — it means "we have not yet modeled risk." Future: risk
+    /// may become hard constraints (risk > ceiling → ineligible) or
+    /// explicit downside utility. NEVER derived from uncertainty.
+    #[serde(default)]
+    pub risk_penalty: Option<f64>,
     /// Opportunity cost: expected Y30 fans foregone by choosing this
     /// candidate instead of the next-best alternative. Negative.
     /// Computed by the optimizer relative to the portfolio, not here.
@@ -152,13 +195,13 @@ impl DecisionValue {
     /// in PortfolioConfig as a hard constraint, not here as a penalty.
     /// This prevents DecisionValue from becoming another arbitrary
     /// weighted soup like the old EFE.
+    ///
+    /// `risk_penalty` is `None` (NotModeled) in Phase 1 — treated as
+    /// 0.0. This is semantically "risk not yet modeled", NOT "risk
+    /// is proven zero."
     #[must_use]
     pub fn total(&self) -> f64 {
-        self.pragmatic_value
-            + self.epistemic_value
-            + self.exploration_value
-            + self.risk_penalty
-            + self.opportunity_cost
+        self.pragmatic_value + self.risk_penalty.unwrap_or(0.0) + self.opportunity_cost
     }
 
     /// Constructs a DecisionValue from treatment-aware stats and resource
@@ -173,6 +216,9 @@ impl DecisionValue {
     ///
     /// The `evidence_quality` is taken from the stats (which carry the
     /// strongest evidence quality available for this template/context).
+    ///
+    /// `risk_penalty` is `None` (NotModeled) — Phase 1 does not model
+    /// risk. This is NOT "risk = 0" — it is "risk not yet modeled."
     #[must_use]
     pub fn from_stats(
         stats: &TreatmentAwareStats,
@@ -221,14 +267,32 @@ impl DecisionValue {
             uses_y30: stats.uses_y30,
             bridge_confidence: stats.bridge_confidence,
             bridge_is_reliable: stats.bridge_is_reliable,
+            contamination: 0.0,    // Wired in Step 7 from experiment state
+            calibration_bias: 0.0, // Wired in Step 7 from calibration tracker
             resource_cost,
             pragmatic_value: expected_y30,
-            epistemic_value: 0.0, // Phase 1: not yet computed in fan-value space
-            exploration_value: 0.0, // Phase 1: not yet computed in fan-value space
-            risk_penalty: 0.0,    // Phase 1: not yet computed in fan-value space
+            risk_penalty: None,    // Phase 1: NotModeled. NOT "risk = 0".
             opportunity_cost: 0.0, // Computed by optimizer relative to next-best
             decision_mode,
         }
+    }
+
+    /// Sets the contamination estimate on this DecisionValue. Called by
+    /// the application layer after loading contamination from the
+    /// experiment assignment state. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_contamination(mut self, contamination: f64) -> Self {
+        self.contamination = contamination.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Sets the calibration bias on this DecisionValue. Called by the
+    /// application layer after loading calibration from the calibration
+    /// tracker. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_calibration_bias(mut self, calibration_bias: f64) -> Self {
+        self.calibration_bias = calibration_bias;
+        self
     }
 }
 
@@ -270,15 +334,40 @@ mod tests {
             uses_y30: true,
             bridge_confidence: 5,
             bridge_is_reliable: false,
+            contamination: 0.0,
+            calibration_bias: 0.0,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: 5.0,
-            epistemic_value: 0.5,
-            exploration_value: 0.3,
-            risk_penalty: -0.2,
+            risk_penalty: Some(-0.2),
             opportunity_cost: -1.0,
             decision_mode: DecisionMode::Exploit,
         };
-        assert!((dv.total() - 4.6).abs() < 0.001);
+        // total = 5.0 + (-0.2) + (-1.0) = 3.8
+        assert!((dv.total() - 3.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn total_with_unmodeled_risk_treats_as_zero() {
+        let dv = DecisionValue {
+            expected_incremental_y30: 5.0,
+            uncertainty: 2.0,
+            p_meaningful_effect: 0.8,
+            estimation_regime: EstimationRegime::Y30Direct,
+            evidence_quality: EvidenceQuality::Observational,
+            sample_size: 10,
+            uses_y30: true,
+            bridge_confidence: 5,
+            bridge_is_reliable: false,
+            contamination: 0.0,
+            calibration_bias: 0.0,
+            resource_cost: ResourceCost::configured(1.0),
+            pragmatic_value: 5.0,
+            risk_penalty: None, // NotModeled
+            opportunity_cost: -1.0,
+            decision_mode: DecisionMode::Exploit,
+        };
+        // total = 5.0 + 0.0 + (-1.0) = 4.0
+        assert!((dv.total() - 4.0).abs() < 0.001);
     }
 
     #[test]
@@ -339,6 +428,15 @@ mod tests {
     }
 
     #[test]
+    fn from_stats_risk_is_not_modeled() {
+        let stats = make_stats(5.0, 2.0, 10);
+        let dv =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit);
+        // Phase 1: risk is NotModeled (None), NOT zero.
+        assert!(dv.risk_penalty.is_none());
+    }
+
+    #[test]
     fn estimation_regime_round_trips() {
         for regime in [
             EstimationRegime::Y30Direct,
@@ -361,11 +459,11 @@ mod tests {
             uses_y30: true,
             bridge_confidence: 5,
             bridge_is_reliable: false,
+            contamination: 0.1,
+            calibration_bias: -0.3,
             resource_cost: ResourceCost::configured(2.0),
             pragmatic_value: 5.0,
-            epistemic_value: 0.5,
-            exploration_value: 0.3,
-            risk_penalty: -0.2,
+            risk_penalty: Some(-0.5),
             opportunity_cost: -1.0,
             decision_mode: DecisionMode::Exploit,
         };
@@ -376,5 +474,58 @@ mod tests {
         assert_eq!(back.estimation_regime, EstimationRegime::Y30Direct);
         assert_eq!(back.decision_mode, DecisionMode::Exploit);
         assert!(!back.bridge_is_reliable);
+        assert!((back.contamination - 0.1).abs() < 0.001);
+        assert!((back.calibration_bias - (-0.3)).abs() < 0.001);
+        assert_eq!(back.risk_penalty, Some(-0.5));
+    }
+
+    #[test]
+    fn serde_backwards_compatible_with_old_risk_as_f64() {
+        // Old brain state checkpoints may have risk_penalty as f64 (not Option).
+        // A bare number deserializes as Some(value) via serde's Option handling.
+        let old_json = r#"{
+            "expected_incremental_y30": 5.0,
+            "uncertainty": 2.0,
+            "p_meaningful_effect": 0.8,
+            "estimation_regime": "y30_direct",
+            "evidence_quality": "observational",
+            "sample_size": 10,
+            "uses_y30": true,
+            "bridge_confidence": 5,
+            "bridge_is_reliable": false,
+            "resource_cost": {"units": 1.0, "source": "configured"},
+            "pragmatic_value": 5.0,
+            "risk_penalty": -0.2,
+            "opportunity_cost": -1.0,
+            "decision_mode": "exploit"
+        }"#;
+        let back: DecisionValue = serde_json::from_str(old_json).unwrap();
+        assert!((back.expected_incremental_y30 - 5.0).abs() < 0.001);
+        assert_eq!(back.risk_penalty, Some(-0.2));
+    }
+
+    #[test]
+    fn serde_handles_missing_new_fields() {
+        // Brain state checkpoints from before this sprint won't have
+        // contamination or calibration_bias. #[serde(default)] handles this.
+        let old_json = r#"{
+            "expected_incremental_y30": 5.0,
+            "uncertainty": 2.0,
+            "p_meaningful_effect": 0.8,
+            "estimation_regime": "y30_direct",
+            "evidence_quality": "observational",
+            "sample_size": 10,
+            "uses_y30": true,
+            "bridge_confidence": 5,
+            "bridge_is_reliable": false,
+            "resource_cost": {"units": 1.0, "source": "configured"},
+            "pragmatic_value": 5.0,
+            "opportunity_cost": -1.0,
+            "decision_mode": "exploit"
+        }"#;
+        let back: DecisionValue = serde_json::from_str(old_json).unwrap();
+        assert!((back.contamination - 0.0).abs() < 0.001);
+        assert!((back.calibration_bias - 0.0).abs() < 0.001);
+        assert!(back.risk_penalty.is_none());
     }
 }

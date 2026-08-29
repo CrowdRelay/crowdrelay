@@ -83,16 +83,18 @@ pub enum Platform {
     Reddit,
     Bandsintown,
     Spotify,
+    Youtube,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 6] = [
+    pub const ALL: [Platform; 7] = [
         Platform::Meta,
         Platform::Tiktok,
         Platform::GoogleAds,
         Platform::Reddit,
         Platform::Bandsintown,
         Platform::Spotify,
+        Platform::Youtube,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -103,6 +105,7 @@ impl Platform {
             Self::Reddit => "reddit",
             Self::Bandsintown => "bandsintown",
             Self::Spotify => "spotify",
+            Self::Youtube => "youtube",
         }
     }
 
@@ -122,6 +125,7 @@ impl Platform {
             Self::Reddit => "Reddit",
             Self::Bandsintown => "Bandsintown",
             Self::Spotify => "Spotify",
+            Self::Youtube => "YouTube",
         }
     }
 
@@ -134,6 +138,7 @@ impl Platform {
             Self::Reddit => &["identity", "read", "submit"],
             Self::Tiktok => &["user.info.basic", "ad.management"],
             Self::Bandsintown => &[],
+            Self::Youtube => &["https://www.googleapis.com/auth/youtube.readonly"],
         }
     }
 

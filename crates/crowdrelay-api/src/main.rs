@@ -573,6 +573,7 @@ fn parse_fanbase_oauth_configs(
         (Platform::Spotify, "SPOTIFY"),
         (Platform::Reddit, "REDDIT"),
         (Platform::Tiktok, "TIKTOK"),
+        (Platform::Youtube, "YOUTUBE"),
     ];
 
     let mut configs = Vec::new();
@@ -629,6 +630,9 @@ fn default_authorize_url(platform: &crowdrelay_domain::fanbase::Platform) -> Str
         crowdrelay_domain::fanbase::Platform::Tiktok => {
             "https://www.tiktok.com/v2/auth/authorize/".to_owned()
         }
+        crowdrelay_domain::fanbase::Platform::Youtube => {
+            "https://accounts.google.com/o/oauth2/v2/auth".to_owned()
+        }
         crowdrelay_domain::fanbase::Platform::Bandsintown => String::new(),
     }
 }
@@ -649,6 +653,9 @@ fn default_token_url(platform: &crowdrelay_domain::fanbase::Platform) -> String 
         }
         crowdrelay_domain::fanbase::Platform::Tiktok => {
             "https://open.tiktokapis.com/v2/oauth/token/".to_owned()
+        }
+        crowdrelay_domain::fanbase::Platform::Youtube => {
+            "https://oauth2.googleapis.com/token".to_owned()
         }
         crowdrelay_domain::fanbase::Platform::Bandsintown => String::new(),
     }

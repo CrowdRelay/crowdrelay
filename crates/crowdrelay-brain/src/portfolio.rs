@@ -59,6 +59,29 @@ use serde::{Deserialize, Serialize};
 use crate::decision_value::DecisionValue;
 use crate::opportunity::OpportunityId;
 
+/// Non-economic candidate-generation / exploration signal from EFE.
+///
+/// This is explicitly NOT part of the candidate's economic value. EFE
+/// decides what is worth *learning about* (candidate generation,
+/// exploration allocation). DecisionValue decides what is worth *doing*
+/// (portfolio ranking). The optimizer must never combine `EfeSignal`
+/// with `DecisionValue.total()`.
+///
+/// Carried on `PortfolioCandidate::generation_signal` for audit and
+/// exploration provenance — the optimizer ignores it for ranking.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct EfeSignal {
+    /// Information gain — how much the brain would learn from this
+    /// action's outcome. From EFE's epistemic term.
+    pub information_gain: f64,
+    /// Novelty — how unexplored this (template, context) pair is.
+    /// From the exploration memory.
+    pub novelty: f64,
+    /// The raw EFE score (lower = better). Kept for logging and
+    /// candidate-generation provenance only.
+    pub efe_score: f64,
+}
+
 /// The decision mode for a portfolio candidate — why the brain is
 /// dispatching this candidate.
 ///
@@ -102,9 +125,11 @@ pub struct PortfolioCandidate {
     pub source_context: String,
     /// The action payload key (for linking to the persist layer).
     pub action_key: String,
-    /// The EFE score (lower = better). Kept for backward compat and
-    /// logging only — the optimizer uses `decision_value.total()`.
-    pub efe_score: f64,
+    /// Non-economic candidate-generation / exploration signal from EFE.
+    /// The optimizer IGNORES this for ranking — it is carried for audit
+    /// and exploration provenance only. EFE decides what is worth
+    /// learning about; DecisionValue decides what is worth doing.
+    pub generation_signal: Option<EfeSignal>,
 
     // ── Canonical value ──
     /// The intrinsic decision value — one source of truth for all value
@@ -546,17 +571,17 @@ mod tests {
             uses_y30: false,
             bridge_confidence: 0,
             bridge_is_reliable: false,
+            contamination: 0.0,
+            calibration_bias: 0.0,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: expected_fans,
-            epistemic_value: 0.0,
-            exploration_value: 0.0,
-            risk_penalty: 0.0,
+            risk_penalty: None,
             opportunity_cost: 0.0,
             decision_mode: DecisionMode::Exploit,
         };
         PortfolioCandidate {
             opportunity_id: OpportunityId::new(template, target, OpportunityAction::Post, &ctx),
-            efe_score: -expected_fans,
+            generation_signal: None,
             audience_key: audience.to_owned(),
             source_context: "GrowthIntelligence".to_owned(),
             action_key: format!("action:{template}:{target}"),

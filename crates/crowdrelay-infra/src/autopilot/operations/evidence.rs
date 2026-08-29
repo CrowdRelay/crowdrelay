@@ -374,8 +374,9 @@ pub(in crate::autopilot) async fn record_credit_allocation(
                  credited_incremental_y30, credit_weight,
                  attribution_confidence, attribution_method,
                  eligible_competitors, unattributed_residual,
-                 evidence_quality, measurement_id, attribution_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 evidence_quality, measurement_id, attribution_version,
+                 is_causal_evidence)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (measurement_id, attribution_version, action_id)
                 WHERE measurement_id IS NOT NULL
             DO NOTHING
@@ -390,9 +391,10 @@ pub(in crate::autopilot) async fn record_credit_allocation(
         .bind(result.method.as_str())
         .bind(&eligible_competitors)
         .bind(result.unattributed)
-        .bind("observational") // Phase 1: default quality for credited entries
+        .bind("modeled_attribution") // ATTRIBUTION ≠ CAUSAL EVIDENCE
         .bind(measurement_id)
         .bind(attribution_version as i32)
+        .bind(credit.is_causal_evidence)
         .execute(pool)
         .await
         .map_err(map_sqlx)?;

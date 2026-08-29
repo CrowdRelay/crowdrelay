@@ -48,6 +48,19 @@ pub struct PredictionRecord {
     pub observed: f64,
     /// The template that was dispatched.
     pub template_id: String,
+    /// The target/audience (e.g. subreddit). Used for hierarchical
+    /// calibration at progressively more specific levels.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// The channel (reddit, instagram, etc.).
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// The estimation regime used for this prediction.
+    #[serde(default)]
+    pub estimation_regime: Option<String>,
+    /// The evidence quality supporting this prediction.
+    #[serde(default)]
+    pub evidence_quality: Option<String>,
 }
 
 /// The result of a calibration analysis.
@@ -137,6 +150,34 @@ impl CalibrationTracker {
 
     /// Records a prediction-observation pair.
     pub fn record(&mut self, template_id: &str, predicted: f64, predicted_std: f64, observed: f64) {
+        self.record_with_context(
+            template_id,
+            predicted,
+            predicted_std,
+            observed,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Records a prediction-observation pair with full hierarchical context.
+    /// The target, channel, estimation_regime, and evidence_quality enable
+    /// calibration at progressively more specific levels:
+    ///   global → template → channel → audience/target → context
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_context(
+        &mut self,
+        template_id: &str,
+        predicted: f64,
+        predicted_std: f64,
+        observed: f64,
+        target: Option<&str>,
+        channel: Option<&str>,
+        estimation_regime: Option<&str>,
+        evidence_quality: Option<&str>,
+    ) {
         // Update online accumulators.
         let error = predicted - observed;
         self.total_count += 1;
@@ -157,6 +198,10 @@ impl CalibrationTracker {
             predicted_std,
             observed,
             template_id: template_id.to_owned(),
+            target: target.map(|s| s.to_owned()),
+            channel: channel.map(|s| s.to_owned()),
+            estimation_regime: estimation_regime.map(|s| s.to_owned()),
+            evidence_quality: evidence_quality.map(|s| s.to_owned()),
         });
     }
 
@@ -261,6 +306,54 @@ impl CalibrationTracker {
         }
         let bias = self.sum_error / self.total_count as f64;
         predicted - bias
+    }
+
+    /// Corrects prediction uncertainty based on calibration slope.
+    ///
+    /// CALIBRATION ≠ OBSERVABILITY — it must feed back into uncertainty.
+    ///
+    /// The calibration slope measures whether the brain's confidence
+    /// scales correctly with prediction magnitude:
+    /// - slope < 1.0 → over-confident → inflate uncertainty
+    /// - slope > 1.0 → under-confident → deflate uncertainty
+    /// - slope = 1.0 → well-calibrated → no change
+    ///
+    /// The correction: `corrected_std = predicted_std / max(slope, 0.1)`
+    /// (clamped to prevent division by near-zero). This closes the loop:
+    ///   prediction → outcome → calibration → uncertainty correction
+    ///   → next prediction
+    #[must_use]
+    pub fn correct_uncertainty(&self, predicted_std: f64) -> f64 {
+        if self.total_count < 5 {
+            // Not enough data to trust the slope — return unchanged.
+            return predicted_std;
+        }
+        let report = self.report();
+        if report.calibration_slope < 1e-6 {
+            // Slope is effectively zero — can't correct meaningfully.
+            return predicted_std;
+        }
+        // Inflate when over-confident (slope < 1), deflate when under-confident.
+        // Clamp slope to [0.1, 10.0] to prevent extreme corrections.
+        let clamped_slope = report.calibration_slope.clamp(0.1, 10.0);
+        predicted_std / clamped_slope
+    }
+
+    /// Returns the calibration bias for a specific template — the running
+    /// mean of (predicted - observed) for that template. Returns 0.0 when
+    /// no data exists for the template.
+    #[must_use]
+    pub fn bias_for_template(&self, template_id: &str) -> f64 {
+        let filtered: Vec<&PredictionRecord> = self
+            .records
+            .iter()
+            .filter(|r| r.template_id == template_id)
+            .collect();
+        if filtered.is_empty() {
+            return 0.0;
+        }
+        let sum_error: f64 = filtered.iter().map(|r| r.predicted - r.observed).sum();
+        sum_error / filtered.len() as f64
     }
 
     /// Returns the calibration report for a specific template.
@@ -600,12 +693,20 @@ mod tests {
                 predicted_std: 1.0,
                 observed: 3.0,
                 template_id: "t".to_owned(),
+                target: None,
+                channel: None,
+                estimation_regime: None,
+                evidence_quality: None,
             },
             PredictionRecord {
                 predicted: 5.0,
                 predicted_std: 1.0,
                 observed: 7.0,
                 template_id: "t".to_owned(),
+                target: None,
+                channel: None,
+                estimation_regime: None,
+                evidence_quality: None,
             },
         ];
         let (slope, intercept) = ols_regression(&records);

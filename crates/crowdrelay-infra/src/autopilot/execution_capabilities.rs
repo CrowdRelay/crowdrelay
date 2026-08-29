@@ -33,6 +33,7 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         "crowdrelay.team.assignment_email_requested" => "team.email",
         "crowdrelay.agent.content_requested" => "agent.content",
         "crowdrelay.community.engagement_requested" => "community.engage",
+        "crowdrelay.social.post_requested" => "social.post",
         _ => "unknown",
     }
 }

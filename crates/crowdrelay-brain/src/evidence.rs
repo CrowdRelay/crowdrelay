@@ -348,14 +348,20 @@ impl GrowthEvidence {
             || self.converted
     }
 
-    /// Returns the Y14 (14-day incremental) outcome for learning. Falls
-    /// back to raw observed fans when incremental is not available.
+    /// Returns the Y14 (14-day incremental) outcome for learning.
     ///
     /// This is the early leading signal — the brain can learn from it
     /// sooner than Y30, but it's less reliable as a North Star target.
+    ///
+    /// Returns `None` until the DiD-adjusted `observed_incremental_fans`
+    /// is available. We deliberately do NOT fall back to raw
+    /// `observed_fans` because `predicted_fans` is an incremental
+    /// expectation — comparing it to a raw workspace-wide fan count
+    /// would teach the brain the wrong lesson (the raw count includes
+    /// fans acquired by other actions, organic growth, etc.).
     #[must_use]
     pub fn y14_outcome(&self) -> Option<f64> {
-        self.observed_incremental_fans.or(self.observed_fans)
+        self.observed_incremental_fans
     }
 
     /// Returns the Y30 (30-day durable) outcome for learning. This is the
@@ -562,8 +568,10 @@ mod tests {
             EvidenceQuality::default(),
         );
         evidence.observed_fans = Some(10.0);
-        // No incremental → Y14 falls back to raw (10.0).
-        assert_eq!(evidence.y14_outcome(), Some(10.0));
+        // No incremental → Y14 is None. We do not fall back to raw
+        // observed_fans because predicted_fans is incremental — using
+        // a raw workspace-wide count would teach the wrong lesson.
+        assert_eq!(evidence.y14_outcome(), None);
         // Y30 is still None.
         assert_eq!(evidence.y30_outcome(), None);
     }

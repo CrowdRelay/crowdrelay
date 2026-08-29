@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use crowdrelay_brain::{
     AttributionResult, CausalModel, DispatchPrediction, ExperimentAssignment, ExplorationMemory,
-    FanOutcome, GrowthIntelligenceSnapshot,
+    FanOutcome, FanProvenanceEvent, GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, PlayId, WorkspaceId,
@@ -341,6 +341,63 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         assignment: &ExperimentAssignment,
         strategy: Option<&str>,
     ) -> Result<(), RepositoryError>;
+
+    /// Evaluates contamination over the full measurement window.
+    ///
+    /// Contamination is NOT just the assignment-time snapshot. It must be
+    /// evaluated over the entire measurement window: assignment-time
+    /// interference + post-assignment interference + cross-channel
+    /// contamination. A clean assignment can become contaminated later.
+    ///
+    /// This is called when `complete_measurement` resolves a fan-growth
+    /// measurement. It scans ALL treatment actions on the same unit during
+    /// the full window, computes `final_contamination`, and downgrades
+    /// `final_evidence_quality` if contamination is high (> 0.1).
+    async fn evaluate_contamination(
+        &self,
+        workspace_id: WorkspaceId,
+        experiment_uuid: uuid::Uuid,
+        unit_id: &str,
+        assignment_time: time::OffsetDateTime,
+        measurement_window_end: time::OffsetDateTime,
+    ) -> Result<(), RepositoryError>;
+
+    /// Records a fan provenance event — an append-only exposure/
+    /// interaction/conversion/durability event. PROVENANCE ≠ CAUSALITY:
+    /// these events establish exposure/attribution evidence, not causal
+    /// treatment effect.
+    async fn record_fan_provenance_event(
+        &self,
+        workspace_id: WorkspaceId,
+        event: &FanProvenanceEvent,
+    ) -> Result<(), RepositoryError>;
+
+    /// Loads the strongest evidence quality for a template+unit from
+    /// the experiment assignment state. Returns `Observational` when
+    /// no experiment assignments exist.
+    async fn load_evidence_quality(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+        unit_id: &str,
+    ) -> Result<crowdrelay_brain::EvidenceQuality, RepositoryError>;
+
+    /// Loads the contamination estimate for a unit+template from the
+    /// experiment assignment state. Returns 0.0 when no assignments exist.
+    async fn load_contamination_estimate(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+        unit_id: &str,
+    ) -> Result<f64, RepositoryError>;
+
+    /// Loads the calibration bias for a template from the calibration
+    /// tracker in brain state. Returns 0.0 when no calibration data exists.
+    async fn load_calibration_bias(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+    ) -> Result<f64, RepositoryError>;
 
     /// Records a credit allocation — attributed credit for a fan outcome.
     /// CRITICAL: the raw observation in the evidence table is immutable.

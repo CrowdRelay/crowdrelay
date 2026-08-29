@@ -303,11 +303,11 @@ impl FanbaseOauthRepository {
             r#"
             INSERT INTO fanbase_connections (
                 workspace_id, platform, external_account_ref, credential_ref,
-                label, status,
+                label, status, provider_account_id,
                 encrypted_access_token, encrypted_refresh_token,
                 token_expires_at, token_scope, token_type
             )
-            VALUES ($1, $2, $3, $4, $5, 'connected', $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, 'connected', $3, $6, $7, $8, $9, $10)
             ON CONFLICT (workspace_id, platform, external_account_ref)
             DO UPDATE SET
                 encrypted_access_token = EXCLUDED.encrypted_access_token,
@@ -316,6 +316,7 @@ impl FanbaseOauthRepository {
                 token_scope = EXCLUDED.token_scope,
                 token_type = EXCLUDED.token_type,
                 status = 'connected',
+                provider_account_id = EXCLUDED.provider_account_id,
                 updated_at = now()
             RETURNING id
             "#,
@@ -396,6 +397,7 @@ impl FanbaseOauthRepository {
                 "https://www.googleapis.com/oauth2/v2/userinfo"
             }
             Platform::Tiktok => "https://open.tiktokapis.com/v2/user/info/",
+            Platform::Youtube => "https://www.googleapis.com/oauth2/v2/userinfo",
             Platform::Bandsintown => return Ok("bandsintown".to_owned()),
         };
         let response = self

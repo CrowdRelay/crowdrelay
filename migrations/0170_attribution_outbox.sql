@@ -11,7 +11,7 @@
 -- request is still pending and will be retried.
 CREATE TABLE IF NOT EXISTS viryaos_attribution_requests (
     id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    workspace_id uuid       NOT NULL REFERENCES viryaos_workspaces(id) ON DELETE CASCADE,
+    workspace_id uuid       NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     measurement_id uuid     NOT NULL,
     action_id   uuid        NOT NULL,
     attribution_version integer NOT NULL DEFAULT 1,

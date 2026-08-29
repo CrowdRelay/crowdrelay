@@ -378,6 +378,81 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn evaluate_contamination(
+        &self,
+        workspace_id: WorkspaceId,
+        experiment_uuid: uuid::Uuid,
+        unit_id: &str,
+        assignment_time: time::OffsetDateTime,
+        measurement_window_end: time::OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        super::operations::experiment_assignments::evaluate_contamination(
+            self,
+            workspace_id,
+            experiment_uuid,
+            unit_id,
+            assignment_time,
+            measurement_window_end,
+        )
+        .await
+    }
+
+    async fn record_fan_provenance_event(
+        &self,
+        workspace_id: WorkspaceId,
+        event: &crowdrelay_brain::FanProvenanceEvent,
+    ) -> Result<(), RepositoryError> {
+        super::operations::experiment_assignments::record_fan_provenance_event(
+            self,
+            workspace_id,
+            event,
+        )
+        .await
+    }
+
+    async fn load_evidence_quality(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+        unit_id: &str,
+    ) -> Result<crowdrelay_brain::EvidenceQuality, RepositoryError> {
+        super::operations::experiment_assignments::load_evidence_quality(
+            self,
+            workspace_id,
+            template_id,
+            unit_id,
+        )
+        .await
+    }
+
+    async fn load_contamination_estimate(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+        unit_id: &str,
+    ) -> Result<f64, RepositoryError> {
+        super::operations::experiment_assignments::load_contamination_estimate(
+            self,
+            workspace_id,
+            template_id,
+            unit_id,
+        )
+        .await
+    }
+
+    async fn load_calibration_bias(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+    ) -> Result<f64, RepositoryError> {
+        super::operations::experiment_assignments::load_calibration_bias(
+            self,
+            workspace_id,
+            template_id,
+        )
+        .await
+    }
+
     async fn record_credit_allocation(
         &self,
         workspace_id: WorkspaceId,

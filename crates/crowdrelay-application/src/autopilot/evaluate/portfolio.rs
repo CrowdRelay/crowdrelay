@@ -12,9 +12,9 @@
 use std::collections::HashSet;
 
 use crowdrelay_brain::{
-    DecisionMode, DecisionValue, GrowthIntelligencePolicy, OpportunityAction, OpportunityId,
-    PortfolioCandidate, PortfolioOptimizer, PortfolioSelection, ResourceCost, WaitCandidateValue,
-    context_hash,
+    DecisionMode, DecisionValue, EfeSignal, GrowthIntelligencePolicy, OpportunityAction,
+    OpportunityId, PortfolioCandidate, PortfolioOptimizer, PortfolioSelection, ResourceCost,
+    WaitCandidateValue, context_hash,
 };
 
 use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
@@ -85,7 +85,14 @@ pub(super) fn select_portfolio(
                     action: OpportunityAction::from_template(&p.template_id),
                     context_hash: context_hash(&p.context),
                 },
-                efe_score: *efe,
+                // EFE is a candidate-generation signal, NOT an economic
+                // value. The optimizer ignores generation_signal for
+                // ranking — DecisionValue.total() is the sole authority.
+                generation_signal: Some(EfeSignal {
+                    information_gain: 0.0, // Wired when EFE carries this
+                    novelty: 0.0,
+                    efe_score: *efe,
+                }),
                 audience_key,
                 source_context: c.decision_kind.to_string(),
                 action_key: c.decision_key.clone(),

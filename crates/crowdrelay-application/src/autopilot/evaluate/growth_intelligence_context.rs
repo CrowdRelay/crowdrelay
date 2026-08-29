@@ -109,13 +109,15 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 ));
             }
         }
-        // Sort by EFE score only (lower EFE = better).
-        // Strategy alignment no longer modifies the EFE score — the
-        // strategy multiplier was removed because it was a second
-        // prediction model sitting on top of the causal model. The
-        // causal model is now the sole authority for expected fans.
-        // Strategy enters via `strategy_rank` for candidate eligibility
-        // and exploration allocation, not as a score modifier.
+        // Sort by EFE score (lower EFE = better) for candidate POOL
+        // ORDERING only. This determines which candidates enter the
+        // portfolio pool first — it does NOT determine which candidates
+        // WIN. The portfolio optimizer makes the final selection using
+        // DecisionValue.total() as the sole ranking authority.
+        //
+        // EFE decides what is worth learning about (candidate generation).
+        // DecisionValue decides what is worth doing (portfolio ranking).
+        // The optimizer must never combine EFE with DecisionValue.total().
         scored_candidates
             .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
         // Extract the GI policy for resource costs and holdout config.
@@ -177,7 +179,50 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // holdout assignment within one cycle, preventing
             // flapping. The hash is mapped to [0, 1) and
             // compared against the holdout probability.
-            let holdout_roll = deterministic_roll(&candidate.decision_key);
+            // Per-round deterministic randomization. The hash includes
+            // the cycle epoch so the assignment varies across cycles
+            // (real randomization, not permanent fate). Within one
+            // cycle, the same decision key gets the same assignment
+            // (preventing flapping).
+            //
+            // ASSIGNMENT RANDOMIZATION ≠ PERMANENT HASH BUCKET
+            // The cycle_epoch changes each cycle, so the roll changes.
+            // Once assigned, the result is persisted — retries/replays
+            // read the persisted arm, they don't re-roll.
+            // Cycle epoch: divides time into 6-hour windows. The same
+            // decision key gets the same assignment within one window,
+            // but different windows produce different rolls.
+            let cycle_epoch = (now.unix_timestamp() / (6 * 3600)) as u64;
+            let holdout_roll = deterministic_roll(&format!(
+                "{}:{}:{}",
+                candidate.decision_key, template_id, cycle_epoch
+            ));
+            // Generate a unique experiment_uuid for this template+cycle.
+            // All units in the same cycle share the same experiment_uuid,
+            // but different units get different assignment_ids.
+            let experiment_uuid = uuid::Uuid::now_v7();
+            // Determine interference policy from unit kind + intervention type.
+            // UNIT VALIDITY ≠ UNIT DECLARATION — the policy is derived
+            // from the actual intervention, not just the unit kind.
+            let interference_policy =
+                crowdrelay_brain::InterferencePolicy::from_unit_and_template(
+                    crowdrelay_brain::ExperimentUnitKind::TargetCommunity,
+                    template_id,
+                );
+            let is_interference_controllable = interference_policy.is_interference_controllable();
+            // Estimand metadata: the holdout estimates "effect among
+            // eligible/selected candidates", not "effect among all
+            // opportunities." Record what made this candidate eligible.
+            let eligibility_criteria = serde_json::json!({
+                "is_direct_action": is_direct_action,
+                "template_id": template_id,
+                "portfolio_selected": true,
+            });
+            let selection_context = serde_json::json!({
+                "holdout_probability": holdout_probability,
+                "strategy": strategy.as_str(),
+                "cycle_epoch": cycle_epoch,
+            });
             if holdout_probability > 0.0
                 && is_direct_action
                 && holdout_roll < holdout_probability
@@ -192,11 +237,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 // which is isolatable — other communities can still
                 // receive treatment without contaminating this
                 // control.
+                let assignment_uuid = uuid::Uuid::now_v7();
                 let assignment = crowdrelay_brain::ExperimentAssignment {
-                    experiment_id: format!(
-                        "exp:{template_id}:{}",
-                        candidate.decision_key
-                    ),
+                    assignment_id: format!("asgn:{assignment_uuid}"),
+                    experiment_uuid,
+                    assignment_round: 1,
                     candidate_id: candidate.decision_key.clone(),
                     unit_id: candidate.decision_key.clone(),
                     unit_kind: crowdrelay_brain::ExperimentUnitKind::TargetCommunity,
@@ -208,7 +253,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     prediction: prediction.clone(),
                     action_id: None,
                     contamination_estimate: 0.0,
-                    is_interference_controllable: true,
+                    interference_policy,
+                    is_interference_controllable,
+                    eligibility_criteria: eligibility_criteria.clone(),
+                    selection_context: selection_context.clone(),
                 };
                 let _ = self
                     .repository
@@ -238,11 +286,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 // pairs with the control arm above to produce real
                 // causal evidence. The unit is the target community
                 // (decision_key), same as the control arm.
+                let treatment_uuid = uuid::Uuid::now_v7();
                 let treatment_assignment = crowdrelay_brain::ExperimentAssignment {
-                    experiment_id: format!(
-                        "exp:{template_id}:{}",
-                        candidate.decision_key
-                    ),
+                    assignment_id: format!("asgn:{treatment_uuid}"),
+                    experiment_uuid,
+                    assignment_round: 1,
                     candidate_id: candidate.decision_key.clone(),
                     unit_id: candidate.decision_key.clone(),
                     unit_kind: crowdrelay_brain::ExperimentUnitKind::TargetCommunity,
@@ -254,7 +302,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     prediction: prediction.clone(),
                     action_id: Some(action_id),
                     contamination_estimate: 0.0,
-                    is_interference_controllable: true,
+                    interference_policy,
+                    is_interference_controllable,
+                    eligibility_criteria: eligibility_criteria.clone(),
+                    selection_context: selection_context.clone(),
                 };
                 let _ = self
                     .repository

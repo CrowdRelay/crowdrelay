@@ -26,6 +26,7 @@ use crowdrelay_infra::{
 use crowdrelay_worker::{
     ad_conversion::AdConversionWorker,
     agent_outcomes::AgentOutcomeWorker,
+    attribution::AttributionWorker,
     audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
@@ -33,6 +34,7 @@ use crowdrelay_worker::{
     discovery::{DiscoveryConfig, RedditDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
+    growth_metric_sync::GrowthMetricSyncWorker,
     operator_brief::OperatorBriefWorker,
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
@@ -291,6 +293,11 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         workspace_id,
         config.autopilot_poll_interval.min(Duration::from_secs(60)),
     );
+    let attribution_worker = AttributionWorker::new(
+        autopilot_repository.clone(),
+        workspace_id,
+        config.autopilot_poll_interval.min(Duration::from_secs(30)),
+    );
     let autopilot_worker = if config.autopilot_enabled {
         Some(AutopilotWorker::new(
             autopilot_repository,
@@ -420,6 +427,35 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         tracing::info!("ad conversion disabled; no platforms (Meta/Google/Bandsintown) enabled");
         None
     };
+    // Growth metric sync: reactive worker that LISTENs on Postgres NOTIFY
+    // for new YouTube/Meta connections and syncs follower/subscriber counts
+    // into viryaos_growth_metric_series. No polling — wakes only on NOTIFY
+    // or when the next scheduled sync time arrives.
+    let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let meta_oauth_config = crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig {
+        platform: crowdrelay_domain::fanbase::Platform::Meta,
+        client_id: std::env::var("CROWDRELAY_FANBASE_OAUTH_META_CLIENT_ID").unwrap_or_default(),
+        client_secret: std::env::var("CROWDRELAY_FANBASE_OAUTH_META_CLIENT_SECRET")
+            .unwrap_or_default(),
+        authorize_url: "https://www.facebook.com/v21.0/dialog/oauth".to_owned(),
+        token_url: "https://graph.facebook.com/v21.0/oauth/access_token".to_owned(),
+        scopes: vec!["ads_management".to_owned(), "ads_read".to_owned()],
+    };
+    let meta_config = if meta_oauth_config.client_id.is_empty() {
+        None
+    } else {
+        Some(meta_oauth_config)
+    };
+    let growth_metric_sync = GrowthMetricSyncWorker::new(
+        database.clone(),
+        youtube_api_key,
+        meta_config,
+        config.response_encryption_key.clone(),
+        config.database.operation_timeout,
+    )
+    .context("invalid growth metric sync worker configuration")?;
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
@@ -435,6 +471,8 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
     let community_executor_shutdown = shutdown_receiver.clone();
+    let growth_metric_sync_shutdown = shutdown_receiver.clone();
+    let attribution_shutdown = shutdown_receiver.clone();
 
     // Growth readiness summary: tells the operator exactly which growth
     // systems are active and what's missing. This is the single most
@@ -531,6 +569,16 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             "community executor"
         });
     }
+    if let Some(worker) = growth_metric_sync {
+        runtime_tasks.spawn(async move {
+            let _ = worker.run(growth_metric_sync_shutdown).await;
+            "growth metric sync"
+        });
+    }
+    runtime_tasks.spawn(async move {
+        attribution_worker.run(attribution_shutdown).await;
+        "attribution worker"
+    });
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);
     checks.set_missed_tick_behavior(MissedTickBehavior::Skip);

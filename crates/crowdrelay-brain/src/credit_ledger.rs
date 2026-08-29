@@ -79,6 +79,11 @@ pub struct AttributionResult {
 
 /// A single credit entry — the attributed share of the fan outcome
 /// for one action.
+///
+/// ATTRIBUTION CREDIT ≠ CAUSAL EFFECT EVIDENCE. These are attribution
+/// artifacts, not causal evidence. The learner must consume them with
+/// `EvidenceQuality::ModeledAttribution` weighting. Only randomized/
+/// quasi-experimental evidence produces causal claims.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreditEntry {
     pub action_id: uuid::Uuid,
@@ -91,6 +96,13 @@ pub struct CreditEntry {
     pub credited_incremental_y30: Option<f64>,
     /// 0.0–1.0, confidence in this action's attribution.
     pub attribution_confidence: f64,
+    /// Whether this credit entry is backed by causal evidence (true
+    /// only when the experiment assignment's final_evidence_quality =
+    /// 'randomized_holdout' and final_contamination < 0.1). False for
+    /// proportional attribution. The learner must distinguish
+    /// attribution from causal evidence.
+    #[serde(default)]
+    pub is_causal_evidence: bool,
 }
 
 /// The attribution method used to allocate credit.
@@ -187,6 +199,11 @@ impl CreditAllocator for ProportionalCreditAllocator {
                 credited_incremental_y14: credited_y14,
                 credited_incremental_y30: credited_y30,
                 attribution_confidence: action.attribution_confidence,
+                // Proportional attribution is NOT causal evidence.
+                // The attribution worker sets this to true only when
+                // the experiment assignment's final_evidence_quality
+                // = 'randomized_holdout' and final_contamination < 0.1.
+                is_causal_evidence: false,
             });
         }
 

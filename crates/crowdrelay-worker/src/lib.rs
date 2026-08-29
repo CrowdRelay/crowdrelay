@@ -30,6 +30,7 @@ pub mod community_executor;
 pub mod discovery;
 pub mod draws;
 pub mod event_sync;
+pub mod growth_metric_sync;
 pub mod operator_brief;
 pub mod ops_watchdog;
 pub mod outbox;

@@ -82,13 +82,14 @@ pub use efe::{
 };
 pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence};
 pub use experiment::{
-    ExperimentAssignment, ExperimentKind, ExperimentUnitKind, TreatmentAssignment,
+    ExperimentAssignment, ExperimentKind, ExperimentUnitKind, FanProvenanceEvent,
+    InterferencePolicy, ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
 pub use opportunity::{OpportunityAction, OpportunityId};
 pub use portfolio::{
-    DecisionMode, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
-    PortfolioSelection, RejectionReason, WaitCandidateValue,
+    DecisionMode, EfeSignal, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer,
+    PortfolioRejection, PortfolioSelection, RejectionReason, WaitCandidateValue,
 };
 pub use reach::{ReachChannel, ReachMetrics};
 pub use resource_cost::{CostSource, ResourceCost};
@@ -110,3 +111,6 @@ pub use world_model::{
 
 // Re-export shared domain types the brain depends on.
 pub use crowdrelay_domain::learning::{Standing, StandingPolicy};
+
+#[cfg(test)]
+mod scenario_tests;

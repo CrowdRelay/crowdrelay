@@ -135,7 +135,7 @@ impl SocialExecutorWorker {
         );
 
         let mut ticker = interval(self.poll_interval);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         ticker.tick().await; // skip the first immediate tick
 
         loop {
@@ -411,6 +411,7 @@ impl SocialExecutorWorker {
             crowdrelay_domain::fanbase::Platform::GoogleAds => "google_ads",
             crowdrelay_domain::fanbase::Platform::Tiktok => "tiktok",
             crowdrelay_domain::fanbase::Platform::Bandsintown => "bandsintown",
+            crowdrelay_domain::fanbase::Platform::Youtube => "youtube",
         };
         let id: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM fanbase_connections
