@@ -45,8 +45,7 @@ CREATE TABLE IF NOT EXISTS viryaos_causal_estimates (
         'y30_durable'
     )),
 
-    computed_at timestamptz NOT NULL DEFAULT now(),
-
+    computed_at timestamptz NOT NULL DEFAULT now()
     -- One estimate per (workspace, template, subreddit_type, method, target).
     -- Use a unique index with COALESCE instead of a table-level UNIQUE constraint
     -- because PostgreSQL doesn't allow expressions in table-level UNIQUE constraints.
