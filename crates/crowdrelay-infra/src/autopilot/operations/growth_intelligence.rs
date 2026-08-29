@@ -741,7 +741,7 @@ async fn apply_delta_to_strategy_posterior(
     use crowdrelay_brain::StateConditionedStrategyPosterior;
 
     // Load the existing strategy posterior from brain state.
-    let posterior = match super::evidence::load_brain_state(repo, workspace_id, "strategy_learner")
+    let posterior = match super::evidence::load_brain_state(repo, workspace_id, "strategy_posterior")
         .await
     {
         Ok(Some((state, _ts))) => {
@@ -756,7 +756,7 @@ async fn apply_delta_to_strategy_posterior(
     // Save the updated posterior back to brain state. Best-effort.
     if let Ok(state) = serde_json::to_value(&posterior) {
         let _ =
-            super::evidence::save_brain_state(repo, workspace_id, "strategy_learner", &state).await;
+            super::evidence::save_brain_state(repo, workspace_id, "strategy_posterior", &state).await;
     }
 }
 

@@ -23,7 +23,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // multiplier is used as fallback.
         let strategy_posterior = self
             .repository
-            .load_brain_state(self.workspace_id, "strategy_learner")
+            .load_brain_state(self.workspace_id, "strategy_posterior")
             .await
             .ok()
             .flatten()
@@ -229,7 +229,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         if let Ok(state) = serde_json::to_value(&strategy_posterior) {
             let _ = self
                 .repository
-                .save_brain_state(self.workspace_id, "strategy_learner", &state)
+                .save_brain_state(self.workspace_id, "strategy_posterior", &state)
                 .await;
         }
         Ok(())
