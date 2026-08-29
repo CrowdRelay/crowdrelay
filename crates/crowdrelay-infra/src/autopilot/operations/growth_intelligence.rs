@@ -560,6 +560,11 @@ pub(in crate::autopilot) async fn mark_insights_consumed(
 /// outcomes. The brain uses this to predict how many fans each worker
 /// dispatch will produce. The model is recomputed from the prediction
 /// history each cycle — no separate storage needed.
+///
+/// In addition to the outcome model P(Y|action,context), this function also
+/// loads treatment-effect observations and updates the treatment-effect
+/// posterior P(τ|context). When enough paired experiment data has
+/// accumulated, the brain uses τ as the primary ranking signal.
 pub(in crate::autopilot) async fn load_causal_model(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -570,19 +575,23 @@ pub(in crate::autopilot) async fn load_causal_model(
 
     // Load all resolved predictions with their observed outcomes, ordered
     // oldest-first so the EMA update processes them in chronological order.
-    /// Prediction row: (template_id, expected_fans, expected_signal, observed_fans, observed_signal)
-    type PredictionRow = (String, f64, f64, Option<f64>, Option<f64>);
+    // We load the full context jsonb so the hierarchical model can learn
+    // per-subreddit-type effects — previously the context was dropped and
+    // every observation was fed with DispatchContext::default().
+    /// Prediction row: (template_id, expected_fans, expected_signal, observed_fans, observed_signal, context_json)
+    type PredictionRow = (String, f64, f64, Option<f64>, Option<f64>, serde_json::Value);
     let rows: Vec<PredictionRow> = sqlx::query_as(
         r#"
         SELECT template_id,
                expected_new_fans,
                expected_signal_installs,
                observed_new_fans,
-               observed_signal_installs
+               observed_signal_installs,
+               context
         FROM viryaos_dispatch_predictions
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
-          AND observed_new_fans IS NOT NULL
+          AND (observed_new_fans IS NOT NULL OR observed_signal_installs IS NOT NULL)
         ORDER BY predicted_at ASC
         "#,
     )
@@ -592,12 +601,14 @@ pub(in crate::autopilot) async fn load_causal_model(
     .map_err(map_sqlx)?;
 
     let mut model = CausalModel::default();
-    for (template_id, expected_fans, expected_signal, observed_fans, observed_signal) in rows {
+    for (template_id, expected_fans, expected_signal, observed_fans, observed_signal, context_json) in rows {
+        let context: crowdrelay_brain::DispatchContext =
+            serde_json::from_value(context_json).unwrap_or_default();
         let prediction = DispatchPrediction {
             template_id: template_id.clone(),
             expected_new_fans: expected_fans,
             expected_signal_installs: expected_signal,
-            ..Default::default()
+            context,
         };
         let outcome = PredictionOutcome::from_observation(
             prediction,
@@ -605,6 +616,35 @@ pub(in crate::autopilot) async fn load_causal_model(
             observed_signal.unwrap_or(0.0),
         );
         model.update(&outcome);
+    }
+
+    // Load treatment-effect observations and update the treatment-effect
+    // posterior. Each row is a pre-computed τ estimate from paired
+    // treatment/control experiments.
+    type TreatmentEffectRow = (String, Option<String>, f64, f64);
+    let te_rows: Vec<TreatmentEffectRow> = sqlx::query_as(
+        r#"
+        SELECT template_id,
+               subreddit_type,
+               observed_tau,
+               observation_variance
+        FROM viryaos_treatment_effect_observations
+        WHERE workspace_id = $1
+        ORDER BY computed_at ASC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    for (template_id, subreddit_type, observed_tau, observation_variance) in te_rows {
+        model.update_treatment_effect(
+            &template_id,
+            subreddit_type.as_deref(),
+            observed_tau,
+            observation_variance,
+        );
     }
 
     Ok(model)
@@ -648,6 +688,11 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
 ///
 /// The context hash is derived from the prediction's context fields, so
 /// two dispatches with the same context features count as the same visit.
+///
+/// We load the full context jsonb and deserialize it into `DispatchContext`
+/// so the hash matches what was stored at prediction time. Previously, only
+/// a subset of fields was loaded, causing a hash mismatch that made every
+/// context appear novel (novelty always 1.0).
 pub(in crate::autopilot) async fn load_exploration_memory(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -655,24 +700,14 @@ pub(in crate::autopilot) async fn load_exploration_memory(
     use crowdrelay_brain::{DispatchContext, ExplorationMemory, VISIT_DECAY, context_hash};
     use time::OffsetDateTime;
 
-    /// Exploration row: (template_id, days_to_event, subreddit_type, trend, time_of_day_bps, predicted_at)
-    type ExplorationRow = (
-        String,
-        Option<i32>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-        OffsetDateTime,
-    );
+    /// Exploration row: (template_id, context_json, predicted_at)
+    type ExplorationRow = (String, serde_json::Value, OffsetDateTime);
     let pool = &repo.pool;
     let now = OffsetDateTime::now_utc();
     let rows: Vec<ExplorationRow> = sqlx::query_as(
         r#"
             SELECT template_id,
-                   (context ->> 'days_to_event')::int,
-                   context ->> 'subreddit_type',
-                   context ->> 'fan_growth_trend',
-                   (context ->> 'time_of_day_bps')::int,
+                   context,
                    predicted_at
             FROM viryaos_dispatch_predictions
             WHERE workspace_id = $1
@@ -686,12 +721,8 @@ pub(in crate::autopilot) async fn load_exploration_memory(
     let mut mem = ExplorationMemory::default();
     // The autopilot cycle runs every 5 minutes. Each historical visit is
     // weighted by VISIT_DECAY^age_cycles so old visits contribute less.
-    // This fixes the bug where 6-month-old visits counted the same as
-    // yesterday's — the decay was never applied during DB reconstruction.
     const CYCLE_HOURS: f64 = 5.0 / 60.0; // 5 minutes in hours
-    for (template_id, days_to_event, subreddit_type, trend_str, time_of_day_bps, predicted_at) in
-        rows
-    {
+    for (template_id, context_json, predicted_at) in rows {
         let age_hours = (now - predicted_at).whole_hours().max(0) as f64;
         let age_cycles = age_hours / CYCLE_HOURS;
         let decayed_weight = VISIT_DECAY.powf(age_cycles);
@@ -699,20 +730,7 @@ pub(in crate::autopilot) async fn load_exploration_memory(
         if decayed_weight < 0.01 {
             continue;
         }
-        let fan_growth_trend = match trend_str.as_deref().unwrap_or("steady") {
-            "stagnant" => crowdrelay_brain::GrowthTrend::Stagnant,
-            "decelerating" => crowdrelay_brain::GrowthTrend::Decelerating,
-            "accelerating" => crowdrelay_brain::GrowthTrend::Accelerating,
-            _ => crowdrelay_brain::GrowthTrend::Steady,
-        };
-        let ctx = DispatchContext {
-            days_to_event: days_to_event.map(|d| d as u32),
-            fan_growth_trend,
-            subreddit_type,
-            post_format: None,
-            time_of_day_bps: time_of_day_bps.map(|t| t as u16).unwrap_or(0),
-            community_novelty_bps: 0,
-        };
+        let ctx: DispatchContext = serde_json::from_value(context_json).unwrap_or_default();
         let hash = context_hash(&ctx);
         mem.record_decayed_visit(&template_id, &hash, decayed_weight);
     }

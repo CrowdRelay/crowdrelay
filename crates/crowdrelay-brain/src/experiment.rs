@@ -237,6 +237,78 @@ impl ExperimentEngine {
         let control_mean = control_weighted_outcome / control_weight_sum;
         Some(treatment_mean - control_mean)
     }
+
+    /// Estimates the paired treatment effect and its variance from a set of
+    /// propensity records and observed outcomes.
+    ///
+    /// Returns `(tau, variance)` where `tau` is the IPW-estimated treatment
+    /// effect and `variance` is the variance of the estimate. The variance
+    /// is computed using the IPW estimator's asymptotic variance:
+    ///
+    /// ```text
+    /// Var(τ) = Σ w_i² (y_i - μ_group)² / (Σ w_i)²
+    /// ```
+    ///
+    /// where `w_i` is the IPW weight and `μ_group` is the weighted group mean.
+    /// This is a simplified variance estimator that ignores the covariance
+    /// between treatment and control groups (conservative).
+    ///
+    /// Returns `None` if there's insufficient data.
+    #[must_use]
+    pub fn estimate_paired_treatment_effect(
+        records: &[PropensityRecord],
+        outcomes: &[f64],
+    ) -> Option<(f64, f64)> {
+        if records.len() != outcomes.len() || records.is_empty() {
+            return None;
+        }
+        let mut treatment_weighted_outcome = 0.0;
+        let mut treatment_weight_sum = 0.0;
+        let mut control_weighted_outcome = 0.0;
+        let mut control_weight_sum = 0.0;
+        // Collect (weight, outcome) pairs for variance computation.
+        let mut treatment_pairs: Vec<(f64, f64)> = Vec::new();
+        let mut control_pairs: Vec<(f64, f64)> = Vec::new();
+        for (record, &outcome) in records.iter().zip(outcomes.iter()) {
+            let p = record.assignment_probability;
+            if p <= 0.0 || p >= 1.0 {
+                continue;
+            }
+            match record.treatment {
+                TreatmentAssignment::Treatment => {
+                    let weight = 1.0 / p;
+                    treatment_weighted_outcome += weight * outcome;
+                    treatment_weight_sum += weight;
+                    treatment_pairs.push((weight, outcome));
+                }
+                TreatmentAssignment::Control => {
+                    let weight = 1.0 / (1.0 - p);
+                    control_weighted_outcome += weight * outcome;
+                    control_weight_sum += weight;
+                    control_pairs.push((weight, outcome));
+                }
+            }
+        }
+        if treatment_weight_sum <= 0.0 || control_weight_sum <= 0.0 {
+            return None;
+        }
+        let treatment_mean = treatment_weighted_outcome / treatment_weight_sum;
+        let control_mean = control_weighted_outcome / control_weight_sum;
+        let tau = treatment_mean - control_mean;
+        // Variance: Σ w_i² (y_i - μ)² / (Σ w_i)² for each group, then sum.
+        let treatment_var: f64 = treatment_pairs
+            .iter()
+            .map(|(w, y)| w * w * (y - treatment_mean).powi(2))
+            .sum::<f64>()
+            / (treatment_weight_sum * treatment_weight_sum);
+        let control_var: f64 = control_pairs
+            .iter()
+            .map(|(w, y)| w * w * (y - control_mean).powi(2))
+            .sum::<f64>()
+            / (control_weight_sum * control_weight_sum);
+        let variance = treatment_var + control_var;
+        Some((tau, variance))
+    }
 }
 
 #[cfg(test)]
@@ -469,5 +541,113 @@ mod tests {
         assert_eq!(ExperimentEngine::ipw_weight(&record), 0.0);
         record.assignment_probability = 1.5;
         assert_eq!(ExperimentEngine::ipw_weight(&record), 0.0);
+    }
+
+    #[test]
+    fn estimate_paired_treatment_effect_matches_ate() {
+        let engine = ExperimentEngine::new();
+        let records: Vec<PropensityRecord> = (0..10)
+            .map(|i| {
+                engine.record_propensity(
+                    format!("key_{i}"),
+                    "t".to_owned(),
+                    1.0,
+                    if i < 5 {
+                        TreatmentAssignment::Treatment
+                    } else {
+                        TreatmentAssignment::Control
+                    },
+                    -5.0,
+                )
+            })
+            .collect();
+        let outcomes: Vec<f64> = (0..10).map(|i| if i < 5 { 10.0 } else { 5.0 }).collect();
+        let ate = ExperimentEngine::estimate_ate(&records, &outcomes).unwrap();
+        let (tau, _) = ExperimentEngine::estimate_paired_treatment_effect(&records, &outcomes)
+            .expect("should return Some");
+        // tau should match ATE.
+        assert!(
+            (tau - ate).abs() < 0.01,
+            "paired tau should match ATE, got tau={tau}, ate={ate}"
+        );
+    }
+
+    #[test]
+    fn estimate_paired_treatment_effect_returns_variance() {
+        let engine = ExperimentEngine::new();
+        let records: Vec<PropensityRecord> = (0..10)
+            .map(|i| {
+                engine.record_propensity(
+                    format!("key_{i}"),
+                    "t".to_owned(),
+                    1.0,
+                    if i < 5 {
+                        TreatmentAssignment::Treatment
+                    } else {
+                        TreatmentAssignment::Control
+                    },
+                    -5.0,
+                )
+            })
+            .collect();
+        let outcomes: Vec<f64> = (0..10)
+            .map(|i| {
+                if i < 5 {
+                    10.0 + (i as f64) * 2.0 // treatment: 10, 12, 14, 16, 18
+                } else {
+                    5.0 + ((i - 5) as f64) * 1.5 // control: 5, 6.5, 8, 9.5, 11
+                }
+            })
+            .collect();
+        let (_, variance) = ExperimentEngine::estimate_paired_treatment_effect(&records, &outcomes)
+            .expect("should return Some");
+        assert!(
+            variance > 0.0,
+            "variance should be positive, got {variance}"
+        );
+    }
+
+    #[test]
+    fn estimate_paired_treatment_effect_returns_none_for_insufficient_data() {
+        let engine = ExperimentEngine::new();
+        // Only treatment, no control.
+        let records: Vec<PropensityRecord> = (0..5)
+            .map(|i| {
+                engine.record_propensity(
+                    format!("key_{i}"),
+                    "t".to_owned(),
+                    1.0,
+                    TreatmentAssignment::Treatment,
+                    -5.0,
+                )
+            })
+            .collect();
+        let outcomes: Vec<f64> = vec![10.0; 5];
+        assert!(ExperimentEngine::estimate_paired_treatment_effect(&records, &outcomes).is_none());
+    }
+
+    #[test]
+    fn estimate_paired_treatment_effect_negative_tau() {
+        let engine = ExperimentEngine::new();
+        let records: Vec<PropensityRecord> = (0..10)
+            .map(|i| {
+                engine.record_propensity(
+                    format!("key_{i}"),
+                    "t".to_owned(),
+                    1.0,
+                    if i < 5 {
+                        TreatmentAssignment::Treatment
+                    } else {
+                        TreatmentAssignment::Control
+                    },
+                    -5.0,
+                )
+            })
+            .collect();
+        // Treatment outcomes worse than control → negative tau.
+        let outcomes: Vec<f64> = (0..10).map(|i| if i < 5 { 1.0 } else { 5.0 }).collect();
+        let (tau, _) = ExperimentEngine::estimate_paired_treatment_effect(&records, &outcomes)
+            .expect("should return Some");
+        assert!(tau < 0.0, "negative effect expected, got {tau}");
     }
 }

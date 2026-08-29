@@ -69,7 +69,7 @@ pub struct WorldModel {
 /// The trend of fan growth over time. The brain uses this to decide
 /// urgency: stagnant growth → more aggressive dispatch; accelerating →
 /// maintain the current approach.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrowthTrend {
     /// Growth rate is increasing month-over-month.

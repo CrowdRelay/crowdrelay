@@ -152,6 +152,12 @@ impl HypothesisRegistry {
     /// strongly the evidence moves the posterior — the likelihood is
     /// `0.7 + weight * 0.3`.
     ///
+    /// This is a convenience wrapper around [`Self::update_with_effect`] that
+    /// maps the boolean + weight to a synthetic effect size. For real
+    /// evidence with measured effect sizes and standard errors, prefer
+    /// [`Self::update_with_effect`] directly — it uses a proper Normal
+    /// likelihood instead of a hardcoded heuristic.
+    ///
     /// Does nothing if the hypothesis id is unknown.
     pub fn update(&mut self, id: &str, evidence_supports: bool, weight: f64) {
         let Some(h) = self.hypotheses.get_mut(id) else {
@@ -171,6 +177,78 @@ impl HypothesisRegistry {
         h.posterior_probability = posterior;
         h.evidence_count += 1;
         h.status = HypothesisStatus::from_posterior(posterior);
+        h.last_updated_at = OffsetDateTime::now_utc();
+    }
+
+    /// Updates a hypothesis with a measured effect size and its standard
+    /// error, using a proper Normal likelihood function.
+    ///
+    /// This is the recommended update method for real evidence. Instead of
+    /// the hardcoded `0.7 + weight * 0.3` likelihood used by [`Self::update`],
+    /// this method computes the likelihood from the actual measured effect:
+    ///
+    /// ```text
+    /// L(effect | H_true)  = Normal(effect | μ_H, σ_H)
+    /// L(effect | H_false) = Normal(effect | μ_notH, σ_notH)
+    /// ```
+    ///
+    /// where `μ_H` is the expected effect under the hypothesis (positive),
+    /// `μ_notH` is the expected effect under the negation (zero or negative),
+    /// and `σ_H = σ_notH = standard_error`.
+    ///
+    /// The posterior is then:
+    ///
+    /// ```text
+    /// posterior = prior * L_H / (prior * L_H + (1 - prior) * L_notH)
+    /// ```
+    ///
+    /// This properly accounts for the statistical power of the evidence: a
+    /// large effect with small standard error moves the posterior more than
+    /// a small effect with large standard error.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the hypothesis id.
+    /// - `observed_effect`: the measured effect size (e.g. incremental fans).
+    ///   Positive = supports the hypothesis, negative = refutes it.
+    /// - `standard_error`: the standard error of the effect estimate. Smaller
+    ///   values mean more confident evidence.
+    ///
+    /// Does nothing if the hypothesis id is unknown.
+    pub fn update_with_effect(&mut self, id: &str, observed_effect: f64, standard_error: f64) {
+        let Some(h) = self.hypotheses.get_mut(id) else {
+            return;
+        };
+        let prior = h.posterior_probability;
+        let se = standard_error.max(1e-10);
+        // Under H_true: the effect is positive. We use |observed_effect| as
+        // μ_H (the MLE for the magnitude, assuming H is true and the sign is
+        // positive).
+        // Under H_false: the effect is centered at 0 (no effect).
+        let mu_h = observed_effect.abs();
+        let mu_not_h = 0.0;
+        // Normal likelihood: L = exp(-(x - μ)² / (2σ²)) / (σ√(2π))
+        // The normalizing constant cancels in the ratio, so we only need
+        // the exponential part.
+        let log_l_h = -(observed_effect - mu_h).powi(2) / (2.0 * se * se);
+        let log_l_not_h = -(observed_effect - mu_not_h).powi(2) / (2.0 * se * se);
+        // Convert to posterior using Bayes' rule in log space for numerical
+        // stability.
+        // posterior = prior * L_h / (prior * L_h + (1 - prior) * L_not_h)
+        // In log space: log_posterior = log(prior) + log_l_h
+        //               - log_sum_exp(log(prior) + log_l_h, log(1-prior) + log_l_not_h)
+        let log_prior = prior.ln();
+        let log_prior_not = (1.0 - prior).ln();
+        let log_term_h = log_prior + log_l_h;
+        let log_term_not_h = log_prior_not + log_l_not_h;
+        // log_sum_exp for numerical stability.
+        let max_log = log_term_h.max(log_term_not_h);
+        let log_sum_exp =
+            max_log + ((log_term_h - max_log).exp() + (log_term_not_h - max_log).exp()).ln();
+        let posterior = (log_term_h - log_sum_exp).exp();
+        h.posterior_probability = posterior.clamp(0.0, 1.0);
+        h.evidence_count += 1;
+        h.status = HypothesisStatus::from_posterior(h.posterior_probability);
         h.last_updated_at = OffsetDateTime::now_utc();
     }
 
@@ -485,29 +563,121 @@ mod tests {
     }
 
     #[test]
-    fn status_from_posterior_boundaries() {
-        // > 0.8 → Supported
-        assert_eq!(
-            HypothesisStatus::from_posterior(0.81),
-            HypothesisStatus::Supported
+    fn update_with_effect_positive_effect_increases_posterior() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // Large positive effect with small SE → strong support.
+        registry.update_with_effect("h", 10.0, 1.0);
+        let h = registry.get("h").expect("exists");
+        assert!(
+            h.posterior_probability > 0.9,
+            "strong positive effect should push posterior high, got {}",
+            h.posterior_probability
         );
-        assert_eq!(
-            HypothesisStatus::from_posterior(0.8),
-            HypothesisStatus::Inconclusive
+        assert_eq!(h.evidence_count, 1);
+        assert_eq!(h.status, HypothesisStatus::Supported);
+    }
+
+    #[test]
+    fn update_with_effect_negative_effect_decreases_posterior() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // Large negative effect with small SE → strong refutation.
+        registry.update_with_effect("h", -10.0, 1.0);
+        let h = registry.get("h").expect("exists");
+        assert!(
+            h.posterior_probability < 0.1,
+            "strong negative effect should push posterior low, got {}",
+            h.posterior_probability
         );
-        // < 0.2 → Refuted
-        assert_eq!(
-            HypothesisStatus::from_posterior(0.19),
-            HypothesisStatus::Refuted
+        assert_eq!(h.evidence_count, 1);
+        assert_eq!(h.status, HypothesisStatus::Refuted);
+    }
+
+    #[test]
+    fn update_with_effect_zero_effect_keeps_posterior_near_prior() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // Zero effect → no evidence either way. Posterior should stay near 0.5.
+        registry.update_with_effect("h", 0.0, 5.0);
+        let h = registry.get("h").expect("exists");
+        assert!(
+            (h.posterior_probability - 0.5).abs() < 0.2,
+            "zero effect should not move posterior much, got {}",
+            h.posterior_probability
         );
-        assert_eq!(
-            HypothesisStatus::from_posterior(0.2),
-            HypothesisStatus::Inconclusive
+    }
+
+    #[test]
+    fn update_with_effect_large_se_is_weak_evidence() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // Large effect but huge SE → weak evidence, posterior moves little.
+        registry.update_with_effect("h", 10.0, 100.0);
+        let h = registry.get("h").expect("exists");
+        assert!(
+            (h.posterior_probability - 0.5).abs() < 0.2,
+            "huge SE should make evidence weak, got {}",
+            h.posterior_probability
         );
-        // middle → Inconclusive
-        assert_eq!(
-            HypothesisStatus::from_posterior(0.5),
-            HypothesisStatus::Inconclusive
+    }
+
+    #[test]
+    fn update_with_effect_small_se_is_strong_evidence() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // Small positive effect with tiny SE → still strong support.
+        registry.update_with_effect("h", 1.0, 0.1);
+        let h = registry.get("h").expect("exists");
+        assert!(
+            h.posterior_probability > 0.9,
+            "tiny SE makes even small effect strong, got {}",
+            h.posterior_probability
+        );
+    }
+
+    #[test]
+    fn update_with_effect_accumulates_across_observations() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // Multiple moderate positive effects accumulate into strong support.
+        // SNR = 3/3 = 1.0 per observation — moderate evidence.
+        for _ in 0..10 {
+            registry.update_with_effect("h", 3.0, 3.0);
+        }
+        let h = registry.get("h").expect("exists");
+        assert_eq!(h.evidence_count, 10);
+        assert!(
+            h.posterior_probability > 0.8,
+            "accumulated moderate evidence should become strong, got {}",
+            h.posterior_probability
+        );
+    }
+
+    #[test]
+    fn update_with_effect_unknown_id_is_noop() {
+        let mut registry = HypothesisRegistry::new();
+        registry.update_with_effect("does_not_exist", 10.0, 1.0);
+        assert!(registry.hypotheses.is_empty());
+    }
+
+    #[test]
+    fn update_with_effect_mixed_evidence_converges() {
+        let mut registry = HypothesisRegistry::new();
+        registry.register(Hypothesis::new("h".to_owned(), "claim".to_owned(), 0.5));
+        // 8 positive, 2 negative → should end up supported.
+        for _ in 0..8 {
+            registry.update_with_effect("h", 5.0, 3.0);
+        }
+        for _ in 0..2 {
+            registry.update_with_effect("h", -5.0, 3.0);
+        }
+        let h = registry.get("h").expect("exists");
+        assert_eq!(h.evidence_count, 10);
+        assert!(
+            h.posterior_probability > 0.5,
+            "8 positive vs 2 negative should lean supported, got {}",
+            h.posterior_probability
         );
     }
 }

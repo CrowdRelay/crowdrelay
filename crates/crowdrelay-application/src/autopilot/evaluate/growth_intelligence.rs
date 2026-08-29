@@ -184,11 +184,26 @@ pub fn evaluate_growth_intelligence(
     // Build the enriched dispatch context (shared with the novelty lookup
     // in evaluate.rs so both use the same context hash).
     let dispatch_context = build_dispatch_context(snapshot, now);
-    // Single-lookup EFE scoring: get expected fans, predict std, and
-    // confidence in one hierarchical lookup instead of three separate
-    // HashMap lookups.
-    let (expected_new_fans, predict_std, confidence) =
-        causal_model.predict_stats(&snapshot.template_id, &dispatch_context);
+    // Treatment-aware EFE scoring: when the treatment-effect model has enough
+    // paired experiment data (≥ MIN_TREATMENT_CONFIDENCE), the brain uses τ
+    // (the causally correct treatment effect) as the primary ranking signal
+    // instead of the outcome model P(Y|action,context). Below that threshold,
+    // it falls back to the outcome model.
+    let treatment_stats =
+        causal_model.predict_stats_with_treatment(&snapshot.template_id, &dispatch_context);
+    let (expected_new_fans, predict_std, confidence) = if treatment_stats.use_treatment_effect {
+        (
+            treatment_stats.treatment_effect,
+            treatment_stats.treatment_std,
+            treatment_stats.treatment_confidence,
+        )
+    } else {
+        (
+            treatment_stats.expected_fans,
+            treatment_stats.predict_std,
+            treatment_stats.confidence,
+        )
+    };
     // Predict expected Signal installs using the learned Signal model.
     let expected_signal_installs =
         causal_model.predict_signal(&snapshot.template_id, &dispatch_context);

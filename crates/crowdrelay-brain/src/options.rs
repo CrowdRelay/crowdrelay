@@ -30,21 +30,27 @@
 //! immediately. This allows both sequential pipelines
 //! (1 → 2 → 3) and parallel fan-out (1 → {2, 3} → 4).
 //!
-//! # Overlap penalty
+//! # Expected value: reach probability propagation
 //!
-//! When steps target overlapping audiences, the total expected fans is *not*
-//! the naive sum — some fans would have been captured by multiple steps. The
-//! `total_expected_fans` field applies a simple overlap penalty so the brain
-//! doesn't double-count.
+//! The total expected fans of an option is NOT the naive sum — step *n* only
+//! happens if all preceding steps succeed. The correct formula is:
+//!
+//! ```text
+//! E[total] = Σ_i reach_prob_i × expected_fans_i
+//! ```
+//!
+//! where `reach_prob_0 = 1.0` and `reach_prob_{i+1} = reach_prob_i ×
+//! success_probability_i`. Each step's `success_probability` (default 0.85)
+//! models the probability that the step succeeds and the next step becomes
+//! reachable. This replaces the old flat overlap penalty with proper
+//! sequential probability propagation.
 
 use serde::Serialize;
 
-/// The overlap penalty factor applied when summing step expected fans.
-///
-/// Each additional step beyond the first contributes only
-/// `OVERLAP_PENALTY_FACTOR` of its expected fans, modelling that later steps
-/// in a sequence partially re-target the same audience as earlier ones.
-pub const OVERLAP_PENALTY_FACTOR: f64 = 0.85;
+/// Default success probability for a step in an option. Models the
+/// probability that a step succeeds and the next step becomes reachable.
+/// Used as the default when no explicit `success_probability` is provided.
+pub const DEFAULT_STEP_SUCCESS_PROBABILITY: f64 = 0.85;
 
 /// The lifecycle status of an entire option.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -87,6 +93,10 @@ pub struct OptionStep {
     pub target: String,
     /// The expected number of fans from this step *alone*.
     pub expected_fans: f64,
+    /// The probability that this step succeeds (0.0–1.0). Used in the
+    /// reach-probability propagation for `total_expected_fans`. Defaults to
+    /// [`DEFAULT_STEP_SUCCESS_PROBABILITY`].
+    pub success_probability: f64,
     /// Indices of steps (within the option's `steps` vector) that must
     /// complete before this step can be dispatched.
     pub depends_on: Vec<usize>,
@@ -96,7 +106,8 @@ pub struct OptionStep {
 
 impl OptionStep {
     /// Creates a new step with the given template, target, expected fans, and
-    /// dependencies. The step starts in `Pending` status.
+    /// dependencies. The step starts in `Pending` status with the default
+    /// success probability ([`DEFAULT_STEP_SUCCESS_PROBABILITY`]).
     #[must_use]
     pub fn new(
         template_id: &str,
@@ -108,6 +119,26 @@ impl OptionStep {
             template_id: template_id.to_owned(),
             target: target.to_owned(),
             expected_fans,
+            success_probability: DEFAULT_STEP_SUCCESS_PROBABILITY,
+            depends_on,
+            status: OptionStepStatus::Pending,
+        }
+    }
+
+    /// Creates a new step with an explicit success probability.
+    #[must_use]
+    pub fn with_success_probability(
+        template_id: &str,
+        target: &str,
+        expected_fans: f64,
+        success_probability: f64,
+        depends_on: Vec<usize>,
+    ) -> Self {
+        Self {
+            template_id: template_id.to_owned(),
+            target: target.to_owned(),
+            expected_fans,
+            success_probability: success_probability.clamp(0.0, 1.0),
             depends_on,
             status: OptionStepStatus::Pending,
         }
@@ -142,7 +173,8 @@ pub struct ActionOption {
     pub name: String,
     /// The ordered sequence of steps that make up this option.
     pub steps: Vec<OptionStep>,
-    /// The total expected fans from the whole option, with overlap penalty.
+    /// The total expected fans from the whole option, computed via reach
+    /// probability propagation.
     pub total_expected_fans: f64,
     /// The current lifecycle status of the option.
     pub status: OptionStatus,
@@ -155,11 +187,10 @@ pub struct ActionOption {
 impl ActionOption {
     /// Creates a new option with the given id, name, and steps.
     ///
-    /// `total_expected_fans` is computed from the steps using an overlap
-    /// penalty: the first step contributes its full `expected_fans`, and each
-    /// subsequent step contributes `OVERLAP_PENALTY_FACTOR` of its
-    /// `expected_fans`, modelling that later steps partially re-target the
-    /// same audience.
+    /// `total_expected_fans` is computed from the steps using reach
+    /// probability propagation: step *i* contributes `reach_prob_i ×
+    /// expected_fans_i` where `reach_prob` accumulates the product of
+    /// preceding steps' `success_probability`.
     ///
     /// Steps with no dependencies are immediately marked `Ready`; the rest
     /// stay `Pending` until their dependencies complete.
@@ -227,21 +258,31 @@ impl ActionOption {
     }
 }
 
-/// Computes the total expected fans for an option from its steps, applying an
-/// overlap penalty so that later steps contribute less (they partially
-/// re-target the same audience as earlier steps).
+/// Computes the total expected fans for an option from its steps, using
+/// reach probability propagation.
 ///
-/// The first step contributes its full `expected_fans`; each subsequent step
-/// contributes `OVERLAP_PENALTY_FACTOR` of its `expected_fans`.
+/// Step *i* only happens if all preceding steps succeed. The expected value
+/// is:
+///
+/// ```text
+/// E[total] = Σ_i reach_prob_i × expected_fans_i
+/// ```
+///
+/// where `reach_prob_0 = 1.0` and `reach_prob_{i+1} = reach_prob_i ×
+/// success_probability_i`. This properly models that step *n*'s contribution
+/// is discounted by the probability that the sequence reaches it.
+///
+/// For parallel steps (no dependencies), the reach probability is the product
+/// of all preceding steps' success probabilities — the same sequential
+/// formula applies because the steps are ordered in the vector.
 #[must_use]
 pub fn compute_total_expected_fans(steps: &[OptionStep]) -> f64 {
     let mut total = 0.0;
-    for (i, step) in steps.iter().enumerate() {
-        if i == 0 {
-            total += step.expected_fans;
-        } else {
-            total += step.expected_fans * OVERLAP_PENALTY_FACTOR;
-        }
+    let mut reach_prob = 1.0; // P(reaching the current step)
+    for step in steps {
+        total += reach_prob * step.expected_fans;
+        // The next step is reachable only if this one succeeds.
+        reach_prob *= step.success_probability;
     }
     total
 }
@@ -278,11 +319,11 @@ impl OptionPlanner {
         self.active_options.push(option);
     }
 
-    /// Advances the option identified by `action_id` after a step result.
+    /// Advances the option identified by `option_id` after a step result.
     ///
     /// # What it does
     ///
-    /// 1. Finds the option with the given `action_id`.
+    /// 1. Finds the option with the given `option_id` (matching [`ActionOption::id`]).
     /// 2. Finds the step that is currently `Dispatched` (the one whose result
     ///    just came back) and marks it `Completed` (if `success`) or `Failed`
     ///    (if not).
@@ -299,9 +340,14 @@ impl OptionPlanner {
     /// after advancing. When called with no currently dispatched step but a
     /// `Ready` step exists, the ready step is returned unchanged (the call is
     /// a no-op aside from the lookup).
+    ///
+    /// # Parameters
+    ///
+    /// - `option_id`: the [`ActionOption::id`] of the option to advance.
+    /// - `success`: whether the currently-dispatched step succeeded.
     #[must_use]
-    pub fn advance(&mut self, action_id: &str, success: bool) -> Option<&OptionStep> {
-        let option = self.active_options.iter_mut().find(|o| o.id == action_id)?;
+    pub fn advance(&mut self, option_id: &str, success: bool) -> Option<&OptionStep> {
+        let option = self.active_options.iter_mut().find(|o| o.id == option_id)?;
         if option.status == OptionStatus::Completed || option.status == OptionStatus::Abandoned {
             return None;
         }
@@ -396,12 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn total_expected_fans_applies_overlap_penalty() {
+    fn total_expected_fans_uses_reach_probability_propagation() {
         let option = sequential_option();
-        // step 0: 50.0 (full)
-        // step 1: 30.0 * 0.85 = 25.5
-        // step 2: 15.0 * 0.85 = 12.75
-        let expected = 50.0 + 30.0 * OVERLAP_PENALTY_FACTOR + 15.0 * OVERLAP_PENALTY_FACTOR;
+        // All steps have default success_probability = 0.85.
+        // reach_prob_0 = 1.0 → contribution = 1.0 * 50.0 = 50.0
+        // reach_prob_1 = 1.0 * 0.85 = 0.85 → contribution = 0.85 * 30.0 = 25.5
+        // reach_prob_2 = 0.85 * 0.85 = 0.7225 → contribution = 0.7225 * 15.0 = 10.8375
+        // total = 50.0 + 25.5 + 10.8375 = 86.3375
+        let expected = 50.0 + 0.85 * 30.0 + 0.85 * 0.85 * 15.0;
         assert!(
             (option.total_expected_fans - expected).abs() < 0.001,
             "got {}, expected {}",
@@ -422,6 +470,7 @@ mod tests {
                 vec![],
             )],
         );
+        // Single step: reach_prob = 1.0 → total = 42.0
         assert!((option.total_expected_fans - 42.0).abs() < 0.001);
     }
 
@@ -429,6 +478,42 @@ mod tests {
     fn total_expected_fans_empty() {
         let option = ActionOption::new("empty", "Empty", vec![]);
         assert_eq!(option.total_expected_fans, 0.0);
+    }
+
+    #[test]
+    fn total_expected_fans_low_success_probability_reduces_total() {
+        // Step 0: 100 fans, success_prob = 0.5
+        // Step 1: 100 fans, success_prob = 0.5
+        // reach_prob_0 = 1.0 → 100.0
+        // reach_prob_1 = 0.5 → 50.0
+        // total = 150.0
+        let option = ActionOption::new(
+            "low-prob",
+            "Low prob",
+            vec![
+                OptionStep::with_success_probability("a", "t1", 100.0, 0.5, vec![]),
+                OptionStep::with_success_probability("b", "t2", 100.0, 0.5, vec![0]),
+            ],
+        );
+        assert!((option.total_expected_fans - 150.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn total_expected_fans_zero_success_probability_zeros_later_steps() {
+        // Step 0: 100 fans, success_prob = 0.0
+        // Step 1: 100 fans, success_prob = 1.0 (but never reached)
+        // reach_prob_0 = 1.0 → 100.0
+        // reach_prob_1 = 0.0 → 0.0
+        // total = 100.0
+        let option = ActionOption::new(
+            "zero-prob",
+            "Zero prob",
+            vec![
+                OptionStep::with_success_probability("a", "t1", 100.0, 0.0, vec![]),
+                OptionStep::with_success_probability("b", "t2", 100.0, 1.0, vec![0]),
+            ],
+        );
+        assert!((option.total_expected_fans - 100.0).abs() < 0.001);
     }
 
     #[test]
@@ -803,6 +888,15 @@ mod tests {
         assert_eq!(step.template_id, "reddit-scanner");
         assert_eq!(step.target, "r_MetalMusic");
         assert_eq!(step.expected_fans, 10.0);
+        assert!((step.success_probability - DEFAULT_STEP_SUCCESS_PROBABILITY).abs() < 1e-9);
+    }
+
+    #[test]
+    fn option_step_with_success_probability_clamps() {
+        let step = OptionStep::with_success_probability("a", "t", 10.0, 1.5, vec![]);
+        assert!((step.success_probability - 1.0).abs() < 1e-9);
+        let step = OptionStep::with_success_probability("a", "t", 10.0, -0.5, vec![]);
+        assert!((step.success_probability - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -841,7 +935,10 @@ mod tests {
             OptionStep::new("c", "t3", 100.0, vec![1]),
         ];
         let total = compute_total_expected_fans(&steps);
-        // 100 + 100*0.85 + 100*0.85 = 100 + 85 + 85 = 270
-        assert!((total - 270.0).abs() < 0.001);
+        // reach_prob_0 = 1.0 → 100.0
+        // reach_prob_1 = 0.85 → 85.0
+        // reach_prob_2 = 0.85 * 0.85 = 0.7225 → 72.25
+        // total = 100.0 + 85.0 + 72.25 = 257.25
+        assert!((total - 257.25).abs() < 0.001);
     }
 }

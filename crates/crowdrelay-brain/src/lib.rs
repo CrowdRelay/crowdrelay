@@ -43,6 +43,7 @@
 
 pub mod audience;
 pub mod bayesian;
+pub mod calibration;
 pub mod causal_model;
 pub mod change_point;
 pub mod efe;
@@ -65,10 +66,15 @@ pub mod voi;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
-pub use audience::{AudienceKey, estimate_overlap, marginal_value};
+pub use audience::{AudienceKey, LearnedOverlapModel, estimate_overlap, marginal_value};
+pub use bayesian::{
+    HierarchicalPosterior, NormalPosterior, TreatmentEffectPosterior, normal_cdf, normal_pdf,
+};
+pub use calibration::{CalibrationReport, CalibrationTracker, PredictionRecord, ReliabilityBucket};
 pub use causal_model::{
     CausalModel, DEFAULT_EXPECTED_FANS, DEFAULT_EXPECTED_SIGNAL, DispatchContext,
-    DispatchPrediction, PRIOR_VARIANCE, PredictionOutcome,
+    DispatchPrediction, MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE, PredictionOutcome,
+    TreatmentAwareStats,
 };
 pub use change_point::{ChangeDirection, ChangePoint, ChangePointDetector};
 pub use efe::{
@@ -83,11 +89,18 @@ pub use fan_network::{FanNetworkModel, NetworkEffect, RecruitmentChannel};
 pub use hypothesis::{Hypothesis, HypothesisRegistry, HypothesisStatus};
 pub use metacognition::{MetacognitionMonitor, MetacognitiveState};
 pub use north_star::NorthStarMetric;
-pub use opportunity::{OpportunityAction, OpportunityId, OpportunityState, TrackedOpportunity};
+pub use opportunity::{
+    CreditAssignment, DEFAULT_CREDIT_DISCOUNT, EpisodeEvent, EpisodeEventKind, EpisodeStatus,
+    EpisodeTracker, OpportunityAction, OpportunityEpisode, OpportunityId, OpportunityState,
+    TrackedOpportunity, credit_allocation, credit_allocation_with_measurements,
+};
 pub use opportunity_graph::{
     DependencyKind, NodeStatus, OpportunityEdge, OpportunityGraph, OpportunityNode,
 };
-pub use options::{ActionOption, OptionPlanner, OptionStatus, OptionStep, OptionStepStatus};
+pub use options::{
+    ActionOption, DEFAULT_STEP_SUCCESS_PROBABILITY, OptionPlanner, OptionStatus, OptionStep,
+    OptionStepStatus,
+};
 pub use portfolio::{
     PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
     PortfolioSelection, RejectionReason,
@@ -101,8 +114,11 @@ pub use standing::{
     AgentTier, agent_standing_policy, effective_agent_cooldown, effective_agent_tier,
 };
 pub use strategy::GrowthStrategy;
-pub use strategy_learning::{StrategyLearner, StrategyOutcome};
-pub use voi::{expected_information_gain, exploration_bonus, option_value, value_of_information};
+pub use strategy_learning::{StrategyLearner, StrategyOutcome, StrategyPosterior};
+pub use voi::{
+    VoiAssessment, expected_information_gain, exploration_bonus, knowledge_gradient,
+    knowledge_gradient_ranking, option_value, value_of_information,
+};
 pub use world_model::{GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel};
 
 // Re-export shared domain types the brain depends on.

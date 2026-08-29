@@ -118,6 +118,112 @@ pub fn estimate_overlap(key_a: &AudienceKey, key_b: &AudienceKey) -> f64 {
     0.05
 }
 
+/// A learned audience overlap model — stores observed overlap coefficients
+/// between audience pairs and falls back to [`estimate_overlap`] when no
+/// learned data exists.
+///
+/// The brain learns overlap from observed outcomes: when two dispatches to
+/// overlapping audiences produce fewer combined fans than the sum of their
+/// individual predictions, the difference is attributed to overlap. This
+/// is more accurate than the hardcoded heuristic in [`estimate_overlap`]
+/// because it accounts for the specific audience relationships in the
+/// tenant's fanbase.
+///
+/// # Learning rule
+///
+/// When the brain dispatches to audiences A and B and observes combined
+/// outcome `Y_AB`, compared to the expected `Y_A + Y_B`, the overlap
+/// coefficient is updated:
+///
+/// ```text
+/// overlap(A, B) = (Y_A + Y_B - Y_AB) / Y_A   (if Y_A > 0)
+/// ```
+///
+/// This is stored as a running average keyed by the sorted pair `(A, B)`.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LearnedOverlapModel {
+    /// Learned overlap coefficients, keyed by "audience_a|audience_b" (sorted).
+    /// Values are in [0, 1].
+    pub coefficients: HashMap<String, f64>,
+    /// Number of observations per pair (for running average).
+    pub counts: HashMap<String, u32>,
+}
+
+impl LearnedOverlapModel {
+    /// Creates a new, empty learned overlap model.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the overlap between two audiences. Uses the learned coefficient
+    /// if available, otherwise falls back to [`estimate_overlap`].
+    #[must_use]
+    pub fn overlap(&self, key_a: &AudienceKey, key_b: &AudienceKey) -> f64 {
+        if key_a == key_b {
+            return 1.0;
+        }
+        let pair_key = Self::pair_key(key_a, key_b);
+        self.coefficients
+            .get(&pair_key)
+            .copied()
+            .unwrap_or_else(|| estimate_overlap(key_a, key_b))
+    }
+
+    /// Updates the learned overlap coefficient for an audience pair from an
+    /// observed outcome.
+    ///
+    /// `expected_sum` is the sum of individual predictions (Y_A + Y_B).
+    /// `observed_combined` is the actual combined outcome (Y_AB).
+    /// `reference` is the larger of the two individual predictions (used as
+    /// the denominator for the overlap fraction).
+    pub fn update(
+        &mut self,
+        key_a: &AudienceKey,
+        key_b: &AudienceKey,
+        expected_sum: f64,
+        observed_combined: f64,
+        reference: f64,
+    ) {
+        if key_a == key_b || reference <= 0.0 {
+            return;
+        }
+        let observed_overlap = ((expected_sum - observed_combined) / reference).clamp(0.0, 1.0);
+        let pair_key = Self::pair_key(key_a, key_b);
+        let count = self.counts.get(&pair_key).copied().unwrap_or(0);
+        let current = self.coefficients.get(&pair_key).copied().unwrap_or(0.0);
+        // Running average.
+        let updated = if count == 0 {
+            observed_overlap
+        } else {
+            (current * count as f64 + observed_overlap) / (count as f64 + 1.0)
+        };
+        self.coefficients.insert(pair_key.clone(), updated);
+        self.counts.insert(pair_key, count + 1);
+    }
+
+    /// Creates a sorted pair key for two audience keys.
+    fn pair_key(a: &AudienceKey, b: &AudienceKey) -> String {
+        if a.as_str() <= b.as_str() {
+            format!("{}|{}", a, b)
+        } else {
+            format!("{}|{}", b, a)
+        }
+    }
+
+    /// Returns the number of learned overlap pairs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.coefficients.len()
+    }
+
+    /// Returns true if no overlap coefficients have been learned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.coefficients.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +347,93 @@ mod tests {
             AudienceKey::platform("Spotify").as_str(),
             "platform:Spotify"
         );
+    }
+
+    // ─── LearnedOverlapModel tests ────────────────────────────────────────
+
+    #[test]
+    fn learned_overlap_starts_empty() {
+        let model = LearnedOverlapModel::new();
+        assert!(model.is_empty());
+        assert_eq!(model.len(), 0);
+    }
+
+    #[test]
+    fn learned_overlap_falls_back_to_heuristic() {
+        let model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        let b = AudienceKey::subreddit("ProgMusic");
+        // No learned data → should use heuristic (0.2 for same type).
+        assert!((model.overlap(&a, &b) - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn learned_overlap_same_key_is_full() {
+        let model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        assert!((model.overlap(&a, &a) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn learned_overlap_updates_from_observation() {
+        let mut model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        let b = AudienceKey::subreddit("ProgMusic");
+        // Expected sum = 10, observed = 7, reference = 10.
+        // overlap = (10 - 7) / 10 = 0.3
+        model.update(&a, &b, 10.0, 7.0, 10.0);
+        assert!((model.overlap(&a, &b) - 0.3).abs() < 0.01);
+        assert_eq!(model.len(), 1);
+    }
+
+    #[test]
+    fn learned_overlap_averages_multiple_observations() {
+        let mut model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        let b = AudienceKey::subreddit("ProgMusic");
+        // First: overlap = 0.3
+        model.update(&a, &b, 10.0, 7.0, 10.0);
+        // Second: overlap = 0.5
+        model.update(&a, &b, 10.0, 5.0, 10.0);
+        // Average = (0.3 + 0.5) / 2 = 0.4
+        assert!((model.overlap(&a, &b) - 0.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn learned_overlap_clamps_to_zero_one() {
+        let mut model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        let b = AudienceKey::subreddit("ProgMusic");
+        // Observed > expected → overlap = negative → clamped to 0.
+        model.update(&a, &b, 10.0, 15.0, 10.0);
+        assert!((model.overlap(&a, &b) - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn learned_overlap_ignores_same_key() {
+        let mut model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        model.update(&a, &a, 10.0, 5.0, 10.0);
+        assert!(model.is_empty());
+    }
+
+    #[test]
+    fn learned_overlap_ignores_zero_reference() {
+        let mut model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        let b = AudienceKey::subreddit("ProgMusic");
+        model.update(&a, &b, 0.0, 0.0, 0.0);
+        assert!(model.is_empty());
+    }
+
+    #[test]
+    fn learned_overlap_pair_key_is_symmetric() {
+        let mut model = LearnedOverlapModel::new();
+        let a = AudienceKey::subreddit("MetalMusic");
+        let b = AudienceKey::subreddit("ProgMusic");
+        // Update with (a, b) then query with (b, a) — should find the same
+        // coefficient.
+        model.update(&a, &b, 10.0, 7.0, 10.0);
+        assert!((model.overlap(&b, &a) - 0.3).abs() < 0.01);
     }
 }

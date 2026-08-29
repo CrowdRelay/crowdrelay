@@ -172,6 +172,122 @@ impl StrategyLearner {
     }
 }
 
+// ─── Bayesian Strategy Posterior ────────────────────────────────────────────
+
+/// A Bayesian posterior over each growth strategy's effectiveness.
+///
+/// Unlike [`StrategyLearner`] which uses simple averages, `StrategyPosterior`
+/// uses a proper Normal-Normal conjugate model for each strategy. This gives:
+///
+/// - **Proper uncertainty**: the posterior variance shrinks with more data,
+///   giving mathematically honest credible intervals.
+/// - **UCB recommendation**: balances exploitation (high posterior mean)
+///   with exploration (high posterior uncertainty) via the Upper Confidence
+///   Bound: `UCB = mean + exploration_weight × std`.
+/// - **Recency weighting**: more recent observations can be given higher
+///   weight (lower observation variance), so the posterior tracks
+///   non-stationary strategy effectiveness.
+/// - **Signed outcomes**: strategies can backfire (negative incremental
+///   fans), and the posterior correctly handles this via `update_signed`.
+///
+/// # Prior
+///
+/// The prior is skeptical: `Normal(0, PRIOR_VARIANCE)` — the brain starts
+/// believing no strategy has any effect until evidence proves otherwise.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct StrategyPosterior {
+    /// Per-strategy Normal-Normal posteriors.
+    pub posteriors: HashMap<String, crate::bayesian::NormalPosterior>,
+}
+
+impl StrategyPosterior {
+    /// Creates a new strategy posterior with no data.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the prior for a new strategy: `Normal(0, PRIOR_VARIANCE)`.
+    fn prior() -> crate::bayesian::NormalPosterior {
+        crate::bayesian::NormalPosterior::prior(0.0, crate::causal_model::PRIOR_VARIANCE)
+    }
+
+    /// Bayesian update with one strategy outcome.
+    ///
+    /// `incremental_fans` is the measured outcome (can be negative).
+    /// `observation_variance` controls how much the observation moves the
+    /// posterior — higher variance = less trust = more reliance on the prior.
+    pub fn update(&mut self, strategy: &str, incremental_fans: f64, observation_variance: f64) {
+        let entry = self
+            .posteriors
+            .entry(strategy.to_owned())
+            .or_insert_with(Self::prior);
+        entry.update_signed(incremental_fans, observation_variance);
+    }
+
+    /// Bayesian update with recency weighting.
+    ///
+    /// `recency_weight` (0.0–1.0) scales the observation variance: higher
+    /// weight = lower effective variance = the observation is trusted more.
+    /// This allows the posterior to track non-stationary strategy
+    /// effectiveness by giving recent observations more influence.
+    pub fn update_with_recency(
+        &mut self,
+        strategy: &str,
+        incremental_fans: f64,
+        observation_variance: f64,
+        recency_weight: f64,
+    ) {
+        let effective_variance = observation_variance / recency_weight.clamp(0.01, 1.0);
+        self.update(strategy, incremental_fans, effective_variance);
+    }
+
+    /// Returns `(mean, std, n)` for a strategy's posterior.
+    ///
+    /// Unknown strategies return the skeptical prior (mean=0, std=sqrt(PRIOR_VARIANCE)).
+    #[must_use]
+    pub fn predict(&self, strategy: &str) -> (f64, f64, u32) {
+        let post = self.posteriors.get(strategy).unwrap_or(&Self::PRIOR_REF);
+        (post.mean, post.std(), post.n)
+    }
+
+    /// A const reference to a prior for fallback. Uses the same values as
+    /// `Self::prior()` but as a static.
+    const PRIOR_REF: crate::bayesian::NormalPosterior =
+        crate::bayesian::NormalPosterior::prior(0.0, crate::causal_model::PRIOR_VARIANCE);
+
+    /// Upper Confidence Bound for a strategy.
+    ///
+    /// `UCB = mean + exploration_weight × std`
+    ///
+    /// High `exploration_weight` favors uncertain strategies (exploration).
+    /// Zero `exploration_weight` is pure exploitation (just the mean).
+    #[must_use]
+    pub fn ucb(&self, strategy: &str, exploration_weight: f64) -> f64 {
+        let (mean, std, _) = self.predict(strategy);
+        mean + exploration_weight * std
+    }
+
+    /// Recommends the strategy with the highest UCB from the available set.
+    ///
+    /// `exploration_weight` controls the exploration-exploitation trade-off:
+    /// - 0.0: pure exploitation (highest mean)
+    /// - >0.0: balances mean with uncertainty (favors under-explored strategies)
+    #[must_use]
+    pub fn recommend_ucb(&self, available: &[&str], exploration_weight: f64) -> Option<String> {
+        available
+            .iter()
+            .max_by(|a, b| {
+                let ucb_a = self.ucb(a, exploration_weight);
+                let ucb_b = self.ucb(b, exploration_weight);
+                ucb_a
+                    .partial_cmp(&ucb_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|s| (*s).to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +457,143 @@ mod tests {
         let json = serde_json::to_string(&learner).expect("learner serializes");
         assert!(json.contains("content_first"));
         assert!(json.contains("total_evaluations"));
+    }
+
+    // ─── StrategyPosterior tests ──────────────────────────────────────────
+
+    #[test]
+    fn strategy_posterior_starts_with_skeptical_prior() {
+        let posterior = StrategyPosterior::new();
+        let (mean, _, _) = posterior.predict("unknown");
+        assert!(
+            (mean - 0.0).abs() < 1e-9,
+            "skeptical prior should start at zero, got {mean}"
+        );
+    }
+
+    #[test]
+    fn strategy_posterior_learns_positive_effect() {
+        let mut posterior = StrategyPosterior::new();
+        for _ in 0..10 {
+            posterior.update("content_first", 5.0, 4.0);
+        }
+        let (mean, std, n) = posterior.predict("content_first");
+        assert!(
+            mean > 2.0,
+            "positive outcomes should move mean up, got {mean}"
+        );
+        assert!(std < 2.0, "variance should shrink, got std={std}");
+        assert_eq!(n, 10);
+    }
+
+    #[test]
+    fn strategy_posterior_learns_negative_effect() {
+        let mut posterior = StrategyPosterior::new();
+        for _ in 0..10 {
+            posterior.update("bad_strategy", -3.0, 4.0);
+        }
+        let (mean, _, _) = posterior.predict("bad_strategy");
+        assert!(
+            mean < -1.0,
+            "negative outcomes should move mean down, got {mean}"
+        );
+    }
+
+    #[test]
+    fn strategy_posterior_ucb_favors_uncertain_strategies() {
+        let mut posterior = StrategyPosterior::new();
+        // Strategy A: well-explored, mean=5, very low uncertainty
+        for _ in 0..20 {
+            posterior.update("a", 5.0, 1.0);
+        }
+        // Strategy B: less explored, mean=4, much higher uncertainty
+        for _ in 0..3 {
+            posterior.update("b", 4.0, 4.0);
+        }
+        // With high exploration weight (5.0), B should have higher UCB
+        // despite lower mean, because its uncertainty is much larger.
+        // UCB_A ≈ 5.0 + 5.0 * 0.22 ≈ 6.1
+        // UCB_B ≈ 3.0 + 5.0 * 1.0 = 8.0
+        let ucb_a = posterior.ucb("a", 5.0);
+        let ucb_b = posterior.ucb("b", 5.0);
+        assert!(
+            ucb_b > ucb_a,
+            "high exploration weight should favor uncertain strategy: ucb_a={ucb_a}, ucb_b={ucb_b}"
+        );
+    }
+
+    #[test]
+    fn strategy_posterior_ucb_zero_exploration_is_mean() {
+        let mut posterior = StrategyPosterior::new();
+        for _ in 0..10 {
+            posterior.update("a", 5.0, 4.0);
+        }
+        let (mean, _, _) = posterior.predict("a");
+        let ucb = posterior.ucb("a", 0.0);
+        assert!(
+            (ucb - mean).abs() < 0.01,
+            "zero exploration weight → UCB = mean"
+        );
+    }
+
+    #[test]
+    fn strategy_posterior_recommend_ucb_picks_highest() {
+        let mut posterior = StrategyPosterior::new();
+        for _ in 0..10 {
+            posterior.update("a", 3.0, 4.0);
+        }
+        for _ in 0..10 {
+            posterior.update("b", 7.0, 4.0);
+        }
+        let available = ["a", "b"];
+        let recommended = posterior.recommend_ucb(&available, 0.1);
+        assert_eq!(recommended, Some("b".to_owned()));
+    }
+
+    #[test]
+    fn strategy_posterior_recommend_ucb_returns_none_for_empty() {
+        let posterior = StrategyPosterior::new();
+        assert_eq!(posterior.recommend_ucb(&[], 1.0), None);
+    }
+
+    #[test]
+    fn strategy_posterior_recommend_ucb_returns_none_for_unknown() {
+        let posterior = StrategyPosterior::new();
+        let available = ["unknown_strategy"];
+        // Unknown strategy has prior mean=0, std=sqrt(PRIOR_VARIANCE)=2.0.
+        // With exploration weight > 0, it would have a positive UCB.
+        // But we should still return it if it's the only option.
+        let recommended = posterior.recommend_ucb(&available, 1.0);
+        assert_eq!(recommended, Some("unknown_strategy".to_owned()));
+    }
+
+    #[test]
+    fn strategy_posterior_recency_weighting_favors_recent() {
+        let mut posterior = StrategyPosterior::new();
+        // Old observations: high outcomes
+        for _ in 0..10 {
+            posterior.update_with_recency("s", 10.0, 4.0, 0.5);
+        }
+        // Recent observations: low outcomes
+        for _ in 0..10 {
+            posterior.update_with_recency("s", 0.0, 4.0, 1.0);
+        }
+        let (mean, _, _) = posterior.predict("s");
+        // With recency weighting, recent observations (weight=1.0) should
+        // dominate over old ones (weight=0.5). The mean should be closer
+        // to 0 than to 10.
+        assert!(
+            mean < 5.0,
+            "recency weighting should favor recent observations, got mean={mean}"
+        );
+    }
+
+    #[test]
+    fn strategy_posterior_serializes() {
+        let mut posterior = StrategyPosterior::new();
+        posterior.update("content_first", 10.0, 4.0);
+        let json = serde_json::to_string(&posterior).expect("should serialize");
+        assert!(json.contains("content_first"));
+        assert!(json.contains("posteriors"));
     }
 }

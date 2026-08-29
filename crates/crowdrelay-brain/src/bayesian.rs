@@ -109,6 +109,22 @@ impl NormalPosterior {
         self.n += 1;
     }
 
+    /// Bayesian update with one observation, allowing **signed** (negative)
+    /// values. Used by the treatment-effect model where τ = Y(1) - Y(0) can
+    /// be negative (the action backfired). Same conjugate formula as
+    /// [`update`](Self::update), but without the non-negativity constraint.
+    pub fn update_signed(&mut self, observation: f64, observation_variance: f64) {
+        if !observation.is_finite() || observation_variance <= 0.0 {
+            return;
+        }
+        let prior_precision = 1.0 / self.variance;
+        let obs_precision = 1.0 / observation_variance;
+        let post_precision = prior_precision + obs_precision;
+        self.mean = (self.mean * prior_precision + observation * obs_precision) / post_precision;
+        self.variance = 1.0 / post_precision;
+        self.n += 1;
+    }
+
     /// Posterior standard deviation — the brain's uncertainty.
     #[must_use]
     pub fn std(&self) -> f64 {
@@ -147,10 +163,17 @@ impl NormalPosterior {
     }
 }
 
+/// Standard Normal PDF: φ(z) = exp(-z²/2) / sqrt(2π).
+#[must_use]
+pub fn normal_pdf(z: f64) -> f64 {
+    const INV_SQRT_2PI: f64 = 0.3989422804014327;
+    INV_SQRT_2PI * (-z * z / 2.0).exp()
+}
+
 /// Standard Normal CDF approximation (Abramowitz & Stegun 7.1.26).
 /// Accuracy: < 1e-7.
 #[must_use]
-fn normal_cdf(z: f64) -> f64 {
+pub fn normal_cdf(z: f64) -> f64 {
     let sign = if z < 0.0 { -1.0 } else { 1.0 };
     let x = z.abs() / 2.0_f64.sqrt();
     // Coefficients for the approximation.
@@ -232,6 +255,29 @@ impl HierarchicalPosterior {
         }
     }
 
+    /// Signed update — same as [`update`](Self::update) but allows negative
+    /// observations. Used by the treatment-effect model where τ can be
+    /// negative.
+    pub fn update_signed(
+        &mut self,
+        template_id: Option<&str>,
+        subreddit_type: Option<&str>,
+        observation: f64,
+        observation_variance: f64,
+    ) {
+        self.global.update_signed(observation, observation_variance);
+        if let Some(tid) = template_id {
+            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self.by_template.entry(tid.to_owned()).or_insert(prior);
+            entry.update_signed(observation, observation_variance);
+        }
+        if let Some(st) = subreddit_type {
+            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self.by_subreddit_type.entry(st.to_owned()).or_insert(prior);
+            entry.update_signed(observation, observation_variance);
+        }
+    }
+
     /// Predicts the expected value for a template + subreddit type, using
     /// partial pooling.
     ///
@@ -280,6 +326,100 @@ impl HierarchicalPosterior {
     #[must_use]
     pub fn confidence(&self, template_id: &str) -> u32 {
         self.by_template.get(template_id).map(|p| p.n).unwrap_or(0)
+    }
+}
+
+/// Posterior over the treatment effect τ = Y(1) - Y(0) for a template.
+///
+/// Uses a Normal-Normal conjugate model on the **signed** treatment effect,
+/// with the same hierarchical partial pooling structure as the outcome model
+/// ([`HierarchicalPosterior`]). The key difference: τ can be negative (the
+/// action backfired), so updates use [`NormalPosterior::update_signed`].
+///
+/// # Prior
+///
+/// The prior is centered at 0.0 (no effect) with [`crate::PRIOR_VARIANCE`].
+/// This is a skeptical prior — the brain starts believing actions have no
+/// effect until evidence proves otherwise.
+///
+/// # Ranking
+///
+/// The brain ranks templates by `τ(x)` — the heterogeneous treatment effect
+/// for context `x`. A template with `τ = +5` produces 5 incremental fans on
+/// average; `τ = -3` means the action loses 3 fans. This is the causally
+/// correct ranking signal, unlike the outcome model which conflates
+/// correlation with causation.
+#[derive(Clone, Debug, Serialize)]
+pub struct TreatmentEffectPosterior {
+    /// Hierarchical posterior for τ, same structure as the fan posterior.
+    pub effects: HierarchicalPosterior,
+}
+
+impl Default for TreatmentEffectPosterior {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TreatmentEffectPosterior {
+    /// Creates a treatment-effect posterior with a skeptical prior (mean=0,
+    /// variance=PRIOR_VARIANCE).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            effects: HierarchicalPosterior::new(NormalPosterior::prior(0.0, crate::PRIOR_VARIANCE)),
+        }
+    }
+
+    /// Predicts the treatment effect τ for a template + subreddit type.
+    ///
+    /// Returns `(tau_mean, tau_var)` — the expected treatment effect and its
+    /// variance. Positive `tau_mean` means the action increases fans;
+    /// negative means it backfires.
+    #[must_use]
+    pub fn predict(&self, template_id: &str, subreddit_type: Option<&str>) -> (f64, f64) {
+        self.effects.predict(template_id, subreddit_type)
+    }
+
+    /// Updates the treatment-effect posterior from an observed τ.
+    ///
+    /// `observed_tau` is the estimated treatment effect (e.g. from an IPW
+    /// estimator). It can be negative. `observation_variance` is the variance
+    /// of the estimate (from the IPW computation).
+    pub fn update(
+        &mut self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        observed_tau: f64,
+        observation_variance: f64,
+    ) {
+        self.effects.update_signed(
+            Some(template_id),
+            subreddit_type,
+            observed_tau,
+            observation_variance,
+        );
+    }
+
+    /// Returns the confidence (observation count) for a template's treatment
+    /// effect.
+    #[must_use]
+    pub fn confidence(&self, template_id: &str) -> u32 {
+        self.effects.confidence(template_id)
+    }
+
+    /// Returns `(tau, std, confidence)` in a single hierarchical lookup.
+    /// This is the hot path for EFE scoring.
+    #[must_use]
+    pub fn predict_stats(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+    ) -> (f64, f64, u32) {
+        let (mean, var) = self.effects.predict(template_id, subreddit_type);
+        let std = var.sqrt().max(0.1);
+        let confidence = self.effects.confidence(template_id);
+        (mean, std, confidence)
     }
 }
 
@@ -450,6 +590,97 @@ mod tests {
         assert_eq!(
             post.n, 0,
             "invalid observations should not update the posterior"
+        );
+    }
+
+    #[test]
+    fn update_signed_accepts_negative_observations() {
+        let mut post = NormalPosterior::prior(0.0, 4.0);
+        post.update_signed(-5.0, 1.0);
+        assert_eq!(post.n, 1);
+        assert!(
+            post.mean < 0.0,
+            "negative observation should move mean negative"
+        );
+    }
+
+    #[test]
+    fn update_signed_rejects_invalid() {
+        let mut post = NormalPosterior::prior(0.0, 4.0);
+        post.update_signed(f64::NAN, 1.0);
+        post.update_signed(5.0, -1.0);
+        assert_eq!(post.n, 0, "invalid signed observations should be ignored");
+    }
+
+    #[test]
+    fn treatment_effect_posterior_starts_at_zero() {
+        let tep = TreatmentEffectPosterior::new();
+        let (mean, _) = tep.predict("unknown", None);
+        assert!(
+            (mean - 0.0).abs() < 1e-9,
+            "skeptical prior should start at zero, got {mean}"
+        );
+        assert_eq!(tep.confidence("unknown"), 0);
+    }
+
+    #[test]
+    fn treatment_effect_posterior_learns_positive_effect() {
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..10 {
+            tep.update("social-post", None, 5.0, 1.0);
+        }
+        let (mean, std, confidence) = tep.predict_stats("social-post", None);
+        assert!(mean > 2.0, "positive τ should move mean up, got {mean}");
+        assert!(std < 2.0, "variance should shrink, got std={std}");
+        assert_eq!(confidence, 10);
+    }
+
+    #[test]
+    fn treatment_effect_posterior_learns_negative_effect() {
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..10 {
+            tep.update("bad-template", None, -3.0, 1.0);
+        }
+        let (mean, _, _) = tep.predict_stats("bad-template", None);
+        assert!(mean < -1.0, "negative τ should move mean down, got {mean}");
+    }
+
+    #[test]
+    fn treatment_effect_posterior_pools_across_templates() {
+        let mut tep = TreatmentEffectPosterior::new();
+        // Template "a" has lots of data showing +5 effect.
+        for _ in 0..20 {
+            tep.update("a", None, 5.0, 1.0);
+        }
+        // Template "b" has no data → should shrink toward global.
+        let (mean_b, _, _) = tep.predict_stats("b", None);
+        assert!(
+            mean_b > 1.0,
+            "no-data template should shrink toward global positive effect, got {mean_b}"
+        );
+    }
+
+    #[test]
+    fn treatment_effect_posterior_subreddit_type_pools() {
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..10 {
+            tep.update("a", Some("metal"), 8.0, 1.0);
+        }
+        let (mean_b_metal, _, _) = tep.predict_stats("b", Some("metal"));
+        let (mean_b_none, _, _) = tep.predict_stats("b", None);
+        assert!(
+            mean_b_metal > mean_b_none,
+            "metal subreddit type should boost prediction"
+        );
+    }
+
+    #[test]
+    fn treatment_effect_posterior_default_is_zero() {
+        let tep = TreatmentEffectPosterior::default();
+        let (mean, _) = tep.predict("any", None);
+        assert!(
+            (mean - 0.0).abs() < 1e-9,
+            "default treatment effect should be zero, got {mean}"
         );
     }
 }

@@ -5,8 +5,34 @@
 //! value of keeping it open rather than committing now — and an expected
 //! information gain from each additional observation. Together these feed the
 //! EFE scorer's epistemic term.
+//!
+//! # Knowledge Gradient (KG)
+//!
+//! The Knowledge Gradient is a principled VoI measure for Bayesian learning.
+//! Unlike the heuristic [`value_of_information`], the KG computes the *exact*
+//! expected improvement in the best decision after one more observation.
+//!
+//! For a Normal posterior with mean μ and variance σ², observing one sample
+//! with measurement variance σ_obs² updates the posterior to:
+//!
+//! ```text
+//! σ_post² = 1 / (1/σ² + 1/σ_obs²)
+//! ```
+//!
+//! The KG is the expected increase in the maximum of the posterior:
+//!
+//! ```text
+//! KG = E[max(μ_post, 0)] - max(μ, 0)
+//! ```
+//!
+//! For a single alternative (should we dispatch or not?), the KG tells us
+//! exactly how much better our best decision will be after one observation.
+//! This is the "true VoI" — it accounts for both the uncertainty reduction
+//! *and* how that reduction changes the optimal decision.
 
 use serde::Serialize;
+
+use crate::bayesian::{normal_cdf, normal_pdf};
 
 /// A snapshot of the VoI and option-value metrics for a dispatch opportunity.
 ///
@@ -92,6 +118,126 @@ pub fn expected_information_gain(prior_variance: f64, posterior_variance: f64) -
 #[must_use]
 pub fn exploration_bonus(novelty: f64, voi: f64, exploration_weight: f64) -> f64 {
     exploration_weight * novelty * voi
+}
+
+// ─── Knowledge Gradient ─────────────────────────────────────────────────────
+
+/// Computes the Knowledge Gradient (KG) for a single-alternative Bayesian
+/// decision problem.
+///
+/// The KG is the expected improvement in the best decision after one more
+/// observation. For the binary decision "dispatch or not" (value vs. zero),
+/// the KG is:
+///
+/// ```text
+/// KG = E[max(μ_post, 0)] - max(μ, 0)
+/// ```
+///
+/// where μ_post is the posterior mean after the observation. Since the
+/// posterior mean is a random variable (it depends on the observation), we
+/// compute its expectation analytically using the Normal-Normal conjugate
+/// model.
+///
+/// # Arguments
+///
+/// - `prior_mean` (μ) — the current posterior mean.
+/// - `prior_variance` (σ²) — the current posterior variance.
+/// - `observation_variance` (σ_obs²) — the variance of one observation.
+///
+/// # Returns
+///
+/// The expected improvement in `max(·, 0)` from one observation. Always
+/// non-negative — more information can never make the best decision worse.
+///
+/// # Mathematical details
+///
+/// After one observation, the posterior variance becomes:
+///
+/// ```text
+/// σ_post² = 1 / (1/σ² + 1/σ_obs²) = σ² · σ_obs² / (σ² + σ_obs²)
+/// ```
+///
+/// The posterior mean is a Normal random variable with mean μ and variance
+/// equal to the "learning variance":
+///
+/// ```text
+/// σ_learn² = σ² - σ_post² = σ⁴ / (σ² + σ_obs²)
+/// ```
+///
+/// The KG for `max(·, 0)` with a Normal variable X ~ N(μ, σ_learn²) is:
+///
+/// ```text
+/// E[max(X, 0)] = μ · Φ(μ/σ_learn) + σ_learn · φ(μ/σ_learn)
+/// ```
+///
+/// where Φ is the Normal CDF and φ is the Normal PDF. The KG is this minus
+/// `max(μ, 0)`.
+#[must_use]
+pub fn knowledge_gradient(prior_mean: f64, prior_variance: f64, observation_variance: f64) -> f64 {
+    // Degenerate cases: no prior uncertainty or no observation noise → no learning.
+    if prior_variance <= 0.0 || observation_variance <= 0.0 {
+        return 0.0;
+    }
+
+    // Posterior variance after one observation (Normal-Normal conjugate).
+    let post_variance =
+        prior_variance * observation_variance / (prior_variance + observation_variance);
+
+    // Learning variance: how much the posterior mean can move.
+    let learn_variance = prior_variance - post_variance;
+    if learn_variance <= 0.0 {
+        return 0.0;
+    }
+    let learn_std = learn_variance.sqrt();
+
+    // E[max(X, 0)] where X ~ N(prior_mean, learn_variance).
+    // = prior_mean * Φ(prior_mean / learn_std) + learn_std * φ(prior_mean / learn_std)
+    let z = prior_mean / learn_std;
+    let expected_max_post = prior_mean * normal_cdf(z) + learn_std * normal_pdf(z);
+
+    // Current best: max(prior_mean, 0).
+    let current_best = prior_mean.max(0.0);
+
+    // KG = E[max(μ_post, 0)] - max(μ, 0). Always >= 0.
+    (expected_max_post - current_best).max(0.0)
+}
+
+/// Computes the Knowledge Gradient for a multi-alternative ranking problem.
+///
+/// When the brain is choosing between multiple templates (alternatives) and
+/// wants to know which one to experiment with, the KG for each alternative
+/// is computed independently and the one with the highest KG is selected.
+///
+/// This function computes the KG for each alternative and returns the index
+/// of the best one to experiment with, along with its KG value.
+///
+/// # Arguments
+///
+/// - `means` — the posterior means for each alternative.
+/// - `variances` — the posterior variances for each alternative.
+/// - `observation_variance` — the variance of one observation (same for all).
+///
+/// # Returns
+///
+/// `(best_index, best_kg)` — the index of the alternative with the highest KG
+/// and its KG value. Returns `(0, 0.0)` if the input is empty.
+#[must_use]
+pub fn knowledge_gradient_ranking(
+    means: &[f64],
+    variances: &[f64],
+    observation_variance: f64,
+) -> (usize, f64) {
+    if means.is_empty() || variances.is_empty() || means.len() != variances.len() {
+        return (0, 0.0);
+    }
+
+    means
+        .iter()
+        .zip(variances.iter())
+        .map(|(&m, &v)| knowledge_gradient(m, v, observation_variance))
+        .enumerate()
+        .max_by(|(_, kg_a), (_, kg_b)| kg_a.partial_cmp(kg_b).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((0, 0.0))
 }
 
 #[cfg(test)]
@@ -312,5 +458,141 @@ mod tests {
         assert!((assessment.option_value).abs() < 0.001);
         assert!((assessment.expected_information_gain).abs() < 0.001);
         assert!((assessment.exploration_bonus).abs() < 0.001);
+    }
+
+    // ─── Knowledge Gradient tests ─────────────────────────────────────────
+
+    #[test]
+    fn kg_zero_prior_variance_is_zero() {
+        // No uncertainty → no value in learning.
+        let kg = knowledge_gradient(5.0, 0.0, 4.0);
+        assert!(
+            (kg).abs() < 0.001,
+            "zero prior variance → zero KG, got {kg}"
+        );
+    }
+
+    #[test]
+    fn kg_zero_observation_variance_is_zero() {
+        // Perfect observation → no posterior change → no KG.
+        let kg = knowledge_gradient(5.0, 4.0, 0.0);
+        assert!(
+            (kg).abs() < 0.001,
+            "zero observation variance → zero KG, got {kg}"
+        );
+    }
+
+    #[test]
+    fn kg_is_always_non_negative() {
+        // KG should never be negative — more info can't hurt.
+        for &mean in &[0.0, 5.0, -5.0, 10.0, -10.0] {
+            for &pv in &[1.0, 4.0, 16.0] {
+                for &ov in &[1.0, 4.0, 16.0] {
+                    let kg = knowledge_gradient(mean, pv, ov);
+                    assert!(
+                        kg >= 0.0,
+                        "KG should be non-negative: mean={mean}, pv={pv}, ov={ov}, kg={kg}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kg_increases_with_prior_uncertainty() {
+        // More prior uncertainty → more to learn → higher KG.
+        let kg_low = knowledge_gradient(0.0, 1.0, 4.0);
+        let kg_high = knowledge_gradient(0.0, 16.0, 4.0);
+        assert!(
+            kg_high > kg_low,
+            "higher prior variance → higher KG: low={kg_low}, high={kg_high}"
+        );
+    }
+
+    #[test]
+    fn kg_decreases_with_observation_noise() {
+        // More observation noise → less learning → lower KG.
+        let kg_low_noise = knowledge_gradient(0.0, 4.0, 1.0);
+        let kg_high_noise = knowledge_gradient(0.0, 4.0, 16.0);
+        assert!(
+            kg_low_noise > kg_high_noise,
+            "lower observation noise → higher KG: low_noise={kg_low_noise}, high_noise={kg_high_noise}"
+        );
+    }
+
+    #[test]
+    fn kg_positive_mean_near_zero_is_high() {
+        // When the mean is near zero, we're uncertain about the sign of the
+        // effect — one observation could flip the decision. This is the
+        // highest-KG scenario.
+        let kg_near_zero = knowledge_gradient(0.0, 4.0, 4.0);
+        let kg_positive = knowledge_gradient(10.0, 4.0, 4.0);
+        assert!(
+            kg_near_zero > kg_positive,
+            "mean near zero → higher KG than confident positive: near_zero={kg_near_zero}, positive={kg_positive}"
+        );
+    }
+
+    #[test]
+    fn kg_very_confident_positive_is_low() {
+        // When the mean is very positive relative to uncertainty, we already
+        // know the decision — KG should be small.
+        let kg = knowledge_gradient(100.0, 1.0, 4.0);
+        assert!(kg < 0.1, "very confident positive → low KG, got {kg}");
+    }
+
+    #[test]
+    fn kg_very_confident_negative_is_low() {
+        // When the mean is very negative relative to uncertainty, we already
+        // know not to dispatch — KG should be small.
+        let kg = knowledge_gradient(-100.0, 1.0, 4.0);
+        assert!(kg < 0.1, "very confident negative → low KG, got {kg}");
+    }
+
+    #[test]
+    fn kg_symmetric_around_zero_mean() {
+        // KG(μ) should equal KG(-μ) for the same variances, because the
+        // decision boundary is at zero.
+        let kg_pos = knowledge_gradient(5.0, 4.0, 4.0);
+        let kg_neg = knowledge_gradient(-5.0, 4.0, 4.0);
+        assert!(
+            (kg_pos - kg_neg).abs() < 0.001,
+            "KG should be symmetric around zero: pos={kg_pos}, neg={kg_neg}"
+        );
+    }
+
+    #[test]
+    fn kg_ranking_picks_highest_kg() {
+        let means = vec![10.0, 0.0, -10.0];
+        let variances = vec![1.0, 4.0, 1.0];
+        let (idx, kg) = knowledge_gradient_ranking(&means, &variances, 4.0);
+        // Alternative 1 (mean=0, var=4) has the highest KG because it's
+        // near the decision boundary with high uncertainty.
+        assert_eq!(idx, 1);
+        assert!(kg > 0.0);
+    }
+
+    #[test]
+    fn kg_ranking_empty_returns_zero() {
+        let (idx, kg) = knowledge_gradient_ranking(&[], &[], 4.0);
+        assert_eq!(idx, 0);
+        assert!((kg).abs() < 0.001);
+    }
+
+    #[test]
+    fn kg_ranking_mismatched_lengths_returns_zero() {
+        let means = vec![1.0, 2.0];
+        let variances = vec![1.0];
+        let (idx, kg) = knowledge_gradient_ranking(&means, &variances, 4.0);
+        assert_eq!(idx, 0);
+        assert!((kg).abs() < 0.001);
+    }
+
+    #[test]
+    fn kg_ranking_all_zero_variance_returns_zero_kg() {
+        let means = vec![5.0, 10.0];
+        let variances = vec![0.0, 0.0];
+        let (_, kg) = knowledge_gradient_ranking(&means, &variances, 4.0);
+        assert!((kg).abs() < 0.001);
     }
 }
