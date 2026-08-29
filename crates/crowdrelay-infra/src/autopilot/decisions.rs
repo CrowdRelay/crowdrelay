@@ -368,6 +368,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::load_last_dispatched_template(self, workspace_id).await
     }
 
+    async fn load_reach_metrics(
+        &self,
+        workspace_id: WorkspaceId,
+        since: OffsetDateTime,
+        until: Option<OffsetDateTime>,
+    ) -> Result<crowdrelay_brain::ReachMetrics, RepositoryError> {
+        super::operations::reach::load_reach_metrics(self, workspace_id, since, until).await
+    }
+
     async fn load_outreach_supply_snapshot(
         &self,
         workspace_id: WorkspaceId,

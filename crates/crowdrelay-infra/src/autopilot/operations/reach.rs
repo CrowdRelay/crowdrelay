@@ -171,7 +171,6 @@ pub(in crate::autopilot) async fn load_reach_events(
 /// This is the brain's primary read path for reach analytics. It returns
 /// counts of each status type (sent, delivered, opened, clicked, replied,
 /// converted, bounced, etc.) and the total estimated reach.
-#[allow(dead_code)]
 pub(in crate::autopilot) async fn load_reach_metrics(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,

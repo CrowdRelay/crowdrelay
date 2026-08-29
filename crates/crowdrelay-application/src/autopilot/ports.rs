@@ -338,6 +338,17 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<Option<String>, RepositoryError>;
 
+    /// Loads aggregated reach metrics for the unified reach ledger.
+    /// Returns counts of each status type (sent, delivered, opened,
+    /// clicked, replied, converted, etc.) and the total estimated reach
+    /// within the time window.
+    async fn load_reach_metrics(
+        &self,
+        workspace_id: WorkspaceId,
+        since: OffsetDateTime,
+        until: Option<OffsetDateTime>,
+    ) -> Result<crowdrelay_brain::ReachMetrics, RepositoryError>;
+
     /// What the pitcher currently has to work with. One row per workspace
     /// rather than a list: supply is not a property of any single target, and
     /// counting it per target is how a starved pipeline stays invisible.

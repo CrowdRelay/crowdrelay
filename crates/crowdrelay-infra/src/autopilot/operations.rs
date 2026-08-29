@@ -39,7 +39,7 @@ pub(in crate::autopilot) mod growth_intelligence;
 mod ingress;
 mod next_best_action;
 mod push_segments;
-mod reach;
+pub(in crate::autopilot) mod reach;
 mod release_links;
 mod reply_triage;
 mod show_growth;

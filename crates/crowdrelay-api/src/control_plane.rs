@@ -231,6 +231,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::autopilot::growth_metric_trends),
         )
         .route(
+            "/v1/control-plane/autopilot/reach-metrics",
+            get(crate::autopilot::reach_metrics),
+        )
+        .route(
             "/v1/control-plane/autopilot/objectives",
             get(crate::autopilot::growth_objectives)
                 .post(crate::autopilot::declare_growth_objective),

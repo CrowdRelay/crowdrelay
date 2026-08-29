@@ -241,3 +241,24 @@ pub async fn play_ledger(State(state): State<AppState>, headers: HeaderMap) -> R
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }
+
+/// Reach metrics for the unified reach ledger.
+///
+/// Returns aggregated counts of reach events by status (sent, delivered,
+/// opened, clicked, replied, converted, etc.) for the last 30 days. This
+/// is the brain's primary read path for reach analytics.
+pub async fn reach_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let now = OffsetDateTime::now_utc();
+    let since = now - time::Duration::days(30);
+    match state
+        .autopilot
+        .load_reach_metrics(state.ops.workspace_id(), since, Some(now))
+        .await
+    {
+        Ok(metrics) => {
+            let json = serde_json::to_value(&metrics).unwrap_or(serde_json::Value::Null);
+            private_json(StatusCode::OK, json)
+        }
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}

@@ -49,6 +49,8 @@ pub use beacon_release::{
     beacon_release_activation_copy, validate_beacon_release_recipient_transition,
 };
 pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
+/// Re-exported brain types used in API responses.
+pub use crowdrelay_brain::ReachMetrics;
 pub use ecosystem::{
     EcosystemControlPlaneRepository, EcosystemRepositoryError, FeatureFlagMutation,
     FeatureFlagState, ReconciliationFindingState, ReconciliationOutcome, ReconciliationRunState,
