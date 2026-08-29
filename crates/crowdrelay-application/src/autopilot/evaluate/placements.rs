@@ -7,6 +7,50 @@
 
 use super::*;
 
+/// Walks every pending playlist placement and either settles it or queues a
+/// verification candidate. Extracted from the main evaluator to keep it
+/// under the modularity limit.
+pub(super) async fn follow_through_placements<R>(
+    evaluator: &EvaluateAutopilot<'_, R>,
+    policy: &AutopilotPolicy,
+    limits: &mut CycleLimits<'_>,
+    report: &mut AutopilotCycleReport,
+    now: OffsetDateTime,
+) -> Result<(), AutopilotError>
+where
+    R: AutopilotDecisionRepository,
+{
+    let placement_policy = PlacementPolicy::default();
+    for entry in evaluator
+        .repository
+        .load_playlist_placements(evaluator.workspace_id, now)
+        .await?
+    {
+        match evaluate_placement(entry.placement, placement_policy, now) {
+            PlacementDecision::Hold => {}
+            PlacementDecision::Settle { state } => {
+                evaluator
+                    .repository
+                    .settle_playlist_placement(
+                        evaluator.workspace_id,
+                        PlacementSettlement {
+                            opportunity_id: entry.placement.opportunity_id,
+                            state,
+                        },
+                        now,
+                    )
+                    .await?;
+                report.placements_settled = report.placements_settled.saturating_add(1);
+            }
+            PlacementDecision::Verify { checkpoint } => {
+                let candidate = placement_candidate(&entry, policy, placement_policy, checkpoint)?;
+                evaluator.persist(&candidate, limits, report).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One public read of one claimed placement, as a durable candidate.
 pub(super) fn placement_candidate(
     entry: &PlaylistPlacementSnapshot,

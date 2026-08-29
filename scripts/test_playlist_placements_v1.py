@@ -103,9 +103,14 @@ class PlaylistPlacementContract(unittest.TestCase):
 
     def test_the_schedule_is_not_an_operator_setting(self) -> None:
         # A re-check window somebody could widen is a window a scammer waits out.
-        loop = read(EVALUATE).split("async fn follow_through_placements", 1)[1].split("\n    }", 1)[0]
-        self.assertIn("PlacementPolicy::default()", loop)
-        self.assertNotIn("AutopilotPolicyConfig::", loop)
+        # The follow_through_placements logic lives in placements.rs (extracted
+        # from evaluate.rs to respect the modularity contract), so we check
+        # both the delegate in evaluate.rs and the implementation in placements.rs.
+        delegate = read(EVALUATE).split("async fn follow_through_placements", 1)[1].split("\n    }", 1)[0]
+        impl_body = read(CANDIDATE).split("pub(super) async fn follow_through_placements", 1)[1].split("\n}", 1)[0]
+        self.assertIn("PlacementPolicy::default()", impl_body)
+        self.assertNotIn("AutopilotPolicyConfig::", impl_body)
+        self.assertNotIn("AutopilotPolicyConfig::", delegate)
 
     def test_three_real_reads_close_the_window(self) -> None:
         rule = self.domain.split("pub fn evaluate_placement", 1)[1].split("\n}", 1)[0]

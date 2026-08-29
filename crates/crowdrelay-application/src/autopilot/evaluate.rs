@@ -87,7 +87,6 @@ use growth_debt::growth_debt_candidate;
 use growth_intelligence::{build_dispatch_context, growth_intelligence_candidate};
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
-use placements::placement_candidate;
 use plays::{play_decision, play_start, play_step_candidate};
 use show_growth::show_growth_candidate;
 
@@ -700,37 +699,7 @@ where
         report: &mut AutopilotCycleReport,
         now: OffsetDateTime,
     ) -> Result<(), AutopilotError> {
-        // The verification schedule is not an operator setting: a re-check
-        // window somebody could widen is a window a scammer could wait out.
-        let placement_policy = PlacementPolicy::default();
-        for entry in self
-            .repository
-            .load_playlist_placements(self.workspace_id, now)
-            .await?
-        {
-            match evaluate_placement(entry.placement, placement_policy, now) {
-                PlacementDecision::Hold => {}
-                PlacementDecision::Settle { state } => {
-                    self.repository
-                        .settle_playlist_placement(
-                            self.workspace_id,
-                            PlacementSettlement {
-                                opportunity_id: entry.placement.opportunity_id,
-                                state,
-                            },
-                            now,
-                        )
-                        .await?;
-                    report.placements_settled = report.placements_settled.saturating_add(1);
-                }
-                PlacementDecision::Verify { checkpoint } => {
-                    let candidate =
-                        placement_candidate(&entry, policy, placement_policy, checkpoint)?;
-                    self.persist(&candidate, limits, report).await?;
-                }
-            }
-        }
-        Ok(())
+        placements::follow_through_placements(self, policy, limits, report, now).await
     }
 
     async fn settle_outreach_waves(
