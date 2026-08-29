@@ -33,6 +33,7 @@ struct UnassignedApprovalRow {
     action_kind: String,
     subject_id: Uuid,
     approval_expires_at: Option<OffsetDateTime>,
+    payload: serde_json::Value,
 }
 
 #[derive(Debug, FromRow)]
@@ -56,6 +57,7 @@ struct ReminderRow {
     normalized_email: String,
     due_at: Option<OffsetDateTime>,
     reminder_count: i32,
+    payload: Option<serde_json::Value>,
 }
 
 impl PostgresAutopilotRepository {
@@ -88,7 +90,7 @@ impl PostgresAutopilotRepository {
             let approvals = sqlx::query_as::<_, UnassignedApprovalRow>(
                 r#"
                 SELECT action.id, action.context, action.action_kind,
-                       action.subject_id, action.approval_expires_at
+                       action.subject_id, action.approval_expires_at, action.payload
                 FROM viryaos_autopilot_actions action
                 LEFT JOIN viryaos_team_assignments assignment
                   ON assignment.workspace_id=action.workspace_id
@@ -210,7 +212,7 @@ impl PostgresAutopilotRepository {
                     &member.normalized_email,
                     &member.display_name,
                     friendly_action_title(&action.action_kind),
-                    format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.action_kind),
+                    enriched_task_detail(&action.payload, action.approval_expires_at, None),
                     action.approval_expires_at,
                     0,
                     now,
@@ -304,7 +306,8 @@ impl PostgresAutopilotRepository {
                        action.action_kind, action.context, assignment.source_kind,
                        assignment.source_ref, event.title event_title,
                        member.display_name, member.normalized_email,
-                       assignment.due_at, assignment.reminder_count
+                       assignment.due_at, assignment.reminder_count,
+                       action.payload
                 FROM viryaos_team_assignments assignment
                 JOIN workspace_members member
                   ON member.workspace_id=assignment.workspace_id
@@ -355,10 +358,16 @@ impl PostgresAutopilotRepository {
                 } else {
                     friendly_action_title(row.action_kind.as_deref().unwrap_or("approval"))
                 };
-                let detail = if let Some(event_title) = row.event_title.as_deref() {
-                    format!(
-                        "To zadanie dotyczące koncertu {event_title} nadal czeka na domknięcie."
-                    )
+                let detail = if row.source_kind == "show_task" {
+                    if let Some(event_title) = row.event_title.as_deref() {
+                        format!(
+                            "To zadanie dotyczące koncertu {event_title} nadal czeka na domknięcie."
+                        )
+                    } else {
+                        "To zadanie nadal czeka na Twoje domknięcie.".to_owned()
+                    }
+                } else if let Some(payload_json) = row.payload.as_ref() {
+                    enriched_task_detail(payload_json, row.due_at, row.due_at)
                 } else {
                     "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned()
                 };
@@ -663,6 +672,51 @@ fn friendly_show_task_title(task_key: &str) -> String {
         "post_show_report" => "Domknij raport po koncercie".into(),
         other => format!("Domknij zadanie koncertowe: {}", other.replace('_', " ")),
     }
+}
+
+/// Builds an enriched `task_detail` string from the action payload's briefing.
+/// This is what goes into the team assignment email body — summary, why it
+/// matters, steps, and the content being approved. Truncated to 1800 chars
+/// to fit the n8n workflow's slice limit.
+fn enriched_task_detail(
+    payload_json: &serde_json::Value,
+    approval_expires_at: Option<OffsetDateTime>,
+    assignment_due_at: Option<OffsetDateTime>,
+) -> String {
+    use crowdrelay_application::autopilot::AutopilotActionPayload;
+
+    let Ok(payload) = serde_json::from_value::<AutopilotActionPayload>(payload_json.clone()) else {
+        return "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned();
+    };
+    let mut briefing = payload.briefing();
+    briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at);
+
+    let mut text = format!(
+        "{}\n\nDlaczego to ważne: {}\n\nKroki:",
+        briefing.summary, briefing.why_it_matters
+    );
+    for (i, step) in briefing.steps.iter().enumerate() {
+        text.push_str(&format!(
+            "\n{}. {} — {}",
+            i + 1,
+            step.what_to_do,
+            step.why_it_matters
+        ));
+    }
+    if !briefing.content.is_empty() {
+        text.push_str("\n\nTreść:");
+        for field in &briefing.content {
+            text.push_str(&format!("\n{}: {}", field.label, field.value));
+        }
+    }
+    text.push_str(&format!("\n\n{}", briefing.deadline_note));
+
+    // Truncate to fit the n8n workflow's slice(0, 1800) limit.
+    if text.len() > 1800 {
+        text.truncate(1799);
+        text.push('…');
+    }
+    text
 }
 
 fn parse_team_skill(value: &str) -> Option<TeamSkill> {

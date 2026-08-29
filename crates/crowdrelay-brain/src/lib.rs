@@ -72,7 +72,7 @@ pub use context_effect::ContextGLM;
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
-pub use evidence::{EvidenceEvent, EvidenceEventType, GrowthEvidence};
+pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence};
 pub use experiment::TreatmentAssignment;
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
 pub use opportunity::{OpportunityAction, OpportunityId};

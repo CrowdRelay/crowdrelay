@@ -9,6 +9,8 @@ POLL_SECONDS="${CROWDRELAY_DEPLOY_POLL_SECONDS:-3}"
 CONTROL_PLANE_HOST="${CROWDRELAY_CONTROL_PLANE_HOST:-virya-crowdrelay}"
 ORACLE="${CROWDRELAY_DEPLOY_HOST:-virya-crowdrelay}"
 ORACLE_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
+BLUEGREEN="$ROOT_DIR/scripts/deploy-bluegreen.sh"
+# Fallback for bootstrap/recovery when no blue container is running
 CANONICAL="$ROOT_DIR/scripts/deploy-production-safe.sh"
 
 fail() {
@@ -26,6 +28,7 @@ for command in git gh ssh bash; do require "$command"; done
 
 cd "$ROOT_DIR"
 [[ -f "$CANONICAL" && ! -L "$CANONICAL" ]] || fail "canonical deploy is missing or unsafe: $CANONICAL"
+[[ -f "$BLUEGREEN" && ! -L "$BLUEGREEN" ]] || fail "blue-green deploy is missing or unsafe: $BLUEGREEN"
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree must be clean'
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 [[ "$branch" == "main" ]] || fail "make deploy must run from main, got=${branch:-detached}"
@@ -234,26 +237,57 @@ REMOTE_MAIN="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
 TUNNEL_BEFORE="$(control_plane_tunnel_fingerprint)"
 printf 'CONTROL_PLANE_TUNNEL_BASELINE=PASS fingerprint=%s\n' "$TUNNEL_BEFORE"
 
-set +e
-bash "$CANONICAL" "$TARGET"
-deploy_status=$?
-set -e
+# --- Deploy via blue-green (zero-downtime) or fallback to force-recreate ---
+# Blue-green is the canonical path. If no blue/green container is running
+# (first install or recovery), fall back to the force-recreate path.
+blue_green_eligible="$(ssh -T "$ORACLE" bash -s -- "$ORACLE_REPO" <<'REMOTE_CHECK'
+{
+set -euo pipefail
+repo="$1"
+cd "$repo" 2>/dev/null || exit 0
+blue="$(docker inspect crowdrelay-api-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+green="$(docker inspect crowdrelay-api-green-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+if [[ "$blue" == "healthy" || "$blue" == "running" || "$green" == "healthy" || "$green" == "running" ]]; then
+  echo "eligible"
+fi
+} </dev/null
+REMOTE_CHECK
+)"
 
-TUNNEL_AFTER="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable after CrowdRelay deploy'
-[[ "$TUNNEL_AFTER" == "$TUNNEL_BEFORE" ]] || fail "CrowdRelay deploy touched Control Plane tunnel: before=$TUNNEL_BEFORE after=$TUNNEL_AFTER"
-printf 'CONTROL_PLANE_TUNNEL_PRESERVATION=PASS unchanged=true\n'
+if [[ "$blue_green_eligible" == "eligible" ]]; then
+  printf '\n==> Blue-green deploy (zero-downtime Caddy cutover)\n'
+  # Run cross-system source contracts before the blue-green cutover
+  python3 scripts/test_area_deploy_contract.py
+  python3 scripts/test_control_plane_management_contract.py
+  python3 scripts/test_boring_production_deploy_contract.py
+  printf 'SOURCE_CONTRACTS=PASS\n'
 
-if (( deploy_status != 0 )); then
-  printf 'CANONICAL_DEPLOY=FAILED status=%d checking-bounded-convergence-recovery=true\n' "$deploy_status" >&2
-  RECOVERY_TUNNEL_BEFORE="$(control_plane_tunnel_fingerprint)"
-  if recover_exact_runtime_convergence; then
-    RECOVERY_TUNNEL_AFTER="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable after convergence recovery'
-    [[ "$RECOVERY_TUNNEL_AFTER" == "$RECOVERY_TUNNEL_BEFORE" ]] || fail "runtime convergence recovery touched Control Plane tunnel: before=$RECOVERY_TUNNEL_BEFORE after=$RECOVERY_TUNNEL_AFTER"
-    printf 'CONTROL_PLANE_TUNNEL_RECOVERY_PRESERVATION=PASS unchanged=true\n'
-    printf '==> Retrying canonical deploy once after exact runtime convergence\n'
-    bash "$CANONICAL" "$TARGET"
-  else
-    exit "$deploy_status"
+  # Ship the blue-green script to the remote and execute it
+  ssh -T "$ORACLE" bash -s -- "$TARGET" "$ORACLE_REPO" < "$BLUEGREEN"
+  deploy_status=$?
+else
+  printf '\n==> Bootstrap/recovery deploy (force-recreate — no blue/green container running)\n'
+  set +e
+  bash "$CANONICAL" "$TARGET"
+  deploy_status=$?
+  set -e
+
+  TUNNEL_AFTER="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable after CrowdRelay deploy'
+  [[ "$TUNNEL_AFTER" == "$TUNNEL_BEFORE" ]] || fail "CrowdRelay deploy touched Control Plane tunnel: before=$TUNNEL_BEFORE after=$TUNNEL_AFTER"
+  printf 'CONTROL_PLANE_TUNNEL_PRESERVATION=PASS unchanged=true\n'
+
+  if (( deploy_status != 0 )); then
+    printf 'CANONICAL_DEPLOY=FAILED status=%d checking-bounded-convergence-recovery=true\n' "$deploy_status" >&2
+    RECOVERY_TUNNEL_BEFORE="$(control_plane_tunnel_fingerprint)"
+    if recover_exact_runtime_convergence; then
+      RECOVERY_TUNNEL_AFTER="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable after convergence recovery'
+      [[ "$RECOVERY_TUNNEL_AFTER" == "$RECOVERY_TUNNEL_BEFORE" ]] || fail "runtime convergence recovery touched Control Plane tunnel: before=$RECOVERY_TUNNEL_BEFORE after=$RECOVERY_TUNNEL_AFTER"
+      printf 'CONTROL_PLANE_TUNNEL_RECOVERY_PRESERVATION=PASS unchanged=true\n'
+      printf '==> Retrying canonical deploy once after exact runtime convergence\n'
+      bash "$CANONICAL" "$TARGET"
+    else
+      exit "$deploy_status"
+    fi
   fi
 fi
 

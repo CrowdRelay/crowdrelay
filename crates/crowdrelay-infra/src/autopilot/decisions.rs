@@ -349,9 +349,37 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
         action_id: uuid::Uuid,
         prediction: &crowdrelay_brain::DispatchPrediction,
+        strategy: Option<&str>,
+        holdout_probability: f64,
     ) -> Result<(), RepositoryError> {
-        super::operations::record_dispatch_prediction(self, workspace_id, action_id, prediction)
-            .await
+        super::operations::record_dispatch_prediction(
+            self,
+            workspace_id,
+            action_id,
+            prediction,
+            strategy,
+            holdout_probability,
+        )
+        .await
+    }
+
+    async fn record_holdout_control(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: uuid::Uuid,
+        prediction: &crowdrelay_brain::DispatchPrediction,
+        strategy: Option<&str>,
+        holdout_probability: f64,
+    ) -> Result<(), RepositoryError> {
+        super::operations::record_holdout_control(
+            self,
+            workspace_id,
+            action_id,
+            prediction,
+            strategy,
+            holdout_probability,
+        )
+        .await
     }
 
     async fn load_exploration_memory(

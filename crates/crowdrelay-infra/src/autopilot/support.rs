@@ -77,6 +77,8 @@ fn pending_action(
             .iter()
             .any(|advertised| advertised == capability)
     });
+    let mut briefing = payload.briefing();
+    briefing.deadline_note = format_deadline_note(row.approval_expires_at, row.assignment_due_at);
     Ok(PendingAutopilotAction {
         required_capability: required_capability.map(ToOwned::to_owned),
         executor_ready,
@@ -86,6 +88,7 @@ fn pending_action(
         subject_kind: row.subject_kind,
         subject_id: row.subject_id,
         payload,
+        briefing,
         created_at: row.created_at,
         approval_expires_at: row.approval_expires_at,
         assignee: match (
@@ -102,6 +105,25 @@ fn pending_action(
         },
         assignment_due_at: row.assignment_due_at,
     })
+}
+
+/// Formats a deadline note in Polish from the action's deadline fields.
+/// Prefers `assignment_due_at` (the team assignment deadline) over
+/// `approval_expires_at` (the autopilot approval window).
+pub(super) fn format_deadline_note(
+    approval_expires_at: Option<OffsetDateTime>,
+    assignment_due_at: Option<OffsetDateTime>,
+) -> String {
+    let deadline = assignment_due_at.or(approval_expires_at);
+    match deadline {
+        Some(dt) => {
+            let formatted = dt
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+            format!("Termin: {}", formatted)
+        }
+        None => "Brak twardego terminu".into(),
+    }
 }
 
 fn recent_action(row: RecentActionRow) -> Result<RecentAutopilotAction, RepositoryError> {
@@ -223,6 +245,12 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
             Ok(AutopilotMeasurementKind::AgentRunCommunityEngagement7d)
         }
         "durable_fan_growth_30d" => Ok(AutopilotMeasurementKind::DurableFanGrowth30d),
+        "scanner_discovery_quality_14d" => {
+            Ok(AutopilotMeasurementKind::ScannerDiscoveryQuality14d)
+        }
+        "strategist_insight_quality_14d" => {
+            Ok(AutopilotMeasurementKind::StrategistInsightQuality14d)
+        }
         _ => Err(RepositoryError::Unexpected),
     }
 }

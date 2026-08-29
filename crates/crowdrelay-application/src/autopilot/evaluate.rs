@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 
-use crowdrelay_brain::{DispatchPrediction, GrowthStrategy, context_hash};
+use crowdrelay_brain::{GrowthStrategy, context_hash};
 use crowdrelay_domain::{
     FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
@@ -84,7 +84,7 @@ use commercial::{
     merch_candidate, merch_price_candidate,
 };
 use growth_debt::growth_debt_candidate;
-use growth_intelligence::{build_dispatch_context, growth_intelligence_candidate};
+use growth_intelligence::{ScoredCandidate, build_dispatch_context, growth_intelligence_candidate};
 use growth_metrics::growth_metric_candidate;
 use outreach_supply::outreach_supply_candidate;
 use plays::{play_decision, play_start, play_step_candidate};
@@ -589,12 +589,8 @@ where
                     // efe_score) so the brain dispatches the best
                     // opportunities first. When budget limits kick in,
                     // the worst opportunities are the ones that get gated.
-                    let mut scored_candidates: Vec<(
-                        DecisionCandidate,
-                        DispatchPrediction,
-                        f64,
-                        usize,
-                    )> = Vec::with_capacity(snapshots.len());
+                    let mut scored_candidates: Vec<ScoredCandidate> =
+                        Vec::with_capacity(snapshots.len());
                     for snapshot in &snapshots {
                         for insight in &snapshot.recent_insights {
                             consumed_ids.push(insight.outcome_id);
@@ -605,23 +601,28 @@ where
                         let ctx = build_dispatch_context(snapshot, now);
                         let novelty =
                             exploration_memory.novelty(&snapshot.template_id, &context_hash(&ctx));
-                        if let Some((candidate, prediction, efe_score, strategy_rank)) =
-                            growth_intelligence_candidate(
-                                snapshot,
-                                &policy,
-                                self.workspace_id,
-                                now,
-                                &causal_model,
-                                strategy,
-                                novelty,
-                                &strategy_posterior,
-                            )?
-                        {
+                        if let Some((
+                            candidate,
+                            prediction,
+                            efe_score,
+                            strategy_rank,
+                            treatment_stats,
+                        )) = growth_intelligence_candidate(
+                            snapshot,
+                            &policy,
+                            self.workspace_id,
+                            now,
+                            &causal_model,
+                            strategy,
+                            novelty,
+                            &strategy_posterior,
+                        )? {
                             scored_candidates.push((
                                 candidate,
                                 prediction,
                                 efe_score,
                                 strategy_rank,
+                                treatment_stats,
                             ));
                         }
                     }
@@ -640,8 +641,16 @@ where
                     // logic.
                     let selection = portfolio::select_portfolio(&scored_candidates);
                     let selected_keys = portfolio::selected_keys(&selection);
+                    // Extract the holdout probability from the policy.
+                    // Guardrails: clamped to [0.0, 0.10] — 0% = off, max 10%.
+                    let holdout_probability = match &policy.config {
+                        AutopilotPolicyConfig::GrowthIntelligence(gi) => {
+                            gi.randomized_holdout_probability.clamp(0.0, 0.10)
+                        }
+                        _ => 0.0,
+                    };
                     let mut dispatched_count = 0usize;
-                    for (candidate, prediction, _efe, _rank) in scored_candidates {
+                    for (candidate, prediction, _efe, _rank, _stats) in scored_candidates {
                         // Skip candidates that the portfolio optimizer
                         // rejected (negative marginal value, audience
                         // overlap, budget exhausted, or superseded).
@@ -651,9 +660,54 @@ where
                         {
                             continue;
                         }
+                        // Randomized holdout: with probability
+                        // `holdout_probability`, skip the dispatch and
+                        // record a control-group evidence row instead.
+                        // This produces gold-standard causal evidence
+                        // (randomized holdout) for high-volume actions.
+                        // Only applies to direct-action workers —
+                        // scanner/strategist are never held out.
+                        let template_id = match &candidate.action {
+                            AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
+                                template_id.as_str()
+                            }
+                            _ => "",
+                        };
+                        let is_direct_action =
+                            !matches!(template_id, "reddit-scanner" | "growth-strategist");
+                        // Deterministic pseudo-random from the decision key
+                        // — the same decision key always gets the same
+                        // holdout assignment within one cycle, preventing
+                        // flapping. The hash is mapped to [0, 1) and
+                        // compared against the holdout probability.
+                        let holdout_roll = deterministic_roll(&candidate.decision_key);
+                        if holdout_probability > 0.0
+                            && is_direct_action
+                            && holdout_roll < holdout_probability
+                        {
+                            // Holdout fired: record a control-group
+                            // evidence row with a synthetic action_id.
+                            // No action is dispatched — the worker never
+                            // runs. The measurement system will measure
+                            // the workspace's fan growth in the 14-day
+                            // window, which is the control group's
+                            // counterfactual.
+                            let holdout_action_id = Uuid::now_v7();
+                            let _ = self
+                                .repository
+                                .record_holdout_control(
+                                    self.workspace_id,
+                                    holdout_action_id,
+                                    &prediction,
+                                    Some(strategy.as_str()),
+                                    holdout_probability,
+                                )
+                                .await;
+                            continue;
+                        }
                         let persisted = self.persist(&candidate, &mut limits, &mut report).await?;
-                        // Record the prediction for later comparison with
-                        // measured outcomes (the dopamine loop).
+                        // Record the prediction for the dopamine loop. Pass the actual
+                        // strategy so the strategy posterior learns from the real strategy.
                         if let Some(action_id) = persisted {
                             let _ = self
                                 .repository
@@ -661,6 +715,8 @@ where
                                     self.workspace_id,
                                     action_id,
                                     &prediction,
+                                    Some(strategy.as_str()),
+                                    holdout_probability,
                                 )
                                 .await;
                         }
@@ -989,6 +1045,20 @@ where
         }
         Ok(persisted.action_id)
     }
+}
+
+/// Deterministic pseudo-random roll from a string key. Maps the key's
+/// hash to [0, 1). Used for the randomized holdout — the same decision
+/// key always gets the same roll within one cycle, preventing flapping.
+fn deterministic_roll(key: &str) -> f64 {
+    // FNV-1a hash → u64 → [0, 1).
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in key.as_bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    // Map to [0, 1) using the upper 53 bits (mantissa precision of f64).
+    f64::from_bits(0x3FF0_0000_0000_0000 | (hash & 0x000F_FFFF_FFFF_FFFF)) - 1.0
 }
 
 include!("evaluate/types.rs");

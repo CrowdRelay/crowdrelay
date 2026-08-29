@@ -139,7 +139,7 @@ impl AutopilotContext {
 }
 
 /// Typed bounded-context configuration loaded from the policy store.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AutopilotPolicyConfig {
     TicketYield(TicketYieldPolicy),
     FanLifecycle(FanLifecyclePolicy),
@@ -267,7 +267,7 @@ impl AutopilotPolicyConfig {
 }
 
 /// Persisted authority configuration for one bounded context.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AutopilotPolicy {
     pub context: AutopilotContext,
     pub enabled: bool,
@@ -866,6 +866,609 @@ impl AutopilotActionPayload {
             Self::RequestSignalPush { .. } => "signal.push.request",
         }
     }
+
+    /// Generates a human-readable briefing for this action — what to do,
+    /// why it matters, concrete steps, and the content being approved.
+    ///
+    /// Exhaustive on purpose: a new payload variant must not compile until
+    /// somebody writes its briefing. The `deadline_note` is left empty here
+    /// and filled by the caller from the action's deadline fields.
+    #[must_use]
+    pub fn briefing(&self) -> super::control::ActionBriefing {
+        use super::control::{ActionBriefing, BriefingField, BriefingStep};
+
+        let truncate = |s: String, max: usize| {
+            if s.len() > max {
+                let mut truncated = s.chars().take(max.saturating_sub(1)).collect::<String>();
+                truncated.push('…');
+                truncated
+            } else {
+                s
+            }
+        };
+
+        match self {
+            Self::ChangeTicketPrice { ticket_type_id, from_minor, to_minor } => ActionBriefing {
+                summary: format!("Zmień cenę biletu: {} → {}", format_minor(*from_minor), format_minor(*to_minor)),
+                why_it_matters: "Zmiana ceny biletu wpływa na przychód i frekwencję. Ktoś już mógł zapłacić starą cenę — zmiana nie jest odwracalna.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź nową cenę i typ biletu".into(), why_it_matters: "Upewnij się, że zmiana jest celowa".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zastosować".into(), why_it_matters: "Po akceptacji cena jest aktywna natychmiast".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Typ biletu".into(), value: ticket_type_id.to_string() },
+                    BriefingField { label: "Stara cena".into(), value: format_minor(*from_minor) },
+                    BriefingField { label: "Nowa cena".into(), value: format_minor(*to_minor) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::ChangeTicketCapacity { ticket_type_id, from_capacity, to_capacity, .. } => ActionBriefing {
+                summary: format!("Zmień pojemność biletów: {} → {}", from_capacity, to_capacity),
+                why_it_matters: "Zmiana pojemności wpływa na dostępność biletów. Zmniejszenie może odrzucić zarezerwowane miejsca.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź nową pojemność".into(), why_it_matters: "Upewnij się, że venue to obsłuży".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zastosować".into(), why_it_matters: "Po akceptacji pojemność jest aktywna".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Typ biletu".into(), value: ticket_type_id.to_string() },
+                    BriefingField { label: "Stara pojemność".into(), value: from_capacity.to_string() },
+                    BriefingField { label: "Nowa pojemność".into(), value: to_capacity.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestFanLifecycleMessage { fan_id, template_key } => ActionBriefing {
+                summary: format!("Wyślij wiadomość do fana: {}", template_key),
+                why_it_matters: "Wiadomość trafi do fana, który wyraził zgodę. Wysłanej wiadomości nie można cofnąć.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź treść wiadomości i szablon".into(), why_it_matters: "Upewnij się, że ton jest odpowiedni".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać".into(), why_it_matters: "Wiadomość zostanie dostarczona do fana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Fan".into(), value: fan_id.to_string() },
+                    BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestMerchReorder { variant_id, quantity } => ActionBriefing {
+                summary: format!("Zamów ponownie merch: {} szt.", quantity),
+                why_it_matters: "Zamówienie merchu wymaga kosztów i czasu dostawy. Upewnij się, że zapas jest potrzebny.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź ilość i wariant produktu".into(), why_it_matters: "Potwierdź, że zapas faktycznie brakuje".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zamówić".into(), why_it_matters: "Po akceptacji zamówienie zostanie złożone".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Wariant".into(), value: variant_id.to_string() },
+                    BriefingField { label: "Ilość".into(), value: quantity.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::ChangeMerchPrice { product_id, from_minor, to_minor, .. } => ActionBriefing {
+                summary: format!("Zmień cenę merchu: {} → {}", format_minor(*from_minor), format_minor(*to_minor)),
+                why_it_matters: "Zmiana ceny merchu wpływa na marżę i sprzedaż. Ktoś już mógł zapłacić starą cenę.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź nową cenę".into(), why_it_matters: "Upewnij się, że zmiana jest celowa".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zastosować".into(), why_it_matters: "Po akceptacji cena jest aktywna natychmiast".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Produkt".into(), value: product_id.to_string() },
+                    BriefingField { label: "Stara cena".into(), value: format_minor(*from_minor) },
+                    BriefingField { label: "Nowa cena".into(), value: format_minor(*to_minor) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestBookingOutreach { target_name, score, phase, .. } => ActionBriefing {
+                summary: format!("Kontakt bookingowy: {}", target_name),
+                why_it_matters: "To pierwsze podejście do promotera. Otrzymasz jedną szansę na kontakt — upewnij się, że wiadomość jest dobra.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź nazwę celu i fazę kontaktu".into(), why_it_matters: "Upewnij się, że to właściwy promoter".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać".into(), why_it_matters: "Po akceptacji wiadomość zostanie wysłana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Cel".into(), value: target_name.clone() },
+                    BriefingField { label: "Faza".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Wynik".into(), value: format!("{}", score) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestAudienceCampaign { event_id, phase, template_key } => ActionBriefing {
+                summary: format!("Kampania audience: {}", template_key),
+                why_it_matters: "Kampania trafi do fanów związanych z wydarzeniem. Wysłanej kampanii nie można cofnąć.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź szablon i fazę kampanii".into(), why_it_matters: "Upewnij się, że treść jest odpowiednia dla fazy".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić".into(), why_it_matters: "Po akceptacji kampania zostanie wysłana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Faza".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestMerchBundle { product_a, product_b, bundle_price_minor, affinity_basis_points } => ActionBriefing {
+                summary: format!("Utwórz zestaw merch: {}", format_minor(*bundle_price_minor)),
+                why_it_matters: "Zestaw łączy dwa produkty w jedną cenę. Upewnij się, że afinitet jest wystarczający.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź produkty i cenę zestawu".into(), why_it_matters: "Upewnij się, że marża jest akceptowalna".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby utworzyć".into(), why_it_matters: "Po akceptacji zestaw będzie dostępny".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Produkt A".into(), value: product_a.to_string() },
+                    BriefingField { label: "Produkt B".into(), value: product_b.to_string() },
+                    BriefingField { label: "Cena zestawu".into(), value: format_minor(*bundle_price_minor) },
+                    BriefingField { label: "Afinitet".into(), value: format!("{}%", affinity_basis_points / 100) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestOutreach { target_name, phase, template_key, .. } => ActionBriefing {
+                summary: format!("Kontakt outreach: {}", target_name),
+                why_it_matters: "To podejście do zewnętrznego celu. Otrzymasz jedną szansę na kontakt.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź cel, fazę i szablon".into(), why_it_matters: "Upewnij się, że wiadomość jest spersonalizowana".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać".into(), why_it_matters: "Po akceptacji wiadomość zostanie wysłana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Cel".into(), value: target_name.clone() },
+                    BriefingField { label: "Faza".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::VerifyPlaylistPlacement { playlist_external_id, track_external_id, checkpoint, .. } => ActionBriefing {
+                summary: format!("Zweryfikuj playlistę (sprawdzenie {})", checkpoint),
+                why_it_matters: "Weryfikacja sprawdza czy utwór jest na playliście. To odczyt danych publicznych — nie kontaktuje nikogo.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić weryfikację".into(), why_it_matters: "System odczyta publiczną playlistę i sprawdzi utwór".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Playlist ID".into(), value: playlist_external_id.clone() },
+                    BriefingField { label: "Track ID".into(), value: track_external_id.clone() },
+                    BriefingField { label: "Punkt kontrolny".into(), value: checkpoint.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestBeaconDiscovery { event_id, target_count } => ActionBriefing {
+                summary: format!("Znajdź {} lokalne Beacony", target_count),
+                why_it_matters: "System przeszuka lokalne Beacony w okolicy wydarzenia. To odczyt danych — nie kontaktuje nikogo.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić wyszukiwanie".into(), why_it_matters: "System znajdzie potencjalne Beacony dla wydarzenia".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Liczba celów".into(), value: target_count.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestBeaconInviteBatch { beacon_id, event_id, requested_count, .. } => ActionBriefing {
+                summary: format!("Poproś Beacon o {} kodów zaproszenia", requested_count),
+                why_it_matters: "To prośba do partnera (Beacon) o rozdystrybuowanie kodów zaproszenia w ich społeczności. Kody są nasze — każdy signup jest przypisany i zgodny z zgodą.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź Beacon i liczbę kodów".into(), why_it_matters: "Upewnij się, że partner jest właściwy".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać prośbę".into(), why_it_matters: "Po akceptacji prośba zostanie wysłana do Beacon".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Beacon".into(), value: beacon_id.to_string() },
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Liczba kodów".into(), value: requested_count.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestOutreachDiscovery { requested_candidates } => ActionBriefing {
+                summary: format!("Znajdź {} kandydatów outreach", requested_candidates),
+                why_it_matters: "System przeszuka opublikowane źródła w poszukiwaniu tras zgłoszeń. Odczyt danych publicznych — nie kontaktuje nikogo.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić wyszukiwanie".into(), why_it_matters: "System znajdzie potencjalne cele outreach".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Liczba kandydatów".into(), value: requested_candidates.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestBookingTargetDiscovery { requested_count } => ActionBriefing {
+                summary: format!("Znajdź {} celów bookingowych", requested_count),
+                why_it_matters: "System przeszuka opublikowane trasy venue/promoter. Odczyt danych publicznych — nie kontaktuje nikogo.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić wyszukiwanie".into(), why_it_matters: "System znajdzie potencjalne cele bookingowe".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Liczba celów".into(), value: requested_count.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestBeaconOutreach { beacon_id, event_id, phase, template_key, .. } => ActionBriefing {
+                summary: format!("Kontakt Beacon: {}", template_key),
+                why_it_matters: "To podejście do Beacon w sprawie wydarzenia. Otrzymasz jedną szansę na kontakt.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź Beacon, fazę i szablon".into(), why_it_matters: "Upewnij się, że wiadomość jest odpowiednia".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać".into(), why_it_matters: "Po akceptacji wiadomość zostanie wysłana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Beacon".into(), value: beacon_id.to_string() },
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Faza".into(), value: format!("{:?}", phase) },
+                    BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestShowGrowth { event_id, lever, template_key } => ActionBriefing {
+                summary: format!("Wzmocnij frekwencję: {}", lever.as_str()),
+                why_it_matters: "To akcja wzmacniająca frekwencję na koncercie. Może kontaktować zewnętrzne strony lub wysyłać do fanów.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź dźwignię i szablon".into(), why_it_matters: "Upewnij się, że akcja jest odpowiednia dla wydarzenia".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić".into(), why_it_matters: "Po akceptacji akcja zostanie wykonana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Dźwignia".into(), value: lever.as_str().into() },
+                    BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestContentArtifact { source_id, artifact, template_key, .. } => ActionBriefing {
+                summary: format!("Artefakt treści: {}", template_key),
+                why_it_matters: "System wygeneruje artefakt treści (np. grafikę, tekst) ze źródła. To operacja wewnętrzna.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wygenerować".into(), why_it_matters: "System utworzy artefakt z określonego źródła".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Źródło".into(), value: source_id.to_string() },
+                    BriefingField { label: "Artefakt".into(), value: format!("{:?}", artifact) },
+                    BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::AdjustExperiment { experiment_id, winner_variant_id, allocations, complete, .. } => ActionBriefing {
+                summary: if *complete { "Zakończ eksperyment i ogłoś zwycięzcę".into() } else { "Dostosuj alokację eksperymentu".into() },
+                why_it_matters: "Zmiana alokacji wpływa na to, który wariant widzą fani. Zakończenie eksperymentu ustala zwycięzcę.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź zwycięski wariant i alokacje".into(), why_it_matters: "Upewnij się, że decyzja jest oparta na danych".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zastosować".into(), why_it_matters: "Po akceptacji alokacje zostaną zmienione".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Eksperyment".into(), value: experiment_id.to_string() },
+                        BriefingField { label: "Zwycięski wariant".into(), value: winner_variant_id.to_string() },
+                    ];
+                    for alloc in allocations {
+                        fields.push(BriefingField {
+                            label: format!("Wariant {}", alloc.variant_id),
+                            value: format!("{}%", alloc.allocation_basis_points / 100),
+                        });
+                    }
+                    fields.push(BriefingField { label: "Zakończ".into(), value: if *complete { "tak" } else { "nie" }.into() });
+                    fields
+                },
+                deadline_note: String::new(),
+            },
+            Self::CompleteShowTask { event_id, task } => ActionBriefing {
+                summary: format!("Zadanie koncertowe: {:?}", task),
+                why_it_matters: "To zadanie operacyjne związane z koncertem. Oznaczenie jako ukończone domyka checklistę.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Potwierdź, że zadanie jest wykonane".into(), why_it_matters: "Zaznacz tylko jeśli faktycznie zostało zrobione".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby domknąć".into(), why_it_matters: "Po akceptacji zadanie zostanie oznaczone jako ukończone".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Zadanie".into(), value: format!("{:?}", task) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::EscalateShowTask { event_id, task } => ActionBriefing {
+                summary: format!("Eskaluj zadanie koncertowe: {:?}", task),
+                why_it_matters: "Eskalacja oznacza, że zadanie wymaga pilnej uwagi. To podnosi priorytet w kolejce.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź dlaczego zadanie wymaga eskalacji".into(), why_it_matters: "Zrozum problem przed podjęciem działania".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby eskalować".into(), why_it_matters: "Po akceptacji priorytet zostanie podniesiony".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.to_string() },
+                    BriefingField { label: "Zadanie".into(), value: format!("{:?}", task) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestPromotionBudgetChange { campaign_id, from_minor, to_minor, roas_basis_points } => ActionBriefing {
+                summary: format!("Zmień budżet promocji: {} → {}", format_minor(*from_minor), format_minor(*to_minor)),
+                why_it_matters: "Zmiana budżetu wpływa na wydatki reklamowe. ROAS pokazuje zwrot z wydatków.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź nowy budżet i ROAS".into(), why_it_matters: "Upewnij się, że zmiana jest uzasadniona".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zastosować".into(), why_it_matters: "Po akceptacji budżet zostanie zmieniony".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Kampania".into(), value: campaign_id.to_string() },
+                    BriefingField { label: "Stary budżet".into(), value: format_minor(*from_minor) },
+                    BriefingField { label: "Nowy budżet".into(), value: format_minor(*to_minor) },
+                    BriefingField { label: "ROAS".into(), value: format!("{}%", roas_basis_points / 100) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::ExecuteReleaseMilestone { title, release_at, milestone, .. } => ActionBriefing {
+                summary: format!("Kamień milowy release: {}", title),
+                why_it_matters: "To kamień milowy w planie release. Wykonanie uruchamia zaplanowane akcje promocyjne.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź tytuł, datę i typ kamienia milowego".into(), why_it_matters: "Upewnij się, że wszystko jest gotowe".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wykonać".into(), why_it_matters: "Po akceptacji kamień milowy zostanie wykonany".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Tytuł".into(), value: title.clone() },
+                    BriefingField { label: "Data release".into(), value: release_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default() },
+                    BriefingField { label: "Kamień milowy".into(), value: format!("{:?}", milestone) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::EscalateEditorialPitch { title, due_at, .. } => ActionBriefing {
+                summary: format!("Eskaluj pitch editorial: {}", title),
+                why_it_matters: "To przypomnienie o niezłożonym pitchu do Spotify Editorial. Nudge wewnątrz workspace — nie kontaktuje zewnętrznych stron.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź tytuł i termin".into(), why_it_matters: "Zrozum co jest zaległe".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby eskalować".into(), why_it_matters: "Po akceptacji przypomnienie zostanie wysłane".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Tytuł".into(), value: title.clone() },
+                    BriefingField { label: "Termin".into(), value: due_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::ApplyLiveOpportunity { opportunity_id, opportunity_kind, score } => ActionBriefing {
+                summary: format!("Wyślij zgłoszenie koncertowe: {:?}", opportunity_kind),
+                why_it_matters: "To zgłoszenie na koncert/festiwal. Wysłanie zgłoszenia to zobowiązanie kalendarzowe.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź typ zgłoszenia i wynik".into(), why_it_matters: "Upewnij się, że to właściwa okazja".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać zgłoszenie".into(), why_it_matters: "Po akceptacji zgłoszenie zostanie wysłane".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Typ".into(), value: format!("{:?}", opportunity_kind) },
+                    BriefingField { label: "Wynik".into(), value: score.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::CounterLiveOpportunityTerms { opportunity_id, ask_minor, currency, round } => ActionBriefing {
+                summary: format!("Kontruj warunki: {} {} (runda {})", format_minor(*ask_minor), currency, round),
+                why_it_matters: "To kontrpropozycja fee dla promotora. Wysłanie zmienia warunki negocjacji.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź kwotę i walutę".into(), why_it_matters: "Upewnij się, że kwota jest akceptowalna".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać kontrpropozycję".into(), why_it_matters: "Po akceptacji kontrpropozycja zostanie wysłana".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Kwota".into(), value: format_minor(*ask_minor) },
+                    BriefingField { label: "Waluta".into(), value: currency.clone() },
+                    BriefingField { label: "Runda".into(), value: round.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::AcceptLiveOpportunityTerms { opportunity_id, fee_minor, currency } => ActionBriefing {
+                summary: format!("Akceptuj warunki: {} {}", format_minor(*fee_minor), currency),
+                why_it_matters: "Akceptacja fee to zobowiązanie kalendarza i pieniędzy. Nie można cofnąć po akceptacji.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź kwotę i walutę".into(), why_it_matters: "To zobowiązanie — upewnij się, że warunki są dobre".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zaakceptować".into(), why_it_matters: "Po akceptacji warunki są wiążące".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                    BriefingField { label: "Fee".into(), value: format_minor(*fee_minor) },
+                    BriefingField { label: "Waluta".into(), value: currency.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::PrepareFundingPackage { opportunity_id } => ActionBriefing {
+                summary: "Przygotuj pakiet finansowania".into(),
+                why_it_matters: "To przygotowanie dokumentów wniosku finansowego. Operacja wewnętrzna — nie kontaktuje zewnętrznych stron.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby przygotować pakiet".into(), why_it_matters: "System zbierze wymagane dokumenty".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::SubmitFundingApplication { opportunity_id } => ActionBriefing {
+                summary: "Wyślij wniosek finansowy".into(),
+                why_it_matters: "Wysłanie wniosku to formalne zobowiązanie. Po wysłaniu nie można cofnąć.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź kompletność wniosku".into(), why_it_matters: "Upewnij się, że wszystkie dokumenty są gotowe".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać".into(), why_it_matters: "Po akceptacji wniosek zostanie wysłany".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Okazja".into(), value: opportunity_id.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RaiseGrowthOpportunity { platform, metric_key, signal, recommended_action, deviation_basis_points, .. } => ActionBriefing {
+                summary: format!("Możliwość wzrostu: {} — {}", platform_label(platform), metric_key),
+                why_it_matters: "System wykrył ruch w zewnętrznej metryce. To sygnał, że coś się dzieje i wymaga reakcji.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Przeczytaj zalecaną akcję".into(), why_it_matters: "Zrozum co system proponuje i dlaczego".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zaplanować akcję".into(), why_it_matters: "Po akceptacji akcja zostanie dodana do kolejki".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Platforma".into(), value: platform_label(platform) },
+                    BriefingField { label: "Metryka".into(), value: metric_key.clone() },
+                    BriefingField { label: "Sygnał".into(), value: format!("{:?}", signal) },
+                    BriefingField { label: "Odchylenie".into(), value: format!("{}%", deviation_basis_points / 100) },
+                    BriefingField { label: "Zalecana akcja".into(), value: recommended_action.clone() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::IssueReferralCode { fan_id } => ActionBriefing {
+                summary: "Wydaj kod referencyjny fanowi".into(),
+                why_it_matters: "Kod referencyjny to mechanizm wzrostu, który skaluje się z audytorium. Fan musi wyrazić zgodę.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wydać kod".into(), why_it_matters: "Po akceptacji fan otrzyma swój kod referencyjny".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Fan".into(), value: fan_id.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RaiseGrowthDebt { debt_kind, recommended_action, overdue_basis_points, outstanding_items, tracked_items, .. } => ActionBriefing {
+                summary: format!("Dług wzrostu: {:?}", debt_kind),
+                why_it_matters: "To zaległa praca, która została zobowiązana ale nie wykonana. Im dłużej czeka, tym trudniej ją nadrobić.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Przeczytaj zalecaną akcję".into(), why_it_matters: "Zrozum co jest zaległe i dlaczego".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby zaplanować nadrobienie".into(), why_it_matters: "Po akceptacji akcja zostanie dodana do kolejki".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Typ długu".into(), value: format!("{:?}", debt_kind) },
+                    BriefingField { label: "Zalecana akcja".into(), value: recommended_action.clone() },
+                    BriefingField { label: "Po terminie".into(), value: format!("{}%", overdue_basis_points / 100) },
+                    BriefingField { label: "Zaległe pozycje".into(), value: format!("{} / {}", outstanding_items, tracked_items) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RunPlayStep { play_id, play_kind, step_index, step_kind, event_id, fan_id, template_key } => ActionBriefing {
+                summary: format!("Krok play: {:?} (krok {})", play_kind, step_index),
+                why_it_matters: "To jeden krok kampanii play dla jednego fana. Wysłanej wiadomości nie można cofnąć.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź typ kroku i szablon".into(), why_it_matters: "Upewnij się, że treść jest odpowiednia dla tego kroku".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać".into(), why_it_matters: "Po akceptacji krok zostanie wykonany".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Play".into(), value: play_id.to_string() },
+                        BriefingField { label: "Typ play".into(), value: format!("{:?}", play_kind) },
+                        BriefingField { label: "Krok".into(), value: format!("{}: {:?}", step_index, step_kind) },
+                        BriefingField { label: "Szablon".into(), value: template_key.clone() },
+                    ];
+                    if let Some(eid) = event_id {
+                        fields.push(BriefingField { label: "Wydarzenie".into(), value: eid.to_string() });
+                    }
+                    if let Some(fid) = fan_id {
+                        fields.push(BriefingField { label: "Fan".into(), value: fid.to_string() });
+                    }
+                    fields
+                },
+                deadline_note: String::new(),
+            },
+            Self::SendTeamAssignmentEmail { task_title, task_detail, reminder_number, .. } => ActionBriefing {
+                summary: if *reminder_number > 0 { format!("Przypomnienie: {}", task_title) } else { task_title.clone() },
+                why_it_matters: "To email z przypisaniem zadania do członka zespołu. Przypomnienia są wysyłane aż zadanie zostanie domknięte.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź treść zadania".into(), why_it_matters: "Upewnij się, że zadanie jest jasne".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać email".into(), why_it_matters: "Po akceptacji email zostanie wysłany".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Tytuł zadania".into(), value: task_title.clone() },
+                    BriefingField { label: "Szczegóły".into(), value: truncate(task_detail.clone(), 2000) },
+                    BriefingField { label: "Przypomnienie".into(), value: reminder_number.to_string() },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestAgentContent { template_id, task_id, draft } => ActionBriefing {
+                summary: "Zatwierdź draft treści od agenta".into(),
+                why_it_matters: "Agent wygenerował ten draft na podstawie inteligencji zebranej przez system. Po akceptacji treść zostanie opublikowana w odpowiednim kanale.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Przeczytaj draft poniżej".into(), why_it_matters: "Sprawdź ton, fakty i zgodność z marką".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ jeśli draft jest dobry, ODRZUĆ jeśli wymaga poprawek".into(), why_it_matters: "Po akceptacji treść zostanie opublikowana — nie można cofnąć".into() },
+                ],
+                content: {
+                    let mut fields = Vec::new();
+                    if let Some(tid) = template_id {
+                        fields.push(BriefingField { label: "Szablon".into(), value: tid.clone() });
+                    }
+                    fields.push(BriefingField { label: "Zadanie".into(), value: task_id.to_string() });
+                    fields.push(BriefingField { label: "Draft".into(), value: truncate(draft_to_text(draft), 2000) });
+                    fields
+                },
+                deadline_note: String::new(),
+            },
+            Self::RequestAgentRun { template_id, prompt, priority, tier } => ActionBriefing {
+                summary: format!("Uruchom agenta: {}", template_id),
+                why_it_matters: "Mózg (deterministyczny) wysyła pracownika LLM aby zebrał inteligencję lub wygenerował draft. Agent nie podejmuje decyzji — tylko dostarcza dane.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź szablon i priorytet".into(), why_it_matters: "Upewnij się, że zadanie ma sens".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby uruchomić agenta".into(), why_it_matters: "Po akceptacji agent zostanie uruchomiony i zbierze inteligencję".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Szablon".into(), value: template_id.clone() },
+                    BriefingField { label: "Priorytet".into(), value: priority.to_string() },
+                    BriefingField { label: "Tier".into(), value: format!("{:?}", tier) },
+                    BriefingField { label: "Prompt".into(), value: truncate(prompt.clone(), 2000) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestCommunityEngagement { platform, subreddit, title, body, smart_link, .. } => ActionBriefing {
+                summary: format!("Post społecznościowy: {} — {}", platform, title),
+                why_it_matters: "To post na zewnętrznej platformie (np. Reddit). Po opublikowaniu nie można go cofnąć. Post trafi do cudzej społeczności.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Przeczytaj tytuł i treść posta".into(), why_it_matters: "Sprawdź ton, fakty i zgodność z zasadami platformy".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby opublikować".into(), why_it_matters: "Po akceptacji post zostanie opublikowany na platformie".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Platforma".into(), value: platform.clone() },
+                    BriefingField { label: "Subreddit".into(), value: subreddit.clone().unwrap_or("—".into()) },
+                    BriefingField { label: "Tytuł".into(), value: title.clone() },
+                    BriefingField { label: "Treść".into(), value: truncate(body.clone(), 2000) },
+                    BriefingField { label: "Smart link".into(), value: smart_link.clone().unwrap_or("—".into()) },
+                ],
+                deadline_note: String::new(),
+            },
+            Self::RequestSignalPush { title, body, target_path, event_id, segment, .. } => ActionBriefing {
+                summary: format!("Powiadomienie push: {}", title),
+                why_it_matters: "Powiadomienie push trafi do fanów, którzy wyrazili zgodę na powiadomienia. Wysłany push nie może być cofnięty.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź tytuł i treść powiadomienia".into(), why_it_matters: "Wysłany push nie może być cofnięty — sprawdź dokładnie".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby wysłać do segmentu".into(), why_it_matters: "Po akceptacji push zostanie wysłany do wybranego segmentu fanów".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Tytuł".into(), value: title.clone() },
+                    BriefingField { label: "Treść".into(), value: truncate(body.clone(), 2000) },
+                    BriefingField { label: "Link".into(), value: target_path.clone().unwrap_or("—".into()) },
+                    BriefingField { label: "Segment".into(), value: segment.clone().unwrap_or("wszyscy".into()) },
+                    BriefingField { label: "Wydarzenie".into(), value: event_id.map(|id| id.to_string()).unwrap_or("—".into()) },
+                ],
+                deadline_note: String::new(),
+            },
+        }
+    }
+}
+
+/// Formats a minor-currency amount as a human-readable string.
+/// Assumes the amount is in the workspace's currency; the label is neutral
+/// because the currency code is not available in the payload.
+fn format_minor(minor: i64) -> String {
+    let abs = minor.unsigned_abs();
+    let whole = abs / 100;
+    let cents = abs % 100;
+    if minor < 0 {
+        format!("-{}.{:02}", whole, cents)
+    } else {
+        format!("{}.{:02}", whole, cents)
+    }
+}
+
+/// Maps a `MetricPlatform` to a human-readable Polish label.
+fn platform_label(platform: &MetricPlatform) -> String {
+    match platform {
+        MetricPlatform::Spotify => "Spotify".into(),
+        MetricPlatform::Bandsintown => "Bandsintown".into(),
+        MetricPlatform::Social => "Social media".into(),
+        MetricPlatform::Website => "Strona www".into(),
+        MetricPlatform::Ticketing => "Ticketing".into(),
+        MetricPlatform::Signal => "Signal".into(),
+        MetricPlatform::Merch => "Merch".into(),
+        MetricPlatform::YouTube => "YouTube".into(),
+    }
+}
+
+/// Extracts readable text from a draft JSON value.
+/// Drafts are structured JSON from the agent service; this flattens them
+/// into a single string for display. Falls back to pretty-printed JSON.
+fn draft_to_text(draft: &serde_json::Value) -> String {
+    if let Some(s) = draft.as_str() {
+        return s.to_owned();
+    }
+    if let Some(obj) = draft.as_object() {
+        let mut parts = Vec::new();
+        for (key, val) in obj {
+            if let Some(s) = val.as_str() {
+                parts.push(format!("{}: {}", key, s));
+            } else {
+                parts.push(format!("{}: {}", key, val));
+            }
+        }
+        return parts.join("\n");
+    }
+    serde_json::to_string_pretty(draft).unwrap_or_default()
 }
 
 /// Action-ready decision emitted by application orchestration.

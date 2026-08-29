@@ -57,7 +57,7 @@ pub struct CommunityEngagementSummary {
 }
 
 /// Cooldown intervals (in hours) for each worker template.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct GrowthIntelligencePolicy {
     pub reddit_scanner_cooldown_hours: u32,
@@ -69,6 +69,21 @@ pub struct GrowthIntelligencePolicy {
     pub press_pitch_event_lead_days: u32,
     pub fan_growth_stagnant_days: u32,
     pub failed_run_retry_hours: u32,
+    /// Probability (0.0–1.0) that a high-volume dispatch is randomly
+    /// assigned to a holdout control group. The control group is not
+    /// dispatched but is still measured — the difference between the
+    /// treatment and control groups is the true causal treatment effect.
+    ///
+    /// Guardrails:
+    /// - 0.0 = no holdout (all dispatches go through, DiD counterfactual only)
+    /// - 0.05 = 5% of dispatches are held out (recommended for high-volume)
+    /// - Maximum 0.10 (10%) — higher values would waste too many opportunities
+    ///
+    /// The holdout only applies to direct-action workers (community-engager,
+    /// social-post, signal-inviter). Scanner and strategist are never held
+    /// out — they don't directly acquire fans, so there's no treatment to
+    /// withhold.
+    pub randomized_holdout_probability: f64,
 }
 
 impl Default for GrowthIntelligencePolicy {
@@ -83,6 +98,7 @@ impl Default for GrowthIntelligencePolicy {
             press_pitch_event_lead_days: 30,
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,
+            randomized_holdout_probability: 0.0,
         }
     }
 }

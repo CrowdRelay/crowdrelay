@@ -630,6 +630,12 @@ fn apply_evidence_to_model(
     for ev in evidence {
         let template = extract_template_from_opportunity(&ev.opportunity_id);
         let subreddit_type = ev.context.subreddit_type.as_deref();
+        // Scale the observation variance by the evidence quality multiplier.
+        // Higher quality evidence (randomized holdout) gets a lower variance
+        // → moves the posterior more. Lower quality evidence (observational)
+        // gets a higher variance → barely moves the posterior. This prevents
+        // weak pre/post evidence from dominating strong causal evidence.
+        let quality_multiplier = ev.evidence_quality.variance_multiplier();
 
         // Update the outcome model from the Y14 (incremental) outcome.
         // Y14 is the early leading signal — available 14 days after dispatch.
@@ -647,17 +653,19 @@ fn apply_evidence_to_model(
         // Update the Y14 treatment-effect posterior from the incremental
         // outcome. The `observed_incremental_fans` field is the
         // counterfactual-adjusted τ estimate (already IPW-corrected if
-        // propensity is available).
+        // propensity is available). The observation variance is scaled by
+        // the evidence quality — weak evidence barely moves the posterior.
         if let Some(tau_y14) = ev.observed_incremental_fans {
-            let obs_var = 2.0 * tau_y14.abs().max(1.0); // adaptive variance
+            let obs_var = 2.0 * tau_y14.abs().max(1.0) * quality_multiplier;
             model.update_treatment_effect(&template, subreddit_type, tau_y14, obs_var);
         }
 
         // When Y30 (durable) is available, update the Y30 treatment-effect
         // posterior, the Y30 calibration tracker, and the Y14→Y30 bridge.
         if let Some(y30_fans) = ev.y30_outcome() {
-            // Y30 treatment-effect update (North Star).
-            let obs_var = 2.0 * y30_fans.abs().max(1.0);
+            // Y30 treatment-effect update (North Star). Scaled by evidence
+            // quality — same rationale as Y14.
+            let obs_var = 2.0 * y30_fans.abs().max(1.0) * quality_multiplier;
             model.update_treatment_effect_y30(&template, subreddit_type, y30_fans, obs_var);
             // Y30 calibration.
             model
@@ -684,8 +692,20 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
     use crowdrelay_brain::GrowthStrategy;
 
     for ev in evidence {
+        // Use the recorded strategy when available. Legacy evidence rows
+        // (before the strategy field was added) fall back to inferring
+        // from the template — a heuristic guess that can be wrong when
+        // multiple strategies dispatch the same template.
         let template = extract_template_from_opportunity(&ev.opportunity_id);
-        let strategy = GrowthStrategy::infer_from_template(&template);
+        let strategy = ev
+            .strategy
+            .as_deref()
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| {
+                GrowthStrategy::infer_from_template(&template)
+                    .as_str()
+                    .to_owned()
+            });
         let growth_trend = ev.context.fan_growth_trend.as_str();
         let event_proximity = match ev.context.days_to_event {
             Some(d) if d <= 7 => "close",
@@ -699,7 +719,7 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
         if let Some(incremental_fans) = ev.observed_incremental_fans {
             let obs_var = 2.0 * incremental_fans.abs().max(1.0);
             posterior.update(
-                strategy.as_str(),
+                &strategy,
                 growth_trend,
                 event_proximity,
                 incremental_fans,
@@ -854,11 +874,17 @@ async fn full_replay(
 /// Records a dispatch prediction. Called when the brain dispatches a worker
 /// — stores the prediction so it can be compared with the measured outcome
 /// later (after the measurement window elapses).
+///
+/// The `strategy` parameter records the actual growth strategy that was
+/// active when the dispatch was made, so the strategy posterior learns from
+/// the real strategy — not a heuristic inference from the template.
 pub(in crate::autopilot) async fn record_dispatch_prediction(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     action_id: uuid::Uuid,
     prediction: &crowdrelay_brain::DispatchPrediction,
+    strategy: Option<&str>,
+    holdout_probability: f64,
 ) -> Result<(), RepositoryError> {
     let pool = &repo.pool;
     let context_json = serde_json::to_value(&prediction.context).unwrap_or(serde_json::json!({}));
@@ -881,16 +907,23 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
     .await
     .map_err(map_sqlx)?;
 
-    // Also record a growth evidence row at dispatch time. The outcome
-    // fields are left NULL — they are filled in when measurements arrive.
-    // The recipient_id and channel are derived from the context; we use
-    // a placeholder when the context doesn't specify them (the reach
-    // event recording sites will update these later).
-    let recipient_id = prediction
+    // Construct the opportunity_id from the prediction's template, target,
+    // action, and context hash. This is the stable identity that the
+    // causal model uses to attribute outcomes to the correct template —
+    // previously this was always None, causing all evidence to be
+    // attributed to the "unknown" template.
+    let target = prediction
         .context
         .subreddit_type
         .clone()
         .unwrap_or_else(|| format!("action:{}", action_id));
+    let opportunity_id = crowdrelay_brain::OpportunityId::new(
+        &prediction.template_id,
+        &target,
+        crowdrelay_brain::OpportunityAction::Post,
+        &prediction.context,
+    );
+    let recipient_id = target.clone();
     let channel = prediction
         .context
         .subreddit_type
@@ -903,18 +936,92 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
             }
         })
         .unwrap_or(crowdrelay_brain::ReachChannel::Other);
+    // When a randomized holdout is active (holdout_probability > 0),
+    // label the treatment evidence as `RandomizedHoldout` with propensity
+    // = 1 - holdout_probability (the probability of treatment assignment).
+    // Both treatment and control arms of the same experiment carry the
+    // same evidence quality and complementary propensities.
+    let (treatment_propensity, evidence_quality) = if holdout_probability > 0.0 {
+        (
+            1.0 - holdout_probability,
+            crowdrelay_brain::EvidenceQuality::RandomizedHoldout,
+        )
+    } else {
+        (1.0, crowdrelay_brain::EvidenceQuality::Observational)
+    };
     let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
         workspace_id.into_uuid(),
         action_id,
-        None,
+        Some(opportunity_id.to_string()),
         recipient_id,
         channel,
         1,
         crowdrelay_brain::TreatmentAssignment::Treatment,
-        1.0,
+        treatment_propensity,
         prediction.expected_new_fans,
         prediction.expected_signal_installs,
         prediction.context.clone(),
+        strategy.map(|s| s.to_owned()),
+        evidence_quality,
+    );
+    let _ = super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await;
+    Ok(())
+}
+
+/// Records a holdout control group assignment. When the randomized holdout
+/// fires, the brain does NOT dispatch the worker — instead, it records a
+/// control-group evidence row. The same measurements are scheduled so the
+/// control group's fan growth is measured.
+pub(in crate::autopilot) async fn record_holdout_control(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    prediction: &crowdrelay_brain::DispatchPrediction,
+    strategy: Option<&str>,
+    holdout_probability: f64,
+) -> Result<(), RepositoryError> {
+    let target = prediction
+        .context
+        .subreddit_type
+        .clone()
+        .unwrap_or_else(|| format!("action:{}", action_id));
+    let opportunity_id = crowdrelay_brain::OpportunityId::new(
+        &prediction.template_id,
+        &target,
+        crowdrelay_brain::OpportunityAction::Post,
+        &prediction.context,
+    );
+    let recipient_id = target.clone();
+    let channel = prediction
+        .context
+        .subreddit_type
+        .as_deref()
+        .map(|s| {
+            if s.starts_with("r/") {
+                crowdrelay_brain::ReachChannel::RedditPost
+            } else {
+                crowdrelay_brain::ReachChannel::Other
+            }
+        })
+        .unwrap_or(crowdrelay_brain::ReachChannel::Other);
+    // Control group: TreatmentAssignment::Control with the same
+    // propensity as the treatment arm (P(treatment) = 1 - p). Both arms
+    // of the randomized holdout carry EvidenceQuality::RandomizedHoldout.
+    let control_propensity = 1.0 - holdout_probability;
+    let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
+        workspace_id.into_uuid(),
+        action_id,
+        Some(opportunity_id.to_string()),
+        recipient_id,
+        channel,
+        1,
+        crowdrelay_brain::TreatmentAssignment::Control,
+        control_propensity,
+        prediction.expected_new_fans,
+        prediction.expected_signal_installs,
+        prediction.context.clone(),
+        strategy.map(|s| s.to_owned()),
+        crowdrelay_brain::EvidenceQuality::RandomizedHoldout,
     );
     let _ = super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await;
     Ok(())
@@ -960,9 +1067,12 @@ pub(in crate::autopilot) async fn load_exploration_memory(
     let mut mem = ExplorationMemory::default();
     // The autopilot cycle runs every 5 minutes. Each historical visit is
     // weighted by VISIT_DECAY^age_cycles so old visits contribute less.
+    // Use fractional hours (not whole_hours) so sub-hour visits decay
+    // correctly — with a 5-minute cycle, the first 12 cycles all had
+    // age_hours=0 and full weight when using whole_hours.
     const CYCLE_HOURS: f64 = 5.0 / 60.0; // 5 minutes in hours
     for (template_id, context_json, predicted_at) in rows {
-        let age_hours = (now - predicted_at).whole_hours().max(0) as f64;
+        let age_hours = (now - predicted_at).as_seconds_f64() / 3600.0;
         let age_cycles = age_hours / CYCLE_HOURS;
         let decayed_weight = VISIT_DECAY.powf(age_cycles);
         // Skip visits that have decayed to near-zero.

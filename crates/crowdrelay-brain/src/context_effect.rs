@@ -29,7 +29,7 @@
 //! ```
 //!
 //! The posterior over β is approximated as a multivariate Normal with mean
-//! vector `μ` (5-dim) and covariance matrix `Σ` (5×5). Each observation
+//! vector `μ` (7-dim) and covariance matrix `Σ` (7×7). Each observation
 //! updates the posterior via one Newton step:
 //!
 //! ```text
@@ -49,7 +49,7 @@
 //! - **Additive in log space**: prevents multiplicative explosion.
 //! - **Interpretable coefficients**: β = 0 means no effect. The old
 //!   multipliers become `exp(β)`: ×1.5 → β = log(1.5) ≈ 0.405.
-//! - **Joint uncertainty**: the 5×5 covariance matrix captures correlations
+//! - **Joint uncertainty**: the 7×7 covariance matrix captures correlations
 //!   between context effects, giving honest predictive uncertainty.
 
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ use crate::causal_model::DispatchContext;
 use crate::world_model::GrowthTrend;
 
 /// Number of context coefficients in the GLM.
-const N_COEFFS: usize = 5;
+const N_COEFFS: usize = 7;
 
 // Coefficient indices:
 const IDX_EVENT_7D: usize = 0;
@@ -66,6 +66,13 @@ const IDX_EVENT_30D: usize = 1;
 const IDX_STAGNANT: usize = 2;
 const IDX_DECELERATING: usize = 3;
 const IDX_ACCELERATING: usize = 4;
+/// Binary indicator: 1.0 if a post_format is specified, 0.0 otherwise.
+/// Captures whether explicitly formatting a post improves outcomes.
+const IDX_POST_FORMAT: usize = 5;
+/// Continuous covariate: time of day normalized to [0, 1] from
+/// `time_of_day_bps` (0–10_000). Captures the linear effect of timing
+/// on fan acquisition (e.g. evening posts may perform better).
+const IDX_TIME_OF_DAY: usize = 6;
 
 /// The prior for β_event_7d: log(1.5) ≈ 0.405 (the old ×1.5 multiplier).
 const BETA_EVENT_7D_PRIOR: f64 = 0.4055;
@@ -81,6 +88,12 @@ const BETA_DECELERATING_PRIOR: f64 = -0.2231;
 
 /// The prior for β_accelerating: log(1.1) ≈ 0.0953.
 const BETA_ACCELERATING_PRIOR: f64 = 0.0953;
+
+/// The prior for β_post_format: 0.0 (no prior knowledge about format effect).
+const BETA_POST_FORMAT_PRIOR: f64 = 0.0;
+
+/// The prior for β_time_of_day: 0.0 (no prior knowledge about timing effect).
+const BETA_TIME_OF_DAY_PRIOR: f64 = 0.0;
 
 /// The prior variance for context coefficients. Represents initial
 /// uncertainty — higher means faster learning but more volatility.
@@ -99,19 +112,19 @@ const MAX_STEP: f64 = 0.5;
 /// A Bayesian online log-linear GLM for context effects.
 ///
 /// The model predicts `E[fans] = exp(log(base_mean) + xᵀβ)` where `β` is a
-/// 5-dimensional coefficient vector with a multivariate Normal posterior.
+/// 7-dimensional coefficient vector with a multivariate Normal posterior.
 /// The posterior is updated via online Laplace approximation (Fisher
 /// scoring / Newton's method), which correctly attributes outcomes to the
 /// covariates that drove them — unlike the old equal-residual-splitting
 /// coordinate descent.
 ///
-/// The 5×5 covariance matrix captures correlations between context effects,
+/// The 7×7 covariance matrix captures correlations between context effects,
 /// giving honest predictive uncertainty via `predict_std`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextGLM {
     /// Posterior mean vector (5-dim).
     mu: [f64; N_COEFFS],
-    /// Posterior covariance matrix (5×5).
+    /// Posterior covariance matrix (7×7).
     sigma: [[f64; N_COEFFS]; N_COEFFS],
     /// Number of observations used to form this posterior.
     n: u32,
@@ -134,13 +147,17 @@ impl ContextGLM {
             BETA_STAGNANT_PRIOR,
             BETA_DECELERATING_PRIOR,
             BETA_ACCELERATING_PRIOR,
+            BETA_POST_FORMAT_PRIOR,
+            BETA_TIME_OF_DAY_PRIOR,
         ];
         let sigma = [
-            [CONTEXT_PRIOR_VARIANCE, 0.0, 0.0, 0.0, 0.0],
-            [0.0, CONTEXT_PRIOR_VARIANCE, 0.0, 0.0, 0.0],
-            [0.0, 0.0, CONTEXT_PRIOR_VARIANCE, 0.0, 0.0],
-            [0.0, 0.0, 0.0, CONTEXT_PRIOR_VARIANCE, 0.0],
-            [0.0, 0.0, 0.0, 0.0, CONTEXT_PRIOR_VARIANCE],
+            [CONTEXT_PRIOR_VARIANCE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, CONTEXT_PRIOR_VARIANCE, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, CONTEXT_PRIOR_VARIANCE, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, CONTEXT_PRIOR_VARIANCE, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, CONTEXT_PRIOR_VARIANCE, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, CONTEXT_PRIOR_VARIANCE, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, CONTEXT_PRIOR_VARIANCE],
         ];
         Self { mu, sigma, n: 0 }
     }
@@ -161,6 +178,14 @@ impl ContextGLM {
             GrowthTrend::Decelerating => x[IDX_DECELERATING] = 1.0,
             GrowthTrend::Accelerating => x[IDX_ACCELERATING] = 1.0,
             GrowthTrend::Steady => {}
+        }
+        // Post format: binary indicator for whether a format is specified.
+        if context.post_format.is_some() {
+            x[IDX_POST_FORMAT] = 1.0;
+        }
+        // Time of day: continuous covariate normalized to [0, 1].
+        if context.time_of_day_bps > 0 {
+            x[IDX_TIME_OF_DAY] = f64::from(context.time_of_day_bps) / 10_000.0;
         }
         x
     }
@@ -227,7 +252,7 @@ impl ContextGLM {
         }
 
         // Prior precision: Λ = Σ⁻¹
-        let lambda = mat_inv_5x5(&self.sigma);
+        let lambda = mat_inv(&self.sigma);
 
         // Fisher information (Hessian): H = Λ + μ_pred · (x ⊗ x)
         // Add a small ridge for numerical stability.
@@ -242,7 +267,7 @@ impl ContextGLM {
         }
 
         // Solve H·δ = g → δ = H⁻¹·g
-        let h_inv = mat_inv_5x5(&h);
+        let h_inv = mat_inv(&h);
         let mut delta = [0.0; N_COEFFS];
         for i in 0..N_COEFFS {
             for j in 0..N_COEFFS {
@@ -279,9 +304,9 @@ impl ContextGLM {
     }
 }
 
-// ── 5×5 matrix operations ────────────────────────────────────────────────
+// ── N×N matrix operations ────────────────────────────────────────────────
 
-/// Dot product of two 5-dim vectors.
+/// Dot product of two N-dim vectors.
 fn dot(a: &[f64; N_COEFFS], b: &[f64; N_COEFFS]) -> f64 {
     let mut s = 0.0;
     for i in 0..N_COEFFS {
@@ -290,7 +315,7 @@ fn dot(a: &[f64; N_COEFFS], b: &[f64; N_COEFFS]) -> f64 {
     s
 }
 
-/// Quadratic form: xᵀ·M·x for a 5-dim vector and 5×5 matrix.
+/// Quadratic form: xᵀ·M·x for an N-dim vector and N×N matrix.
 fn quadratic_form(x: &[f64; N_COEFFS], m: &[[f64; N_COEFFS]; N_COEFFS]) -> f64 {
     let mut s = 0.0;
     for i in 0..N_COEFFS {
@@ -301,11 +326,11 @@ fn quadratic_form(x: &[f64; N_COEFFS], m: &[[f64; N_COEFFS]; N_COEFFS]) -> f64 {
     s
 }
 
-/// Inverts a 5×5 matrix using Gauss-Jordan elimination with partial pivoting.
+/// Inverts an N×N matrix using Gauss-Jordan elimination with partial pivoting.
 /// Returns the identity if the matrix is singular (should not happen with the
 /// ridge regularization).
 #[must_use]
-fn mat_inv_5x5(m: &[[f64; N_COEFFS]; N_COEFFS]) -> [[f64; N_COEFFS]; N_COEFFS] {
+fn mat_inv(m: &[[f64; N_COEFFS]; N_COEFFS]) -> [[f64; N_COEFFS]; N_COEFFS] {
     // Augmented matrix [m | I]
     let mut aug = [[0.0f64; 2 * N_COEFFS]; N_COEFFS];
     for (i, row) in aug.iter_mut().enumerate() {
@@ -625,15 +650,17 @@ mod tests {
     }
 
     #[test]
-    fn mat_inv_5x5_identity() {
+    fn mat_inv_identity() {
         let id = [
-            [1.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         ];
-        let inv = mat_inv_5x5(&id);
+        let inv = mat_inv(&id);
         for (i, row) in inv.iter().enumerate() {
             for (j, &val) in row.iter().enumerate() {
                 let expected = if i == j { 1.0 } else { 0.0 };
@@ -643,19 +670,23 @@ mod tests {
     }
 
     #[test]
-    fn mat_inv_5x5_diagonal() {
+    fn mat_inv_diagonal() {
         let d = [
-            [4.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.5, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.25],
+            [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 8.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0],
         ];
-        let inv = mat_inv_5x5(&d);
+        let inv = mat_inv(&d);
         assert!((inv[0][0] - 0.25).abs() < 1e-10);
         assert!((inv[1][1] - 0.5).abs() < 1e-10);
         assert!((inv[2][2] - 1.0).abs() < 1e-10);
         assert!((inv[3][3] - 2.0).abs() < 1e-10);
         assert!((inv[4][4] - 4.0).abs() < 1e-10);
+        assert!((inv[5][5] - 0.125).abs() < 1e-10);
+        assert!((inv[6][6] - 0.1).abs() < 1e-10);
     }
 }

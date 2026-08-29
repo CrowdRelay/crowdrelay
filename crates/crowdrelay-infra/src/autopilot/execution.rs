@@ -265,33 +265,60 @@ pub(super) async fn schedule_effect_measurement(
         // window after the dispatch. This closes the learning loop: the
         // brain can retire workers that consistently produce no growth and
         // shorten the cadence of workers that do.
-        AutopilotActionPayload::RequestAgentRun { .. } => {
-            let baseline_fans = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COUNT(*)::double precision FROM fans
-                WHERE workspace_id = $1
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
-            plans.push((
-                AutopilotMeasurementKind::AgentRunFanGrowth14d,
-                action_id.into_uuid(),
-                baseline_fans,
-                now + time::Duration::days(14),
-            ));
-            // North Star: incremental fan growth with counterfactual baseline.
-            // The baseline is the pre-action daily fan arrival rate (fans per
-            // day in the 30 days before the action). The measurement observes
-            // new fans in the 14-day post-action window and computes
-            // max(0, observed - rate × 14) — the incremental uplift.
+        AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
+            // Reward alignment: measure each worker on its proximal outcome,
+            // not workspace-wide fan growth. The scanner discovers
+            // communities, the strategist produces insights — neither
+            // acquires fans directly. Measuring them on fan growth would
+            // credit them for fans acquired by other workers (credit
+            // leakage + polluted posteriors).
+            let is_scanner = template_id == "reddit-scanner";
+            let is_strategist = template_id == "growth-strategist";
+            if !is_scanner && !is_strategist {
+                // Direct-action workers: measure fan growth (the existing
+                // path). These workers (community-engager, social-post,
+                // signal-inviter, press-pitch) can directly acquire fans.
+                let baseline_fans = sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision FROM fans
+                    WHERE workspace_id = $1
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?;
+                plans.push((
+                    AutopilotMeasurementKind::AgentRunFanGrowth14d,
+                    action_id.into_uuid(),
+                    baseline_fans,
+                    now + time::Duration::days(14),
+                ));
+            // North Star: incremental fan growth with a difference-in-
+            // differences (DiD) counterfactual. The baseline is the pre-
+            // action daily fan arrival rate computed from a matched 14-day
+            // window (the same length as the observation window). This is
+            // a quasi-experimental counterfactual: the 14-day pre-period
+            // is the "control" and the 14-day post-period is the
+            // "treatment". The DiD estimate is:
+            //
+            //   τ = (fans_post - fans_pre) = observed - (rate × 14)
+            //
+            // Using a matched 14-day window (instead of the previous 30-day
+            // average) makes the counterfactual more robust to time-varying
+            // trends: if fan growth was already declining before the action,
+            // the 30-day average would overstate the counterfactual and
+            // understate the treatment effect. The 14-day matched window
+            // captures the most recent trend.
+            //
+            // The evidence quality is `Observational` — this is a
+            // quasi-experimental estimate, not a randomized experiment.
+            // The treatment-effect posterior weights it accordingly.
             let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
                 r#"
-                SELECT COUNT(*)::double precision / 30.0 FROM fans
+                SELECT COUNT(*)::double precision / 14.0 FROM fans
                 WHERE workspace_id = $1
-                  AND created_at >= $2 - INTERVAL '30 days'
+                  AND created_at >= $2 - INTERVAL '14 days'
                   AND created_at < $2
                 "#,
             )
@@ -305,6 +332,20 @@ pub(super) async fn schedule_effect_measurement(
                 action_id.into_uuid(),
                 pre_action_daily_rate,
                 now + time::Duration::days(14),
+            ));
+            // Y30 durable fan growth (North Star): fans created in the
+            // 14-day post-action window that are still active 30 days
+            // after creation. The measurement window is 44 days (14-day
+            // observation + 30-day durability check). The baseline is
+            // the same pre-action daily rate, so Y30 is incremental —
+            // not a raw count. Previously this measurement kind existed
+            // but was never scheduled, so the Y30 treatment-effect
+            // posterior was never updated (conf_y30 was always 0).
+            plans.push((
+                AutopilotMeasurementKind::DurableFanGrowth30d,
+                action_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(44),
             ));
             let baseline_installs = sqlx::query_scalar::<_, f64>(
                 r#"
@@ -323,6 +364,22 @@ pub(super) async fn schedule_effect_measurement(
                 baseline_installs,
                 now + time::Duration::days(7),
             ));
+            } else {
+                // Scanner/strategist: measure proximal outcome, not fan
+                // growth. The scanner discovers communities, the
+                // strategist produces insights — neither acquires fans.
+                let kind = if is_scanner {
+                    AutopilotMeasurementKind::ScannerDiscoveryQuality14d
+                } else {
+                    AutopilotMeasurementKind::StrategistInsightQuality14d
+                };
+                plans.push((
+                    kind,
+                    action_id.into_uuid(),
+                    0.0, // baseline: no targets/insights existed before
+                    now + time::Duration::days(14),
+                ));
+            }
         }
         // Community engagement: measure whether the posts produced
         // meaningful engagement (upvotes, comments) rather than just

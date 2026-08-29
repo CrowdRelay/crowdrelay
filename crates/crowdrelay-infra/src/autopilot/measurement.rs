@@ -347,11 +347,18 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                 }
-                // Incremental fan growth (North Star): new fans in the
-                // 14-day post-action window minus the counterfactual
-                // (pre-action daily rate × 14, stored as baseline_value).
-                // Returns max(0, observed - counterfactual) — the
-                // incremental fans attributable to the action.
+                // Incremental fan growth (North Star): difference-in-
+                // differences (DiD) estimate. New fans in the 14-day post-
+                // action window minus the counterfactual (pre-action daily
+                // rate from a matched 14-day window × 14, stored as
+                // baseline_value). This is a quasi-experimental estimate,
+                // not a randomized experiment — the evidence quality is
+                // `MatchedQuasiExperiment`.
+                //
+                // Allows negative values — the brain must be able to learn
+                // that an action *harmed* fan growth (e.g. a community post
+                // that alienated the audience). The treatment-effect
+                // posterior supports negative τ via `update_signed`.
                 AutopilotMeasurementKind::IncrementalFanGrowth14d => {
                     let observed = sqlx::query_scalar::<_, f64>(
                         r#"
@@ -368,9 +375,10 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                     // The baseline_value stores the pre-action daily fan
-                    // arrival rate. Counterfactual = rate × 14 days.
+                    // arrival rate from a matched 14-day window.
+                    // Counterfactual = rate × 14 days = pre-period count.
                     let counterfactual = measurement.baseline_value * 14.0;
-                    (observed - counterfactual).max(0.0)
+                    observed - counterfactual
                 }
                 // Signal install growth after an agent dispatch: count new
                 // active push endpoints in the 7-day window. A push endpoint
@@ -425,20 +433,71 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 }
                 // Durable fan growth (Y30): fans created in the 14-day
                 // post-action window that are still active 30 days after
-                // creation (not suppressed, not deleted). This is the
-                // true North Star — fans that stick, not just fans that
-                // sign up. The subject_id is unused; the measurement
-                // applies to the workspace as a whole.
+                // creation. This is the true North Star — fans that stick,
+                // not just fans that sign up.
+                //
+                // The measurement is incremental: it subtracts the
+                // counterfactual (baseline daily rate × 14) so Y30 is a
+                // causal incremental outcome, not a raw count. Allows
+                // negative values — the brain must learn when actions
+                // produce *non-durable* fans.
+                //
+                // SQL fix: the second status check was `!= 'suppressed'`
+                // (same as the first) instead of `= 'active'`. This meant
+                // the query never actually verified the fan was still
+                // active — it only checked not-suppressed twice.
                 AutopilotMeasurementKind::DurableFanGrowth30d => {
-                    sqlx::query_scalar::<_, f64>(
+                    let observed = sqlx::query_scalar::<_, f64>(
                         r#"
                         SELECT COUNT(*)::double precision FROM fans
                         WHERE workspace_id = $1
                           AND created_at >= $2
                           AND created_at < $2 + INTERVAL '14 days'
-                          AND status != 'suppressed'
                           AND created_at + INTERVAL '30 days' <= now()
-                          AND status != 'suppressed'
+                          AND status = 'active'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+                    // Counterfactual: pre-action daily rate × 14 days.
+                    let counterfactual = measurement.baseline_value * 14.0;
+                    observed - counterfactual
+                }
+                // Scanner discovery quality: counts new outreach targets
+                // discovered in the 14-day post-action window. The scanner's
+                // proximal outcome is discovery, not fan growth — measuring
+                // it on workspace-wide fan count would credit it for fans
+                // acquired by other workers.
+                AutopilotMeasurementKind::ScannerDiscoveryQuality14d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision FROM agent_outreach_targets
+                        WHERE workspace_id = $1
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '14 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                // Strategist insight quality: counts campaign insights
+                // produced in the 14-day post-action window. The
+                // strategist's proximal outcome is intelligence production,
+                // not fan growth.
+                AutopilotMeasurementKind::StrategistInsightQuality14d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision FROM agent_outcomes
+                        WHERE workspace_id = $1
+                          AND kind = 'campaign_insight'
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '14 days'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -599,11 +658,15 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    // Also update the growth evidence table.
+                    // Also update the growth evidence table. Set the
+                    // evidence quality to `matched_quasi_experiment` —
+                    // the DiD counterfactual uses a matched 14-day pre-
+                    // period, which is a quasi-experimental method.
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
                         SET observed_incremental_fans = $3,
+                            evidence_quality = 'matched_quasi_experiment',
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -677,6 +740,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         r#"
                         UPDATE viryaos_growth_evidence
                         SET durable_fans_30d = $3,
+                            evidence_quality = 'matched_quasi_experiment',
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -686,6 +750,44 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                // Scanner/strategist proximal outcome measurements: mark
+                // the prediction and evidence as resolved. The observed
+                // value (discovered targets / produced insights) is stored
+                // in the outcome table but not in the prediction's fan
+                // columns — these workers don't acquire fans.
+                AutopilotMeasurementKind::ScannerDiscoveryQuality14d
+                | AutopilotMeasurementKind::StrategistInsightQuality14d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_dispatch_predictions
+                        SET resolved_at = COALESCE(resolved_at, $3)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET resolved_at = COALESCE(resolved_at, $3)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
                     .bind(now)
                     .execute(&mut *transaction)
                     .await

@@ -60,6 +60,10 @@ pub struct IntelligenceRequest {
     /// The strategy-derived priority rank for this template (0 = highest
     /// priority). Used as the primary sort key before EFE.
     pub strategy_rank: usize,
+    /// Treatment-aware stats from the causal model. Used by the portfolio
+    /// optimizer to rank candidates by Y30 durable fans (North Star) when
+    /// the treatment-effect confidence is sufficient.
+    pub treatment_stats: crowdrelay_brain::TreatmentAwareStats,
 }
 
 /// Formats the unengaged outreach targets into a context block for the
@@ -320,21 +324,35 @@ pub fn evaluate_growth_intelligence(
 
     // ── Time-to-feedback discount (P1.10) ──
     // Templates that produce feedback faster are slightly preferred because
-    // the brain can learn from them sooner. The discount factor is based on
-    // the treatment confidence: templates with low confidence have faster
-    // feedback loops (the brain learns more from each observation), so they
-    // get a small exploration boost. Templates with high confidence are
-    // already well-learned, so the discount is minimal.
+    // the brain can learn from them sooner. The discount is based on the
+    // actual feedback horizon — the time until the measurement window
+    // closes and the brain observes the outcome.
+    //
+    // The feedback horizon is determined by the measurement kind:
+    //   - Y14 (incremental fan growth): 14 days
+    //   - Y30 (durable fan growth): 44 days (14-day window + 30-day check)
+    //   - Signal installs: 7 days
+    //   - Scanner/strategist proximal outcomes: 14 days
     //
     // The discount is multiplicative on the EFE score (lower = better):
-    //   low confidence → 0.95× (5% boost — learn faster)
-    //   high confidence → 1.0× (no boost — already learned)
-    let feedback_discount = if confidence < 10 {
-        0.95 // 5% boost for fast-learning templates
-    } else if confidence < 30 {
+    //   short horizon (≤7 days) → 0.92× (8% boost — learn fastest)
+    //   medium horizon (≤14 days) → 0.95× (5% boost)
+    //   long horizon (≤44 days) → 0.98× (2% boost)
+    //   very long horizon (>44 days) → 1.0× (no boost)
+    //
+    // Previously this used confidence buckets as a proxy for feedback speed,
+    // which is wrong: confidence measures how much we've learned, not how
+    // fast we learn. A template with 100 observations still has a 14-day
+    // feedback horizon.
+    let feedback_horizon_days = feedback_horizon_for_template(&snapshot.template_id);
+    let feedback_discount = if feedback_horizon_days <= 7 {
+        0.92 // 8% boost for fast feedback
+    } else if feedback_horizon_days <= 14 {
+        0.95 // 5% boost
+    } else if feedback_horizon_days <= 44 {
         0.98 // 2% boost
     } else {
-        1.0 // no boost for well-learned templates
+        1.0 // no boost for very long horizons
     };
 
     let raw_efe = GrowthOpportunity::compute_efe(
@@ -421,6 +439,7 @@ pub fn evaluate_growth_intelligence(
             ),
             efe_score,
             strategy_rank,
+            treatment_stats,
         });
     }
 
@@ -461,6 +480,7 @@ pub fn evaluate_growth_intelligence(
                 ),
                 efe_score,
                 strategy_rank,
+                treatment_stats,
             });
         }
     }
@@ -491,6 +511,7 @@ pub fn evaluate_growth_intelligence(
             ),
             efe_score,
             strategy_rank,
+            treatment_stats,
         });
     }
 
@@ -532,6 +553,7 @@ pub fn evaluate_growth_intelligence(
             ),
             efe_score,
             strategy_rank,
+            treatment_stats,
         });
     }
 
@@ -571,6 +593,7 @@ pub fn evaluate_growth_intelligence(
             ),
             efe_score,
             strategy_rank,
+            treatment_stats,
         });
     }
 
@@ -603,6 +626,7 @@ pub fn evaluate_growth_intelligence(
             ),
             efe_score,
             strategy_rank,
+            treatment_stats,
         });
     }
 
@@ -653,11 +677,22 @@ pub fn evaluate_growth_intelligence(
             ),
             efe_score,
             strategy_rank,
+            treatment_stats,
         });
     }
 
     None
 }
+
+/// A scored growth intelligence candidate: (decision, prediction, EFE score,
+/// strategy rank, treatment-aware stats). Used by the portfolio optimizer.
+pub(super) type ScoredCandidate = (
+    DecisionCandidate,
+    DispatchPrediction,
+    f64,
+    usize,
+    crowdrelay_brain::TreatmentAwareStats,
+);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn growth_intelligence_candidate(
@@ -669,7 +704,7 @@ pub(super) fn growth_intelligence_candidate(
     strategy: GrowthStrategy,
     exploration_novelty: f64,
     strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
-) -> Result<Option<(DecisionCandidate, DispatchPrediction, f64, usize)>, serde_json::Error> {
+) -> Result<Option<ScoredCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::GrowthIntelligence(domain_policy) = policy.config else {
         return Ok(None);
     };
@@ -687,6 +722,7 @@ pub(super) fn growth_intelligence_candidate(
     let prediction = request.prediction.clone();
     let efe_score = request.efe_score;
     let strategy_rank = request.strategy_rank;
+    let treatment_stats = request.treatment_stats;
     let disposition = disposition(
         policy.autonomy_level,
         Confidence::MAX,
@@ -727,6 +763,7 @@ pub(super) fn growth_intelligence_candidate(
         prediction,
         efe_score,
         strategy_rank,
+        treatment_stats,
     )))
 }
 
@@ -798,6 +835,25 @@ pub(super) fn classify_subreddit(subreddit: &str) -> String {
         "hiphop".to_owned()
     } else {
         "other".to_owned()
+    }
+}
+
+/// Returns the feedback horizon (in days) for a worker template — the time
+/// until the brain observes the outcome of a dispatch. This is determined by
+/// the measurement kind scheduled for the template:
+///   - Scanner/strategist: 14 days (proximal outcome measurement)
+///   - Signal inviter: 7 days (signal install measurement)
+///   - Direct-action workers: 14 days (Y14) + 44 days (Y30)
+///
+/// The shortest horizon is used for the feedback discount — the brain learns
+/// the fastest signal first.
+fn feedback_horizon_for_template(template_id: &str) -> u32 {
+    match template_id {
+        "signal-inviter" => 7,
+        // Scanner and strategist have proximal outcome measurements (14d).
+        "reddit-scanner" | "growth-strategist" => 14,
+        // Direct-action workers have Y14 (14d) as the shortest horizon.
+        _ => 14,
     }
 }
 

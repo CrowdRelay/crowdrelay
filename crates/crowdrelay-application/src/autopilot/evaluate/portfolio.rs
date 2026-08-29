@@ -8,31 +8,63 @@
 use std::collections::HashSet;
 
 use crowdrelay_brain::{
-    OpportunityAction, OpportunityId, PortfolioCandidate, PortfolioOptimizer, PortfolioSelection,
-    context_hash,
+    DecisionMode, OpportunityAction, OpportunityId, PortfolioCandidate, PortfolioOptimizer,
+    PortfolioSelection, context_hash,
 };
 
-use crate::autopilot::model::DecisionCandidate;
+use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
 
 /// Builds portfolio candidates from scored growth intelligence candidates
 /// and runs the optimizer to select the optimal dispatch set.
+///
+/// The portfolio optimizer now uses the treatment-aware stats (Y30
+/// durable fans, treatment confidence, P(τ > δ)) as the primary value
+/// signal when the treatment-effect model has sufficient confidence.
+/// When confidence is low, it falls back to the EFE score (which uses
+/// the outcome model's expected fans).
 ///
 /// Returns the portfolio selection. The caller should only dispatch
 /// candidates whose `decision_key` appears in the selection's `selected`
 /// list, and skip all candidates if `do_nothing` is true.
 #[must_use]
-pub(super) fn select_portfolio(
-    scored: &[(
-        DecisionCandidate,
-        crowdrelay_brain::DispatchPrediction,
-        f64,
-        usize,
-    )],
-) -> PortfolioSelection {
+pub(super) fn select_portfolio(scored: &[ScoredCandidate]) -> PortfolioSelection {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
-        .map(|(c, p, efe, _)| {
-            let audience_key = format!("template:{}", p.template_id);
+        .map(|(c, p, efe, _, stats)| {
+            // Audience key includes both the template AND the target
+            // (decision_key). Previously this was just `template:{}`,
+            // which meant two dispatches to different subreddits with
+            // the same template were treated as the same audience —
+            // causing the portfolio optimizer to reject the second as
+            // "audience overlap" when the audiences are actually
+            // disjoint (e.g. r/MetalMusic and r/progmetal are different
+            // communities).
+            let audience_key = format!("template:{}:{}", p.template_id, c.decision_key);
+            // Wire the North Star fields from the treatment-aware stats.
+            // When Y30 is confident, expected_durable_fans uses the Y30
+            // treatment effect. When only Y14 is confident, it uses the
+            // Y14 treatment effect with bridge-inflated uncertainty. When
+            // neither is confident, it falls back to 0.0 (the optimizer
+            // will use the EFE score instead).
+            let expected_durable_fans = if stats.use_treatment_effect {
+                if stats.uses_y30 {
+                    stats.treatment_effect_y30
+                } else {
+                    stats.treatment_effect
+                }
+            } else {
+                0.0
+            };
+            let treatment_confidence = if stats.uses_y30 {
+                stats.treatment_confidence_y30
+            } else {
+                stats.treatment_confidence
+            };
+            let treatment_std = if stats.uses_y30 {
+                stats.treatment_std_y30
+            } else {
+                stats.treatment_std
+            };
             PortfolioCandidate {
                 opportunity_id: OpportunityId {
                     template_id: p.template_id.clone(),
@@ -46,16 +78,15 @@ pub(super) fn select_portfolio(
                 cost: 1,
                 source_context: c.decision_kind.to_string(),
                 action_key: c.decision_key.clone(),
-                // P1.4: North Star fields — wired from the treatment-aware
-                // stats when available. For now, these default to 0/empty
-                // which makes the portfolio optimizer fall back to
-                // expected_fans. The growth intelligence evaluator will
-                // populate these in a future iteration.
-                expected_durable_fans: 0.0,
-                treatment_confidence: 0,
-                treatment_std: 0.0,
-                p_meaningful_effect: 0.0,
-                decision_mode: crowdrelay_brain::DecisionMode::Exploit,
+                expected_durable_fans,
+                treatment_confidence,
+                treatment_std,
+                p_meaningful_effect: stats.p_meaningful_effect,
+                decision_mode: if stats.use_treatment_effect {
+                    DecisionMode::Exploit
+                } else {
+                    DecisionMode::Explore
+                },
             }
         })
         .collect();

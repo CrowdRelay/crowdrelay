@@ -35,9 +35,10 @@ pub(in crate::autopilot) async fn record_growth_evidence(
             observed_fans, observed_incremental_fans, durable_fans_30d,
             converted, converted_fan_id,
             predicted_fans, predicted_signal_installs, context,
+            strategy, evidence_quality,
             episode_id, resolved_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
         ON CONFLICT (workspace_id, action_id) DO NOTHING
         "#,
     )
@@ -60,6 +61,8 @@ pub(in crate::autopilot) async fn record_growth_evidence(
     .bind(evidence.predicted_fans)
     .bind(evidence.predicted_signal_installs)
     .bind(&context_json)
+    .bind(&evidence.strategy)
+    .bind(evidence.evidence_quality.as_str())
     .bind(&evidence.episode_id)
     .bind(evidence.resolved_at)
     .execute(pool)
@@ -80,6 +83,8 @@ pub(in crate::autopilot) async fn record_growth_evidence(
             "propensity": evidence.propensity,
             "predicted_fans": evidence.predicted_fans,
             "predicted_signal_installs": evidence.predicted_signal_installs,
+            "strategy": evidence.strategy,
+            "evidence_quality": evidence.evidence_quality.as_str(),
             "context": context_json,
         }),
         occurred_at: evidence.timestamp,
@@ -126,6 +131,8 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         predicted_fans: f64,
         predicted_signal_installs: f64,
         context: serde_json::Value,
+        strategy: Option<String>,
+        evidence_quality: String,
         episode_id: Option<String>,
         resolved_at: Option<OffsetDateTime>,
     }
@@ -136,7 +143,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                channel, estimated_reach, actual_reach, treatment, propensity,
                observed_fans, observed_incremental_fans, durable_fans_30d,
                converted, converted_fan_id, predicted_fans, predicted_signal_installs,
-               context, episode_id, resolved_at
+               context, strategy, evidence_quality, episode_id, resolved_at
         FROM viryaos_growth_evidence
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
@@ -179,6 +186,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 predicted_fans: row.predicted_fans,
                 predicted_signal_installs: row.predicted_signal_installs,
                 context,
+                strategy: row.strategy,
+                evidence_quality: crowdrelay_brain::EvidenceQuality::parse(&row.evidence_quality)
+                    .unwrap_or(crowdrelay_brain::EvidenceQuality::Observational),
                 episode_id: row.episode_id,
                 resolved_at: row.resolved_at,
             }

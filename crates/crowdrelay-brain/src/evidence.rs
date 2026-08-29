@@ -34,6 +34,91 @@ use crate::causal_model::DispatchContext;
 use crate::experiment::TreatmentAssignment;
 use crate::reach::ReachChannel;
 
+/// How the outcome was measured — the causal strength of the evidence.
+///
+/// The brain must never silently treat weak pre/post evidence as strong
+/// causal evidence. This enum lets the learning loop weight observations
+/// by their causal quality:
+///
+/// - **RandomizedHoldout**: true A/B — action was withheld for a control
+///   group. Full causal strength. Treatment-effect posterior gets full
+///   weight.
+/// - **MatchedQuasiExperiment**: a matched comparison unit was used (e.g.
+///   a similar subreddit that wasn't targeted). Strong quasi-experimental
+///   design. ~70% weight.
+/// - **PrePost**: before/after comparison on the same unit. Confounded by
+///   seasonality, concurrent campaigns, baseline momentum. ~30% weight.
+/// - **Observational**: no counterfactual — just an outcome observation.
+///   Barely moves the posterior. ~10% weight.
+///
+/// The weights are applied by scaling the observation variance in the
+/// treatment-effect posterior update: higher quality → lower variance →
+/// the observation moves the posterior more.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceQuality {
+    /// True A/B: action was withheld for a control group. Full causal
+    /// strength.
+    RandomizedHoldout,
+    /// Matched comparison unit was used. Strong quasi-experimental design.
+    MatchedQuasiExperiment,
+    /// Before/after comparison on the same unit. Confounded by
+    /// seasonality and concurrent campaigns.
+    PrePost,
+    /// No counterfactual — just an outcome observation. Weakest evidence.
+    #[default]
+    Observational,
+}
+
+impl EvidenceQuality {
+    /// Returns the weight applied to treatment-effect observations of
+    /// this quality. Higher = more trust = lower effective variance.
+    ///
+    /// The weight is used to scale the observation variance: a weight of
+    /// 0.3 means the variance is divided by 0.3 (≈3.3×), making the
+    /// observation move the posterior less.
+    #[must_use]
+    pub const fn weight(self) -> f64 {
+        match self {
+            Self::RandomizedHoldout => 1.0,
+            Self::MatchedQuasiExperiment => 0.7,
+            Self::PrePost => 0.3,
+            Self::Observational => 0.1,
+        }
+    }
+
+    /// Returns the variance multiplier — how much to scale the base
+    /// observation variance by. Lower quality → higher multiplier → the
+    /// observation is trusted less.
+    #[must_use]
+    pub const fn variance_multiplier(self) -> f64 {
+        1.0 / self.weight()
+    }
+
+    /// Returns the string representation for DB storage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RandomizedHoldout => "randomized_holdout",
+            Self::MatchedQuasiExperiment => "matched_quasi_experiment",
+            Self::PrePost => "pre_post",
+            Self::Observational => "observational",
+        }
+    }
+
+    /// Parses a string into an `EvidenceQuality`.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "randomized_holdout" => Some(Self::RandomizedHoldout),
+            "matched_quasi_experiment" => Some(Self::MatchedQuasiExperiment),
+            "pre_post" => Some(Self::PrePost),
+            "observational" => Some(Self::Observational),
+            _ => None,
+        }
+    }
+}
+
 /// A single immutable growth evidence record — the unified evidence that
 /// all learning subsystems consume.
 ///
@@ -90,6 +175,15 @@ pub struct GrowthEvidence {
     /// The context features that informed the prediction.
     pub context: DispatchContext,
 
+    // ── Strategy + Evidence Quality ──
+    /// The growth strategy that was active when this dispatch was made.
+    /// Recorded so the strategy posterior learns from the actual strategy
+    /// used, not a heuristic inference from the template.
+    pub strategy: Option<String>,
+    /// How the outcome was measured — the causal strength of the evidence.
+    /// The learning loop weights observations by this quality.
+    pub evidence_quality: EvidenceQuality,
+
     // ── Episode linkage ──
     /// The episode this evidence belongs to (links to the episode model).
     pub episode_id: Option<String>,
@@ -119,6 +213,8 @@ impl Default for GrowthEvidence {
             predicted_fans: 0.0,
             predicted_signal_installs: 0.0,
             context: DispatchContext::default(),
+            strategy: None,
+            evidence_quality: EvidenceQuality::default(),
             episode_id: None,
             resolved_at: None,
         }
@@ -142,6 +238,8 @@ impl GrowthEvidence {
         predicted_fans: f64,
         predicted_signal_installs: f64,
         context: DispatchContext,
+        strategy: Option<String>,
+        evidence_quality: EvidenceQuality,
     ) -> Self {
         Self {
             workspace_id,
@@ -163,6 +261,8 @@ impl GrowthEvidence {
             predicted_fans,
             predicted_signal_installs,
             context,
+            strategy,
+            evidence_quality,
             episode_id: None,
             resolved_at: None,
         }
@@ -340,6 +440,8 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
+            EvidenceQuality::default(),
         );
         assert!(!evidence.is_resolved());
         assert_eq!(evidence.y14_outcome(), None);
@@ -361,6 +463,8 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
+            EvidenceQuality::default(),
         );
         evidence.observed_fans = Some(10.0);
         evidence.observed_incremental_fans = Some(5.0);
@@ -384,6 +488,8 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
+            EvidenceQuality::default(),
         );
         evidence.observed_fans = Some(10.0);
         // No incremental → Y14 falls back to raw (10.0).
@@ -406,6 +512,8 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
+            EvidenceQuality::default(),
         );
         evidence.observed_incremental_fans = Some(8.0);
         evidence.durable_fans_30d = Some(3.0);
@@ -429,6 +537,8 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            Some("aggressive_discovery".to_owned()),
+            EvidenceQuality::RandomizedHoldout,
         );
         evidence.observed_fans = Some(10.0);
         let json = serde_json::to_string(&evidence).expect("should serialize");
@@ -436,6 +546,14 @@ mod tests {
         assert_eq!(deserialized.action_id, evidence.action_id);
         assert_eq!(deserialized.observed_fans, Some(10.0));
         assert_eq!(deserialized.estimated_reach, 500);
+        assert_eq!(
+            deserialized.strategy,
+            Some("aggressive_discovery".to_owned())
+        );
+        assert_eq!(
+            deserialized.evidence_quality,
+            EvidenceQuality::RandomizedHoldout
+        );
     }
 
     #[test]
@@ -452,8 +570,47 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
+            EvidenceQuality::default(),
         );
         evidence.converted = true;
         assert!(evidence.is_resolved());
+    }
+
+    #[test]
+    fn evidence_quality_weights_are_ordered() {
+        assert!(
+            EvidenceQuality::RandomizedHoldout.weight()
+                > EvidenceQuality::MatchedQuasiExperiment.weight()
+        );
+        assert!(
+            EvidenceQuality::MatchedQuasiExperiment.weight() > EvidenceQuality::PrePost.weight()
+        );
+        assert!(EvidenceQuality::PrePost.weight() > EvidenceQuality::Observational.weight());
+    }
+
+    #[test]
+    fn evidence_quality_variance_multiplier_is_inverse_of_weight() {
+        for q in [
+            EvidenceQuality::RandomizedHoldout,
+            EvidenceQuality::MatchedQuasiExperiment,
+            EvidenceQuality::PrePost,
+            EvidenceQuality::Observational,
+        ] {
+            assert!((q.variance_multiplier() - 1.0 / q.weight()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn evidence_quality_round_trips_through_string() {
+        for q in [
+            EvidenceQuality::RandomizedHoldout,
+            EvidenceQuality::MatchedQuasiExperiment,
+            EvidenceQuality::PrePost,
+            EvidenceQuality::Observational,
+        ] {
+            assert_eq!(EvidenceQuality::parse(q.as_str()), Some(q));
+        }
+        assert_eq!(EvidenceQuality::parse("unknown"), None);
     }
 }
