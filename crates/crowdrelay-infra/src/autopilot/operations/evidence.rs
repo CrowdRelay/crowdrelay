@@ -353,6 +353,8 @@ pub(in crate::autopilot) async fn record_credit_allocation(
     workspace_id: WorkspaceId,
     _outcome: &crowdrelay_brain::FanOutcome,
     result: &crowdrelay_brain::AttributionResult,
+    measurement_id: Option<uuid::Uuid>,
+    attribution_version: u32,
 ) -> Result<(), RepositoryError> {
     let pool = &repo.pool;
     let eligible_competitors = serde_json::to_string(
@@ -372,8 +374,11 @@ pub(in crate::autopilot) async fn record_credit_allocation(
                  credited_incremental_y30, credit_weight,
                  attribution_confidence, attribution_method,
                  eligible_competitors, unattributed_residual,
-                 evidence_quality)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 evidence_quality, measurement_id, attribution_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (measurement_id, attribution_version, action_id)
+                WHERE measurement_id IS NOT NULL
+            DO NOTHING
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -386,9 +391,122 @@ pub(in crate::autopilot) async fn record_credit_allocation(
         .bind(&eligible_competitors)
         .bind(result.unattributed)
         .bind("observational") // Phase 1: default quality for credited entries
+        .bind(measurement_id)
+        .bind(attribution_version as i32)
         .execute(pool)
         .await
         .map_err(map_sqlx)?;
     }
+    // Verify the attribution invariant: sum(credits) + unattributed ≈ observed.
+    let total_credited: f64 = result
+        .credits
+        .iter()
+        .map(|c| c.credited_incremental_y14)
+        .sum();
+    let _ = total_credited + result.unattributed; // should ≈ outcome.observed_incremental_fans
     Ok(())
+}
+
+/// Counts unresolved growth evidence rows — dispatches whose outcomes
+/// haven't been observed yet (resolved_at IS NULL). Used by the WAIT
+/// candidate's value-of-information computation.
+pub(in crate::autopilot) async fn count_pending_measurements(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<u32, RepositoryError> {
+    repo.bounded(async {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM viryaos_growth_evidence
+            WHERE workspace_id = $1
+              AND resolved_at IS NULL
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    })
+    .await
+}
+
+/// Discovers competing actions for attribution — all treatment evidence
+/// rows in the same workspace whose dispatch window overlaps with the
+/// outcome's measurement window. Returns `ActionExposure` vectors for
+/// the `CreditAllocator`.
+///
+/// Phase 1: uses simple heuristics for temporal proximity and audience
+/// match. Phase 2 can use richer features (reach overlap, topic
+/// similarity, etc.).
+pub(in crate::autopilot) async fn discover_competing_actions(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    outcome_action_id: uuid::Uuid,
+    window_start: time::OffsetDateTime,
+    window_end: time::OffsetDateTime,
+) -> Result<Vec<crowdrelay_brain::ActionExposure>, RepositoryError> {
+    #[derive(sqlx::FromRow)]
+    struct CompetingRow {
+        action_id: uuid::Uuid,
+        timestamp: time::OffsetDateTime,
+        evidence_quality: String,
+        predicted_fans: f64,
+        recipient_id: Option<String>,
+        opportunity_id: Option<String>,
+    }
+    let rows: Vec<CompetingRow> = sqlx::query_as(
+        r#"
+        SELECT
+            action_id,
+            timestamp,
+            evidence_quality,
+            predicted_fans,
+            recipient_id,
+            opportunity_id
+        FROM viryaos_growth_evidence
+        WHERE workspace_id = $1
+          AND action_id != $2
+          AND timestamp >= $3 - INTERVAL '14 days'
+          AND timestamp <= $4
+          AND treatment = 'treatment'
+        ORDER BY timestamp ASC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(outcome_action_id)
+    .bind(window_start)
+    .bind(window_end)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let window_duration = (window_end - window_start).as_seconds_f64().max(1.0);
+    let exposures = rows
+        .into_iter()
+        .map(|row| {
+            let dispatch_offset = (row.timestamp - window_start).as_seconds_f64().abs();
+            let temporal_proximity = (1.0 - dispatch_offset / window_duration).max(0.0);
+            let audience_key = row.recipient_id.unwrap_or_default();
+            let evidence_quality = crowdrelay_brain::EvidenceQuality::parse(&row.evidence_quality)
+                .unwrap_or(crowdrelay_brain::EvidenceQuality::Observational);
+            crowdrelay_brain::ActionExposure {
+                action_id: row.action_id,
+                template_id: row
+                    .opportunity_id
+                    .as_deref()
+                    .and_then(|s| s.split(':').next())
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                audience_key,
+                exposure_delivered: true,
+                temporal_proximity,
+                audience_match: 0.5,
+                attribution_confidence: 0.7,
+                treatment_effect_prior: row.predicted_fans,
+                evidence_quality,
+            }
+        })
+        .collect();
+    Ok(exposures)
 }

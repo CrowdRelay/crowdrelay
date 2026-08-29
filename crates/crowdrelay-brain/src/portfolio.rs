@@ -56,8 +56,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::decision_value::DecisionValue;
 use crate::opportunity::OpportunityId;
-use crate::resource_cost::ResourceCost;
 
 /// The decision mode for a portfolio candidate — why the brain is
 /// dispatching this candidate.
@@ -82,42 +82,34 @@ pub enum DecisionMode {
 }
 
 /// A candidate in the global pool, scored and ready for portfolio selection.
+///
+/// This is a **thin wrapper** around `DecisionValue` — the canonical
+/// intrinsic value object. The optimizer reads `decision_value` for all
+/// value semantics. Identity/routing fields stay outside DecisionValue
+/// because they are not value semantics.
+///
+/// `DecisionValue` = intrinsic value before portfolio interactions.
+/// `PortfolioOptimizer` = marginal value after overlap, fatigue, budget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortfolioCandidate {
+    // ── Identity / routing (not value semantics) ──
     /// The opportunity identity (stable across cycles).
     pub opportunity_id: OpportunityId,
-    /// The EFE score (lower = better). Used as the base value.
-    pub efe_score: f64,
-    /// The expected incremental fans from this candidate.
-    pub expected_fans: f64,
     /// The audience key — candidates with the same audience key overlap.
     /// E.g. "subreddit:r_MetalMusic" or "venue:Warsaw_Palladium".
     pub audience_key: String,
-    /// The resource cost of this candidate — operator-configured effective
-    /// resource units, not measured costs. Used by the portfolio optimizer
-    /// for budget constraints and tie-breaking among candidates with similar
-    /// absolute fan value. The North Star is `expected_durable_fans`
-    /// (absolute fans), NOT a cost ratio.
-    pub resource_cost: ResourceCost,
     /// The context that produced this candidate (for tracing).
     pub source_context: String,
     /// The action payload key (for linking to the persist layer).
     pub action_key: String,
-    /// The Y30 (North Star) expected durable fans. When available, the
-    /// portfolio optimizer uses this instead of `expected_fans` for ranking
-    /// and marginal value computation (P1.4).
-    pub expected_durable_fans: f64,
-    /// The treatment-effect confidence (paired observation count). Used by
-    /// the knowledge gradient computation (P1.4).
-    pub treatment_confidence: u32,
-    /// The treatment-effect std. Used by the knowledge gradient (P1.4).
-    pub treatment_std: f64,
-    /// The P(τ > δ) meaningful-effect probability. Used as a tie-breaker
-    /// in portfolio selection (P1.4).
-    pub p_meaningful_effect: f64,
-    /// The decision mode — why the brain is dispatching this candidate.
-    /// Computed by the portfolio optimizer during selection (P2.6).
-    pub decision_mode: DecisionMode,
+    /// The EFE score (lower = better). Kept for backward compat and
+    /// logging only — the optimizer uses `decision_value.total()`.
+    pub efe_score: f64,
+
+    // ── Canonical value ──
+    /// The intrinsic decision value — one source of truth for all value
+    /// semantics. The optimizer computes marginal value from this.
+    pub decision_value: DecisionValue,
 }
 
 /// The result of portfolio optimization.
@@ -292,19 +284,18 @@ impl PortfolioOptimizer {
     /// Selects the optimal portfolio from the global candidate pool.
     ///
     /// Uses greedy selection with marginal value:
-    /// 1. Sort candidates by expected durable fans (North Star) when available,
-    ///    falling back to expected fans.
+    /// 1. Sort candidates by intrinsic `decision_value.total()`.
     /// 2. At each step, pick the candidate with the highest marginal value
-    ///    (expected fans minus audience overlap and fatigue with already-selected).
+    ///    (intrinsic total × overlap × fatigue × bridge penalty).
     /// 3. Stop when marginal value < min_marginal_value, dispatch count
     ///    budget exhausted, or cost budget exhausted.
     ///
-    /// # North Star objective (P1.4)
+    /// # North Star objective
     ///
-    /// When `expected_durable_fans > 0`, the optimizer uses Y30 durable fans
-    /// as the ranking signal instead of raw expected fans. This ensures the
-    /// portfolio optimizes for the long-term North Star, not short-term
-    /// incremental fans.
+    /// The optimizer uses `decision_value.total()` as the ranking signal.
+    /// DecisionValue carries the estimation regime (Y30Direct, Y14Bridged,
+    /// or OutcomeModel) and full provenance — the optimizer applies a
+    /// bridge reliability penalty for uncalibrated Y14Bridged candidates.
     #[must_use]
     pub fn select(&self, candidates: Vec<PortfolioCandidate>) -> PortfolioSelection {
         if candidates.is_empty() {
@@ -320,20 +311,11 @@ impl PortfolioOptimizer {
         let mut rejected: Vec<PortfolioRejection> = Vec::new();
         let mut remaining: Vec<PortfolioCandidate> = candidates;
         let mut total_cost: f64 = 0.0;
-        // Sort by North Star (durable fans) when available, else expected fans.
+        // Sort by intrinsic decision value (total) — highest first.
         remaining.sort_by(|a, b| {
-            let val_a = if a.expected_durable_fans > 0.0 {
-                a.expected_durable_fans
-            } else {
-                a.expected_fans
-            };
-            let val_b = if b.expected_durable_fans > 0.0 {
-                b.expected_durable_fans
-            } else {
-                b.expected_fans
-            };
-            val_b
-                .partial_cmp(&val_a)
+            b.decision_value
+                .total()
+                .partial_cmp(&a.decision_value.total())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut total_expected_fans = 0.0;
@@ -344,7 +326,8 @@ impl PortfolioOptimizer {
             for (i, candidate) in remaining.iter().enumerate() {
                 // Check cost budget — skip candidates that would exceed it.
                 if self.config.cost_budget > 0.0
-                    && total_cost + candidate.resource_cost.units > self.config.cost_budget
+                    && total_cost + candidate.decision_value.resource_cost.units
+                        > self.config.cost_budget
                 {
                     continue;
                 }
@@ -357,13 +340,24 @@ impl PortfolioOptimizer {
                     1.0 - self.config.audience_overlap_penalty * audience_count as f64;
                 // Fatigue: exponential decay for repeated dispatches.
                 let fatigue_factor = self.config.fatigue_decay.powi(audience_count as i32);
-                // Use North Star (durable fans) when available.
-                let base_value = if candidate.expected_durable_fans > 0.0 {
-                    candidate.expected_durable_fans
+                // Marginal value = intrinsic total × portfolio interactions.
+                // DecisionValue.total() is the intrinsic value; the optimizer
+                // applies overlap and fatigue as multiplicative modifiers.
+                let intrinsic = candidate.decision_value.total();
+                // Bridge reliability penalty: when the bridge is unreliable
+                // and the regime is Y14Bridged, apply a confidence penalty.
+                // The bridge is a temporary belief, not a semi-factual
+                // substitute for Y30.
+                let bridge_penalty = if !candidate.decision_value.bridge_is_reliable
+                    && candidate.decision_value.estimation_regime
+                        == crate::decision_value::EstimationRegime::Y14Bridged
+                {
+                    0.8 // 20% penalty for uncalibrated bridge
                 } else {
-                    candidate.expected_fans
+                    1.0
                 };
-                let marginal = base_value * overlap_factor.max(0.0) * fatigue_factor;
+                let marginal =
+                    intrinsic * overlap_factor.max(0.0) * fatigue_factor * bridge_penalty;
                 if marginal > best_marginal {
                     best_marginal = marginal;
                     best_idx = Some(i);
@@ -401,24 +395,25 @@ impl PortfolioOptimizer {
             // iteration anyway.
             if let Some(idx) = best_idx {
                 let candidate = remaining.swap_remove(idx);
-                total_cost += candidate.resource_cost.units;
+                total_cost += candidate.decision_value.resource_cost.units;
                 *audience_counts
                     .entry(candidate.audience_key.clone())
                     .or_insert(0) += 1;
                 total_expected_fans += best_marginal;
-                // Compute the decision mode (P2.6):
-                // - Learn: low treatment confidence (< 10) → information gain
-                // - Explore: high treatment std relative to expected value
+                // Compute the decision mode from DecisionValue provenance:
+                // - Learn: low sample size → information gain
+                // - Explore: high uncertainty relative to expected value
                 // - Exploit: high confidence, high expected value
-                let mode = if candidate.treatment_confidence < 10 && candidate.treatment_std > 0.0 {
+                let dv = &candidate.decision_value;
+                let mode = if dv.sample_size < 10 && dv.uncertainty > 0.0 {
                     DecisionMode::Learn
-                } else if candidate.treatment_std > best_marginal.abs().max(1.0) {
+                } else if dv.uncertainty > dv.expected_incremental_y30.abs().max(1.0) {
                     DecisionMode::Explore
                 } else {
                     DecisionMode::Exploit
                 };
                 let mut candidate = candidate;
-                candidate.decision_mode = mode;
+                candidate.decision_value.decision_mode = mode;
                 selected.push(candidate);
             } else {
                 // No candidate fits the cost budget — reject the rest.
@@ -479,32 +474,33 @@ impl PortfolioOptimizer {
                 ..Default::default()
             };
         }
-        // Compute the best candidate's expected Y30 (before overlap/fatigue).
-        let best_y30 = candidates
+        // Compute the best candidate's intrinsic value (before overlap/fatigue).
+        let best_action_value = candidates
             .iter()
-            .map(|c| {
-                if c.expected_durable_fans > 0.0 {
-                    c.expected_durable_fans
-                } else {
-                    c.expected_fans
-                }
-            })
+            .map(|c| c.decision_value.total())
             .fold(0.0_f64, f64::max);
         let wait_total = wait.total();
-        // If WAIT has higher value than the best action candidate, do nothing.
-        // This is the economic WAIT decision: the brain waits because the
-        // expected value of information + fatigue recovery exceeds the
-        // opportunity cost of not acting.
-        if wait_total > best_y30 && wait_total > self.config.min_marginal_value {
+        // WAIT wins when its net utility is positive — NOT when it exceeds
+        // the best action value. The opportunity_cost term in WaitCandidateValue
+        // already subtracts the best action's Y30, so:
+        //
+        //   wait_total = VOI + fatigue + option - best_action_y30
+        //
+        // If wait_total > 0, then VOI + fatigue + option > best_action_y30,
+        // meaning the value of waiting exceeds the value of acting.
+        //
+        // The old code compared wait_total > best_y30, which double-counted
+        // the opportunity cost. This is the corrected math.
+        if wait_total > 0.0 && wait_total > self.config.min_marginal_value {
             let reason = format!(
                 "WAIT wins: VOI={:.2}, fatigue_recovery={:.2}, option_value={:.2}, \
-                 opportunity_cost={:.2}, total={:.2} > best_action_y30={:.2}",
+                 opportunity_cost={:.2}, net_utility={:.2} > 0 (best_action_value={:.2})",
                 wait.value_of_information,
                 wait.fatigue_recovery_value,
                 wait.option_value,
                 wait.opportunity_cost,
                 wait_total,
-                best_y30,
+                best_action_value,
             );
             let rejected: Vec<PortfolioRejection> = candidates
                 .into_iter()
@@ -531,6 +527,7 @@ mod tests {
     use super::*;
     use crate::causal_model::DispatchContext;
     use crate::opportunity::OpportunityAction;
+    use crate::resource_cost::ResourceCost;
 
     fn make_candidate(
         template: &str,
@@ -539,19 +536,31 @@ mod tests {
         audience: &str,
     ) -> PortfolioCandidate {
         let ctx = DispatchContext::default();
+        let decision_value = DecisionValue {
+            expected_incremental_y30: expected_fans,
+            uncertainty: 0.0,
+            p_meaningful_effect: 0.0,
+            estimation_regime: crate::decision_value::EstimationRegime::OutcomeModel,
+            evidence_quality: crate::evidence::EvidenceQuality::Observational,
+            sample_size: 0,
+            uses_y30: false,
+            bridge_confidence: 0,
+            bridge_is_reliable: false,
+            resource_cost: ResourceCost::configured(1.0),
+            pragmatic_value: expected_fans,
+            epistemic_value: 0.0,
+            exploration_value: 0.0,
+            risk_penalty: 0.0,
+            opportunity_cost: 0.0,
+            decision_mode: DecisionMode::Exploit,
+        };
         PortfolioCandidate {
             opportunity_id: OpportunityId::new(template, target, OpportunityAction::Post, &ctx),
             efe_score: -expected_fans,
-            expected_fans,
             audience_key: audience.to_owned(),
-            resource_cost: ResourceCost::configured(1.0),
             source_context: "GrowthIntelligence".to_owned(),
             action_key: format!("action:{template}:{target}"),
-            expected_durable_fans: 0.0,
-            treatment_confidence: 0,
-            treatment_std: 0.0,
-            p_meaningful_effect: 0.0,
-            decision_mode: DecisionMode::Exploit,
+            decision_value,
         }
     }
 
@@ -754,13 +763,13 @@ mod tests {
         };
         let optimizer = PortfolioOptimizer::new(config);
         let mut expensive = make_candidate("a", "x", 10.0, "aud1");
-        expensive.resource_cost = ResourceCost::configured(3.0);
+        expensive.decision_value.resource_cost = ResourceCost::configured(3.0);
         let mut cheap1 = make_candidate("b", "y", 4.0, "aud2");
-        cheap1.resource_cost = ResourceCost::configured(1.0);
+        cheap1.decision_value.resource_cost = ResourceCost::configured(1.0);
         let mut cheap2 = make_candidate("c", "z", 3.0, "aud3");
-        cheap2.resource_cost = ResourceCost::configured(1.0);
+        cheap2.decision_value.resource_cost = ResourceCost::configured(1.0);
         let mut cheap3 = make_candidate("d", "w", 2.0, "aud4");
-        cheap3.resource_cost = ResourceCost::configured(1.0);
+        cheap3.decision_value.resource_cost = ResourceCost::configured(1.0);
         let result = optimizer.select(vec![expensive, cheap1, cheap2, cheap3]);
         // expensive (cost 3) + cheap1 (cost 1) + cheap2 (cost 1) = cost 5.
         // cheap3 would exceed budget.

@@ -129,7 +129,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // of candidates, accounting for audience overlap, fatigue,
         // and resource costs. See `evaluate/portfolio.rs` for the
         // selection logic.
-        let selection = portfolio::select_portfolio(&scored_candidates, &gi_policy);
+        let pending_measurement_count = self
+            .repository
+            .count_pending_measurements(self.workspace_id)
+            .await
+            .unwrap_or(0);
+        let selection = portfolio::select_portfolio(
+            &scored_candidates,
+            &gi_policy,
+            pending_measurement_count,
+        );
         let selected_keys = portfolio::selected_keys(&selection);
         // Extract the holdout probability from the policy.
         // Guardrails: clamped to [0.0, 0.10] — 0% = off, max 10%.
@@ -145,21 +154,24 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             {
                 continue;
             }
-            // Randomized holdout: with probability
-            // `holdout_probability`, skip the dispatch and
-            // record a control-group evidence row instead.
-            // This produces gold-standard causal evidence
-            // (randomized holdout) for high-volume actions.
-            // Only applies to direct-action workers —
-            // scanner/strategist are never held out.
+            // Randomized holdout via first-class ExperimentAssignment.
+            // With probability `holdout_probability`, skip the dispatch
+            // and record a control-arm ExperimentAssignment instead.
+            // This produces real causal evidence (randomized holdout)
+            // for high-volume actions. Only applies to direct-action
+            // workers — scanner/strategist are never held out.
+            //
+            // The experimental unit is the target community (the
+            // decision_key), NOT the workspace. This is a first-class
+            // experiment assignment — not a synthetic action_id.
             let template_id = match &candidate.action {
                 AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
                     template_id.as_str()
                 }
                 _ => "",
             };
-            let is_direct_action =
-                !matches!(template_id, "reddit-scanner" | "growth-strategist");
+            let is_direct_action = !template_id.is_empty()
+                && !matches!(template_id, "reddit-scanner" | "growth-strategist");
             // Deterministic pseudo-random from the decision key
             // — the same decision key always gets the same
             // holdout assignment within one cycle, preventing
@@ -170,22 +182,40 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 && is_direct_action
                 && holdout_roll < holdout_probability
             {
-                // Holdout fired: record a control-group
-                // evidence row with a synthetic action_id.
-                // No action is dispatched — the worker never
-                // runs. The measurement system will measure
-                // the workspace's fan growth in the 14-day
-                // window, which is the control group's
-                // counterfactual.
-                let holdout_action_id = Uuid::now_v7();
+                // Control arm: record an ExperimentAssignment with
+                // arm=Control. No action is dispatched — the worker
+                // never runs. The measurement system will measure
+                // the workspace's fan growth in the 14-day window,
+                // which is the control group's counterfactual.
+                //
+                // The unit is the target community (decision_key),
+                // which is isolatable — other communities can still
+                // receive treatment without contaminating this
+                // control.
+                let assignment = crowdrelay_brain::ExperimentAssignment {
+                    experiment_id: format!(
+                        "exp:{template_id}:{}",
+                        candidate.decision_key
+                    ),
+                    candidate_id: candidate.decision_key.clone(),
+                    unit_id: candidate.decision_key.clone(),
+                    unit_kind: crowdrelay_brain::ExperimentUnitKind::TargetCommunity,
+                    arm: crowdrelay_brain::TreatmentAssignment::Control,
+                    assigned_at: now,
+                    propensity: 1.0 - holdout_probability,
+                    intended_template_id: template_id.to_owned(),
+                    context: prediction.context.clone(),
+                    prediction: prediction.clone(),
+                    action_id: None,
+                    contamination_estimate: 0.0,
+                    is_interference_controllable: true,
+                };
                 let _ = self
                     .repository
-                    .record_holdout_control(
+                    .record_experiment_assignment(
                         self.workspace_id,
-                        holdout_action_id,
-                        &prediction,
+                        &assignment,
                         Some(strategy.as_str()),
-                        holdout_probability,
                     )
                     .await;
                 continue;
@@ -202,6 +232,36 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         &prediction,
                         Some(strategy.as_str()),
                         holdout_probability,
+                    )
+                    .await;
+                // Record the treatment-arm ExperimentAssignment. This
+                // pairs with the control arm above to produce real
+                // causal evidence. The unit is the target community
+                // (decision_key), same as the control arm.
+                let treatment_assignment = crowdrelay_brain::ExperimentAssignment {
+                    experiment_id: format!(
+                        "exp:{template_id}:{}",
+                        candidate.decision_key
+                    ),
+                    candidate_id: candidate.decision_key.clone(),
+                    unit_id: candidate.decision_key.clone(),
+                    unit_kind: crowdrelay_brain::ExperimentUnitKind::TargetCommunity,
+                    arm: crowdrelay_brain::TreatmentAssignment::Treatment,
+                    assigned_at: now,
+                    propensity: 1.0 - holdout_probability,
+                    intended_template_id: template_id.to_owned(),
+                    context: prediction.context.clone(),
+                    prediction: prediction.clone(),
+                    action_id: Some(action_id),
+                    contamination_estimate: 0.0,
+                    is_interference_controllable: true,
+                };
+                let _ = self
+                    .repository
+                    .record_experiment_assignment(
+                        self.workspace_id,
+                        &treatment_assignment,
+                        Some(strategy.as_str()),
                     )
                     .await;
             }

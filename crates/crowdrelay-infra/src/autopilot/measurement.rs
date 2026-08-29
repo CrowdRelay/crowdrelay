@@ -861,6 +861,32 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .map_err(map_sqlx)?;
                 }
             }
+            // Enqueue attribution request for fan-growth measurements.
+            // The attribution worker discovers competing actions, runs
+            // the CreditAllocator, and writes credited entries to the
+            // credit ledger. This is durable — if the transaction
+            // commits, the attribution will eventually happen.
+            if matches!(
+                measurement.kind,
+                AutopilotMeasurementKind::AgentRunFanGrowth14d
+                    | AutopilotMeasurementKind::IncrementalFanGrowth14d
+                    | AutopilotMeasurementKind::DurableFanGrowth30d
+            ) {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO viryaos_attribution_requests
+                        (workspace_id, measurement_id, action_id, attribution_version)
+                    VALUES ($1, $2, $3, 1)
+                    ON CONFLICT (measurement_id, attribution_version) DO NOTHING
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(measurement.id.into_uuid())
+                .bind(measurement.action_id.into_uuid())
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            }
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(())
         })

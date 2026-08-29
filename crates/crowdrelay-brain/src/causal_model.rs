@@ -259,6 +259,11 @@ pub struct TreatmentAwareStats {
     /// candidates lower — the bridge is a temporary belief, not a
     /// semi-factual substitute for Y30.
     pub bridge_is_reliable: bool,
+    /// The strongest evidence quality available for this template/context.
+    /// Propagated to DecisionValue for provenance. Phase 1: defaults to
+    /// `Observational` since the causal model doesn't yet track per-template
+    /// evidence quality. Phase 2 will derive this from the evidence table.
+    pub evidence_quality: crate::evidence::EvidenceQuality,
 }
 
 /// A Bayesian linear regression bridge model: Y30 = α + β·Y14 + ε.
@@ -715,6 +720,7 @@ impl CausalModel {
             p_meaningful_effect: p_meaningful,
             bridge_confidence: self.bridge.confidence(),
             bridge_is_reliable: self.bridge.confidence() >= MIN_BRIDGE_CONFIDENCE,
+            evidence_quality: crate::evidence::EvidenceQuality::Observational,
         }
     }
 }

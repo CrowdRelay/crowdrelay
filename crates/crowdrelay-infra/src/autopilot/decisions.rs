@@ -363,25 +363,6 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
-    async fn record_holdout_control(
-        &self,
-        workspace_id: WorkspaceId,
-        action_id: uuid::Uuid,
-        prediction: &crowdrelay_brain::DispatchPrediction,
-        strategy: Option<&str>,
-        holdout_probability: f64,
-    ) -> Result<(), RepositoryError> {
-        super::operations::record_holdout_control(
-            self,
-            workspace_id,
-            action_id,
-            prediction,
-            strategy,
-            holdout_probability,
-        )
-        .await
-    }
-
     async fn record_experiment_assignment(
         &self,
         workspace_id: WorkspaceId,
@@ -402,8 +383,43 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
         outcome: &crowdrelay_brain::FanOutcome,
         result: &crowdrelay_brain::AttributionResult,
+        measurement_id: Option<uuid::Uuid>,
+        attribution_version: u32,
     ) -> Result<(), RepositoryError> {
-        super::operations::evidence::record_credit_allocation(self, workspace_id, outcome, result)
+        super::operations::evidence::record_credit_allocation(
+            self,
+            workspace_id,
+            outcome,
+            result,
+            measurement_id,
+            attribution_version,
+        )
+        .await
+    }
+
+    async fn discover_competing_actions(
+        &self,
+        workspace_id: WorkspaceId,
+        outcome_action_id: uuid::Uuid,
+        window_start: time::OffsetDateTime,
+        window_end: time::OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_brain::ActionExposure>, RepositoryError> {
+        super::operations::evidence::discover_competing_actions(
+            self,
+            workspace_id,
+            outcome_action_id,
+            window_start,
+            window_end,
+        )
+        .await
+    }
+
+    async fn process_attribution_batch(
+        &self,
+        workspace_id: WorkspaceId,
+        batch_size: u32,
+    ) -> Result<u32, RepositoryError> {
+        super::operations::attribution::process_attribution_batch(self, workspace_id, batch_size)
             .await
     }
 
@@ -444,6 +460,13 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         since: Option<OffsetDateTime>,
     ) -> Result<Vec<crowdrelay_brain::GrowthEvidence>, RepositoryError> {
         super::operations::evidence::load_growth_evidence(self, workspace_id, since).await
+    }
+
+    async fn count_pending_measurements(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<u32, RepositoryError> {
+        super::operations::evidence::count_pending_measurements(self, workspace_id).await
     }
 
     async fn save_brain_state(

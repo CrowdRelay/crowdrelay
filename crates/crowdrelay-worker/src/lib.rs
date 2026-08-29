@@ -22,6 +22,7 @@
 
 pub mod ad_conversion;
 pub mod agent_outcomes;
+pub mod attribution;
 pub mod audience_graph;
 pub mod autopilot;
 pub mod bootstrap;

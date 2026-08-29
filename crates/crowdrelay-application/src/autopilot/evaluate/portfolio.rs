@@ -4,12 +4,17 @@
 //! from the main evaluator loop. The portfolio optimizer selects the
 //! optimal set of dispatch candidates, accounting for audience overlap
 //! and fatigue.
+//!
+//! Each candidate carries a `DecisionValue` — the canonical intrinsic
+//! value object. The optimizer computes marginal value from it after
+//! applying portfolio interactions (overlap, fatigue, budget).
 
 use std::collections::HashSet;
 
 use crowdrelay_brain::{
-    DecisionMode, GrowthIntelligencePolicy, OpportunityAction, OpportunityId, PortfolioCandidate,
-    PortfolioOptimizer, PortfolioSelection, ResourceCost, WaitCandidateValue, context_hash,
+    DecisionMode, DecisionValue, GrowthIntelligencePolicy, OpportunityAction, OpportunityId,
+    PortfolioCandidate, PortfolioOptimizer, PortfolioSelection, ResourceCost, WaitCandidateValue,
+    context_hash,
 };
 
 use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
@@ -24,11 +29,18 @@ fn template_cost(policy: &GrowthIntelligencePolicy, template_id: &str) -> Resour
 /// Builds portfolio candidates from scored growth intelligence candidates
 /// and runs the optimizer to select the optimal dispatch set.
 ///
-/// The portfolio optimizer now uses the treatment-aware stats (Y30
-/// durable fans, treatment confidence, P(τ > δ)) as the primary value
-/// signal when the treatment-effect model has sufficient confidence.
-/// When confidence is low, it falls back to the EFE score (which uses
-/// the outcome model's expected fans).
+/// Each candidate is constructed with a `DecisionValue` — the canonical
+/// intrinsic value object that carries the full provenance trail:
+/// estimation regime, evidence quality, uncertainty, bridge confidence.
+/// The optimizer reads `decision_value.total()` for ranking and applies
+/// portfolio interactions (overlap, fatigue, budget) to compute marginal
+/// value.
+///
+/// `pending_measurement_count` is the number of unresolved evidence rows
+/// (dispatches whose outcomes haven't been observed yet). This feeds the
+/// WAIT candidate's value-of-information computation. When > 0, WAIT
+/// has real epistemic value — the brain can learn from pending outcomes
+/// before committing to new dispatches.
 ///
 /// Returns the portfolio selection. The caller should only dispatch
 /// candidates whose `decision_key` appears in the selection's `selected`
@@ -37,6 +49,7 @@ fn template_cost(policy: &GrowthIntelligencePolicy, template_id: &str) -> Resour
 pub(super) fn select_portfolio(
     scored: &[ScoredCandidate],
     policy: &GrowthIntelligencePolicy,
+    pending_measurement_count: u32,
 ) -> PortfolioSelection {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
@@ -50,31 +63,21 @@ pub(super) fn select_portfolio(
             // disjoint (e.g. r/MetalMusic and r/progmetal are different
             // communities).
             let audience_key = format!("template:{}:{}", p.template_id, c.decision_key);
-            // Wire the North Star fields from the treatment-aware stats.
-            // When Y30 is confident, expected_durable_fans uses the Y30
-            // treatment effect. When only Y14 is confident, it uses the
-            // Y14 treatment effect with bridge-inflated uncertainty. When
-            // neither is confident, it falls back to 0.0 (the optimizer
-            // will use the EFE score instead).
-            let expected_durable_fans = if stats.use_treatment_effect {
-                if stats.uses_y30 {
-                    stats.treatment_effect_y30
-                } else {
-                    stats.treatment_effect
-                }
+            // Construct the canonical DecisionValue from treatment-aware
+            // stats. This is the single source of truth for all value
+            // semantics — the optimizer reads decision_value.total()
+            // and applies portfolio interactions to compute marginal
+            // value.
+            let decision_mode = if stats.use_treatment_effect {
+                DecisionMode::Exploit
             } else {
-                0.0
+                DecisionMode::Explore
             };
-            let treatment_confidence = if stats.uses_y30 {
-                stats.treatment_confidence_y30
-            } else {
-                stats.treatment_confidence
-            };
-            let treatment_std = if stats.uses_y30 {
-                stats.treatment_std_y30
-            } else {
-                stats.treatment_std
-            };
+            let decision_value = DecisionValue::from_stats(
+                stats,
+                template_cost(policy, &p.template_id),
+                decision_mode,
+            );
             PortfolioCandidate {
                 opportunity_id: OpportunityId {
                     template_id: p.template_id.clone(),
@@ -83,43 +86,26 @@ pub(super) fn select_portfolio(
                     context_hash: context_hash(&p.context),
                 },
                 efe_score: *efe,
-                expected_fans: p.expected_new_fans,
                 audience_key,
-                resource_cost: template_cost(policy, &p.template_id),
                 source_context: c.decision_kind.to_string(),
                 action_key: c.decision_key.clone(),
-                expected_durable_fans,
-                treatment_confidence,
-                treatment_std,
-                p_meaningful_effect: stats.p_meaningful_effect,
-                decision_mode: if stats.use_treatment_effect {
-                    DecisionMode::Exploit
-                } else {
-                    DecisionMode::Explore
-                },
+                decision_value,
             }
         })
         .collect();
     // Compute WAIT candidate value. Every term is in expected Y30 fans.
-    // Phase 1: conservative — VOI from pending measurements is not yet
-    // wired (count=0), fatigue recovery is not yet computed (0.0).
-    // The WAIT candidate still competes via opportunity cost: if the
-    // best action candidate has very low expected Y30, WAIT can win.
+    // The WAIT candidate's opportunity_cost = -best_action_y30, and
+    // wait_total = VOI + fatigue + option - best_action_y30.
+    // WAIT wins when wait_total > 0 (net positive utility).
     let best_y30 = candidates
         .iter()
-        .map(|c| {
-            if c.expected_durable_fans > 0.0 {
-                c.expected_durable_fans
-            } else {
-                c.expected_fans
-            }
-        })
+        .map(|c| c.decision_value.total())
         .fold(0.0_f64, f64::max);
     let avg_treatment_std = {
         let stds: Vec<f64> = candidates
             .iter()
-            .filter(|c| c.treatment_std > 0.0)
-            .map(|c| c.treatment_std)
+            .filter(|c| c.decision_value.uncertainty > 0.0)
+            .map(|c| c.decision_value.uncertainty)
             .collect();
         if stds.is_empty() {
             0.0
@@ -127,7 +113,13 @@ pub(super) fn select_portfolio(
             stds.iter().sum::<f64>() / stds.len() as f64
         }
     };
-    let wait = WaitCandidateValue::compute(best_y30, 0, avg_treatment_std, 0.0);
+    // Phase 1: VOI uses the pending measurement count passed by the
+    // caller. Fatigue recovery is 0.0 (not yet computed pre-portfolio).
+    // The WAIT candidate competes via opportunity cost + VOI: if the
+    // best action has low expected Y30 and there are pending measurements
+    // whose outcomes could inform the decision, WAIT can win.
+    let wait =
+        WaitCandidateValue::compute(best_y30, pending_measurement_count, avg_treatment_std, 0.0);
     let optimizer = PortfolioOptimizer::default();
     optimizer.select_with_wait(candidates, wait)
 }

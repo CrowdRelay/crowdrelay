@@ -31,6 +31,7 @@ use crowdrelay_application::autopilot::{AutopilotControlMutation, RecordBookingR
 use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 
 mod acquisition_channels;
+pub(in crate::autopilot) mod attribution;
 mod chief;
 mod discovery;
 pub(in crate::autopilot) mod evidence;

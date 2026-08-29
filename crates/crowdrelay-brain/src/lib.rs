@@ -76,7 +76,7 @@ pub use credit_ledger::{
     ActionExposure, AttributionMethod, AttributionResult, CreditAllocator, CreditEntry, FanOutcome,
     ProportionalCreditAllocator,
 };
-pub use decision_value::DecisionValue;
+pub use decision_value::{DecisionValue, EstimationRegime};
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };

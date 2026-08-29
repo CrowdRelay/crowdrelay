@@ -968,65 +968,6 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
     Ok(())
 }
 
-/// Records a holdout control group assignment. When the randomized holdout
-/// fires, the brain does NOT dispatch the worker — instead, it records a
-/// control-group evidence row. The same measurements are scheduled so the
-/// control group's fan growth is measured.
-pub(in crate::autopilot) async fn record_holdout_control(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    action_id: uuid::Uuid,
-    prediction: &crowdrelay_brain::DispatchPrediction,
-    strategy: Option<&str>,
-    holdout_probability: f64,
-) -> Result<(), RepositoryError> {
-    let target = prediction
-        .context
-        .subreddit_type
-        .clone()
-        .unwrap_or_else(|| format!("action:{}", action_id));
-    let opportunity_id = crowdrelay_brain::OpportunityId::new(
-        &prediction.template_id,
-        &target,
-        crowdrelay_brain::OpportunityAction::Post,
-        &prediction.context,
-    );
-    let recipient_id = target.clone();
-    let channel = prediction
-        .context
-        .subreddit_type
-        .as_deref()
-        .map(|s| {
-            if s.starts_with("r/") {
-                crowdrelay_brain::ReachChannel::RedditPost
-            } else {
-                crowdrelay_brain::ReachChannel::Other
-            }
-        })
-        .unwrap_or(crowdrelay_brain::ReachChannel::Other);
-    // Control group: TreatmentAssignment::Control with the same
-    // propensity as the treatment arm (P(treatment) = 1 - p). Both arms
-    // of the randomized holdout carry EvidenceQuality::RandomizedHoldout.
-    let control_propensity = 1.0 - holdout_probability;
-    let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
-        workspace_id.into_uuid(),
-        action_id,
-        Some(opportunity_id.to_string()),
-        recipient_id,
-        channel,
-        1,
-        crowdrelay_brain::TreatmentAssignment::Control,
-        control_propensity,
-        prediction.expected_new_fans,
-        prediction.expected_signal_installs,
-        prediction.context.clone(),
-        strategy.map(|s| s.to_owned()),
-        crowdrelay_brain::EvidenceQuality::RandomizedHoldout,
-    );
-    let _ = super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await;
-    Ok(())
-}
-
 /// Loads the exploration memory from past dispatch predictions. Each
 /// prediction is a "visit" to a (template, context) pair. The brain uses
 /// this to compute novelty: unexplored pairs get an exploration bonus.
