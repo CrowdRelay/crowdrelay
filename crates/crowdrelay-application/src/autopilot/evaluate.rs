@@ -526,7 +526,10 @@ where
                 }
                 AutopilotContext::GrowthIntelligence => {
                     self.evaluate_growth_intelligence_context(
-                        &policy, now, &mut limits, &mut report,
+                        &policy,
+                        now,
+                        &mut limits,
+                        &mut report,
                     )
                     .await?;
                 }
