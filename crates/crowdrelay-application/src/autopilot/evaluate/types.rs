@@ -7,7 +7,7 @@ struct CycleLimits<'a> {
     ceilings: &'a [(ActionClass, AutonomyLevel)],
     envelope: &'a GrowthEnvelope,
     usage: &'a mut EnvelopeUsage,
-    touch_ages: &'a [(uuid::Uuid, u32)],
+    touch_ages: &'a std::collections::HashMap<uuid::Uuid, u32>,
     touched_this_cycle: &'a mut std::collections::HashSet<uuid::Uuid>,
 }
 

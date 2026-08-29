@@ -770,7 +770,7 @@ macro_rules! decision_opportunity_reads {
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<Vec<(Uuid, u32)>, RepositoryError> {
+    ) -> Result<std::collections::HashMap<Uuid, u32>, RepositoryError> {
         self.bounded(async {
             // Bounded by the longest cooldown the schema allows (a year), so a
             // workspace with years of history does not scan all of it.

@@ -2,18 +2,19 @@
 //!
 //! The brain is the Bayesian reasoning engine that sits above the autopilot's
 //! rule-based scheduler. It owns the causal model, the exploration memory,
-//! the portfolio optimizer, and the experiment engine. The autopilot feeds
-//! the brain candidates from all contexts; the brain scores them, selects
-//! the optimal portfolio, and learns from outcomes.
+//! and the portfolio optimizer. The autopilot feeds the brain candidates from
+//! all contexts; the brain scores them, selects the optimal portfolio, and
+//! learns from outcomes.
 //!
 //! # Architecture
 //!
-//! The brain is built on five mathematical foundations:
+//! The brain is built on four mathematical foundations:
 //!
 //! 1. **Causal Model** — P(incremental_fan | template, context) with a
 //!    Gamma-Poisson (Negative Binomial) conjugate model for count data.
 //!    Replaces the old EMA + pseudo-variance with mathematically honest
-//!    uncertainty.
+//!    uncertainty. The Signal install path still uses EMA by design —
+//!    Signal adoption has different noise characteristics than fan counts.
 //! 2. **EFE Scoring** — Expected Free Energy balances pragmatic value
 //!    (expected fans) against epistemic value (information gain × uncertainty)
 //!    and exploration novelty. Lower EFE = better opportunity.
@@ -23,9 +24,6 @@
 //! 4. **Portfolio Optimizer** — Global candidate pool with submodular greedy
 //!    selection. Accounts for audience overlap, fatigue, and marginal value.
 //!    DO NOTHING is always a candidate.
-//! 5. **Experiment Engine** — Treatment/control assignment with propensity
-//!    logging for off-policy evaluation. The brain runs controlled
-//!    experiments to measure causal uplift, not just correlation.
 //!
 //! # North Star
 //!
@@ -42,37 +40,24 @@
 //! LLM blindly — it aggregates intelligence, applies deterministic rules,
 //! and decides.
 
-pub mod audience;
 pub mod bayesian;
 pub mod calibration;
 pub mod causal_model;
-pub mod change_point;
 pub mod context_effect;
 pub mod efe;
-pub mod epistemic;
 pub mod evidence;
 pub mod experiment;
 pub mod exploration;
-pub mod fan_network;
-pub mod funnel;
-pub mod hypothesis;
-pub mod metacognition;
-pub mod north_star;
 pub mod opportunity;
-pub mod opportunity_graph;
-pub mod options;
 pub mod portfolio;
 pub mod reach;
-pub mod simulation;
 pub mod snapshot;
 pub mod standing;
 pub mod strategy;
 pub mod strategy_learning;
-pub mod voi;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
-pub use audience::{AudienceKey, LearnedOverlapModel, estimate_overlap, marginal_value};
 pub use bayesian::{
     HierarchicalNegBinPosterior, HierarchicalPosterior, NegBinPosterior, NormalPosterior,
     TreatmentEffectPosterior, normal_cdf, normal_pdf,
@@ -83,45 +68,19 @@ pub use causal_model::{
     DispatchPrediction, MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE, PredictionOutcome,
     TreatmentAwareStats,
 };
-pub use change_point::{ChangeDirection, ChangePoint, ChangePointDetector};
 pub use context_effect::ContextGLM;
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
-pub use epistemic::EpistemicFrontier;
 pub use evidence::{EvidenceEvent, EvidenceEventType, GrowthEvidence};
-pub use experiment::{
-    DEFAULT_TREATMENT_PROBABILITY, ExperimentEngine, MIN_CONFIDENCE_FOR_EXPERIMENT,
-    PropensityRecord, TreatmentAssignment,
-};
+pub use experiment::TreatmentAssignment;
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
-pub use fan_network::{
-    ChannelReproductionModel, FanNetworkModel, NetworkEffect, RecruitmentChannel,
-};
-pub use funnel::FunnelModel;
-pub use hypothesis::{Hypothesis, HypothesisRegistry, HypothesisStatus};
-pub use metacognition::{MetacognitionMonitor, MetacognitiveState};
-pub use north_star::NorthStarMetric;
-pub use opportunity::{
-    CreditAssignment, DEFAULT_CREDIT_DISCOUNT, EpisodeEvent, EpisodeEventKind, EpisodeStatus,
-    EpisodeTracker, OpportunityAction, OpportunityEpisode, OpportunityId, OpportunityState,
-    TrackedOpportunity, credit_allocation, credit_allocation_with_measurements,
-};
-pub use opportunity_graph::{
-    DependencyKind, NodeStatus, OpportunityEdge, OpportunityGraph, OpportunityNode,
-};
-pub use options::{
-    ActionOption, DEFAULT_STEP_SUCCESS_PROBABILITY, OptionPlanner, OptionStatus, OptionStep,
-    OptionStepStatus,
-};
+pub use opportunity::{OpportunityAction, OpportunityId};
 pub use portfolio::{
     DecisionMode, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioRejection,
     PortfolioSelection, RejectionReason,
 };
-pub use reach::{
-    ReachChannel, ReachConversionModel, ReachEvent, ReachMetrics, ReachRecipientKind, ReachStatus,
-};
-pub use simulation::{MonthlyPrediction, SimulationResult, WorldSimulation};
+pub use reach::{ReachChannel, ReachMetrics};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,
     RecentInsight, UnengagedTarget,
@@ -131,15 +90,11 @@ pub use standing::{
 };
 pub use strategy::GrowthStrategy;
 pub use strategy_learning::{
+    CONFIDENCE_SATURATION_EVALUATIONS, MIN_EVALUATIONS_FOR_RECOMMENDATION,
     StateConditionedStrategyPosterior, StrategyLearner, StrategyOutcome, StrategyPosterior,
 };
-pub use voi::{
-    VoiAssessment, expected_information_gain, exploration_bonus, knowledge_gradient,
-    knowledge_gradient_ranking, option_value, portfolio_kg, value_of_information,
-};
 pub use world_model::{
-    EventProximity, FanbaseTier, GrowthTarget, GrowthTargetProgress, GrowthTrend, RichState,
-    RichStateTransitionModel, StateTransitionModel, TargetProgress, TargetStatus, WorldModel,
+    EventProximity, GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel,
 };
 
 // Re-export shared domain types the brain depends on.

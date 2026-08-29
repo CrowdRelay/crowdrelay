@@ -124,6 +124,17 @@ impl GrowthStrategy {
         }
     }
 
+    /// Returns all strategy variants, in a stable order.
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [
+            Self::AggressiveDiscovery,
+            Self::EventDriven,
+            Self::ContentFirst,
+            Self::SignalConversion,
+        ]
+    }
+
     /// Infers the strategy from the most recently dispatched template.
     #[must_use]
     pub fn infer_from_template(template_id: &str) -> Self {

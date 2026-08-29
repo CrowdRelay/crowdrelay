@@ -139,6 +139,10 @@ pub struct PendingAutopilotAction {
     /// capability. An operator who approves it has not passed it on, and a
     /// queue that cannot say so is asking for work it will silently discard.
     pub executor_ready: bool,
+    /// Human-readable briefing: what to do, why, steps, and the content
+    /// being approved. Generated from the payload so the frontend modal
+    /// and the team email share a single source of truth.
+    pub briefing: ActionBriefing,
 }
 
 /// Compact immutable decision trail shown in the operator cockpit.
@@ -164,6 +168,43 @@ pub struct AutopilotManualStep {
     pub url: String,
     pub what_to_do: String,
     pub why_it_matters: String,
+}
+
+/// A human-readable briefing for a pending autopilot action.
+///
+/// Generated from the payload by the brain — tells the operator what to do,
+/// why it matters, and what content they're approving. Single source of truth:
+/// the frontend modal and the team assignment email both consume this struct.
+#[derive(Clone, Debug, Serialize)]
+pub struct ActionBriefing {
+    /// One-line summary: "Zatwierdź draft posta na Reddit r/PolskaMuzyka"
+    pub summary: String,
+    /// 2-3 sentences explaining why this action matters and what happens
+    /// if approved/rejected.
+    pub why_it_matters: String,
+    /// Ordered list of concrete steps the operator should take.
+    pub steps: Vec<BriefingStep>,
+    /// The actual content being approved (draft text, push notification,
+    /// budget change details, etc.) — structured as key-value pairs so
+    /// the frontend can render it without knowing every action kind.
+    pub content: Vec<BriefingField>,
+    /// When this needs to happen, as a human-readable note.
+    /// E.g. "Termin: 5 wrz 2026, 20:00" or "Brak twardego terminu".
+    pub deadline_note: String,
+}
+
+/// One concrete step in an action briefing.
+#[derive(Clone, Debug, Serialize)]
+pub struct BriefingStep {
+    pub what_to_do: String,
+    pub why_it_matters: String,
+}
+
+/// One labeled field in the briefing content section.
+#[derive(Clone, Debug, Serialize)]
+pub struct BriefingField {
+    pub label: String,
+    pub value: String,
 }
 
 /// Recent action execution evidence. This is deliberately compact and contains

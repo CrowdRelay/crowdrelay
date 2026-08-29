@@ -29,7 +29,7 @@ use crowdrelay_application::{IdempotencyKey, RequestId};
 use crowdrelay_application::{
     RepositoryError,
     autopilot::{
-        AcquisitionChannels, AutopilotActionPayload, AutopilotActionRepository,
+        AcquisitionChannels, ActionBriefing, AutopilotActionPayload, AutopilotActionRepository,
         AutopilotBookingStateRepository, AutopilotContext, AutopilotControlMutation,
         AutopilotControlOverview, AutopilotControlRepository, AutopilotDecisionRepository,
         AutopilotFirstPartyGrowthMetrics, AutopilotGrowthMetricRepository, AutopilotGrowthOverview,
@@ -39,7 +39,8 @@ use crowdrelay_application::{
         AutopilotPlayOutcomeRepository, AutopilotPolicy, AutopilotPolicyConfig,
         AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotShowCostRepository,
         AutopilotTicketStateRepository, AutopilotWaveOutcomeRepository, BookingTargetMutation,
-        CandidatePersistence, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
+        BriefingField, BriefingStep, CandidatePersistence, CityMarketSignalMutation,
+        ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, ClaimedPlayOutcome, ClaimedWaveOutcome, DecisionCandidate,
         DeclareGrowthObjective, DeliveryFaultSubject, EvidencePacket, ExecutionClaimMutation,
         ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,

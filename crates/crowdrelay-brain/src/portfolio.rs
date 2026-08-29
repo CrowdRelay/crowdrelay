@@ -365,42 +365,6 @@ impl PortfolioOptimizer {
             do_nothing,
         }
     }
-
-    /// Computes the knowledge gradient (KG) for a candidate — the expected
-    /// improvement in the portfolio's North Star objective from learning
-    /// about this candidate.
-    ///
-    /// The KG captures the value of information: dispatching a candidate with
-    /// high uncertainty but potentially high durable-fan effect teaches the
-    /// brain about the Y30 North Star, improving future decisions.
-    ///
-    /// ```text
-    /// KG = treatment_std × φ(z) + (treatment_effect - δ) × Φ(z)
-    /// ```
-    ///
-    /// where z = (δ - treatment_effect) / treatment_std, and φ/Φ are the
-    /// standard Normal PDF/CDF. This is the standard KG formula for a
-    /// Normal posterior with measurement cost = 0.
-    ///
-    /// Candidates with high KG are worth dispatching even if their current
-    /// expected value is low, because the brain learns from the outcome.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn knowledge_gradient(candidate: &PortfolioCandidate) -> f64 {
-        if candidate.treatment_std <= 0.0 {
-            return 0.0;
-        }
-        // Use the meaningful-effect threshold δ = 1.0 (from causal_model).
-        let delta = 1.0;
-        let z = (delta - candidate.expected_durable_fans) / candidate.treatment_std;
-        // Standard Normal PDF: φ(z) = exp(-z²/2) / √(2π)
-        let phi = (-z * z / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
-        // Standard Normal CDF: Φ(z) — using the existing normal_cdf from bayesian.
-        let cdf = crate::bayesian::normal_cdf(z);
-        // KG = σ × φ(z) + (μ - δ) × (1 - Φ(z))
-        // = σ × φ(z) + (μ - δ) × Φ(-z)
-        candidate.treatment_std * phi + (candidate.expected_durable_fans - delta) * (1.0 - cdf)
-    }
 }
 
 #[cfg(test)]

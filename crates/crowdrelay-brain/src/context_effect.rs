@@ -184,14 +184,6 @@ impl ContextGLM {
         log_eta.exp().max(0.0)
     }
 
-    /// Computes the linear predictor η = xᵀμ (without the baseline).
-    #[must_use]
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    fn linear_predictor(&self, context: &DispatchContext) -> f64 {
-        let x = Self::design_vector(context);
-        dot(&x, &self.mu)
-    }
-
     /// Returns the context-aware predictive uncertainty: `sqrt(xᵀΣx)`.
     /// This is the standard deviation of the linear predictor due to
     /// uncertainty in β. It varies by context — a context with more active
@@ -284,35 +276,6 @@ impl ContextGLM {
     #[must_use]
     pub fn event_7d_effect(&self) -> f64 {
         self.mu[IDX_EVENT_7D]
-    }
-
-    /// Returns the event-30d coefficient (log space).
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn event_30d_effect(&self) -> f64 {
-        self.mu[IDX_EVENT_30D]
-    }
-
-    /// Returns the stagnant growth coefficient (log space).
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn stagnant_effect(&self) -> f64 {
-        self.mu[IDX_STAGNANT]
-    }
-
-    /// Returns the accelerating growth coefficient (log space).
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn accelerating_effect(&self) -> f64 {
-        self.mu[IDX_ACCELERATING]
-    }
-
-    /// Returns the confidence (total observation count). With the joint GLM,
-    /// all coefficients are updated together, so the confidence is shared.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn event_7d_confidence(&self) -> u32 {
-        self.n
     }
 }
 
@@ -471,11 +434,7 @@ mod tests {
         };
         // No active context → no update should happen
         ctx.update(&context, 2.0, 10.0);
-        assert_eq!(
-            ctx.event_7d_confidence(),
-            0,
-            "no update when no context is active"
-        );
+        assert_eq!(ctx.n, 0, "no update when no context is active");
     }
 
     #[test]
@@ -572,7 +531,7 @@ mod tests {
         }
 
         let event_effect = ctx.event_7d_effect();
-        let stagnant_effect = ctx.stagnant_effect();
+        let stagnant_effect = ctx.mu[IDX_STAGNANT];
 
         // β_event_7d should have moved significantly toward log(3).
         assert!(

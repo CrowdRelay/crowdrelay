@@ -533,17 +533,23 @@ where
                     // The brain uses this to predict how many fans each
                     // dispatch will produce, and learns from prediction errors.
                     let causal_model = self.repository.load_causal_model(self.workspace_id).await?;
-                    // Load reach metrics for the unified reach ledger. The
-                    // brain uses these to learn reach-to-fan conversion rates
-                    // per channel and template. Loaded once per cycle — the
-                    // reach conversion model is already updated from evidence
-                    // during load_causal_model, so this is for observability
-                    // and future use (e.g. adjusting dispatch budgets based
-                    // on reach health).
-                    let _reach_metrics = self
+                    // Load the strategy posterior from brain state. The brain
+                    // learns which growth strategies work best in each world
+                    // state (growth trend × event proximity) via UCB
+                    // exploration. When data is thin, the fixed rank-based
+                    // multiplier is used as fallback.
+                    let strategy_posterior = self
                         .repository
-                        .load_reach_metrics(self.workspace_id, now - time::Duration::days(30), None)
+                        .load_brain_state(self.workspace_id, "strategy_learner")
                         .await
+                        .ok()
+                        .flatten()
+                        .and_then(|(state, _ts)| {
+                            serde_json::from_value::<
+                                crowdrelay_brain::StateConditionedStrategyPosterior,
+                            >(state)
+                            .ok()
+                        })
                         .unwrap_or_default();
                     // Load the exploration memory from past dispatch
                     // predictions. The brain uses this to compute novelty:
@@ -608,6 +614,7 @@ where
                                 &causal_model,
                                 strategy,
                                 novelty,
+                                &strategy_posterior,
                             )?
                         {
                             scored_candidates.push((
@@ -678,6 +685,14 @@ where
                         .repository
                         .save_brain_state_checkpoint(self.workspace_id, &causal_model)
                         .await;
+                    // Save the strategy posterior checkpoint. Best-effort —
+                    // a failed save just means the next cycle starts fresh.
+                    if let Ok(state) = serde_json::to_value(&strategy_posterior) {
+                        let _ = self
+                            .repository
+                            .save_brain_state(self.workspace_id, "strategy_learner", &state)
+                            .await;
+                    }
                 }
             }
         }
@@ -916,9 +931,7 @@ where
                     {
                         return Some(0);
                     }
-                    limits.touch_ages.iter().find_map(|(subject, hours)| {
-                        (*subject == candidate.subject.uuid()).then_some(*hours)
-                    })
+                    limits.touch_ages.get(&candidate.subject.uuid()).copied()
                 })
                 .flatten(),
             ..*limits.usage

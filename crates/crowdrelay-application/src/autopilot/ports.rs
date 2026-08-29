@@ -505,7 +505,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<Vec<(uuid::Uuid, u32)>, RepositoryError>;
+    ) -> Result<std::collections::HashMap<uuid::Uuid, u32>, RepositoryError>;
 
     /// Persists the decision and, for executable dispositions, creates exactly
     /// one durable action unless an equivalent action is already in flight.
@@ -863,15 +863,6 @@ pub trait AutopilotMeasurementRepository: Send + Sync {
         error_kind: &'static str,
         retryable: bool,
         now: OffsetDateTime,
-    ) -> Result<(), RepositoryError>;
-
-    /// Recomputes treatment-effect observations from resolved predictions
-    /// and stores them for the next cycle's causal model load. Called
-    /// after measurement resolution to keep the treatment-effect posterior
-    /// up to date.
-    async fn refresh_treatment_effects(
-        &self,
-        workspace_id: WorkspaceId,
     ) -> Result<(), RepositoryError>;
 }
 

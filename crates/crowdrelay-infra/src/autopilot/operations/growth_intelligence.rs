@@ -12,9 +12,10 @@
 //! 1. **World Model** — the brain's belief about the world: fan counts,
 //!    signal installs, community reach, outreach pipeline, event state,
 //!    and growth target progress. Loaded once per cycle from real data.
-//! 2. **Causal Model** — P(new_fan | template, context) with EMA learning.
-//!    The brain predicts before dispatch and learns from prediction error
-//!    after measurement (the dopamine loop).
+//! 2. **Causal Model** — P(new_fan | template, context) with hierarchical
+//!    Gamma-Poisson (Negative Binomial) learning plus Normal-Normal
+//!    treatment-effect posteriors. The brain predicts before dispatch and
+//!    learns from prediction error after measurement (the dopamine loop).
 //! 3. **Opportunity Queue + EFE** — each eligible dispatch is scored by
 //!    Expected Free Energy, balancing pragmatic value (expected fans)
 //!    against epistemic value (information gain). Lower EFE = better.
@@ -594,6 +595,9 @@ pub(in crate::autopilot) async fn load_causal_model(
                 )
                 .await?;
                 apply_evidence_to_model(&mut model, &delta);
+                // Also apply delta evidence to the strategy posterior so it
+                // stays in sync with the causal model's evidence replay.
+                apply_delta_to_strategy_posterior(repo, workspace_id, &delta).await;
                 tracing::debug!(
                     delta_evidence = delta.len(),
                     "loaded causal model from checkpoint + delta"
@@ -610,19 +614,13 @@ pub(in crate::autopilot) async fn load_causal_model(
         full_replay(repo, workspace_id).await?
     };
 
-    // P0.5: The separate viryaos_treatment_effect_observations table load
-    // has been deprecated. Treatment-effect updates now come from the
-    // evidence-based path in `apply_evidence_to_model`, which uses the
-    // `observed_incremental_fans` field from GrowthEvidence as the τ
-    // estimate. This avoids double-counting: the evidence row already
-    // carries the treatment assignment + outcome, making the TE table
-    // redundant. The evidence-based path is the single source of truth.
-
     Ok(model)
 }
 
 /// Applies a batch of growth evidence to the causal model, updating the
-/// outcome model, context effects, calibration, and reach conversion model.
+/// outcome model, context effects, Y14 calibration, the Y14/Y30
+/// treatment-effect posteriors, the Y30 calibration tracker, and the
+/// Y14→Y30 bridge.
 fn apply_evidence_to_model(
     model: &mut crowdrelay_brain::CausalModel,
     evidence: &[crowdrelay_brain::GrowthEvidence],
@@ -649,8 +647,7 @@ fn apply_evidence_to_model(
         // Update the Y14 treatment-effect posterior from the incremental
         // outcome. The `observed_incremental_fans` field is the
         // counterfactual-adjusted τ estimate (already IPW-corrected if
-        // propensity is available). This is the evidence-based replacement
-        // for the separate treatment_effect_observations table (P0.5).
+        // propensity is available).
         if let Some(tau_y14) = ev.observed_incremental_fans {
             let obs_var = 2.0 * tau_y14.abs().max(1.0); // adaptive variance
             model.update_treatment_effect(&template, subreddit_type, tau_y14, obs_var);
@@ -671,28 +668,75 @@ fn apply_evidence_to_model(
                 model.update_bridge(y14_fans, y30_fans);
             }
         }
+    }
+}
 
-        // Update the reach conversion model from conversion outcomes.
-        // For broadcast channels, use the Beta-Binomial update with actual
-        // exposure and conversion counts. For direct channels, use Bernoulli.
-        // P0.4: use the boolean converted flag, NOT the Y14 incremental fan
-        // count — incremental fans are a population-level causal uplift,
-        // not individual-level conversion counts.
-        if ev.channel.is_broadcast() {
-            let n_exposed = ev.estimated_reach.max(1);
-            // Use the boolean converted flag as the conversion signal.
-            // When actual conversion counts are available (from the reach
-            // conversions table), those should be used instead — but the
-            // evidence row doesn't yet carry that field (P0.4 migration).
-            let k_converted = if ev.converted { 1 } else { 0 };
-            model
-                .reach_model
-                .update_count(ev.channel, &template, n_exposed, k_converted);
-        } else {
-            model
-                .reach_model
-                .update(ev.channel, &template, ev.converted);
+/// Records strategy outcomes into the state-conditioned strategy posterior
+/// from growth evidence. The strategy is inferred from the evidence's
+/// template_id, and the state (growth_trend, event_proximity) comes from
+/// the evidence's context. This is called alongside `apply_evidence_to_model`
+/// during the causal model load, so the strategy posterior stays in sync
+/// with the causal model's evidence replay.
+pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
+    posterior: &mut crowdrelay_brain::StateConditionedStrategyPosterior,
+    evidence: &[crowdrelay_brain::GrowthEvidence],
+) {
+    use crowdrelay_brain::GrowthStrategy;
+
+    for ev in evidence {
+        let template = extract_template_from_opportunity(&ev.opportunity_id);
+        let strategy = GrowthStrategy::infer_from_template(&template);
+        let growth_trend = ev.context.fan_growth_trend.as_str();
+        let event_proximity = match ev.context.days_to_event {
+            Some(d) if d <= 7 => "close",
+            Some(d) if d <= 30 => "near",
+            _ => "far",
+        };
+        // Use the Y14 incremental outcome as the strategy effectiveness
+        // signal. This is the counterfactual-adjusted estimate of how many
+        // fans the dispatch produced — exactly what we want to learn which
+        // strategies work best.
+        if let Some(incremental_fans) = ev.observed_incremental_fans {
+            let obs_var = 2.0 * incremental_fans.abs().max(1.0);
+            posterior.update(
+                strategy.as_str(),
+                growth_trend,
+                event_proximity,
+                incremental_fans,
+                obs_var,
+            );
         }
+    }
+}
+
+/// Loads the strategy posterior from brain state, applies delta evidence to
+/// it, and saves it back. Called alongside `apply_evidence_to_model` during
+/// the causal model load so the strategy posterior stays in sync with the
+/// causal model's evidence replay.
+async fn apply_delta_to_strategy_posterior(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    delta: &[crowdrelay_brain::GrowthEvidence],
+) {
+    use crowdrelay_brain::StateConditionedStrategyPosterior;
+
+    // Load the existing strategy posterior from brain state.
+    let posterior = match super::evidence::load_brain_state(repo, workspace_id, "strategy_learner")
+        .await
+    {
+        Ok(Some((state, _ts))) => {
+            serde_json::from_value::<StateConditionedStrategyPosterior>(state).unwrap_or_default()
+        }
+        _ => StateConditionedStrategyPosterior::default(),
+    };
+
+    let mut posterior = posterior;
+    apply_evidence_to_strategy_posterior(&mut posterior, delta);
+
+    // Save the updated posterior back to brain state. Best-effort.
+    if let Ok(state) = serde_json::to_value(&posterior) {
+        let _ =
+            super::evidence::save_brain_state(repo, workspace_id, "strategy_learner", &state).await;
     }
 }
 
@@ -737,6 +781,8 @@ async fn full_replay(
     if !evidence.is_empty() {
         let mut model = CausalModel::default();
         apply_evidence_to_model(&mut model, &evidence);
+        // Also replay evidence into the strategy posterior from scratch.
+        apply_delta_to_strategy_posterior(repo, workspace_id, &evidence).await;
         return Ok(model);
     }
 
@@ -903,6 +949,7 @@ pub(in crate::autopilot) async fn load_exploration_memory(
                    predicted_at
             FROM viryaos_dispatch_predictions
             WHERE workspace_id = $1
+              AND predicted_at >= now() - INTERVAL '12 hours'
             "#,
     )
     .bind(workspace_id.into_uuid())
@@ -951,121 +998,4 @@ pub(in crate::autopilot) async fn load_last_dispatched_template(
     .await
     .map_err(map_sqlx)?;
     Ok(template)
-}
-
-/// Computes and stores treatment-effect observations from resolved
-/// predictions.
-///
-/// For each template, we compute the average observed outcome (treatment
-/// group — the template was dispatched) and compare it to the global
-/// average outcome across all other templates (soft control). The
-/// treatment effect τ = treatment_mean - control_mean.
-///
-/// This is a simplified A/B estimate that doesn't require explicit
-/// treatment/control assignment. It assumes that when a template is NOT
-/// dispatched, the outcome is approximately what would have happened
-/// without treatment. This is valid when:
-/// - Different templates are dispatched in different cycles (no perfect
-///   confounding between templates)
-/// - The outcome (fan growth) is measured in the same way for all
-///   templates
-///
-/// The results are written to `viryaos_treatment_effect_observations`
-/// and loaded by `load_causal_model` on the next cycle.
-///
-/// This function is called after measurement resolution to keep the
-/// treatment-effect posterior up to date.
-pub(in crate::autopilot) async fn compute_and_store_treatment_effects(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-) -> Result<(), RepositoryError> {
-    let pool = &repo.pool;
-
-    // Compute per-template average observed outcome and the global average.
-    // We use incremental fan growth when available (counterfactual-adjusted),
-    // falling back to raw fan growth.
-    //
-    // The query computes:
-    // - For each template: avg(observed), count, variance
-    // - The global average across all templates
-    // - The treatment effect: avg(template) - global_avg
-    // - The observation variance
-    type TreatmentEffectComputation = (
-        String,         // template_id
-        Option<String>, // subreddit_type (extracted from context)
-        f64,            // observed_tau
-        f64,            // observation_variance
-        i64,            // sample_size
-    );
-    let rows: Vec<TreatmentEffectComputation> = sqlx::query_as(
-        r#"
-        WITH template_stats AS (
-            SELECT
-                template_id,
-                context ->> 'subreddit_type' AS subreddit_type,
-                AVG(COALESCE(observed_incremental_fans, observed_new_fans, 0)) AS treatment_mean,
-                COUNT(*) AS sample_count,
-                VARIANCE(COALESCE(observed_incremental_fans, observed_new_fans, 0)) AS treatment_var
-            FROM viryaos_brain_evidence
-            WHERE workspace_id = $1
-              AND resolved_at IS NOT NULL
-              AND COALESCE(observed_incremental_fans, observed_new_fans) IS NOT NULL
-            GROUP BY template_id, context ->> 'subreddit_type'
-        ),
-        global_stats AS (
-            SELECT AVG(COALESCE(observed_incremental_fans, observed_new_fans, 0)) AS global_mean
-            FROM viryaos_brain_evidence
-            WHERE workspace_id = $1
-              AND resolved_at IS NOT NULL
-              AND COALESCE(observed_incremental_fans, observed_new_fans) IS NOT NULL
-        )
-        SELECT
-            ts.template_id,
-            ts.subreddit_type,
-            ts.treatment_mean - gs.global_mean AS observed_tau,
-            COALESCE(ts.treatment_var, 0.0) AS observation_variance,
-            ts.sample_count
-        FROM template_stats ts
-        CROSS JOIN global_stats gs
-        WHERE ts.sample_count >= 3
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    // Write the treatment-effect observations. We use upsert to update
-    // existing observations when new data arrives.
-    for (template_id, subreddit_type, observed_tau, observation_variance, sample_size) in rows {
-        sqlx::query(
-            r#"
-            INSERT INTO viryaos_treatment_effect_observations
-                (workspace_id, template_id, subreddit_type,
-                 observed_tau, observation_variance, sample_size, computed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, now())
-            ON CONFLICT (workspace_id, template_id, COALESCE(subreddit_type, ''))
-            DO UPDATE SET
-                observed_tau = $4,
-                observation_variance = $5,
-                sample_size = $6,
-                computed_at = now()
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(&template_id)
-        .bind(&subreddit_type)
-        .bind(observed_tau)
-        .bind(observation_variance)
-        .bind(sample_size)
-        .execute(pool)
-        .await
-        .map_err(map_sqlx)?;
-    }
-
-    Ok(())
 }

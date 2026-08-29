@@ -40,8 +40,6 @@ pub struct IntelligenceRequest {
     pub template_id: &'static str,
     pub priority: u8,
     pub prompt: String,
-    #[allow(dead_code)]
-    pub cooldown_hours: u32,
     /// The time window used for the decision/action idempotency key. For a
     /// normal dispatch (after a successful run), this equals `cooldown_hours`.
     /// For a retry after a failed/empty run, this equals the retry delay
@@ -172,6 +170,7 @@ pub fn evaluate_growth_intelligence(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
+    strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
     now: OffsetDateTime,
 ) -> Option<IntelligenceRequest> {
     // A retired worker is never dispatched. The standing is computed from
@@ -253,6 +252,67 @@ pub fn evaluate_growth_intelligence(
             2 => 0.9,
             _ => 1.0,
         }
+    };
+    // ── UCB strategy learning (Phase 3) ──
+    // When the strategy posterior has enough data for the current strategy
+    // in the current world state, the brain adjusts the multiplier based on
+    // UCB: if an alternative strategy has a higher UCB for this template's
+    // strategy, the multiplier shifts toward that strategy's rank-0 boost.
+    // This lets the brain learn which strategies actually work best in each
+    // state, rather than relying on the fixed world-model heuristic.
+    //
+    // The adjustment is gated by confidence: below
+    // MIN_EVALUATIONS_FOR_RECOMMENDATION, the fixed multiplier is used
+    // unchanged. Above it, the UCB-recommended strategy's rank-0 multiplier
+    // (0.7×) replaces the fixed one, scaled by the UCB margin.
+    let growth_trend_str = dispatch_context.fan_growth_trend.as_str();
+    let event_proximity_str = match dispatch_context.days_to_event {
+        Some(d) if d <= 7 => "close",
+        Some(d) if d <= 30 => "near",
+        _ => "far",
+    };
+    let current_strategy_str = strategy.as_str();
+    let current_confidence =
+        strategy_posterior.confidence(current_strategy_str, growth_trend_str, event_proximity_str);
+    let strategy_multiplier = if current_confidence
+        >= crowdrelay_brain::MIN_EVALUATIONS_FOR_RECOMMENDATION
+    {
+        // Compute UCB for all strategies in the current state.
+        // exploration_weight scales with uncertainty: low confidence →
+        // higher weight → more exploration.
+        let exploration_weight = 1.0 / (1.0 + f64::from(current_confidence));
+        let best_ucb_strategy = GrowthStrategy::all()
+            .iter()
+            .map(|s| {
+                let (mean, var) =
+                    strategy_posterior.predict(s.as_str(), growth_trend_str, event_proximity_str);
+                let ucb = mean + exploration_weight * var.sqrt();
+                (s, ucb)
+            })
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(s, _)| *s);
+        // If the UCB-recommended strategy differs from the current one,
+        // re-rank this template against the UCB-recommended strategy's
+        // priority list. This shifts the multiplier toward the strategy
+        // the brain has learned works best in this state.
+        if let Some(ucb_strategy) = best_ucb_strategy {
+            let ucb_priority = ucb_strategy.template_priority();
+            let ucb_rank = ucb_priority
+                .iter()
+                .position(|t| *t == snapshot.template_id)
+                .unwrap_or(usize::MAX);
+            match ucb_rank {
+                0 => 0.7,
+                1 => 0.8,
+                2 => 0.9,
+                usize::MAX => 1.1,
+                _ => 1.0,
+            }
+        } else {
+            strategy_multiplier
+        }
+    } else {
+        strategy_multiplier
     };
     // Apply the strategy multiplier as a fan boost: aligned templates get
     // higher effective fans (lower EFE), misaligned ones get lower.
@@ -346,7 +406,6 @@ pub fn evaluate_growth_intelligence(
             template_id: "reddit-scanner",
             priority: 3,
             prompt,
-            cooldown_hours: reddit_scanner_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
@@ -383,7 +442,6 @@ pub fn evaluate_growth_intelligence(
                 template_id: "press-pitch",
                 priority,
                 prompt,
-                cooldown_hours: press_pitch_cd,
                 key_window_hours: if is_retry {
                     retry_window
                 } else {
@@ -418,7 +476,6 @@ pub fn evaluate_growth_intelligence(
             template_id: "social-post",
             priority: 2,
             prompt,
-            cooldown_hours: social_post_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
@@ -458,7 +515,6 @@ pub fn evaluate_growth_intelligence(
             template_id: "community-engager",
             priority: 2,
             prompt,
-            cooldown_hours: community_engager_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
@@ -500,7 +556,6 @@ pub fn evaluate_growth_intelligence(
             template_id: "community-engager",
             priority: 2,
             prompt,
-            cooldown_hours: community_engager_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
@@ -533,7 +588,6 @@ pub fn evaluate_growth_intelligence(
             template_id: "signal-inviter",
             priority: 3,
             prompt,
-            cooldown_hours: signal_inviter_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
@@ -580,7 +634,6 @@ pub fn evaluate_growth_intelligence(
             template_id: "growth-strategist",
             priority: 4,
             prompt,
-            cooldown_hours: growth_strategist_cd,
             key_window_hours: if is_retry {
                 retry_window
             } else {
@@ -606,6 +659,7 @@ pub fn evaluate_growth_intelligence(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn growth_intelligence_candidate(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
@@ -614,6 +668,7 @@ pub(super) fn growth_intelligence_candidate(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
+    strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
 ) -> Result<Option<(DecisionCandidate, DispatchPrediction, f64, usize)>, serde_json::Error> {
     let AutopilotPolicyConfig::GrowthIntelligence(domain_policy) = policy.config else {
         return Ok(None);
@@ -624,6 +679,7 @@ pub(super) fn growth_intelligence_candidate(
         causal_model,
         strategy,
         exploration_novelty,
+        strategy_posterior,
         now,
     ) else {
         return Ok(None);

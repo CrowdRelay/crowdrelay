@@ -800,15 +800,4 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         })
         .await
     }
-
-    async fn refresh_treatment_effects(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<(), RepositoryError> {
-        super::operations::growth_intelligence::compute_and_store_treatment_effects(
-            self,
-            workspace_id,
-        )
-        .await
-    }
 }

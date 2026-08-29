@@ -13,8 +13,10 @@
 //!   prediction based on event proximity and growth trend.
 //! - **Independent Signal install learning**: Signal adoption has different
 //!   drivers than fan acquisition, so it's learned separately.
-//! - **Proper variance**: uses `NormalPosterior` which gives mathematically
-//!   honest posterior variance, credible intervals, and P(positive).
+//! - **Proper variance**: `HierarchicalNegBinPosterior` gives mathematically
+//!   honest posterior variance, credible intervals, and P(positive) for the
+//!   count outcome; `TreatmentEffectPosterior` (Normal-Normal) does the same
+//!   for the continuous treatment effect τ.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -108,30 +110,11 @@ pub const DEFAULT_EXPECTED_FANS: f64 = 2.0;
 /// is harder than fan acquisition — most fans don't install the app.
 pub const DEFAULT_EXPECTED_SIGNAL: f64 = 0.2;
 
-/// The prior variance — represents the brain's initial uncertainty about
-/// outcomes. A value of 4.0 means the brain initially expects outcomes to
-/// vary by ±2 fans (std dev). This shrinks as the brain collects data.
+/// The prior variance used by the Normal-Normal treatment-effect and
+/// strategy-learning posteriors. The fan outcome prior is set separately
+/// via `NegBinPosterior::prior(DEFAULT_EXPECTED_FANS, 1.0)` in
+/// [`CausalModel::new`].
 pub const PRIOR_VARIANCE: f64 = 4.0;
-
-/// The over-dispersion parameter for adaptive observation variance. The
-/// adaptive variance is `max(predicted, 1.0) * DISPERSION`, which gives
-/// Poisson-like variance (mean ≈ variance) scaled by a dispersion factor.
-/// A dispersion of 2.0 means the variance is twice the mean — appropriate
-/// for over-dispersed count data.
-const DISPERSION: f64 = 2.0;
-
-/// Computes an adaptive observation variance for the outcome model. For
-/// count data, the variance should scale with the mean (Poisson-like):
-/// `var ≈ mean × dispersion`. This prevents the model from over-reacting
-/// to large observations (e.g. 17 fans when the prediction was 2) and
-/// under-reacting to small ones.
-///
-/// The floor of 1.0 ensures a minimum noise level even when the prediction
-/// is near zero.
-#[must_use]
-fn adaptive_observation_variance(predicted: f64) -> f64 {
-    predicted.max(1.0) * DISPERSION
-}
 
 /// Minimum number of paired treatment/control observations before the brain
 /// trusts the treatment-effect posterior over the outcome model. Below this,
@@ -204,27 +187,12 @@ pub struct CausalModel {
     /// coefficients in log space. Prevents multiplicative explosion and
     /// learns from partial residuals instead of confounded ratios.
     pub context_effects: ContextGLM,
-    /// Reach conversion model — learns per-channel, per-template
-    /// reach-to-fan conversion rates. When reach data is available, the
-    /// brain predicts `E[fans] = reach × P(conversion)` instead of a raw
-    /// template mean.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    pub reach_model: crate::reach::ReachConversionModel,
     /// Y14→Y30 bridge model — learns the relationship between 14-day
     /// incremental fans (early signal) and 30-day durable fans (North Star).
     /// When Y30 is not yet available, the bridge predicts Y30 from Y14 with
     /// honest uncertainty, which inflates the treatment-effect std for
     /// decisions based on Y14 alone.
     pub bridge: Y14Y30Bridge,
-    /// Full funnel model: Reach → Response → Conversion → Durability.
-    /// Decomposes the growth process into diagnosable stages.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    pub funnel: crate::funnel::FunnelModel,
-    /// Rich state-transition model — learns transition probabilities
-    /// conditioned on the full RichState (growth trend, fanbase tier,
-    /// target progress, event proximity), not just GrowthTrend.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    pub rich_state_transitions: crate::world_model::RichStateTransitionModel,
 }
 
 /// Treatment-aware prediction statistics — the result of querying both the
@@ -427,10 +395,7 @@ impl CausalModel {
             calibration: crate::calibration::CalibrationTracker::new(),
             calibration_y30: crate::calibration::CalibrationTracker::new(),
             context_effects: ContextGLM::new(),
-            reach_model: crate::reach::ReachConversionModel::new(),
             bridge: Y14Y30Bridge::new(),
-            funnel: crate::funnel::FunnelModel::new(),
-            rich_state_transitions: crate::world_model::RichStateTransitionModel::new(),
         }
     }
 
@@ -447,33 +412,6 @@ impl CausalModel {
     #[must_use]
     pub fn predict(&self, template_id: &str, context: &DispatchContext) -> f64 {
         self.predict_stats(template_id, context).0
-    }
-
-    /// Predicts expected new fans with calibration correction applied.
-    ///
-    /// This is the same as [`predict`](Self::predict) but applies the
-    /// calibration tracker's slope/intercept correction to reduce
-    /// systematic prediction bias. When no calibration data is available,
-    /// this is identical to `predict`.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_calibrated(&self, template_id: &str, context: &DispatchContext) -> f64 {
-        let raw = self.predict(template_id, context);
-        self.calibration.correct_prediction(raw).max(0.0)
-    }
-
-    /// Predicts expected durable fans (Y30) with Y30 calibration correction.
-    /// Falls back to Y14 calibration when Y30 data is unavailable.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_calibrated_y30(&self, template_id: &str, context: &DispatchContext) -> f64 {
-        let raw = self.predict(template_id, context);
-        let cal = if self.calibration_y30.is_empty() {
-            &self.calibration
-        } else {
-            &self.calibration_y30
-        };
-        cal.correct_prediction(raw).max(0.0)
     }
 
     /// Predicts expected Signal installs for a dispatch. Uses the
@@ -505,10 +443,12 @@ impl CausalModel {
 
     /// Updates the model from a prediction outcome (the dopamine loop).
     ///
-    /// Uses the Gamma-Poisson conjugate update for the fan count posterior
-    /// (count data with over-dispersion) and the Normal-Normal update for
-    /// the treatment effect posterior (continuous τ). Both the fan count and
-    /// Signal install models are updated independently.
+    /// Updates the fan count posterior (Gamma-Poisson conjugate), the
+    /// learned context GLM, the per-template Signal EMA, and the Y14
+    /// calibration tracker. The Y14/Y30 treatment-effect posteriors are
+    /// NOT updated here — they are updated from evidence rows via
+    /// [`CausalModel::update_treatment_effect`] /
+    /// [`CausalModel::update_treatment_effect_y30`].
     pub fn update(&mut self, outcome: &PredictionOutcome) {
         let template = &outcome.prediction.template_id;
         let subreddit_type = outcome.prediction.context.subreddit_type.as_deref();
@@ -588,40 +528,6 @@ impl CausalModel {
         post.p_positive()
     }
 
-    /// Predicts the heterogeneous treatment effect τ(x) for a template in
-    /// the given context. Returns `(tau, std, confidence)`.
-    ///
-    /// Positive τ means the action increases fans; negative means it
-    /// backfires. The confidence is the number of paired treatment/control
-    /// observations used to estimate τ.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_treatment_effect(
-        &self,
-        template_id: &str,
-        context: &DispatchContext,
-    ) -> (f64, f64, u32) {
-        self.treatment_effects
-            .predict_stats(template_id, context.subreddit_type.as_deref())
-    }
-
-    /// Predicts the Y30 (30-day durable) treatment effect τ_y30(x) for a
-    /// template. Returns `(tau, std, confidence)`.
-    ///
-    /// This is the North Star target — durable fans still active after 30
-    /// days. When Y30 confidence is low, callers should fall back to the
-    /// Y14 treatment effect.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_treatment_effect_y30(
-        &self,
-        template_id: &str,
-        context: &DispatchContext,
-    ) -> (f64, f64, u32) {
-        self.treatment_effects_y30
-            .predict_stats(template_id, context.subreddit_type.as_deref())
-    }
-
     /// Updates the treatment-effect posterior from an experiment outcome.
     ///
     /// `observed_tau` is the estimated treatment effect (e.g. from an IPW
@@ -670,40 +576,6 @@ impl CausalModel {
     /// Y30 with honest uncertainty.
     pub fn update_bridge(&mut self, y14: f64, y30: f64) {
         self.bridge.update(y14, y30);
-    }
-
-    /// Updates the treatment-effect posterior from credit-assigned episode
-    /// outcomes.
-    ///
-    /// Each `CreditAssignment` represents the brain's estimate of how much
-    /// of an episode's outcome was caused by one specific dispatch. The
-    /// credit is used as the observed treatment effect τ for that template,
-    /// with a variance that increases with the number of dispatches (more
-    /// dispatches → more uncertainty in the attribution).
-    ///
-    /// This is the key link between the episode model (Phase 2) and the
-    /// treatment-effect model (Phase 1): the episode records the full
-    /// trajectory, credit assignment distributes the outcome across actions,
-    /// and the treatment-effect posterior learns from the credited outcomes.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    pub fn update_with_credit(
-        &mut self,
-        credits: &[crate::opportunity::CreditAssignment],
-        subreddit_type: Option<&str>,
-    ) {
-        for credit in credits {
-            // Adaptive variance: scales with the credit magnitude (Poisson-like)
-            // and the number of dispatches. More dispatches → more uncertainty.
-            let n = credit.total_dispatches.max(1) as f64;
-            let base_variance = adaptive_observation_variance(credit.credit.abs());
-            let observation_variance = base_variance * n;
-            self.treatment_effects.update(
-                &credit.template_id,
-                subreddit_type,
-                credit.credit,
-                observation_variance,
-            );
-        }
     }
 
     /// Returns treatment-aware prediction statistics — both the outcome model
@@ -818,21 +690,6 @@ impl CausalModel {
             p_meaningful_effect: p_meaningful,
         }
     }
-}
-
-/// Applies the context adjustments (event proximity, growth trend) to a
-/// raw posterior mean using the default (prior) context GLM.
-///
-/// This is used by [`crate::simulation::WorldSimulation`] which doesn't
-/// have access to a learned `CausalModel`. The [`CausalModel::predict`]
-/// method uses the learned `ContextGLM` instead.
-///
-/// When the GLM has no data, it falls back to the same hardcoded
-/// values (1.5, 1.2, 0.8, 1.1) as priors in log space.
-#[must_use]
-pub(crate) fn apply_context_adjustments(prediction: f64, context: &DispatchContext) -> f64 {
-    let ctx = ContextGLM::new();
-    ctx.predict(prediction, context)
 }
 
 #[cfg(test)]
@@ -1307,5 +1164,30 @@ mod tests {
             stats2.use_treatment_effect,
             "hysteresis should keep treatment effect active in the band"
         );
+    }
+
+    // ── Checkpoint compatibility ──────────────────────────────────────────
+    //
+    // Old checkpoints in `viryaos_brain_state` may carry fields that were
+    // removed from `CausalModel` (reach_model, funnel, rich_state_transitions).
+    // Serde ignores unknown fields, so deserialization must keep working —
+    // a shape change here is exactly the failure class that produced the
+    // autopilot control-overview 500.
+
+    #[test]
+    fn deserializes_legacy_checkpoint_with_removed_fields() {
+        let mut json = serde_json::to_value(CausalModel::new()).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        obj.insert(
+            "reach_model".to_owned(),
+            serde_json::json!({ "conversions": {}, "exposures": {} }),
+        );
+        obj.insert("funnel".to_owned(), serde_json::json!({}));
+        obj.insert("rich_state_transitions".to_owned(), serde_json::json!({}));
+
+        let model: CausalModel = serde_json::from_value(json)
+            .expect("legacy checkpoint with removed fields must still deserialize");
+        let ctx = DispatchContext::default();
+        assert!(model.predict("t", &ctx) > 0.0);
     }
 }

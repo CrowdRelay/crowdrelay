@@ -512,7 +512,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<Vec<(Uuid, u32)>, RepositoryError> {
+    ) -> Result<std::collections::HashMap<Uuid, u32>, RepositoryError> {
         self.load_outward_touch_ages_impl(workspace_id, now).await
     }
 

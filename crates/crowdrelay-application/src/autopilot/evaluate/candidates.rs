@@ -742,28 +742,28 @@ fn show_operations_candidate(
     let AutopilotPolicyConfig::ShowOperations(domain_policy) = &policy.config else {
         return Ok(None);
     };
-    let (action, decision_kind, reason, confidence) =
-        match evaluate_show_task(snapshot, *domain_policy, now) {
-            ShowOperationsDecision::AutoComplete { confidence } => (
-                AutopilotActionPayload::CompleteShowTask {
-                    event_id: snapshot.event_id,
-                    task: snapshot.task,
-                },
-                "complete_verified_show_task",
-                "first-party evidence proves a non-physical show task is complete",
-                confidence,
-            ),
-            ShowOperationsDecision::EscalateHuman { confidence } => (
-                AutopilotActionPayload::EscalateShowTask {
-                    event_id: snapshot.event_id,
-                    task: snapshot.task,
-                },
-                "escalate_show_task",
-                "show task is due and requires human or physical confirmation",
-                confidence,
-            ),
-            ShowOperationsDecision::Hold(_) => return Ok(None),
-        };
+    let show_decision = evaluate_show_task(snapshot, *domain_policy, now);
+    let (action, decision_kind, reason, confidence) = match show_decision {
+        ShowOperationsDecision::AutoComplete { confidence } => (
+            AutopilotActionPayload::CompleteShowTask {
+                event_id: snapshot.event_id,
+                task: snapshot.task,
+            },
+            "complete_verified_show_task",
+            "first-party evidence proves a non-physical show task is complete",
+            confidence,
+        ),
+        ShowOperationsDecision::EscalateHuman { confidence } => (
+            AutopilotActionPayload::EscalateShowTask {
+                event_id: snapshot.event_id,
+                task: snapshot.task,
+            },
+            "escalate_show_task",
+            "show task is due and requires human or physical confirmation",
+            confidence,
+        ),
+        ShowOperationsDecision::Hold(_) => return Ok(None),
+    };
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     Ok(Some(DecisionCandidate {
         context: policy.context,
@@ -785,7 +785,7 @@ fn show_operations_candidate(
                 .last_escalated_at
                 .map_or(0, OffsetDateTime::unix_timestamp)
         ),
-        action_idempotency_key: match evaluate_show_task(snapshot, *domain_policy, now) {
+        action_idempotency_key: match show_decision {
             ShowOperationsDecision::AutoComplete { .. } => format!(
                 "action:show:{}:{:?}:complete",
                 snapshot.event_id, snapshot.task

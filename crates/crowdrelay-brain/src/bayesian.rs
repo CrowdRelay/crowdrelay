@@ -48,6 +48,11 @@
 //! - Compatible with online updates (one observation at a time)
 //! - Supports non-stationarity via observation variance (recent observations
 //!   can have higher variance, effectively downweighting old evidence)
+//!
+//! Note: the Signal install path (`template_expected_signal` in `CausalModel`)
+//! still uses EMA by design — Signal adoption has different noise
+//! characteristics than fan counts, and the EMA's simplicity is appropriate
+//! there. The fan count and treatment-effect paths use the conjugate model.
 
 use serde::{Deserialize, Serialize};
 
@@ -151,17 +156,6 @@ impl NormalPosterior {
         // Normal CDF approximation (Abramowitz & Stegun 7.1.26).
         normal_cdf(z)
     }
-
-    /// Expected Value of Information — how much the brain would learn from
-    /// one more observation. This is a proxy for expected posterior entropy
-    /// reduction.
-    ///
-    /// Delegates to [`crate::efe::information_gain`] so there is one
-    /// canonical VoI approximation across the brain.
-    #[must_use]
-    pub fn value_of_information(&self) -> f64 {
-        crate::efe::information_gain(self.n, self.std())
-    }
 }
 
 /// Standard Normal PDF: φ(z) = exp(-z²/2) / sqrt(2π).
@@ -208,9 +202,6 @@ pub struct HierarchicalPosterior {
     pub by_template: std::collections::HashMap<String, NormalPosterior>,
     /// Per-subreddit-type posteriors.
     pub by_subreddit_type: std::collections::HashMap<String, NormalPosterior>,
-    /// Per-channel posteriors (P2.1: hierarchical contextual treatment effects).
-    /// Keyed by `template_id:channel` for template-channel-specific effects.
-    pub by_template_channel: std::collections::HashMap<String, NormalPosterior>,
 }
 
 impl HierarchicalPosterior {
@@ -221,7 +212,6 @@ impl HierarchicalPosterior {
             global: global_prior,
             by_template: std::collections::HashMap::new(),
             by_subreddit_type: std::collections::HashMap::new(),
-            by_template_channel: std::collections::HashMap::new(),
         }
     }
 
@@ -297,75 +287,6 @@ impl HierarchicalPosterior {
                 .or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
-    }
-
-    /// Signed update with channel — same as [`update_signed`](Self::update_signed)
-    /// but also updates the template-channel posterior. Used by the
-    /// hierarchical contextual treatment effect model (P2.1). Uses the
-    /// pre-update global as the child prior to avoid double-counting.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    pub fn update_signed_with_channel(
-        &mut self,
-        template_id: Option<&str>,
-        subreddit_type: Option<&str>,
-        channel: Option<&str>,
-        observation: f64,
-        observation_variance: f64,
-    ) {
-        let global_prior = (self.global.mean, self.global.variance);
-        self.update_signed(
-            template_id,
-            subreddit_type,
-            observation,
-            observation_variance,
-        );
-        if let (Some(tid), Some(ch)) = (template_id, channel) {
-            let key = format!("{tid}:{ch}");
-            let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
-            let entry = self.by_template_channel.entry(key).or_insert_with(prior);
-            entry.update_signed(observation, observation_variance);
-        }
-    }
-
-    /// Predicts the expected value for a template + subreddit type + channel,
-    /// using partial pooling across all three levels. When the
-    /// template-channel posterior has many observations, it stands on its
-    /// own; otherwise it shrinks toward the template or global posterior.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_with_channel(
-        &self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-        channel: Option<&str>,
-    ) -> (f64, f64) {
-        const SHRINKAGE_STRENGTH: f64 = 5.0;
-
-        // First get the template-level prediction (which already shrinks
-        // toward subreddit-type/global).
-        let (template_mean, template_var) = self.predict(template_id, subreddit_type);
-
-        // If no channel provided, return the template-level prediction.
-        let Some(ch) = channel else {
-            return (template_mean, template_var);
-        };
-
-        // Look up the template-channel posterior.
-        let key = format!("{template_id}:{ch}");
-        let Some(tc_post) = self.by_template_channel.get(&key) else {
-            return (template_mean, template_var);
-        };
-        if tc_post.n == 0 {
-            return (template_mean, template_var);
-        }
-
-        // Shrink the template-channel posterior toward the template-level
-        // prediction. With few channel-specific observations, use the
-        // template mean; with many, use the channel-specific mean.
-        let weight = tc_post.n as f64 / (tc_post.n as f64 + SHRINKAGE_STRENGTH);
-        let mean = weight * tc_post.mean + (1.0 - weight) * template_mean;
-        let variance = weight * tc_post.variance + (1.0 - weight) * template_var;
-        (mean, variance.max(0.01))
     }
 
     /// Predicts the expected value for a template + subreddit type, using
@@ -522,27 +443,6 @@ impl NegBinPosterior {
         self.n
     }
 
-    /// P(λ > threshold) — probability that the rate exceeds a threshold.
-    /// Uses the Normal approximation to the Gamma posterior.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn p_exceeds(&self, threshold: f64) -> f64 {
-        let mean = self.mean();
-        let variance = mean / self.beta; // posterior variance of λ
-        if variance <= 0.0 {
-            return if mean > threshold { 1.0 } else { 0.0 };
-        }
-        let z = (mean - threshold) / variance.sqrt();
-        normal_cdf(z)
-    }
-
-    /// Expected Value of Information — how much the brain would learn from
-    /// one more observation.
-    #[must_use]
-    pub fn value_of_information(&self) -> f64 {
-        crate::efe::information_gain(self.n, self.std())
-    }
-
     /// P(y > 0) — probability that an observation is non-zero.
     /// For the NegBin posterior predictive: `P(y=0) = (β/(β+1))^α`.
     #[must_use]
@@ -664,30 +564,6 @@ impl HierarchicalNegBinPosterior {
         }
     }
 
-    /// Returns the posterior predictive (mean, variance) for a new
-    /// observation. The predictive variance includes both epistemic
-    /// uncertainty about λ and Poisson sampling noise:
-    /// `Var[y_pred] = mean + mean²/α` (NegBin over-dispersion).
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_predictive(
-        &self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-    ) -> (f64, f64) {
-        let (mean, _epistemic_var) = self.predict(template_id, subreddit_type);
-        // Predictive variance = epistemic + aleatoric = α/β² + α/β + (α/β)²/α
-        // = mean/β + mean + mean²/α. For simplicity, use the NegBin formula:
-        // Var = mean + mean²/dispersion, where dispersion ≈ α (shape).
-        let template_post = self.by_template.get(template_id);
-        let parent = subreddit_type
-            .and_then(|st| self.by_subreddit_type.get(st))
-            .unwrap_or(&self.global);
-        let alpha = template_post.map(|t| t.alpha).unwrap_or(parent.alpha);
-        let predictive_var = mean + mean * mean / alpha;
-        (mean, predictive_var)
-    }
-
     /// Returns the confidence (observation count) for a template.
     #[must_use]
     pub fn confidence(&self, template_id: &str) -> u32 {
@@ -747,35 +623,6 @@ impl TreatmentEffectPosterior {
         }
     }
 
-    /// Predicts the treatment effect τ for a template + subreddit type.
-    ///
-    /// Returns `(tau_mean, tau_var)` — the expected treatment effect and its
-    /// variance. Positive `tau_mean` means the action increases fans;
-    /// negative means it backfires.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict(&self, template_id: &str, subreddit_type: Option<&str>) -> (f64, f64) {
-        self.effects.predict(template_id, subreddit_type)
-    }
-
-    /// Predicts the treatment effect τ for a template + subreddit type +
-    /// channel (P2.1: hierarchical contextual treatment effects).
-    ///
-    /// When the template-channel pair has many observations, the prediction
-    /// reflects the channel-specific effect. When it has few, it shrinks
-    /// toward the template-level prediction.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    #[must_use]
-    pub fn predict_with_channel(
-        &self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-        channel: Option<&str>,
-    ) -> (f64, f64) {
-        self.effects
-            .predict_with_channel(template_id, subreddit_type, channel)
-    }
-
     /// Updates the treatment-effect posterior from an observed τ.
     ///
     /// `observed_tau` is the estimated treatment effect (e.g. from an IPW
@@ -791,26 +638,6 @@ impl TreatmentEffectPosterior {
         self.effects.update_signed(
             Some(template_id),
             subreddit_type,
-            observed_tau,
-            observation_variance,
-        );
-    }
-
-    /// Updates the treatment-effect posterior from an observed τ, with
-    /// channel context (P2.1). Also updates the template-channel posterior.
-    #[allow(dead_code)] // TODO: wire into production path (next sprint)
-    pub fn update_with_channel(
-        &mut self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-        channel: Option<&str>,
-        observed_tau: f64,
-        observation_variance: f64,
-    ) {
-        self.effects.update_signed_with_channel(
-            Some(template_id),
-            subreddit_type,
-            channel,
             observed_tau,
             observation_variance,
         );
@@ -963,27 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn voi_decreases_with_confidence() {
-        let mut post = NormalPosterior::prior(2.0, 4.0);
-        let voi_0 = post.value_of_information();
-        for _ in 0..10 {
-            post.update(5.0, 1.0);
-        }
-        let voi_10 = post.value_of_information();
-        assert!(voi_10 < voi_0, "VoI should decrease as confidence grows");
-    }
-
-    #[test]
-    fn voi_increases_with_variance() {
-        let low_var = NormalPosterior::prior(5.0, 0.1);
-        let high_var = NormalPosterior::prior(5.0, 100.0);
-        assert!(
-            high_var.value_of_information() > low_var.value_of_information(),
-            "higher variance → higher VoI"
-        );
-    }
-
-    #[test]
     fn hierarchical_shrinks_low_confidence_toward_global() {
         let mut hier = HierarchicalPosterior::new(NormalPosterior::prior(2.0, 4.0));
         // Observe 10 fans for template "a" — high confidence.
@@ -1057,17 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn treatment_effect_posterior_starts_at_zero() {
-        let tep = TreatmentEffectPosterior::new();
-        let (mean, _) = tep.predict("unknown", None);
-        assert!(
-            (mean - 0.0).abs() < 1e-9,
-            "skeptical prior should start at zero, got {mean}"
-        );
-        assert_eq!(tep.confidence("unknown"), 0);
-    }
-
-    #[test]
     fn treatment_effect_posterior_learns_positive_effect() {
         let mut tep = TreatmentEffectPosterior::new();
         for _ in 0..10 {
@@ -1121,16 +916,6 @@ mod tests {
         assert!(
             mean_b_metal > mean_b_none,
             "metal subreddit type should boost prediction above global, got metal={mean_b_metal} global={mean_b_none}"
-        );
-    }
-
-    #[test]
-    fn treatment_effect_posterior_default_is_zero() {
-        let tep = TreatmentEffectPosterior::default();
-        let (mean, _) = tep.predict("any", None);
-        assert!(
-            (mean - 0.0).abs() < 1e-9,
-            "default treatment effect should be zero, got {mean}"
         );
     }
 
@@ -1294,20 +1079,6 @@ mod tests {
             (template_post.mean - 4.0).abs() < 0.01,
             "signed template posterior should use pre-update global prior, got mean={}",
             template_post.mean
-        );
-    }
-
-    #[test]
-    fn hierarchical_no_double_counting_channel() {
-        let mut hier = HierarchicalPosterior::new(NormalPosterior::prior(0.0, 4.0));
-        hier.update_signed_with_channel(Some("a"), None, Some("reddit"), 5.0, 1.0);
-
-        // The channel posterior should also use the pre-update global (0, 4).
-        let channel_post = hier.by_template_channel.get("a:reddit").unwrap();
-        assert!(
-            (channel_post.mean - 4.0).abs() < 0.01,
-            "channel posterior should use pre-update global prior, got mean={}",
-            channel_post.mean
         );
     }
 

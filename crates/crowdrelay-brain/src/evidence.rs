@@ -321,32 +321,6 @@ impl Default for EvidenceEvent {
     }
 }
 
-/// A trait for learning subsystems that consume growth evidence.
-///
-/// The brain has multiple learning subsystems (causal model, reach model,
-/// funnel model, strategy learner, etc.). Each subsystem that wants to
-/// learn from evidence implements this trait. The brain's evidence
-/// replay loop calls `consume_evidence` on each registered subsystem.
-///
-/// This trait ensures all subsystems receive the same evidence and
-/// prevents the brain from turning into disconnected silos with different
-/// ideas of what happened.
-///
-/// # Single-counting guarantee
-///
-/// Each evidence row is passed to each consumer exactly once per replay.
-/// The consumer is responsible for not double-counting (e.g. by checking
-/// whether it has already seen this evidence row).
-#[allow(dead_code)] // TODO: wire into production path (next sprint)
-pub trait EvidenceConsumer {
-    /// Consumes a batch of growth evidence and updates the subsystem's
-    /// internal state.
-    ///
-    /// Called once per autopilot cycle with all new evidence rows since
-    /// the last cycle. The consumer should process each row exactly once.
-    fn consume_evidence(&mut self, evidence: &[GrowthEvidence]);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
