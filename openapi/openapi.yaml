@@ -2577,6 +2577,28 @@ paths:
                 $ref: '#/components/schemas/GrowthMetricTrendsResponse'
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /admin/autopilot/reach-metrics:
+    get:
+      operationId: getAutopilotReachMetrics
+      summary: Read aggregated reach event metrics for the last 30 days
+      description: >
+        Returns counts of reach events by status (sent, delivered, opened,
+        clicked, replied, converted, etc.) from the unified reach ledger.
+        This is the brain's primary read path for reach analytics.
+      security:
+      - adminBearer: []
+      responses:
+        '200':
+          description: Aggregated reach metrics for the last 30 days.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReachMetrics'
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /admin/autopilot/plays:
     get:
       operationId: getAutopilotPlays
@@ -11195,6 +11217,27 @@ components:
         series:
           type: array
           items: { $ref: '#/components/schemas/GrowthMetricTrend' }
+
+    ReachMetrics:
+      type: object
+      additionalProperties: false
+      required:
+        [total_events, total_reach, delivered, opened, clicked, replied,
+         positive_replies, declined, converted, bounced, complained, failed, ignored]
+      properties:
+        total_events: { type: integer, format: int64, minimum: 0 }
+        total_reach: { type: integer, format: int64, minimum: 0 }
+        delivered: { type: integer, format: int64, minimum: 0 }
+        opened: { type: integer, format: int64, minimum: 0 }
+        clicked: { type: integer, format: int64, minimum: 0 }
+        replied: { type: integer, format: int64, minimum: 0 }
+        positive_replies: { type: integer, format: int64, minimum: 0 }
+        declined: { type: integer, format: int64, minimum: 0 }
+        converted: { type: integer, format: int64, minimum: 0 }
+        bounced: { type: integer, format: int64, minimum: 0 }
+        complained: { type: integer, format: int64, minimum: 0 }
+        failed: { type: integer, format: int64, minimum: 0 }
+        ignored: { type: integer, format: int64, minimum: 0 }
 
     PromotionBudgetGuardrailRequest:
       type: object

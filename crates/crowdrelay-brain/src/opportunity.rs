@@ -49,6 +49,24 @@ impl OpportunityAction {
             Self::Analyze => "analyze",
         }
     }
+
+    /// Infers the action kind from a worker template ID.
+    /// Falls back to `Scan` for unknown templates (the safest
+    /// read-only action).
+    #[must_use]
+    pub fn from_template(template_id: &str) -> Self {
+        if template_id.starts_with("reddit-scanner") {
+            Self::Scan
+        } else if template_id.starts_with("community-engager") {
+            Self::Post
+        } else if template_id.starts_with("signal-inviter") {
+            Self::Invite
+        } else if template_id.starts_with("press-pitch") || template_id.starts_with("outreach") {
+            Self::Pitch
+        } else {
+            Self::Scan
+        }
+    }
 }
 
 /// A stable identity for a growth opportunity.

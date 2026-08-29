@@ -22,7 +22,7 @@
     "crates/crowdrelay-worker/src/retention.rs": 1419,
     "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1358,
     "crates/crowdrelay-domain/src/plays.rs": 1532,
-    "crates/crowdrelay-api/src/routing.rs": 927,
+    "crates/crowdrelay-api/src/routing.rs": 931,
     "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs": 1353,
     "crates/crowdrelay-api/src/acquisition.rs": 1213,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,

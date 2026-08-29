@@ -502,8 +502,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // provides the join. But updating the prediction row directly
             // is more efficient for the brain's read path.
             match measurement.kind {
-                AutopilotMeasurementKind::AgentRunFanGrowth14d
-                | AutopilotMeasurementKind::IncrementalFanGrowth14d => {
+                AutopilotMeasurementKind::AgentRunFanGrowth14d => {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
@@ -517,6 +516,28 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                // IncrementalFanGrowth14d is the counterfactual-adjusted
+                // value. It is available to the brain via the evidence
+                // view's observed_incremental_fans column, so we don't
+                // write it to observed_new_fans (which holds the raw
+                // count only). We do mark the prediction as resolved.
+                AutopilotMeasurementKind::IncrementalFanGrowth14d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_dispatch_predictions
+                        SET resolved_at = COALESCE(resolved_at, $3)
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND resolved_at IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
                     .bind(now)
                     .execute(&mut *transaction)
                     .await
