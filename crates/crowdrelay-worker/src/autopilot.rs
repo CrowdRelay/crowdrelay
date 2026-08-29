@@ -259,6 +259,17 @@ impl AutopilotWorker {
             }
         }
 
+        // Refresh treatment-effect observations from newly resolved
+        // predictions. This keeps the treatment-effect posterior up to
+        // date for the next cycle's causal model load.
+        if let Err(error) = self
+            .repository
+            .refresh_treatment_effects(self.workspace_id)
+            .await
+        {
+            tracing::warn!(error = %error, "ViryaOS treatment-effect refresh failed");
+        }
+
         // Play outcomes settle last, and settle even when the plays context is
         // switched off. Measuring what already happened is not acting on it,
         // and a campaign that ran before the operator paused the agent still

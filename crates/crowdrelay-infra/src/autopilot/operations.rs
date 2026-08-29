@@ -35,7 +35,7 @@ mod chief;
 mod discovery;
 mod execution;
 mod growth_debt;
-mod growth_intelligence;
+pub(in crate::autopilot) mod growth_intelligence;
 mod ingress;
 mod next_best_action;
 mod push_segments;

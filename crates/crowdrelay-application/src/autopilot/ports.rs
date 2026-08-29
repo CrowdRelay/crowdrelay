@@ -800,6 +800,15 @@ pub trait AutopilotMeasurementRepository: Send + Sync {
         retryable: bool,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError>;
+
+    /// Recomputes treatment-effect observations from resolved predictions
+    /// and stores them for the next cycle's causal model load. Called
+    /// after measurement resolution to keep the treatment-effect posterior
+    /// up to date.
+    async fn refresh_treatment_effects(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), RepositoryError>;
 }
 
 #[must_use]

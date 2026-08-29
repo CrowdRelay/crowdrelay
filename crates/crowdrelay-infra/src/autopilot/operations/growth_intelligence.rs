@@ -898,7 +898,6 @@ pub(in crate::autopilot) async fn save_brain_state(
 ///
 /// This function is called after measurement resolution to keep the
 /// treatment-effect posterior up to date.
-#[allow(dead_code)] // Wired in Phase 1.1
 pub(in crate::autopilot) async fn compute_and_store_treatment_effects(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
