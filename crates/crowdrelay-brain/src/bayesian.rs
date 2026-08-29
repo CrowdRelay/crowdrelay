@@ -1,12 +1,13 @@
-//! Bayesian posteriors — proper Normal-Normal conjugate model.
+//! Bayesian posteriors — conjugate models for learning.
 //!
-//! Replaces the old EMA + pseudo-variance (which stored raw M2 and called it
-//! "variance" without dividing by n-1) with a mathematically honest
-//! conjugate posterior.
+//! Two conjugate families are used:
+//! - **Normal-Normal** for treatment effects (signed, can be negative).
+//! - **Gamma-Poisson (Negative Binomial)** for fan counts (non-negative,
+//!   over-dispersed count data).
 //!
-//! # Model
+//! # Normal-Normal model (treatment effects)
 //!
-//! We model fan acquisition as:
+//! For signed quantities (treatment effects τ = Y(1) - Y(0)):
 //!
 //! ```text
 //! y_i ~ Normal(μ, σ²)
@@ -207,6 +208,9 @@ pub struct HierarchicalPosterior {
     pub by_template: std::collections::HashMap<String, NormalPosterior>,
     /// Per-subreddit-type posteriors.
     pub by_subreddit_type: std::collections::HashMap<String, NormalPosterior>,
+    /// Per-channel posteriors (P2.1: hierarchical contextual treatment effects).
+    /// Keyed by `template_id:channel` for template-channel-specific effects.
+    pub by_template_channel: std::collections::HashMap<String, NormalPosterior>,
 }
 
 impl HierarchicalPosterior {
@@ -217,6 +221,7 @@ impl HierarchicalPosterior {
             global: global_prior,
             by_template: std::collections::HashMap::new(),
             by_subreddit_type: std::collections::HashMap::new(),
+            by_template_channel: std::collections::HashMap::new(),
         }
     }
 
@@ -278,6 +283,71 @@ impl HierarchicalPosterior {
         }
     }
 
+    /// Signed update with channel — same as [`update_signed`](Self::update_signed)
+    /// but also updates the template-channel posterior. Used by the
+    /// hierarchical contextual treatment effect model (P2.1).
+    pub fn update_signed_with_channel(
+        &mut self,
+        template_id: Option<&str>,
+        subreddit_type: Option<&str>,
+        channel: Option<&str>,
+        observation: f64,
+        observation_variance: f64,
+    ) {
+        self.update_signed(
+            template_id,
+            subreddit_type,
+            observation,
+            observation_variance,
+        );
+        if let (Some(tid), Some(ch)) = (template_id, channel) {
+            let key = format!("{tid}:{ch}");
+            let prior = NormalPosterior::prior(self.global.mean, self.global.variance);
+            let entry = self.by_template_channel.entry(key).or_insert(prior);
+            entry.update_signed(observation, observation_variance);
+        }
+    }
+
+    /// Predicts the expected value for a template + subreddit type + channel,
+    /// using partial pooling across all three levels. When the
+    /// template-channel posterior has many observations, it stands on its
+    /// own; otherwise it shrinks toward the template or global posterior.
+    #[must_use]
+    pub fn predict_with_channel(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        channel: Option<&str>,
+    ) -> (f64, f64) {
+        const SHRINKAGE_STRENGTH: f64 = 5.0;
+
+        // First get the template-level prediction (which already shrinks
+        // toward subreddit-type/global).
+        let (template_mean, template_var) = self.predict(template_id, subreddit_type);
+
+        // If no channel provided, return the template-level prediction.
+        let Some(ch) = channel else {
+            return (template_mean, template_var);
+        };
+
+        // Look up the template-channel posterior.
+        let key = format!("{template_id}:{ch}");
+        let Some(tc_post) = self.by_template_channel.get(&key) else {
+            return (template_mean, template_var);
+        };
+        if tc_post.n == 0 {
+            return (template_mean, template_var);
+        }
+
+        // Shrink the template-channel posterior toward the template-level
+        // prediction. With few channel-specific observations, use the
+        // template mean; with many, use the channel-specific mean.
+        let weight = tc_post.n as f64 / (tc_post.n as f64 + SHRINKAGE_STRENGTH);
+        let mean = weight * tc_post.mean + (1.0 - weight) * template_mean;
+        let variance = weight * tc_post.variance + (1.0 - weight) * template_var;
+        (mean, variance.max(0.01))
+    }
+
     /// Predicts the expected value for a template + subreddit type, using
     /// partial pooling.
     ///
@@ -326,6 +396,279 @@ impl HierarchicalPosterior {
     #[must_use]
     pub fn confidence(&self, template_id: &str) -> u32 {
         self.by_template.get(template_id).map(|p| p.n).unwrap_or(0)
+    }
+}
+
+// ─── Negative Binomial Posterior (Gamma-Poisson conjugate) ───────────────
+
+/// A Gamma-Poisson conjugate posterior for count data (fan acquisitions,
+/// Signal installs).
+///
+/// Fan counts are non-negative integers with over-dispersion (0, 0, 0, 1, 0,
+/// 17, 2, 0) — the variance exceeds the mean. The Normal-Normal model assumes
+/// continuous Gaussian observations with constant variance, which is
+/// mathematically wrong for this data type.
+///
+/// # Model
+///
+/// The Poisson rate λ has a Gamma prior:
+///
+/// ```text
+/// λ ~ Gamma(α, β)         (prior)
+/// y ~ Poisson(λ)          (observation)
+/// λ | y ~ Gamma(α + y, β + 1)   (posterior)
+/// ```
+///
+/// For multiple observations y₁..yₙ:
+///
+/// ```text
+/// λ | y₁..yₙ ~ Gamma(α + Σyᵢ, β + n)
+/// ```
+///
+/// The posterior predictive (marginalizing over λ) is Negative Binomial:
+///
+/// ```text
+/// y_pred ~ NegBin(r = α', p = β' / (β' + 1))
+/// E[y_pred] = α' / β'           (= λ posterior mean)
+/// Var[y_pred] = α'/β' + α'/β'²  (= mean + mean²/α', over-dispersed)
+/// ```
+///
+/// The `dispersion` parameter controls over-dispersion: higher values mean
+/// more variance relative to the mean (more heterogeneous outcomes).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NegBinPosterior {
+    /// Gamma shape parameter α (posterior).
+    pub alpha: f64,
+    /// Gamma rate parameter β (posterior).
+    pub beta: f64,
+    /// Number of observations.
+    pub n: u32,
+}
+
+impl Default for NegBinPosterior {
+    fn default() -> Self {
+        Self::prior(crate::DEFAULT_EXPECTED_FANS, 2.0)
+    }
+}
+
+impl NegBinPosterior {
+    /// Creates a Gamma prior with the given mean and dispersion.
+    ///
+    /// `mean` = α/β, `dispersion` = α (the NegBin size parameter).
+    /// Higher dispersion → less over-dispersion (variance closer to mean).
+    /// Lower dispersion → more over-dispersion (variance >> mean).
+    #[must_use]
+    pub fn prior(mean: f64, dispersion: f64) -> Self {
+        let alpha = dispersion.max(0.1);
+        let beta = if mean > 0.0 { alpha / mean } else { alpha };
+        Self { alpha, beta, n: 0 }
+    }
+
+    /// Bayesian update with one count observation.
+    ///
+    /// Gamma-Poisson conjugate: α += y, β += 1.
+    pub fn update(&mut self, observation: u32) {
+        self.alpha += f64::from(observation);
+        self.beta += 1.0;
+        self.n += 1;
+    }
+
+    /// Returns the posterior predictive (mean, variance).
+    ///
+    /// Mean = α/β, Variance = α/β + α/β² = mean + mean²/α.
+    #[must_use]
+    pub fn predict(&self) -> (f64, f64) {
+        let mean = self.alpha / self.beta;
+        let variance = mean + mean * mean / self.alpha;
+        (mean, variance)
+    }
+
+    /// Returns the posterior predictive standard deviation.
+    #[must_use]
+    pub fn std(&self) -> f64 {
+        let (_, var) = self.predict();
+        var.sqrt().max(0.1)
+    }
+
+    /// Returns the posterior mean of the rate parameter λ.
+    #[must_use]
+    pub fn mean(&self) -> f64 {
+        self.alpha / self.beta
+    }
+
+    /// Returns the number of observations.
+    #[must_use]
+    pub fn confidence(&self) -> u32 {
+        self.n
+    }
+
+    /// P(λ > threshold) — probability that the rate exceeds a threshold.
+    /// Uses the Normal approximation to the Gamma posterior.
+    #[must_use]
+    pub fn p_exceeds(&self, threshold: f64) -> f64 {
+        let mean = self.mean();
+        let variance = mean / self.beta; // posterior variance of λ
+        if variance <= 0.0 {
+            return if mean > threshold { 1.0 } else { 0.0 };
+        }
+        let z = (mean - threshold) / variance.sqrt();
+        normal_cdf(z)
+    }
+
+    /// Expected Value of Information — how much the brain would learn from
+    /// one more observation.
+    #[must_use]
+    pub fn value_of_information(&self) -> f64 {
+        crate::efe::information_gain(self.n, self.std())
+    }
+
+    /// P(y > 0) — probability that an observation is non-zero.
+    /// For the NegBin posterior predictive: `P(y=0) = (β/(β+1))^α`.
+    #[must_use]
+    pub fn p_positive(&self) -> f64 {
+        let p_zero = (self.beta / (self.beta + 1.0)).powf(self.alpha);
+        (1.0 - p_zero).clamp(0.0, 1.0)
+    }
+}
+
+/// A hierarchical NegBin posterior with partial pooling across templates
+/// and subreddit types — the count-data analogue of
+/// [`HierarchicalPosterior`].
+///
+/// Uses the same shrinkage structure: when a template has few observations,
+/// its prediction shrinks toward the global posterior. When it has many, it
+/// stands on its own.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HierarchicalNegBinPosterior {
+    /// The global posterior — pooled across all observations.
+    pub global: NegBinPosterior,
+    /// Per-template posteriors.
+    pub by_template: std::collections::HashMap<String, NegBinPosterior>,
+    /// Per-subreddit-type posteriors.
+    pub by_subreddit_type: std::collections::HashMap<String, NegBinPosterior>,
+}
+
+impl HierarchicalNegBinPosterior {
+    /// Creates a hierarchical posterior with the given global prior.
+    #[must_use]
+    pub fn new(global_prior: NegBinPosterior) -> Self {
+        Self {
+            global: global_prior,
+            by_template: std::collections::HashMap::new(),
+            by_subreddit_type: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Updates the hierarchy with one count observation.
+    ///
+    /// The observation updates the global posterior, the template-level
+    /// posterior (if provided), and the subreddit-type posterior (if provided).
+    /// Each level's posterior is the global posterior updated with that level's
+    /// observations — the correct hierarchical Gamma-Poisson model.
+    pub fn update(
+        &mut self,
+        template_id: Option<&str>,
+        subreddit_type: Option<&str>,
+        observation: u32,
+    ) {
+        // Update global posterior.
+        self.global.update(observation);
+
+        // Update template posterior, using the current global posterior as prior.
+        if let Some(tid) = template_id {
+            let prior = NegBinPosterior {
+                alpha: self.global.alpha,
+                beta: self.global.beta,
+                n: 0,
+            };
+            let entry = self.by_template.entry(tid.to_owned()).or_insert(prior);
+            entry.update(observation);
+        }
+
+        // Update subreddit-type posterior.
+        if let Some(st) = subreddit_type {
+            let prior = NegBinPosterior {
+                alpha: self.global.alpha,
+                beta: self.global.beta,
+                n: 0,
+            };
+            let entry = self.by_subreddit_type.entry(st.to_owned()).or_insert(prior);
+            entry.update(observation);
+        }
+    }
+
+    /// Predicts the expected count for a template + subreddit type, using
+    /// partial pooling with the same shrinkage formula as
+    /// [`HierarchicalPosterior`].
+    ///
+    /// Returns `(mean, variance)` where `mean` is the posterior mean of the
+    /// rate parameter λ and `variance` is the epistemic uncertainty about λ
+    /// (the posterior variance of the Gamma distribution, `α/β²`). This is
+    /// the uncertainty the EFE scorer uses for epistemic value — it shrinks
+    /// as more data arrives. The posterior predictive variance (which
+    /// includes Poisson sampling noise) is available via
+    /// [`predict_predictive`](Self::predict_predictive).
+    #[must_use]
+    pub fn predict(&self, template_id: &str, subreddit_type: Option<&str>) -> (f64, f64) {
+        const SHRINKAGE_STRENGTH: f64 = 5.0;
+
+        let template_post = self.by_template.get(template_id);
+        let subreddit_post = subreddit_type.and_then(|st| self.by_subreddit_type.get(st));
+
+        let parent = subreddit_post.unwrap_or(&self.global);
+        let parent_mean = parent.mean();
+        let parent_var = parent.alpha / (parent.beta * parent.beta);
+
+        match template_post {
+            Some(tp) if tp.n > 0 => {
+                let weight = tp.n as f64 / (tp.n as f64 + SHRINKAGE_STRENGTH);
+                let tp_mean = tp.mean();
+                let tp_var = tp.alpha / (tp.beta * tp.beta);
+                let mean = weight * tp_mean + (1.0 - weight) * parent_mean;
+                let variance = weight * tp_var + (1.0 - weight) * parent_var;
+                (mean, variance.max(0.01))
+            }
+            _ => (parent_mean, parent_var.max(0.01)),
+        }
+    }
+
+    /// Returns the posterior predictive (mean, variance) for a new
+    /// observation. The predictive variance includes both epistemic
+    /// uncertainty about λ and Poisson sampling noise:
+    /// `Var[y_pred] = mean + mean²/α` (NegBin over-dispersion).
+    #[must_use]
+    pub fn predict_predictive(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+    ) -> (f64, f64) {
+        let (mean, _epistemic_var) = self.predict(template_id, subreddit_type);
+        // Predictive variance = epistemic + aleatoric = α/β² + α/β + (α/β)²/α
+        // = mean/β + mean + mean²/α. For simplicity, use the NegBin formula:
+        // Var = mean + mean²/dispersion, where dispersion ≈ α (shape).
+        let template_post = self.by_template.get(template_id);
+        let parent = subreddit_type
+            .and_then(|st| self.by_subreddit_type.get(st))
+            .unwrap_or(&self.global);
+        let alpha = template_post.map(|t| t.alpha).unwrap_or(parent.alpha);
+        let predictive_var = mean + mean * mean / alpha;
+        (mean, predictive_var)
+    }
+
+    /// Returns the confidence (observation count) for a template.
+    #[must_use]
+    pub fn confidence(&self, template_id: &str) -> u32 {
+        self.by_template.get(template_id).map(|p| p.n).unwrap_or(0)
+    }
+
+    /// Returns the posterior for a template, or the global posterior if
+    /// the template has no data.
+    #[must_use]
+    pub fn template_posterior(&self, template_id: &str) -> NegBinPosterior {
+        self.by_template
+            .get(template_id)
+            .cloned()
+            .unwrap_or_else(|| self.global.clone())
     }
 }
 
@@ -381,6 +724,23 @@ impl TreatmentEffectPosterior {
         self.effects.predict(template_id, subreddit_type)
     }
 
+    /// Predicts the treatment effect τ for a template + subreddit type +
+    /// channel (P2.1: hierarchical contextual treatment effects).
+    ///
+    /// When the template-channel pair has many observations, the prediction
+    /// reflects the channel-specific effect. When it has few, it shrinks
+    /// toward the template-level prediction.
+    #[must_use]
+    pub fn predict_with_channel(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        channel: Option<&str>,
+    ) -> (f64, f64) {
+        self.effects
+            .predict_with_channel(template_id, subreddit_type, channel)
+    }
+
     /// Updates the treatment-effect posterior from an observed τ.
     ///
     /// `observed_tau` is the estimated treatment effect (e.g. from an IPW
@@ -396,6 +756,25 @@ impl TreatmentEffectPosterior {
         self.effects.update_signed(
             Some(template_id),
             subreddit_type,
+            observed_tau,
+            observation_variance,
+        );
+    }
+
+    /// Updates the treatment-effect posterior from an observed τ, with
+    /// channel context (P2.1). Also updates the template-channel posterior.
+    pub fn update_with_channel(
+        &mut self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        channel: Option<&str>,
+        observed_tau: f64,
+        observation_variance: f64,
+    ) {
+        self.effects.update_signed_with_channel(
+            Some(template_id),
+            subreddit_type,
+            channel,
             observed_tau,
             observation_variance,
         );
@@ -681,6 +1060,120 @@ mod tests {
         assert!(
             (mean - 0.0).abs() < 1e-9,
             "default treatment effect should be zero, got {mean}"
+        );
+    }
+
+    // ── NegBinPosterior tests ───────────────────────────────────────────
+
+    #[test]
+    fn negbin_prior_has_correct_mean() {
+        let post = NegBinPosterior::prior(5.0, 2.0);
+        let (mean, _) = post.predict();
+        assert!((mean - 5.0).abs() < 0.001, "prior mean should be 5.0");
+    }
+
+    #[test]
+    fn negbin_update_moves_mean_toward_observation() {
+        let mut post = NegBinPosterior::prior(2.0, 2.0);
+        // Observe 10 fans multiple times
+        for _ in 0..20 {
+            post.update(10);
+        }
+        let (mean, _) = post.predict();
+        // After 20 observations of 10, mean should be close to 10
+        assert!(mean > 8.0, "mean should move toward 10, got {mean}");
+        assert!(mean < 12.0, "mean should not overshoot 10, got {mean}");
+    }
+
+    #[test]
+    fn negbin_variance_greater_than_mean() {
+        let mut post = NegBinPosterior::prior(2.0, 2.0);
+        // Observe over-dispersed data: 0, 0, 0, 1, 0, 17, 2, 0
+        for &y in &[0, 0, 0, 1, 0, 17, 2, 0] {
+            post.update(y);
+        }
+        let (mean, variance) = post.predict();
+        // NegBin property: variance > mean (over-dispersion)
+        assert!(
+            variance > mean,
+            "variance ({variance}) should exceed mean ({mean}) for over-dispersed data"
+        );
+    }
+
+    #[test]
+    fn negbin_confidence_increases_with_observations() {
+        let mut post = NegBinPosterior::prior(2.0, 2.0);
+        assert_eq!(post.confidence(), 0);
+        post.update(1);
+        assert_eq!(post.confidence(), 1);
+        post.update(5);
+        assert_eq!(post.confidence(), 2);
+    }
+
+    #[test]
+    fn negbin_handles_zero_observations() {
+        let mut post = NegBinPosterior::prior(2.0, 2.0);
+        post.update(0);
+        post.update(0);
+        post.update(0);
+        let (mean, _) = post.predict();
+        // After 3 zeros, mean should have moved toward 0
+        assert!(mean < 2.0, "mean should decrease after zeros, got {mean}");
+    }
+
+    // ── HierarchicalNegBinPosterior tests ───────────────────────────────
+
+    #[test]
+    fn hierarchical_negbin_shrinks_low_confidence_toward_global() {
+        let mut hier = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(3.0, 2.0));
+        // Give the global posterior lots of data at mean=5
+        for _ in 0..50 {
+            hier.update(None, None, 5);
+        }
+        // One observation for a template at 20
+        hier.update(Some("rare-template"), None, 20);
+        let (mean, _) = hier.predict("rare-template", None);
+        // With only 1 observation, should shrink toward global (5), not stay at 20
+        assert!(
+            mean < 15.0,
+            "low-confidence template should shrink toward global, got {mean}"
+        );
+        assert!(
+            mean > 5.0,
+            "but should be pulled somewhat toward 20, got {mean}"
+        );
+    }
+
+    #[test]
+    fn hierarchical_negbin_high_confidence_stands_alone() {
+        let mut hier = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(3.0, 2.0));
+        // Give the global posterior data at mean=5
+        for _ in 0..20 {
+            hier.update(None, None, 5);
+        }
+        // Give a template lots of data at mean=15
+        for _ in 0..50 {
+            hier.update(Some("confident-template"), None, 15);
+        }
+        let (mean, _) = hier.predict("confident-template", None);
+        // With 50 observations, should be close to 15, not shrunk toward 5
+        assert!(
+            mean > 12.0,
+            "high-confidence template should stand alone, got {mean}"
+        );
+    }
+
+    #[test]
+    fn hierarchical_negbin_predict_unknown_template_uses_global() {
+        let mut hier = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(3.0, 2.0));
+        for _ in 0..10 {
+            hier.update(None, None, 7);
+        }
+        let (mean, _) = hier.predict("unknown-template", None);
+        // Unknown template should use global posterior
+        assert!(
+            (mean - 7.0).abs() < 2.0,
+            "unknown template should use global, got {mean}"
         );
     }
 }

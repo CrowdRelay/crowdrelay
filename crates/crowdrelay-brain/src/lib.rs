@@ -10,9 +10,10 @@
 //!
 //! The brain is built on five mathematical foundations:
 //!
-//! 1. **Causal Model** — P(incremental_fan | template, context) with proper
-//!    Bayesian posteriors (Normal-Normal conjugate model). Replaces the old
-//!    EMA + pseudo-variance with mathematically honest uncertainty.
+//! 1. **Causal Model** — P(incremental_fan | template, context) with a
+//!    Gamma-Poisson (Negative Binomial) conjugate model for count data.
+//!    Replaces the old EMA + pseudo-variance with mathematically honest
+//!    uncertainty.
 //! 2. **EFE Scoring** — Expected Free Energy balances pragmatic value
 //!    (expected fans) against epistemic value (information gain × uncertainty)
 //!    and exploration novelty. Lower EFE = better opportunity.
@@ -71,7 +72,8 @@ pub mod world_model;
 // Re-export the most commonly used types at the crate root.
 pub use audience::{AudienceKey, LearnedOverlapModel, estimate_overlap, marginal_value};
 pub use bayesian::{
-    HierarchicalPosterior, NormalPosterior, TreatmentEffectPosterior, normal_cdf, normal_pdf,
+    HierarchicalNegBinPosterior, HierarchicalPosterior, NegBinPosterior, NormalPosterior,
+    TreatmentEffectPosterior, normal_cdf, normal_pdf,
 };
 pub use calibration::{CalibrationReport, CalibrationTracker, PredictionRecord, ReliabilityBucket};
 pub use causal_model::{
@@ -80,17 +82,19 @@ pub use causal_model::{
     TreatmentAwareStats,
 };
 pub use change_point::{ChangeDirection, ChangePoint, ChangePointDetector};
-pub use context_effect::ContextEffectPosterior;
+pub use context_effect::ContextGLM;
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
-pub use evidence::GrowthEvidence;
+pub use evidence::{EvidenceEvent, EvidenceEventType, GrowthEvidence};
 pub use experiment::{
     DEFAULT_TREATMENT_PROBABILITY, ExperimentEngine, MIN_CONFIDENCE_FOR_EXPERIMENT,
     PropensityRecord, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
-pub use fan_network::{FanNetworkModel, NetworkEffect, RecruitmentChannel};
+pub use fan_network::{
+    ChannelReproductionModel, FanNetworkModel, NetworkEffect, RecruitmentChannel,
+};
 pub use hypothesis::{Hypothesis, HypothesisRegistry, HypothesisStatus};
 pub use metacognition::{MetacognitionMonitor, MetacognitiveState};
 pub use north_star::NorthStarMetric;
@@ -122,12 +126,16 @@ pub use standing::{
     AgentTier, agent_standing_policy, effective_agent_cooldown, effective_agent_tier,
 };
 pub use strategy::GrowthStrategy;
-pub use strategy_learning::{StrategyLearner, StrategyOutcome, StrategyPosterior};
+pub use strategy_learning::{
+    StateConditionedStrategyPosterior, StrategyLearner, StrategyOutcome, StrategyPosterior,
+};
 pub use voi::{
     VoiAssessment, expected_information_gain, exploration_bonus, knowledge_gradient,
-    knowledge_gradient_ranking, option_value, value_of_information,
+    knowledge_gradient_ranking, option_value, portfolio_kg, value_of_information,
 };
-pub use world_model::{GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel};
+pub use world_model::{
+    GrowthTarget, GrowthTargetProgress, GrowthTrend, StateTransitionModel, TargetStatus, WorldModel,
+};
 
 // Re-export shared domain types the brain depends on.
 pub use crowdrelay_domain::learning::{Standing, StandingPolicy};

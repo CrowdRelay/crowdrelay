@@ -15,6 +15,10 @@ use crowdrelay_application::RepositoryError;
 
 /// Records a growth evidence row at dispatch time. The outcome fields are
 /// left NULL — they are filled in when measurements arrive.
+///
+/// This also writes an immutable `action_dispatched` event to the
+/// `viryaos_evidence_events` table and upserts the derived episode in
+/// `viryaos_growth_episodes`.
 pub(in crate::autopilot) async fn record_growth_evidence(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -30,9 +34,10 @@ pub(in crate::autopilot) async fn record_growth_evidence(
             treatment, propensity,
             observed_fans, observed_incremental_fans, durable_fans_30d,
             converted, converted_fan_id,
-            predicted_fans, predicted_signal_installs, context
+            predicted_fans, predicted_signal_installs, context,
+            episode_id, resolved_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         ON CONFLICT (workspace_id, action_id) DO NOTHING
         "#,
     )
@@ -55,9 +60,38 @@ pub(in crate::autopilot) async fn record_growth_evidence(
     .bind(evidence.predicted_fans)
     .bind(evidence.predicted_signal_installs)
     .bind(&context_json)
+    .bind(&evidence.episode_id)
+    .bind(evidence.resolved_at)
     .execute(pool)
     .await
     .map_err(map_sqlx)?;
+
+    // Also write an immutable evidence event for the dispatch.
+    let event = crowdrelay_brain::EvidenceEvent {
+        workspace_id: workspace_id.into_uuid(),
+        action_id: Some(evidence.action_id),
+        opportunity_id: evidence.opportunity_id.clone(),
+        episode_id: evidence.episode_id.clone(),
+        event_type: crowdrelay_brain::EvidenceEventType::ActionDispatched,
+        payload: serde_json::json!({
+            "channel": evidence.channel.as_str(),
+            "estimated_reach": evidence.estimated_reach,
+            "treatment": evidence.treatment.as_str(),
+            "propensity": evidence.propensity,
+            "predicted_fans": evidence.predicted_fans,
+            "predicted_signal_installs": evidence.predicted_signal_installs,
+            "context": context_json,
+        }),
+        occurred_at: evidence.timestamp,
+    };
+    // Best-effort event write — don't fail the dispatch if the event log
+    // write fails. The evidence table is the source of truth; the event
+    // log is the audit trail.
+    let _ = record_evidence_event(repo, workspace_id, &event).await;
+
+    // Upsert the derived episode.
+    let _ = upsert_growth_episode(repo, workspace_id, evidence).await;
+
     Ok(())
 }
 
@@ -92,6 +126,8 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         predicted_fans: f64,
         predicted_signal_installs: f64,
         context: serde_json::Value,
+        episode_id: Option<String>,
+        resolved_at: Option<OffsetDateTime>,
     }
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
@@ -100,7 +136,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                channel, estimated_reach, actual_reach, treatment, propensity,
                observed_fans, observed_incremental_fans, durable_fans_30d,
                converted, converted_fan_id, predicted_fans, predicted_signal_installs,
-               context
+               context, episode_id, resolved_at
         FROM viryaos_growth_evidence
         WHERE workspace_id = $1
           AND resolved_at IS NOT NULL
@@ -143,6 +179,8 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 predicted_fans: row.predicted_fans,
                 predicted_signal_installs: row.predicted_signal_installs,
                 context,
+                episode_id: row.episode_id,
+                resolved_at: row.resolved_at,
             }
         })
         .collect();
@@ -196,4 +234,88 @@ pub(in crate::autopilot) async fn load_brain_state(
     .await
     .map_err(map_sqlx)?;
     Ok(row)
+}
+
+/// Records an immutable evidence event to the `viryaos_evidence_events` table.
+///
+/// This is the append-only event log. Each call inserts a new row — no
+/// updates, no deletes. The derived `viryaos_growth_episodes` table is
+/// rebuilt from these events.
+pub(in crate::autopilot) async fn record_evidence_event(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    event: &crowdrelay_brain::EvidenceEvent,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_evidence_events
+            (workspace_id, action_id, opportunity_id, episode_id,
+             event_type, payload, occurred_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event.action_id)
+    .bind(&event.opportunity_id)
+    .bind(&event.episode_id)
+    .bind(event.event_type.as_str())
+    .bind(&event.payload)
+    .bind(event.occurred_at)
+    .execute(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Upserts a growth episode — the derived aggregate from evidence events.
+///
+/// Called after recording an evidence event to keep the episode table in
+/// sync. The episode is the brain's primary read path for evidence.
+pub(in crate::autopilot) async fn upsert_growth_episode(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    evidence: &GrowthEvidence,
+) -> Result<(), RepositoryError> {
+    let context_json = serde_json::to_value(&evidence.context).unwrap_or(serde_json::json!({}));
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_growth_episodes (
+            workspace_id, action_id, opportunity_id, episode_id,
+            channel, estimated_reach, treatment, propensity,
+            predicted_fans, predicted_signal_installs, context,
+            observed_fans, observed_incremental_fans, durable_fans_30d,
+            actual_reach, converted, resolved_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+        ON CONFLICT (workspace_id, action_id) DO UPDATE SET
+            observed_fans = EXCLUDED.observed_fans,
+            observed_incremental_fans = EXCLUDED.observed_incremental_fans,
+            durable_fans_30d = EXCLUDED.durable_fans_30d,
+            actual_reach = EXCLUDED.actual_reach,
+            converted = EXCLUDED.converted,
+            resolved_at = EXCLUDED.resolved_at,
+            updated_at = now()
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(evidence.action_id)
+    .bind(&evidence.opportunity_id)
+    .bind(&evidence.episode_id)
+    .bind(evidence.channel.as_str())
+    .bind(evidence.estimated_reach as i32)
+    .bind(evidence.treatment.as_str())
+    .bind(evidence.propensity)
+    .bind(evidence.predicted_fans)
+    .bind(evidence.predicted_signal_installs)
+    .bind(&context_json)
+    .bind(evidence.observed_fans)
+    .bind(evidence.observed_incremental_fans)
+    .bind(evidence.durable_fans_30d)
+    .bind(evidence.actual_reach.map(|v| v as i32))
+    .bind(evidence.converted)
+    .bind(evidence.resolved_at)
+    .execute(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }

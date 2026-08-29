@@ -22,7 +22,7 @@
 //! using a Bayesian-style weighted update, so the model self-corrects as
 //! real network-effect data arrives.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -161,6 +161,95 @@ pub struct NetworkEffect {
     pub channel: RecruitmentChannel,
     /// When the network effect was recorded.
     pub recorded_at: OffsetDateTime,
+}
+
+// ─── Channel Reproduction Model (P2.4) ───────────────────────────────────
+
+/// A per-channel fan reproduction model. Fans acquired via community
+/// engagement may reproduce differently than ones acquired via Signal push
+/// or social posts. This model tracks reproduction rates per acquisition
+/// channel, allowing the simulation to predict channel-specific propagation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelReproductionModel {
+    /// Per-channel reproduction rates. Key: channel name (e.g.
+    /// "reddit_post", "signal_push", "social_post"). Value: reproduction
+    /// rate (average number of new fans each fan recruits per generation).
+    rates: std::collections::HashMap<String, f64>,
+    /// Per-channel observation counts (for confidence tracking).
+    counts: std::collections::HashMap<String, u32>,
+    /// The default reproduction rate when a channel has no data.
+    default_rate: f64,
+}
+
+impl Default for ChannelReproductionModel {
+    fn default() -> Self {
+        Self::new(0.3)
+    }
+}
+
+impl ChannelReproductionModel {
+    /// Creates a new channel reproduction model with the given default rate.
+    #[must_use]
+    pub fn new(default_rate: f64) -> Self {
+        Self {
+            rates: std::collections::HashMap::new(),
+            counts: std::collections::HashMap::new(),
+            default_rate: default_rate.max(0.0),
+        }
+    }
+
+    /// Returns the reproduction rate for a channel, or the default if no
+    /// data is available.
+    #[must_use]
+    pub fn rate(&self, channel: &str) -> f64 {
+        self.rates
+            .get(channel)
+            .copied()
+            .unwrap_or(self.default_rate)
+    }
+
+    /// Returns the confidence (observation count) for a channel.
+    #[must_use]
+    pub fn confidence(&self, channel: &str) -> u32 {
+        self.counts.get(channel).copied().unwrap_or(0)
+    }
+
+    /// Updates the reproduction rate for a channel from an observed rate.
+    /// Uses exponential moving average with learning rate `1/(1+count)`.
+    pub fn update(&mut self, channel: &str, observed_rate: f64) {
+        if !observed_rate.is_finite() || observed_rate < 0.0 {
+            return;
+        }
+        let count = self.counts.entry(channel.to_owned()).or_insert(0);
+        *count += 1;
+        let lr = 1.0 / (1.0 + (*count as f64).min(10.0));
+        let current = self
+            .rates
+            .get(channel)
+            .copied()
+            .unwrap_or(self.default_rate);
+        let updated = current + lr * (observed_rate - current);
+        self.rates.insert(channel.to_owned(), updated.max(0.0));
+    }
+
+    /// Predicts the total fan propagation from `n_fans` acquired via the
+    /// given channel over `months` generations.
+    ///
+    /// Uses the geometric series: `total = n × (1 + r + r² + ... + r^months)`
+    /// where `r` is the channel-specific reproduction rate.
+    #[must_use]
+    pub fn predict_channel_propagation(&self, channel: &str, n_fans: f64, months: u32) -> f64 {
+        if n_fans <= 0.0 || months == 0 {
+            return n_fans.max(0.0);
+        }
+        let r = self.rate(channel);
+        if r >= 0.99 {
+            // Near-geometric growth — cap to avoid infinity.
+            return n_fans * (months + 1) as f64;
+        }
+        // Geometric series sum: n × (1 - r^(months+1)) / (1 - r)
+        n_fans * (1.0 - r.powi(months as i32 + 1)) / (1.0 - r)
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +399,63 @@ mod tests {
         assert_eq!(json, "\"word_of_mouth\"");
         let json = serde_json::to_string(&RecruitmentChannel::DirectInvite).unwrap();
         assert_eq!(json, "\"direct_invite\"");
+    }
+
+    // ── ChannelReproductionModel tests ───────────────────────────────────
+
+    #[test]
+    fn channel_reproduction_uses_default_for_unknown_channel() {
+        let model = ChannelReproductionModel::new(0.3);
+        assert!((model.rate("unknown") - 0.3).abs() < 0.001);
+        assert_eq!(model.confidence("unknown"), 0);
+    }
+
+    #[test]
+    fn channel_reproduction_learns_per_channel() {
+        let mut model = ChannelReproductionModel::new(0.3);
+        for _ in 0..20 {
+            model.update("reddit_post", 0.5);
+        }
+        for _ in 0..20 {
+            model.update("signal_push", 0.1);
+        }
+        let reddit_rate = model.rate("reddit_post");
+        let signal_rate = model.rate("signal_push");
+        assert!(
+            reddit_rate > 0.4,
+            "reddit should learn toward 0.5, got {reddit_rate}"
+        );
+        assert!(
+            signal_rate < 0.2,
+            "signal should learn toward 0.1, got {signal_rate}"
+        );
+    }
+
+    #[test]
+    fn channel_reproduction_propagation_uses_channel_rate() {
+        let mut model = ChannelReproductionModel::new(0.3);
+        model.update("reddit_post", 0.5);
+        model.update("reddit_post", 0.5);
+        let propagation = model.predict_channel_propagation("reddit_post", 10.0, 3);
+        // With r=0.5, 10 fans, 3 months: 10 × (1 - 0.5^4) / (1 - 0.5) = 10 × 1.875 = 18.75
+        assert!(
+            propagation > 15.0,
+            "propagation should be ~18.75, got {propagation}"
+        );
+        assert!(
+            propagation < 25.0,
+            "propagation should not explode, got {propagation}"
+        );
+    }
+
+    #[test]
+    fn channel_reproduction_ignores_invalid_observations() {
+        let mut model = ChannelReproductionModel::new(0.3);
+        let initial = model.rate("test");
+        model.update("test", f64::NAN);
+        model.update("test", -1.0);
+        model.update("test", f64::INFINITY);
+        assert_eq!(model.confidence("test"), 0);
+        assert!((model.rate("test") - initial).abs() < 0.001);
     }
 }

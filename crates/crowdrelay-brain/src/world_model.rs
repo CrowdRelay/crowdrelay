@@ -90,6 +90,17 @@ impl GrowthTrend {
     pub const fn is_stagnant(self) -> bool {
         matches!(self, Self::Stagnant | Self::Decelerating)
     }
+
+    /// Returns the string representation for use as a map key.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stagnant => "stagnant",
+            Self::Decelerating => "decelerating",
+            Self::Steady => "steady",
+            Self::Accelerating => "accelerating",
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -190,6 +201,92 @@ impl GrowthTargetProgress {
     }
 }
 
+// ─── State-Transition World Model (P2.5) ─────────────────────────────────
+
+/// A state-transition model that learns the probability of transitioning
+/// between growth states (stagnant → accelerating, etc.) given actions taken.
+///
+/// The model tracks transition counts: `P(next_state | current_state, action_taken)`.
+/// This lets the brain simulate state trajectories, not just fan counts.
+///
+/// The action is discretized as "dispatch" vs "no_dispatch" — the key
+/// question is whether dispatching moves the system from stagnant to
+/// accelerating.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StateTransitionModel {
+    /// Transition counts: key = "current_state:action:next_state" → count.
+    transitions: std::collections::HashMap<String, u32>,
+    /// Total counts per (current_state, action): key = "current_state:action" → count.
+    totals: std::collections::HashMap<String, u32>,
+}
+
+impl StateTransitionModel {
+    /// Creates a new state-transition model.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Computes the key for a (current_state, action, next_state) triple.
+    fn transition_key(current: GrowthTrend, action: &str, next: GrowthTrend) -> String {
+        format!("{}:{action}:{}", current.as_str(), next.as_str())
+    }
+
+    /// Computes the key for a (current_state, action) pair.
+    fn total_key(current: GrowthTrend, action: &str) -> String {
+        format!("{}:{action}", current.as_str())
+    }
+
+    /// Records a state transition: the system was in `current_state`, action
+    /// `action` was taken, and the system transitioned to `next_state`.
+    pub fn update(&mut self, current: GrowthTrend, action: &str, next: GrowthTrend) {
+        let tkey = Self::transition_key(current, action, next);
+        let totkey = Self::total_key(current, action);
+        *self.transitions.entry(tkey).or_insert(0) += 1;
+        *self.totals.entry(totkey).or_insert(0) += 1;
+    }
+
+    /// Predicts the probability of transitioning to `next_state` given the
+    /// current state and action. Returns 0.0 when no data is available.
+    #[must_use]
+    pub fn probability(&self, current: GrowthTrend, action: &str, next: GrowthTrend) -> f64 {
+        let tkey = Self::transition_key(current, action, next);
+        let totkey = Self::total_key(current, action);
+        let count = self.transitions.get(&tkey).copied().unwrap_or(0);
+        let total = self.totals.get(&totkey).copied().unwrap_or(0);
+        if total == 0 {
+            return 0.0;
+        }
+        f64::from(count) / f64::from(total)
+    }
+
+    /// Predicts the most likely next state given the current state and action.
+    /// Returns `None` when no data is available.
+    #[must_use]
+    pub fn predict_transition(&self, current: GrowthTrend, action: &str) -> Option<GrowthTrend> {
+        let mut best: Option<(GrowthTrend, f64)> = None;
+        for next in [
+            GrowthTrend::Stagnant,
+            GrowthTrend::Decelerating,
+            GrowthTrend::Steady,
+            GrowthTrend::Accelerating,
+        ] {
+            let p = self.probability(current, action, next);
+            if p > 0.0 && (best.is_none() || p > best.unwrap().1) {
+                best = Some((next, p));
+            }
+        }
+        best.map(|(s, _)| s)
+    }
+
+    /// Returns the confidence (total observation count) for a (state, action) pair.
+    #[must_use]
+    pub fn confidence(&self, current: GrowthTrend, action: &str) -> u32 {
+        let key = Self::total_key(current, action);
+        self.totals.get(&key).copied().unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +373,86 @@ mod tests {
         let progress = GrowthTargetProgress::from_counts(target, 5, 1);
         assert_eq!(progress.progress_bps, 10_000); // target met (no target)
         assert_eq!(progress.status, TargetStatus::Ahead);
+    }
+
+    // ── StateTransitionModel tests ───────────────────────────────────────
+
+    #[test]
+    fn state_transition_starts_empty() {
+        let model = StateTransitionModel::new();
+        assert_eq!(model.confidence(GrowthTrend::Stagnant, "dispatch"), 0);
+        assert_eq!(
+            model.probability(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Accelerating),
+            0.0
+        );
+        assert_eq!(
+            model.predict_transition(GrowthTrend::Stagnant, "dispatch"),
+            None
+        );
+    }
+
+    #[test]
+    fn state_transition_learns_probabilities() {
+        let mut model = StateTransitionModel::new();
+        // Dispatch from stagnant → accelerating 7 out of 10 times
+        for _ in 0..7 {
+            model.update(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Accelerating);
+        }
+        for _ in 0..3 {
+            model.update(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Steady);
+        }
+        let p_accel =
+            model.probability(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Accelerating);
+        let p_steady = model.probability(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Steady);
+        assert!(
+            (p_accel - 0.7).abs() < 0.01,
+            "P(accelerating) should be 0.7, got {p_accel}"
+        );
+        assert!(
+            (p_steady - 0.3).abs() < 0.01,
+            "P(steady) should be 0.3, got {p_steady}"
+        );
+        assert_eq!(model.confidence(GrowthTrend::Stagnant, "dispatch"), 10);
+    }
+
+    #[test]
+    fn state_transition_predicts_most_likely() {
+        let mut model = StateTransitionModel::new();
+        for _ in 0..8 {
+            model.update(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Accelerating);
+        }
+        for _ in 0..2 {
+            model.update(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Steady);
+        }
+        let predicted = model.predict_transition(GrowthTrend::Stagnant, "dispatch");
+        assert_eq!(predicted, Some(GrowthTrend::Accelerating));
+    }
+
+    #[test]
+    fn state_transition_separates_actions() {
+        let mut model = StateTransitionModel::new();
+        // Dispatch → accelerating
+        for _ in 0..10 {
+            model.update(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Accelerating);
+        }
+        // No dispatch → stays stagnant
+        for _ in 0..10 {
+            model.update(GrowthTrend::Stagnant, "no_dispatch", GrowthTrend::Stagnant);
+        }
+        let p_dispatch =
+            model.probability(GrowthTrend::Stagnant, "dispatch", GrowthTrend::Accelerating);
+        let p_no_dispatch = model.probability(
+            GrowthTrend::Stagnant,
+            "no_dispatch",
+            GrowthTrend::Accelerating,
+        );
+        assert!(
+            p_dispatch > 0.9,
+            "dispatch should lead to accelerating, got {p_dispatch}"
+        );
+        assert!(
+            p_no_dispatch < 0.1,
+            "no_dispatch should not lead to accelerating, got {p_no_dispatch}"
+        );
     }
 }

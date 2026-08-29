@@ -89,6 +89,12 @@ pub struct GrowthEvidence {
     pub predicted_signal_installs: f64,
     /// The context features that informed the prediction.
     pub context: DispatchContext,
+
+    // ── Episode linkage ──
+    /// The episode this evidence belongs to (links to the episode model).
+    pub episode_id: Option<String>,
+    /// When the evidence was resolved (measurement window closed).
+    pub resolved_at: Option<OffsetDateTime>,
 }
 
 impl Default for GrowthEvidence {
@@ -113,6 +119,8 @@ impl Default for GrowthEvidence {
             predicted_fans: 0.0,
             predicted_signal_installs: 0.0,
             context: DispatchContext::default(),
+            episode_id: None,
+            resolved_at: None,
         }
     }
 }
@@ -155,6 +163,8 @@ impl GrowthEvidence {
             predicted_fans,
             predicted_signal_installs,
             context,
+            episode_id: None,
+            resolved_at: None,
         }
     }
 
@@ -168,21 +178,146 @@ impl GrowthEvidence {
             || self.converted
     }
 
-    /// Returns the best available outcome for learning. The brain prefers
-    /// durable fans (Y30) over incremental fans over raw fan count.
+    /// Returns the Y14 (14-day incremental) outcome for learning. Falls
+    /// back to raw observed fans when incremental is not available.
+    ///
+    /// This is the early leading signal — the brain can learn from it
+    /// sooner than Y30, but it's less reliable as a North Star target.
     #[must_use]
-    pub fn best_outcome(&self) -> Option<f64> {
-        self.durable_fans_30d
-            .or(self.observed_incremental_fans)
-            .or(self.observed_fans)
+    pub fn y14_outcome(&self) -> Option<f64> {
+        self.observed_incremental_fans.or(self.observed_fans)
     }
 
-    /// Returns the prediction error (observed - predicted) for the best
-    /// available outcome. This is the dopamine signal for learning.
+    /// Returns the Y30 (30-day durable) outcome for learning. This is the
+    /// North Star target — fans that are still active after 30 days.
+    ///
+    /// Returns `None` until the 30-day measurement window has elapsed.
     #[must_use]
-    pub fn prediction_error(&self) -> Option<f64> {
-        self.best_outcome()
+    pub fn y30_outcome(&self) -> Option<f64> {
+        self.durable_fans_30d
+    }
+
+    /// Returns the Y14 prediction error (observed - predicted).
+    #[must_use]
+    pub fn y14_prediction_error(&self) -> Option<f64> {
+        self.y14_outcome()
             .map(|observed| observed - self.predicted_fans)
+    }
+
+    /// Returns the Y30 prediction error (observed - predicted).
+    #[must_use]
+    pub fn y30_prediction_error(&self) -> Option<f64> {
+        self.y30_outcome()
+            .map(|observed| observed - self.predicted_fans)
+    }
+}
+
+// ─── Evidence Event (immutable event-sourced log) ────────────────────────
+
+/// The type of an evidence event — what happened.
+///
+/// Each event type has a specific payload shape. The events are:
+/// - `ActionDispatched`: an autopilot action was dispatched. Payload includes
+///   the prediction, context, treatment, and propensity.
+/// - `ReachAttempted`: a reach event was recorded. Payload includes the
+///   channel, template, estimated_reach, and recipient.
+/// - `ExposureRecorded`: audience exposure was recorded. Payload includes
+///   the audience key and exposure count.
+/// - `ResponseReceived`: a response was received (reply, click). Payload
+///   includes the response type and content.
+/// - `ConversionObserved`: a fan conversion was observed. Payload includes
+///   the fan_id and conversion source.
+/// - `FanStillActiveDay30`: 30-day durability check — fan is still active.
+/// - `FanChurnedDay30`: 30-day durability check — fan has churned.
+/// - `MeasurementResolved`: the measurement window has closed. Payload
+///   includes the final outcome values.
+/// - `TreatmentAssigned`: a treatment was assigned (A/B test). Payload
+///   includes the treatment and propensity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceEventType {
+    ActionDispatched,
+    ReachAttempted,
+    ExposureRecorded,
+    ResponseReceived,
+    ConversionObserved,
+    FanStillActiveDay30,
+    FanChurnedDay30,
+    MeasurementResolved,
+    TreatmentAssigned,
+}
+
+impl EvidenceEventType {
+    /// Returns the string representation for DB storage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActionDispatched => "action_dispatched",
+            Self::ReachAttempted => "reach_attempted",
+            Self::ExposureRecorded => "exposure_recorded",
+            Self::ResponseReceived => "response_received",
+            Self::ConversionObserved => "conversion_observed",
+            Self::FanStillActiveDay30 => "fan_still_active_day_30",
+            Self::FanChurnedDay30 => "fan_churned_day_30",
+            Self::MeasurementResolved => "measurement_resolved",
+            Self::TreatmentAssigned => "treatment_assigned",
+        }
+    }
+
+    /// Parses a string into an `EvidenceEventType`.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "action_dispatched" => Some(Self::ActionDispatched),
+            "reach_attempted" => Some(Self::ReachAttempted),
+            "exposure_recorded" => Some(Self::ExposureRecorded),
+            "response_received" => Some(Self::ResponseReceived),
+            "conversion_observed" => Some(Self::ConversionObserved),
+            "fan_still_active_day_30" => Some(Self::FanStillActiveDay30),
+            "fan_churned_day_30" => Some(Self::FanChurnedDay30),
+            "measurement_resolved" => Some(Self::MeasurementResolved),
+            "treatment_assigned" => Some(Self::TreatmentAssigned),
+            _ => None,
+        }
+    }
+}
+
+/// An immutable evidence event — a single fact that happened at a specific
+/// time. This is the append-only event log that the derived
+/// `GrowthEpisode` aggregate is rebuilt from.
+///
+/// Unlike `GrowthEvidence` (which is mutable — dispatch creates it,
+/// measurement updates it), `EvidenceEvent` is truly immutable: it's an
+/// INSERT-only record of what happened.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EvidenceEvent {
+    /// The workspace this event belongs to.
+    pub workspace_id: uuid::Uuid,
+    /// The action this event relates to (optional).
+    pub action_id: Option<uuid::Uuid>,
+    /// The opportunity this event relates to (optional).
+    pub opportunity_id: Option<String>,
+    /// The episode this event belongs to (optional).
+    pub episode_id: Option<String>,
+    /// The event type.
+    pub event_type: EvidenceEventType,
+    /// The event payload (type-specific JSON).
+    pub payload: serde_json::Value,
+    /// When the event occurred (immutable).
+    pub occurred_at: OffsetDateTime,
+}
+
+impl Default for EvidenceEvent {
+    fn default() -> Self {
+        Self {
+            workspace_id: uuid::Uuid::nil(),
+            action_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            event_type: EvidenceEventType::ActionDispatched,
+            payload: serde_json::json!({}),
+            occurred_at: OffsetDateTime::now_utc(),
+        }
     }
 }
 
@@ -207,12 +342,13 @@ mod tests {
             DispatchContext::default(),
         );
         assert!(!evidence.is_resolved());
-        assert_eq!(evidence.best_outcome(), None);
-        assert_eq!(evidence.prediction_error(), None);
+        assert_eq!(evidence.y14_outcome(), None);
+        assert_eq!(evidence.y30_outcome(), None);
+        assert_eq!(evidence.y14_prediction_error(), None);
     }
 
     #[test]
-    fn evidence_prefers_durable_fans() {
+    fn evidence_y14_and_y30_are_separate_targets() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
             uuid::Uuid::nil(),
@@ -229,12 +365,13 @@ mod tests {
         evidence.observed_fans = Some(10.0);
         evidence.observed_incremental_fans = Some(5.0);
         evidence.durable_fans_30d = Some(3.0);
-        // Should prefer durable (3.0) over incremental (5.0) over raw (10.0).
-        assert_eq!(evidence.best_outcome(), Some(3.0));
+        // Y14 uses incremental (5.0), Y30 uses durable (3.0) — separate targets.
+        assert_eq!(evidence.y14_outcome(), Some(5.0));
+        assert_eq!(evidence.y30_outcome(), Some(3.0));
     }
 
     #[test]
-    fn evidence_prefers_incremental_over_raw() {
+    fn evidence_y14_falls_back_to_raw() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
             uuid::Uuid::nil(),
@@ -249,12 +386,14 @@ mod tests {
             DispatchContext::default(),
         );
         evidence.observed_fans = Some(10.0);
-        evidence.observed_incremental_fans = Some(5.0);
-        assert_eq!(evidence.best_outcome(), Some(5.0));
+        // No incremental → Y14 falls back to raw (10.0).
+        assert_eq!(evidence.y14_outcome(), Some(10.0));
+        // Y30 is still None.
+        assert_eq!(evidence.y30_outcome(), None);
     }
 
     #[test]
-    fn evidence_prediction_error() {
+    fn evidence_prediction_errors_are_separate() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
             uuid::Uuid::nil(),
@@ -268,9 +407,12 @@ mod tests {
             0.2,
             DispatchContext::default(),
         );
-        evidence.observed_fans = Some(8.0);
-        // prediction_error = 8.0 - 2.0 = 6.0
-        assert!((evidence.prediction_error().unwrap() - 6.0).abs() < 0.001);
+        evidence.observed_incremental_fans = Some(8.0);
+        evidence.durable_fans_30d = Some(3.0);
+        // Y14 error = 8.0 - 2.0 = 6.0
+        assert!((evidence.y14_prediction_error().unwrap() - 6.0).abs() < 0.001);
+        // Y30 error = 3.0 - 2.0 = 1.0
+        assert!((evidence.y30_prediction_error().unwrap() - 1.0).abs() < 0.001);
     }
 
     #[test]

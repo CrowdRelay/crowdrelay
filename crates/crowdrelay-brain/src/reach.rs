@@ -134,19 +134,20 @@ impl ReachChannel {
         }
     }
 
-    /// Returns true if this channel is a broadcast (one-to-many).
+    /// Returns true if this channel is a broadcast (one-to-many). Broadcast
+    /// channels use a Beta-Binomial model: one action exposes N people, K of
+    /// whom convert. The conversion model updates α += K, β += (N - K).
     #[must_use]
     pub const fn is_broadcast(self) -> bool {
-        matches!(self, Self::RedditPost | Self::SocialPost)
+        matches!(self, Self::RedditPost | Self::SocialPost | Self::SignalPush)
     }
 
-    /// Returns true if this channel is a direct message (one-to-one).
+    /// Returns true if this channel is a direct message (one-to-one). Direct
+    /// channels use a Beta-Bernoulli model: one action exposes 1 person, who
+    /// either converts or not. The conversion model updates α += 1 or β += 1.
     #[must_use]
     pub const fn is_direct(self) -> bool {
-        matches!(
-            self,
-            Self::Email | Self::RedditDm | Self::SignalPush | Self::Sms
-        )
+        matches!(self, Self::Email | Self::RedditDm | Self::Sms)
     }
 }
 
@@ -317,6 +318,9 @@ pub struct ReachEvent {
     pub converted_at: Option<time::OffsetDateTime>,
     /// The episode this reach event belongs to.
     pub episode_id: Option<String>,
+    /// The opportunity that motivated this reach event (optional). Links
+    /// the reach event back to the opportunity that triggered it.
+    pub opportunity_id: Option<String>,
     /// Free-form metadata.
     pub metadata: serde_json::Value,
 }
@@ -338,7 +342,40 @@ impl Default for ReachEvent {
             converted_fan_id: None,
             converted_at: None,
             episode_id: None,
+            opportunity_id: None,
             metadata: serde_json::json!({}),
+        }
+    }
+}
+
+/// A single fan conversion attributed to a reach event. A broadcast reach
+/// event can produce multiple conversions — each is a separate row linked
+/// to the reach event by `reach_event_id`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReachConversion {
+    /// The workspace this conversion belongs to.
+    pub workspace_id: uuid::Uuid,
+    /// The reach attempt that produced this conversion.
+    pub reach_event_id: uuid::Uuid,
+    /// The fan who converted (optional — may be null for anonymous conversions).
+    pub fan_id: Option<uuid::Uuid>,
+    /// When the conversion was observed.
+    pub converted_at: time::OffsetDateTime,
+    /// Whether this conversion was incremental. Set by the attribution model.
+    pub incremental: bool,
+    /// Whether this fan is still active after 30 days.
+    pub durable_30d: Option<bool>,
+}
+
+impl Default for ReachConversion {
+    fn default() -> Self {
+        Self {
+            workspace_id: uuid::Uuid::nil(),
+            reach_event_id: uuid::Uuid::nil(),
+            fan_id: None,
+            converted_at: time::OffsetDateTime::now_utc(),
+            incremental: false,
+            durable_30d: None,
         }
     }
 }
@@ -368,6 +405,7 @@ impl ReachEvent {
             converted_fan_id: None,
             converted_at: None,
             episode_id: None,
+            opportunity_id: None,
             metadata: serde_json::json!({}),
         }
     }
@@ -393,6 +431,13 @@ impl ReachEvent {
         self
     }
 
+    /// Sets the opportunity ID.
+    #[must_use]
+    pub fn with_opportunity_id(mut self, opportunity_id: String) -> Self {
+        self.opportunity_id = Some(opportunity_id);
+        self
+    }
+
     /// Sets the metadata.
     #[must_use]
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
@@ -415,22 +460,15 @@ impl ReachEvent {
 }
 
 /// Aggregated reach metrics for a workspace, channel, or template.
-///
-/// This is the summary the brain uses to learn which channels and templates
-/// produce the best reach-to-fan conversion rates.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReachMetrics {
     /// Total reach events.
     pub total_events: u64,
-    /// Total estimated people reached (sum of `estimated_reach`). This is
-    /// **gross** potential reach — the same person may be counted multiple
-    /// times across events. Use [`unique_reach`](Self::unique_reach) for
+    /// Total estimated people reached (sum of `estimated_reach`). Gross —
+    /// same person may be counted multiple times. Use `unique_reach` for
     /// deduplicated reach.
     pub total_reach: u64,
-    /// Unique recipients reached (count of distinct `recipient_id` values).
-    /// This is the deduplicated reach — how many distinct people/audiences
-    /// were contacted. For broadcasts, each subreddit/audience counts as
-    /// one unique recipient regardless of subscriber count.
+    /// Unique recipients reached (distinct `recipient_id` values).
     pub unique_reach: u64,
     /// Events that were delivered.
     pub delivered: u64,
@@ -454,6 +492,12 @@ pub struct ReachMetrics {
     pub failed: u64,
     /// Events with no response after observation window.
     pub ignored: u64,
+    /// Total fan conversions from the conversions table (true count for broadcasts).
+    pub total_conversions: u64,
+    /// Incremental conversions (wouldn't have happened without the action).
+    pub incremental_conversions: u64,
+    /// Durable conversions (fan still active after 30 days).
+    pub durable_conversions: u64,
 }
 
 impl ReachMetrics {
@@ -553,6 +597,48 @@ impl ReachMetrics {
         }
         self.bounced as f64 / self.total_events as f64
     }
+
+    /// Returns the true conversion rate: total_conversions / total_reach.
+    /// This uses the `total_conversions` field from the conversions table,
+    /// which correctly handles broadcasts (one event → many conversions).
+    #[must_use]
+    pub fn true_conversion_rate(&self) -> f64 {
+        if self.total_reach == 0 {
+            return 0.0;
+        }
+        self.total_conversions as f64 / self.total_reach as f64
+    }
+
+    /// Returns the incremental conversion fraction:
+    /// incremental_conversions / total_conversions.
+    #[must_use]
+    pub fn incremental_fraction(&self) -> f64 {
+        if self.total_conversions == 0 {
+            return 0.0;
+        }
+        self.incremental_conversions as f64 / self.total_conversions as f64
+    }
+
+    /// Returns the durable conversion fraction:
+    /// durable_conversions / total_conversions.
+    #[must_use]
+    pub fn durable_fraction(&self) -> f64 {
+        if self.total_conversions == 0 {
+            return 0.0;
+        }
+        self.durable_conversions as f64 / self.total_conversions as f64
+    }
+
+    /// Updates the conversion counts from a list of `ReachConversion` rows.
+    /// Call this after `from_events` to populate the conversion fields.
+    pub fn apply_conversions(&mut self, conversions: &[ReachConversion]) {
+        self.total_conversions = conversions.len() as u64;
+        self.incremental_conversions = conversions.iter().filter(|c| c.incremental).count() as u64;
+        self.durable_conversions = conversions
+            .iter()
+            .filter(|c| c.durable_30d == Some(true))
+            .count() as u64;
+    }
 }
 
 // ─── Reach Conversion Model ───────────────────────────────────────────────
@@ -636,9 +722,8 @@ impl ReachConversionModel {
     }
 
     /// Updates the conversion rate posterior from a resolved reach event.
-    ///
-    /// `converted` = true → α += 1 (the event produced a fan conversion).
-    /// `converted` = false → β += 1 (the event did not convert).
+    /// For direct channels: one Bernoulli trial (α += 1 or β += 1).
+    /// For broadcasts: prefer [`update_count`](Self::update_count).
     pub fn update(&mut self, channel: ReachChannel, template_id: &str, converted: bool) {
         let key = Self::key(channel, template_id);
         let (alpha, beta) = self.posteriors.entry(key).or_insert_with(Self::prior);
@@ -647,6 +732,33 @@ impl ReachConversionModel {
         } else {
             *beta += 1.0;
         }
+    }
+
+    /// Updates the conversion rate posterior from a broadcast reach event
+    /// with known exposure and conversion counts (Beta-Binomial):
+    /// `α += k_converted`, `β += (n_exposed - k_converted)`.
+    ///
+    /// This correctly informs the posterior with the number of individuals
+    /// exposed, not just one binary event.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds assert `k_converted <= n_exposed` — a caller bug.
+    pub fn update_count(
+        &mut self,
+        channel: ReachChannel,
+        template_id: &str,
+        n_exposed: u32,
+        k_converted: u32,
+    ) {
+        debug_assert!(
+            k_converted <= n_exposed,
+            "k_converted ({k_converted}) must not exceed n_exposed ({n_exposed})"
+        );
+        let key = Self::key(channel, template_id);
+        let (alpha, beta) = self.posteriors.entry(key).or_insert_with(Self::prior);
+        *alpha += f64::from(k_converted);
+        *beta += f64::from(n_exposed.saturating_sub(k_converted));
     }
 
     /// Predicts expected fans from reach and conversion rate.
@@ -726,18 +838,19 @@ mod tests {
     fn reach_channel_is_broadcast() {
         assert!(ReachChannel::RedditPost.is_broadcast());
         assert!(ReachChannel::SocialPost.is_broadcast());
+        assert!(ReachChannel::SignalPush.is_broadcast());
         assert!(!ReachChannel::Email.is_broadcast());
-        assert!(!ReachChannel::SignalPush.is_broadcast());
+        assert!(!ReachChannel::RedditDm.is_broadcast());
     }
 
     #[test]
     fn reach_channel_is_direct() {
         assert!(ReachChannel::Email.is_direct());
         assert!(ReachChannel::RedditDm.is_direct());
-        assert!(ReachChannel::SignalPush.is_direct());
         assert!(ReachChannel::Sms.is_direct());
         assert!(!ReachChannel::RedditPost.is_direct());
         assert!(!ReachChannel::SocialPost.is_direct());
+        assert!(!ReachChannel::SignalPush.is_direct());
     }
 
     #[test]
@@ -992,5 +1105,93 @@ mod tests {
     #[test]
     fn reach_status_default_is_sent() {
         assert_eq!(ReachStatus::default(), ReachStatus::Sent);
+    }
+
+    // ── ReachConversionModel tests ──────────────────────────────────────
+
+    #[test]
+    fn conversion_model_starts_with_prior() {
+        let model = ReachConversionModel::new();
+        let rate = model.conversion_rate(ReachChannel::RedditPost, "community-engager");
+        // Prior mean = 0.01
+        assert!(
+            (rate - 0.01).abs() < 0.001,
+            "prior rate should be 0.01, got {rate}"
+        );
+    }
+
+    #[test]
+    fn conversion_model_bernoulli_update_for_direct_channel() {
+        let mut model = ReachConversionModel::new();
+        // 10 direct emails, 2 converted
+        for _ in 0..8 {
+            model.update(ReachChannel::Email, "press-pitch", false);
+        }
+        for _ in 0..2 {
+            model.update(ReachChannel::Email, "press-pitch", true);
+        }
+        let rate = model.conversion_rate(ReachChannel::Email, "press-pitch");
+        // Prior: α=0.1, β=9.9. After: α=2.1, β=17.9. Mean = 2.1/20.0 = 0.105
+        assert!(
+            (rate - 0.105).abs() < 0.01,
+            "rate should be ~0.105, got {rate}"
+        );
+        assert_eq!(model.confidence(ReachChannel::Email, "press-pitch"), 10);
+    }
+
+    #[test]
+    fn conversion_model_binomial_update_for_broadcast_channel() {
+        let mut model = ReachConversionModel::new();
+        // One Reddit post to 10,000 subscribers, 4 fans
+        model.update_count(ReachChannel::RedditPost, "community-engager", 10_000, 4);
+        let rate = model.conversion_rate(ReachChannel::RedditPost, "community-engager");
+        // Prior: α=0.1, β=9.9. After: α=4.1, β=9995.9. Mean ≈ 0.00041
+        assert!(
+            (rate - 4.0 / 10_000.0).abs() < 0.001,
+            "rate should be ~0.0004, got {rate}"
+        );
+    }
+
+    #[test]
+    fn conversion_model_binomial_more_informative_than_bernoulli() {
+        // The key insight: a broadcast of 10k with 4 conversions should
+        // produce a much more confident posterior than 1 Bernoulli "converted".
+        let mut model_binomial = ReachConversionModel::new();
+        model_binomial.update_count(ReachChannel::RedditPost, "t", 10_000, 4);
+
+        let mut model_bernoulli = ReachConversionModel::new();
+        model_bernoulli.update(ReachChannel::RedditPost, "t", true);
+
+        let conf_b = model_binomial.confidence(ReachChannel::RedditPost, "t");
+        let conf_e = model_bernoulli.confidence(ReachChannel::RedditPost, "t");
+        assert!(
+            conf_b > conf_e,
+            "binomial update should be more confident: {conf_b} vs {conf_e}"
+        );
+    }
+
+    #[test]
+    fn conversion_model_predict_fans_uses_rate() {
+        let mut model = ReachConversionModel::new();
+        model.update_count(ReachChannel::RedditPost, "t", 10_000, 50);
+        // Rate ≈ 50/10000 = 0.005
+        let fans = model.predict_fans(ReachChannel::RedditPost, "t", 5000);
+        // 5000 × 0.005 ≈ 25
+        assert!(
+            (fans - 25.0).abs() < 5.0,
+            "predict_fans should be ~25, got {fans}"
+        );
+    }
+
+    #[test]
+    fn signal_push_is_broadcast() {
+        assert!(ReachChannel::SignalPush.is_broadcast());
+        assert!(!ReachChannel::SignalPush.is_direct());
+    }
+
+    #[test]
+    fn email_is_direct() {
+        assert!(ReachChannel::Email.is_direct());
+        assert!(!ReachChannel::Email.is_broadcast());
     }
 }

@@ -202,6 +202,110 @@ pub fn knowledge_gradient(prior_mean: f64, prior_variance: f64, observation_vari
     (expected_max_post - current_best).max(0.0)
 }
 
+/// Portfolio-level Knowledge Gradient (P2.2).
+///
+/// Computes the expected improvement in the portfolio's total expected fans
+/// after observing one more outcome for the candidate at `candidate_idx`.
+///
+/// Unlike the single-alternative [`knowledge_gradient`], this accounts for
+/// the portfolio structure: the candidate competes with other candidates for
+/// limited dispatch slots. The KG is the expected increase in the total
+/// portfolio value after learning the true value of this candidate.
+///
+/// # Algorithm
+///
+/// 1. Simulate the post-observation posterior for the candidate (Normal-Normal
+///    conjugate: the posterior mean is a Normal random variable).
+/// 2. For each possible posterior mean (discretized), re-rank the candidates
+///    and recompute the portfolio value.
+/// 3. The KG is the expected portfolio improvement, weighted by the
+///    probability of each posterior mean.
+///
+/// # Arguments
+///
+/// * `means` — posterior means for all candidates.
+/// * `variances` — posterior variances for all candidates.
+/// * `candidate_idx` — the index of the candidate being considered for
+///   exploration.
+/// * `observation_variance` — the measurement variance for the candidate.
+/// * `portfolio_size` — the number of candidates the portfolio can dispatch.
+///
+/// # Returns
+///
+/// The expected improvement in the portfolio's total expected fans.
+#[must_use]
+pub fn portfolio_kg(
+    means: &[f64],
+    variances: &[f64],
+    candidate_idx: usize,
+    observation_variance: f64,
+    portfolio_size: usize,
+) -> f64 {
+    if means.is_empty()
+        || candidate_idx >= means.len()
+        || means.len() != variances.len()
+        || portfolio_size == 0
+    {
+        return 0.0;
+    }
+
+    let prior_var = variances[candidate_idx];
+    if prior_var <= 0.0 || observation_variance <= 0.0 {
+        return 0.0;
+    }
+
+    // Posterior variance after one observation.
+    let post_var = prior_var * observation_variance / (prior_var + observation_variance);
+    // Learning variance: how much the posterior mean can move.
+    let learn_var = prior_var - post_var;
+    if learn_var <= 0.0 {
+        return 0.0;
+    }
+    let learn_std = learn_var.sqrt();
+
+    // Current portfolio value: sum of the top `portfolio_size` means.
+    let current_portfolio = top_n_sum(means, portfolio_size);
+
+    // Discretize the posterior mean distribution and compute the expected
+    // portfolio improvement. We use Gauss-Hermite quadrature with 5 points
+    // for a balance of accuracy and speed.
+    let prior_mean = means[candidate_idx];
+
+    // E[portfolio_value_after_observation] - current_portfolio_value.
+    // For each possible posterior mean μ', re-rank and recompute.
+    // We approximate with a few representative points.
+    let points = [
+        (-2.0_f64, 0.053),
+        (-1.0, 0.242),
+        (0.0, 0.399),
+        (1.0, 0.242),
+        (2.0, 0.053),
+    ];
+    let mut expected_improvement = 0.0;
+    for &(offset, weight) in &points {
+        let post_mean = prior_mean + offset * learn_std;
+        // Build the new means vector with the updated candidate.
+        let mut new_means: Vec<f64> = means.to_vec();
+        new_means[candidate_idx] = post_mean;
+        let new_portfolio = top_n_sum(&new_means, portfolio_size);
+        let improvement = (new_portfolio - current_portfolio).max(0.0);
+        expected_improvement += weight * improvement;
+    }
+
+    // Normalize weights (they should sum to ~0.989, close to 1.0).
+    expected_improvement / 0.989
+}
+
+/// Returns the sum of the top `n` values in a slice.
+fn top_n_sum(values: &[f64], n: usize) -> f64 {
+    if values.is_empty() || n == 0 {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.iter().take(n).sum()
+}
+
 /// Computes the Knowledge Gradient for a multi-alternative ranking problem.
 ///
 /// When the brain is choosing between multiple templates (alternatives) and

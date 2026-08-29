@@ -16,6 +16,8 @@ use serde::Deserialize;
 use sqlx::FromRow;
 use time::OffsetDateTime;
 
+use uuid;
+
 use super::{PostgresAutopilotRepository, map_sqlx};
 use crowdrelay_application::RepositoryError;
 
@@ -47,7 +49,30 @@ pub(in crate::autopilot) async fn load_reach_metrics(
             COUNT(*) FILTER (WHERE status = 'bounced')::bigint AS bounced,
             COUNT(*) FILTER (WHERE status = 'complained')::bigint AS complained,
             COUNT(*) FILTER (WHERE status = 'failed')::bigint AS failed,
-            COUNT(*) FILTER (WHERE status = 'ignored')::bigint AS ignored
+            COUNT(*) FILTER (WHERE status = 'ignored')::bigint AS ignored,
+            COALESCE(
+                (SELECT COUNT(*)::bigint FROM viryaos_reach_conversions rc
+                 JOIN viryaos_reach_events re ON rc.reach_event_id = re.id
+                 WHERE re.workspace_id = $1 AND re.sent_at >= $2
+                   AND ($3::timestamptz IS NULL OR re.sent_at < $3)),
+                0
+            ) AS total_conversions,
+            COALESCE(
+                (SELECT COUNT(*)::bigint FROM viryaos_reach_conversions rc
+                 JOIN viryaos_reach_events re ON rc.reach_event_id = re.id
+                 WHERE re.workspace_id = $1 AND re.sent_at >= $2
+                   AND ($3::timestamptz IS NULL OR re.sent_at < $3)
+                   AND rc.incremental = true),
+                0
+            ) AS incremental_conversions,
+            COALESCE(
+                (SELECT COUNT(*)::bigint FROM viryaos_reach_conversions rc
+                 JOIN viryaos_reach_events re ON rc.reach_event_id = re.id
+                 WHERE re.workspace_id = $1 AND re.sent_at >= $2
+                   AND ($3::timestamptz IS NULL OR re.sent_at < $3)
+                   AND rc.durable_30d = true),
+                0
+            ) AS durable_conversions
         FROM viryaos_reach_events
         WHERE workspace_id = $1
           AND sent_at >= $2
@@ -61,6 +86,43 @@ pub(in crate::autopilot) async fn load_reach_metrics(
     .await
     .map_err(map_sqlx)?;
     Ok(row.into())
+}
+
+/// Records a fan conversion linked to a reach event.
+///
+/// This is the write path for the `viryaos_reach_conversions` table. It's
+/// called when a fan conversion is attributed to a specific reach event
+/// (e.g. a Reddit post that produced a fan). For broadcasts, multiple
+/// conversions can be linked to the same reach event.
+///
+/// The `incremental` flag is set by the attribution model, not at conversion
+/// time. The `durable_30d` flag is set later by the durability measurement
+/// loop.
+#[allow(dead_code)] // Wired in the next sprint — the reach conversion recording path
+pub(in crate::autopilot) async fn record_reach_conversion(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    reach_event_id: uuid::Uuid,
+    fan_id: Option<uuid::Uuid>,
+    incremental: bool,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_reach_conversions
+            (workspace_id, reach_event_id, fan_id, incremental)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (reach_event_id, fan_id) WHERE fan_id IS NOT NULL
+        DO NOTHING
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(reach_event_id)
+    .bind(fan_id)
+    .bind(incremental)
+    .execute(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }
 
 // ─── Internal types ──────────────────────────────────────────────────────
@@ -82,6 +144,9 @@ struct ReachMetricsRow {
     complained: i64,
     failed: i64,
     ignored: i64,
+    total_conversions: i64,
+    incremental_conversions: i64,
+    durable_conversions: i64,
 }
 
 impl From<ReachMetricsRow> for ReachMetrics {
@@ -101,6 +166,9 @@ impl From<ReachMetricsRow> for ReachMetrics {
             complained: row.complained.max(0) as u64,
             failed: row.failed.max(0) as u64,
             ignored: row.ignored.max(0) as u64,
+            total_conversions: row.total_conversions.max(0) as u64,
+            incremental_conversions: row.incremental_conversions.max(0) as u64,
+            durable_conversions: row.durable_conversions.max(0) as u64,
         }
     }
 }

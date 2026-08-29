@@ -652,8 +652,11 @@ fn apply_evidence_to_model(
     use crowdrelay_brain::{DispatchPrediction, PredictionOutcome};
 
     for ev in evidence {
-        // Update the outcome model from the best available outcome.
-        if let Some(outcome_fans) = ev.best_outcome() {
+        // Update the outcome model from the Y14 (incremental) outcome.
+        // Y14 is the early leading signal — available 14 days after dispatch.
+        // Y30 (durable) is the North Star target but takes 30 days to arrive.
+        // We learn from Y14 as soon as it's available, and from Y30 later.
+        if let Some(y14_fans) = ev.y14_outcome() {
             let prediction = DispatchPrediction {
                 template_id: extract_template_from_opportunity(&ev.opportunity_id),
                 expected_new_fans: ev.predicted_fans,
@@ -661,18 +664,46 @@ fn apply_evidence_to_model(
                 context: ev.context.clone(),
             };
             let outcome = PredictionOutcome::from_observation(
-                prediction,
-                outcome_fans,
-                0.0, // signal installs not tracked in evidence yet
+                prediction, y14_fans, 0.0, // signal installs not tracked in evidence yet
             );
             model.update(&outcome);
         }
+        // When Y30 (durable) is available, also update the calibration
+        // tracker for the durable target. This is a separate learning path
+        // — the Y30 outcome is the North Star, but it arrives later.
+        if let Some(y30_fans) = ev.y30_outcome() {
+            let template = extract_template_from_opportunity(&ev.opportunity_id);
+            model
+                .calibration_y30
+                .record(&template, ev.predicted_fans, 2.0, y30_fans);
+        }
 
         // Update the reach conversion model from conversion outcomes.
+        // For broadcast channels (Reddit post, Signal push, social post),
+        // use the Beta-Binomial update with actual exposure and conversion
+        // counts. For direct channels (email, DM, SMS), use the Bernoulli
+        // update.
         let template = extract_template_from_opportunity(&ev.opportunity_id);
-        model
-            .reach_model
-            .update(ev.channel, &template, ev.converted);
+        if ev.channel.is_broadcast() {
+            let n_exposed = ev.estimated_reach.max(1);
+            // Use Y14 (incremental) for conversion count — it's the earliest
+            // reliable conversion signal. Fall back to raw observed fans,
+            // then to the boolean converted flag.
+            let k_converted = if let Some(fans) = ev.y14_outcome() {
+                fans.round().max(0.0) as u32
+            } else if ev.converted {
+                1
+            } else {
+                0
+            };
+            model
+                .reach_model
+                .update_count(ev.channel, &template, n_exposed, k_converted);
+        } else {
+            model
+                .reach_model
+                .update(ev.channel, &template, ev.converted);
+        }
     }
 }
 

@@ -2,15 +2,15 @@
 //!
 //! The brain's causal model predicts how many incremental fans a worker
 //! dispatch will produce, given the template and context features. It uses
-//! proper Bayesian posteriors (Normal-Normal conjugate model) instead of
-//! the old EMA + pseudo-variance.
+//! a Gamma-Poisson (Negative Binomial) conjugate model for count data with
+//! over-dispersion, replacing the old Normal-Normal model.
 //!
 //! # Architecture
 //!
 //! - **Hierarchical posterior**: global + per-template + per-subreddit-type
 //!   partial pooling. Low-confidence templates shrink toward the global mean.
-//! - **Context adjustments**: event proximity and growth trend modulate the
-//!   base prediction multiplicatively.
+//! - **Context adjustments**: a learned log-linear GLM modulates the base
+//!   prediction based on event proximity and growth trend.
 //! - **Independent Signal install learning**: Signal adoption has different
 //!   drivers than fan acquisition, so it's learned separately.
 //! - **Proper variance**: uses `NormalPosterior` which gives mathematically
@@ -19,8 +19,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::bayesian::{HierarchicalPosterior, NormalPosterior, TreatmentEffectPosterior};
-use crate::context_effect::ContextEffectPosterior;
+use crate::bayesian::{HierarchicalNegBinPosterior, NegBinPosterior, TreatmentEffectPosterior};
+use crate::context_effect::ContextGLM;
 use crate::world_model::GrowthTrend;
 
 /// Context features that the causal model uses to predict fan acquisition
@@ -113,10 +113,25 @@ pub const DEFAULT_EXPECTED_SIGNAL: f64 = 0.2;
 /// vary by ±2 fans (std dev). This shrinks as the brain collects data.
 pub const PRIOR_VARIANCE: f64 = 4.0;
 
-/// The observation variance — the noise level the brain assumes for each
-/// observation. Higher values make the brain more conservative (slower
-/// to update). This can be made adaptive in the future.
-const OBSERVATION_VARIANCE: f64 = 4.0;
+/// The over-dispersion parameter for adaptive observation variance. The
+/// adaptive variance is `max(predicted, 1.0) * DISPERSION`, which gives
+/// Poisson-like variance (mean ≈ variance) scaled by a dispersion factor.
+/// A dispersion of 2.0 means the variance is twice the mean — appropriate
+/// for over-dispersed count data.
+const DISPERSION: f64 = 2.0;
+
+/// Computes an adaptive observation variance for the outcome model. For
+/// count data, the variance should scale with the mean (Poisson-like):
+/// `var ≈ mean × dispersion`. This prevents the model from over-reacting
+/// to large observations (e.g. 17 fans when the prediction was 2) and
+/// under-reacting to small ones.
+///
+/// The floor of 1.0 ensures a minimum noise level even when the prediction
+/// is near zero.
+#[must_use]
+fn adaptive_observation_variance(predicted: f64) -> f64 {
+    predicted.max(1.0) * DISPERSION
+}
 
 /// Minimum number of paired treatment/control observations before the brain
 /// trusts the treatment-effect posterior over the outcome model. Below this,
@@ -126,15 +141,15 @@ pub const MIN_TREATMENT_CONFIDENCE: u32 = 5;
 
 /// The brain's causal model: P(incremental_fan | template, context).
 ///
-/// Uses a `HierarchicalPosterior` for proper Bayesian learning with partial
+/// Uses a `HierarchicalNegBinPosterior` for proper Bayesian learning with partial
 /// pooling across templates and subreddit types. The hierarchical structure
 /// means:
 /// - Templates with many observations stand on their own.
 /// - Templates with few observations shrink toward the global mean.
 /// - Subreddit-type multipliers are learned and pooled.
 ///
-/// Context adjustments (event proximity, growth trend) are applied
-/// multiplicatively on top of the posterior mean, same as before.
+/// Context adjustments (event proximity, growth trend) are applied via a
+/// learned log-linear GLM on top of the posterior mean.
 ///
 /// # Treatment-effect model
 ///
@@ -146,22 +161,36 @@ pub const MIN_TREATMENT_CONFIDENCE: u32 = 5;
 /// outcome model.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CausalModel {
-    /// Hierarchical posterior for fan acquisition (outcome model).
-    pub fans: HierarchicalPosterior,
-    /// Treatment-effect posterior P(τ|context). Primary ranking signal when
-    /// confidence is high; falls back to the outcome model when low.
+    /// Hierarchical NegBin posterior for fan acquisition (outcome model).
+    /// Uses Gamma-Poisson conjugate model for count data with over-dispersion.
+    pub fans: HierarchicalNegBinPosterior,
+    /// Treatment-effect posterior P(τ|context) for Y14 (14-day incremental).
+    /// Primary ranking signal when confidence is high; falls back to the
+    /// outcome model when low.
     pub treatment_effects: TreatmentEffectPosterior,
+    /// Treatment-effect posterior P(τ|context) for Y30 (30-day durable).
+    /// The North Star target — fans still active after 30 days. Uses the
+    /// same hierarchical structure as `treatment_effects` but learns from
+    /// the Y30 outcome, which arrives later.
+    pub treatment_effects_y30: TreatmentEffectPosterior,
     /// Per-template Signal install EMA. Learned independently from fan
     /// counts because Signal adoption has different drivers.
     pub template_expected_signal: HashMap<String, f64>,
-    /// Calibration tracker — learns the mapping between predicted and
-    /// observed fans and corrects future predictions to reduce bias.
+    /// Calibration tracker for Y14 (14-day incremental) predictions.
+    /// Learns the mapping between predicted and observed incremental fans
+    /// and corrects future predictions to reduce bias. This is the early
+    /// leading signal — available 14 days after dispatch.
     pub calibration: crate::calibration::CalibrationTracker,
-    /// Learned context effects — replaces hardcoded multipliers (×1.5 event,
-    /// ×0.8 stagnant, etc.) with Bayesian posteriors that learn the true
-    /// context effect from data. Falls back to the hardcoded values as
-    /// priors when confidence is low.
-    pub context_effects: ContextEffectPosterior,
+    /// Calibration tracker for Y30 (30-day durable) predictions. Learns
+    /// the mapping between predicted and observed durable fans. This is
+    /// the North Star target — fans still active after 30 days. It arrives
+    /// later than Y14 but is the ultimate quality signal.
+    pub calibration_y30: crate::calibration::CalibrationTracker,
+    /// Learned context effects — a hierarchical log-linear GLM that replaces
+    /// hardcoded multipliers (×1.5 event, ×0.8 stagnant, etc.) with learned
+    /// coefficients in log space. Prevents multiplicative explosion and
+    /// learns from partial residuals instead of confounded ratios.
+    pub context_effects: ContextGLM,
     /// Reach conversion model — learns per-channel, per-template
     /// reach-to-fan conversion rates. When reach data is available, the
     /// brain predicts `E[fans] = reach × P(conversion)` instead of a raw
@@ -199,37 +228,36 @@ impl CausalModel {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            fans: HierarchicalPosterior::new(NormalPosterior::prior(
+            fans: HierarchicalNegBinPosterior::new(NegBinPosterior::prior(
                 DEFAULT_EXPECTED_FANS,
-                PRIOR_VARIANCE,
+                1.0, // dispersion=1.0 → prior rate variance = 4.0, matching old Normal prior
             )),
             treatment_effects: TreatmentEffectPosterior::new(),
+            treatment_effects_y30: TreatmentEffectPosterior::new(),
             template_expected_signal: HashMap::new(),
             calibration: crate::calibration::CalibrationTracker::new(),
-            context_effects: ContextEffectPosterior::new(),
+            calibration_y30: crate::calibration::CalibrationTracker::new(),
+            context_effects: ContextGLM::new(),
             reach_model: crate::reach::ReachConversionModel::new(),
         }
     }
 
     /// Predicts expected new fans for a dispatch given its context.
     ///
-    /// Combines the hierarchical posterior mean with context adjustments:
-    /// - Subreddit-type multiplier (learned from past outcomes via partial pooling)
-    /// - Event proximity (≤7 days) boosts expected fans by 1.5x
-    /// - Event proximity (≤30 days) boosts by 1.2x
-    /// - Stagnant growth reduces expected fans by 0.8x
-    /// - Accelerating growth boosts by 1.1x
+    /// Combines the hierarchical NegBin posterior mean with a learned
+    /// log-linear context GLM that modulates the base prediction based on
+    /// event proximity, growth trend, and subreddit type.
     ///
     /// `post_format`, `time_of_day_bps`, and `community_novelty_bps` are
-    /// carried by [`DispatchContext`] but not yet wired into the predictor —
-    /// they are reserved for a future learned-context multiplier so the
-    /// shape is stable before the coefficients exist.
+    /// carried by [`DispatchContext`] but not yet wired into the GLM —
+    /// they are reserved for future context features so the shape is stable
+    /// before the coefficients exist.
     #[must_use]
     pub fn predict(&self, template_id: &str, context: &DispatchContext) -> f64 {
         let (mean, _var) = self
             .fans
             .predict(template_id, context.subreddit_type.as_deref());
-        self.context_effects.predict(context) * mean
+        self.context_effects.predict(mean, context)
     }
 
     /// Predicts expected new fans with calibration correction applied.
@@ -244,30 +272,33 @@ impl CausalModel {
         self.calibration.correct_prediction(raw).max(0.0)
     }
 
+    /// Predicts expected durable fans (Y30) with Y30 calibration correction.
+    ///
+    /// Uses the Y30 calibration tracker (`calibration_y30`) which learns the
+    /// mapping between predicted and observed durable fans. When no Y30
+    /// calibration data is available, this falls back to the Y14-calibrated
+    /// prediction.
+    #[must_use]
+    pub fn predict_calibrated_y30(&self, template_id: &str, context: &DispatchContext) -> f64 {
+        let raw = self.predict(template_id, context);
+        if !self.calibration_y30.is_empty() {
+            self.calibration_y30.correct_prediction(raw).max(0.0)
+        } else {
+            self.calibration.correct_prediction(raw).max(0.0)
+        }
+    }
+
     /// Predicts expected Signal installs for a dispatch. Uses the
     /// template-level Signal EMA if available, otherwise falls back to
-    /// 10% of the fan prediction (a reasonable conversion prior).
+    /// 10% of the fan prediction (a reasonable conversion prior). Context
+    /// adjustments are applied via the same `ContextGLM` as fans.
     #[must_use]
     pub fn predict_signal(&self, template_id: &str, context: &DispatchContext) -> f64 {
-        // Single HashMap lookup: if we have a learned Signal prior,
-        // apply the same context adjustments as fans. Otherwise fall
-        // back to 10% of the fan prediction.
         if let Some(&signal_prior) = self.template_expected_signal.get(template_id) {
-            let mut prediction = signal_prior;
-            if let Some(days) = context.days_to_event {
-                if days <= 7 {
-                    prediction *= 1.3;
-                } else if days <= 30 {
-                    prediction *= 1.1;
-                }
-            }
-            // Growth trend modulates the Signal prediction, same as fans.
-            match context.fan_growth_trend {
-                GrowthTrend::Stagnant | GrowthTrend::Decelerating => prediction *= 0.8,
-                GrowthTrend::Accelerating => prediction *= 1.1,
-                GrowthTrend::Steady => {}
-            }
-            return prediction.max(0.0);
+            // Apply the same learned context GLM as fans — the context
+            // effects (event proximity, growth trend) modulate Signal
+            // installs the same way they modulate fan acquisition.
+            return self.context_effects.predict(signal_prior, context).max(0.0);
         }
         // No learned prior: fall back to 10% of fan prediction.
         self.predict(template_id, context) * 0.1
@@ -286,21 +317,21 @@ impl CausalModel {
 
     /// Updates the model from a prediction outcome (the dopamine loop).
     ///
-    /// Uses the conjugate Normal-Normal update via the hierarchical posterior.
-    /// Both the fan count and Signal install models are updated independently.
+    /// Uses the Gamma-Poisson conjugate update for the fan count posterior
+    /// (count data with over-dispersion) and the Normal-Normal update for
+    /// the treatment effect posterior (continuous τ). Both the fan count and
+    /// Signal install models are updated independently.
     pub fn update(&mut self, outcome: &PredictionOutcome) {
         let template = &outcome.prediction.template_id;
         let subreddit_type = outcome.prediction.context.subreddit_type.as_deref();
         // Get the base prediction (posterior mean before context adjustment)
         // so we can learn the context effect from the ratio.
         let (base_mean, _) = self.fans.predict(template, subreddit_type);
-        // Update the hierarchical fan posterior.
-        self.fans.update(
-            Some(template),
-            subreddit_type,
-            outcome.observed_new_fans,
-            OBSERVATION_VARIANCE,
-        );
+        // Update the hierarchical fan posterior (Gamma-Poisson conjugate).
+        // Fan counts are non-negative integers — convert to u32.
+        let observed_count = outcome.observed_new_fans.round().max(0.0) as u32;
+        self.fans
+            .update(Some(template), subreddit_type, observed_count);
         // Update the learned context effects from the implied multiplier.
         // base_mean is the raw posterior mean before context adjustment;
         // the ratio observed/base implies the context multiplier.
@@ -348,7 +379,7 @@ impl CausalModel {
         let (mean, var) = self
             .fans
             .predict(template_id, context.subreddit_type.as_deref());
-        let expected_fans = self.context_effects.predict(context) * mean;
+        let expected_fans = self.context_effects.predict(mean, context);
         let predict_std = var.sqrt().max(0.1);
         let confidence = self.fans.confidence(template_id);
         (expected_fans, predict_std, confidence)
@@ -358,7 +389,7 @@ impl CausalModel {
     #[must_use]
     pub fn expected_fans(&self, template_id: &str) -> f64 {
         let post = self.fans.template_posterior(template_id);
-        post.mean
+        post.mean()
     }
 
     /// Returns P(expected_fans > 0) for a template — the probability that
@@ -382,6 +413,22 @@ impl CausalModel {
         context: &DispatchContext,
     ) -> (f64, f64, u32) {
         self.treatment_effects
+            .predict_stats(template_id, context.subreddit_type.as_deref())
+    }
+
+    /// Predicts the Y30 (30-day durable) treatment effect τ_y30(x) for a
+    /// template. Returns `(tau, std, confidence)`.
+    ///
+    /// This is the North Star target — durable fans still active after 30
+    /// days. When Y30 confidence is low, callers should fall back to the
+    /// Y14 treatment effect.
+    #[must_use]
+    pub fn predict_treatment_effect_y30(
+        &self,
+        template_id: &str,
+        context: &DispatchContext,
+    ) -> (f64, f64, u32) {
+        self.treatment_effects_y30
             .predict_stats(template_id, context.subreddit_type.as_deref())
     }
 
@@ -424,12 +471,11 @@ impl CausalModel {
         subreddit_type: Option<&str>,
     ) {
         for credit in credits {
-            // Variance scales with the number of dispatches: more dispatches
-            // means more uncertainty in the attribution. With 1 dispatch,
-            // variance = OBSERVATION_VARIANCE. With N dispatches, variance =
-            // OBSERVATION_VARIANCE * N.
+            // Adaptive variance: scales with the credit magnitude (Poisson-like)
+            // and the number of dispatches. More dispatches → more uncertainty.
             let n = credit.total_dispatches.max(1) as f64;
-            let observation_variance = OBSERVATION_VARIANCE * n;
+            let base_variance = adaptive_observation_variance(credit.credit.abs());
+            let observation_variance = base_variance * n;
             self.treatment_effects.update(
                 &credit.template_id,
                 subreddit_type,
@@ -476,18 +522,18 @@ impl CausalModel {
 }
 
 /// Applies the context adjustments (event proximity, growth trend) to a
-/// raw posterior mean using the default (prior) context effect posteriors.
+/// raw posterior mean using the default (prior) context GLM.
 ///
 /// This is used by [`crate::simulation::WorldSimulation`] which doesn't
 /// have access to a learned `CausalModel`. The [`CausalModel::predict`]
-/// method uses the learned `ContextEffectPosterior` instead.
+/// method uses the learned `ContextGLM` instead.
 ///
-/// When the posteriors have no data, they fall back to the same hardcoded
-/// values (1.5, 1.2, 0.8, 1.1) as before.
+/// When the GLM has no data, it falls back to the same hardcoded
+/// values (1.5, 1.2, 0.8, 1.1) as priors in log space.
 #[must_use]
 pub(crate) fn apply_context_adjustments(prediction: f64, context: &DispatchContext) -> f64 {
-    let ctx = ContextEffectPosterior::new();
-    ctx.predict(context) * prediction
+    let ctx = ContextGLM::new();
+    ctx.predict(prediction, context)
 }
 
 #[cfg(test)]
@@ -598,8 +644,13 @@ mod tests {
     #[test]
     fn causal_model_variance_starts_at_prior() {
         let model = CausalModel::new();
-        // Unmeasured template: std = sqrt(PRIOR_VARIANCE) = 2.0.
-        assert!((model.predict_std("t") - 2.0).abs() < 0.01);
+        // Unmeasured template: the NegBin prior has mean=2.0, dispersion=1.0.
+        // α=1.0, β=0.5. Rate variance = α/β² = 1.0/0.25 = 4.0. std = 2.0.
+        let std = model.predict_std("t");
+        assert!(
+            (std - 2.0).abs() < 0.01,
+            "prior std should be 2.0, got {std}"
+        );
     }
 
     #[test]
