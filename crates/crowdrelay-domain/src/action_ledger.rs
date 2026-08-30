@@ -170,10 +170,7 @@ pub struct IllegalTransition {
 
 /// Attempts to transition from one state to another, returning an error
 /// if the transition is illegal.
-pub fn transition(
-    from: ActionState,
-    to: ActionState,
-) -> Result<ActionState, IllegalTransition> {
+pub fn transition(from: ActionState, to: ActionState) -> Result<ActionState, IllegalTransition> {
     if from.can_transition_to(to) {
         Ok(to)
     } else {
