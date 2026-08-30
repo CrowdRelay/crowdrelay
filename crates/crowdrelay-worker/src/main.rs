@@ -414,11 +414,15 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let spotify_client_secret = std::env::var("CROWDRELAY_SPOTIFY_CLIENT_SECRET")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    let reddit_proxy_url = std::env::var("CROWDRELAY_REDDIT_PROXY_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
         spotify_client_id,
         spotify_client_secret,
+        reddit_proxy_url,
         config.database.operation_timeout,
     )
     .context("invalid growth metric sync worker configuration")?;

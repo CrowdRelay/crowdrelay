@@ -96,6 +96,7 @@ impl GrowthMetricSyncWorker {
         youtube_api_key: Option<String>,
         spotify_client_id: Option<String>,
         spotify_client_secret: Option<String>,
+        reddit_proxy_url: Option<String>,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
         if youtube_api_key.is_none()
@@ -106,10 +107,25 @@ impl GrowthMetricSyncWorker {
             );
             return Ok(None);
         }
-        let http_client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .connect_timeout(HTTP_TIMEOUT.min(Duration::from_secs(10)))
             .timeout(HTTP_TIMEOUT)
-            .user_agent(USER_AGENT)
+            .user_agent(USER_AGENT);
+        if let Some(proxy_url) = reddit_proxy_url.as_deref() {
+            match reqwest::Proxy::all(proxy_url) {
+                Ok(proxy) => {
+                    client_builder = client_builder.proxy(proxy);
+                    tracing::info!("growth metric sync: using Reddit proxy");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "growth metric sync: invalid Reddit proxy URL, ignoring"
+                    );
+                }
+            }
+        }
+        let http_client = client_builder
             .build()
             .map_err(GrowthMetricSyncError::ClientBuild)?;
         Ok(Some(Self {
