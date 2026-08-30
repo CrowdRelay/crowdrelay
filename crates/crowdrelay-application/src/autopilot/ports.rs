@@ -358,6 +358,23 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         new_status: ExecutionStatus,
     ) -> Result<(), RepositoryError>;
 
+    /// Transitions the execution_status of an experiment assignment by
+    /// looking up the assignment via `action_id`.
+    ///
+    /// This is the primary transition path for the community executor:
+    /// when `community_posts.status` becomes `'posted'`, the executor
+    /// calls this with `ExecutionStatus::Executed`. When the post
+    /// definitively fails, it calls with `ExecutionStatus::Failed`.
+    ///
+    /// Monotonic: only `dispatched → executed` and `dispatched → failed`
+    /// are allowed. All other transitions are silently no-ops.
+    async fn update_execution_status_by_action_id(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: uuid::Uuid,
+        new_status: ExecutionStatus,
+    ) -> Result<(), RepositoryError>;
+
     /// Get-or-creates a persisted experiment design.
     ///
     /// P0-1: The experiment identity must survive evaluator retries. The
@@ -703,6 +720,23 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
+    ) -> Result<CandidatePersistence, RepositoryError>;
+
+    /// Persists a candidate with dispatch prediction and initial growth
+    /// evidence in the same transaction. Used by the non-experiment path
+    /// where there is no experiment assignment but the prediction and
+    /// evidence still need to be atomic with the action.
+    ///
+    /// P1: The prediction and initial evidence commit atomically with
+    /// the action. This guarantees the prediction consistency invariant:
+    /// `prediction_at_decision == prediction_persisted_in_initial_evidence`.
+    async fn persist_candidate_with_evidence(
+        &self,
+        workspace_id: WorkspaceId,
+        candidate: &DecisionCandidate,
+        prediction: &DispatchPrediction,
+        strategy: Option<&str>,
+        holdout_probability: f64,
     ) -> Result<CandidatePersistence, RepositoryError>;
 }
 

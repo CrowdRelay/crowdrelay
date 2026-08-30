@@ -101,6 +101,7 @@ pub mod show_settlement;
 pub mod target_discovery;
 pub mod team_operations;
 pub mod tour_economics;
+pub mod trace;
 pub mod value_tier;
 pub mod values;
 

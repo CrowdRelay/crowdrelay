@@ -5,8 +5,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         &self,
         policy: &AutopilotPolicy,
         now: OffsetDateTime,
-        limits: &mut CycleLimits<'_>,
-        report: &mut AutopilotCycleReport,
+        _limits: &mut CycleLimits<'_>,
+        _report: &mut AutopilotCycleReport,
     ) -> Result<(), AutopilotError> {
         let snapshots = self
             .repository
@@ -338,19 +338,23 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             if selection.do_nothing || !selected_keys.contains(&candidate.decision_key) {
                 continue;
             }
-            let persisted = self.persist(candidate, limits, report).await?;
-            if let Some(action_id) = persisted {
-                self.repository
-                    .record_dispatch_prediction(
-                        self.workspace_id,
-                        action_id,
-                        prediction,
-                        Some(strategy.as_str()),
-                        0.0,
-                    )
-                    .await?;
+            // P1: persist candidate + prediction + initial evidence
+            // atomically in one transaction. This guarantees the
+            // prediction consistency invariant:
+            // prediction_at_decision == prediction_persisted_in_initial_evidence.
+            let persisted = self
+                .repository
+                .persist_candidate_with_evidence(
+                    self.workspace_id,
+                    candidate,
+                    prediction,
+                    Some(strategy.as_str()),
+                    0.0,
+                )
+                .await?;
+            if persisted.action_id.is_some() {
+                dispatched_count += 1;
             }
-            dispatched_count += 1;
         }
         // Dispatch treatment-assigned candidates that were selected by
         // the portfolio. Record withheld-treatment assignments for
@@ -394,15 +398,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         )
                         .await?;
                     if let Some(action_id) = persisted.action_id {
-                        self.repository
-                            .record_dispatch_prediction(
-                                self.workspace_id,
-                                action_id,
-                                prediction,
-                                Some(strategy.as_str()),
-                                *effective_holdout,
-                            )
-                            .await?;
+                        // P1: The prediction and initial evidence are now
+                        // recorded atomically inside
+                        // persist_treatment_with_assignment — no
+                        // post-commit record_dispatch_prediction needed.
                         // P1-f: Emit Exposure provenance event for
                         // community-engager actions. The exposure is
                         // anonymous (fan_id=None) — we know the post was

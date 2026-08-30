@@ -475,6 +475,24 @@ impl CommunityExecutorWorker {
         .execute(&self.pool)
         .await?;
         sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).execute(&self.pool).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer)
+        // Transition the experiment assignment execution_status from
+        // dispatched → executed. This is the actual execution boundary:
+        // the external intervention (Reddit post) has been confirmed.
+        // Monotonic: only dispatched → executed is allowed; if the
+        // assignment is not in 'dispatched' state, this is a no-op.
+        sqlx::query(
+            r#"
+            UPDATE viryaos_experiment_assignments
+            SET execution_status = 'executed'
+            WHERE workspace_id = $1
+              AND action_id = $2
+              AND execution_status = 'dispatched'
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(action.action_id)
+        .execute(&self.pool)
+        .await?;
         tracing::info!(
             subreddit = %action.subreddit,
             post_url = %reddit_result.post_url,
@@ -929,6 +947,24 @@ impl CommunityExecutorWorker {
             .bind(action_id)
             .bind(self.workspace_id.into_uuid())
             .bind(error_kind)
+            .execute(&self.pool)
+            .await?;
+            // Transition the experiment assignment execution_status from
+            // dispatched → failed. The external intervention was attempted
+            // but definitively failed. Monotonic: only dispatched → failed
+            // is allowed; if the assignment is not in 'dispatched' state,
+            // this is a no-op.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_experiment_assignments
+                SET execution_status = 'failed'
+                WHERE workspace_id = $1
+                  AND action_id = $2
+                  AND execution_status = 'dispatched'
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(action_id)
             .execute(&self.pool)
             .await?;
             tracing::warn!(

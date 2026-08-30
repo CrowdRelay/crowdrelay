@@ -692,4 +692,56 @@ mod tests {
         }
         assert_eq!(EvidenceQuality::parse("unknown"), None);
     }
+
+    // P1: Prediction consistency invariant.
+    // The evidence built from a DispatchPrediction via at_dispatch
+    // must carry the SAME predicted_fans and predicted_signal_installs
+    // as the prediction. This is the structural guarantee that
+    // prediction_at_decision == prediction_persisted_in_initial_evidence.
+    #[test]
+    fn prediction_consistency_evidence_matches_prediction() {
+        let prediction = crate::causal_model::DispatchPrediction {
+            template_id: "community-engager".to_owned(),
+            expected_new_fans: 7.5,
+            expected_signal_installs: 2.3,
+            context: DispatchContext {
+                subreddit_type: Some("r/test".to_owned()),
+                ..Default::default()
+            },
+        };
+        let evidence = GrowthEvidence::at_dispatch(
+            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
+            None,
+            "r/test".to_owned(),
+            ReachChannel::RedditPost,
+            1,
+            TreatmentAssignment::Treatment,
+            0.9,
+            prediction.expected_new_fans,
+            prediction.expected_signal_installs,
+            prediction.context.clone(),
+            Some("discovery".to_owned()),
+            EvidenceQuality::RandomizedHoldout,
+        );
+        // The evidence must carry the exact same prediction values.
+        assert!(
+            (evidence.predicted_fans - prediction.expected_new_fans).abs() < 1e-10,
+            "predicted_fans mismatch: evidence={} prediction={}",
+            evidence.predicted_fans,
+            prediction.expected_new_fans
+        );
+        assert!(
+            (evidence.predicted_signal_installs - prediction.expected_signal_installs).abs()
+                < 1e-10,
+            "predicted_signal_installs mismatch: evidence={} prediction={}",
+            evidence.predicted_signal_installs,
+            prediction.expected_signal_installs
+        );
+        // The context must also match — it's part of the prediction.
+        assert_eq!(
+            evidence.context.subreddit_type,
+            prediction.context.subreddit_type
+        );
+    }
 }

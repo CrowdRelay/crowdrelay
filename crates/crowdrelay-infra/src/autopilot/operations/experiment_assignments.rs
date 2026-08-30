@@ -382,9 +382,10 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
 
 /// Transitions the execution_status of an experiment assignment.
 ///
-/// Monotonic: only `executed → failed` is allowed. All other transitions
-/// are silently no-ops (the WHERE clause prevents them). This is the
-/// one transition point from the executor/result path.
+/// Monotonic: only `dispatched → executed` and `dispatched → failed`
+/// are allowed. All other transitions are silently no-ops (the WHERE
+/// clause prevents them). This is the one transition point from the
+/// executor/result path.
 ///
 /// Retry-safe: setting the same status is a no-op (idempotent).
 pub(in crate::autopilot) async fn update_execution_status(
@@ -393,20 +394,57 @@ pub(in crate::autopilot) async fn update_execution_status(
     assignment_id: &str,
     new_status: crowdrelay_brain::ExecutionStatus,
 ) -> Result<(), RepositoryError> {
-    // Only executed → failed is allowed. The WHERE clause enforces this
-    // at the DB level — no application-level race condition possible.
+    // Only dispatched → executed and dispatched → failed are allowed.
+    // The WHERE clause enforces this at the DB level — no application-
+    // level race condition possible.
     sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
         SET execution_status = $3
         WHERE workspace_id = $1
           AND id = $2
-          AND execution_status = 'executed'
-          AND $3 = 'failed'
+          AND execution_status = 'dispatched'
+          AND $3 IN ('executed', 'failed')
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(assignment_id)
+    .bind(new_status.as_str())
+    .execute(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Transitions the execution_status of an experiment assignment by
+/// looking up the assignment via `action_id`.
+///
+/// This is the primary transition path for the community executor:
+/// when `community_posts.status` becomes `'posted'`, the executor
+/// calls this with `ExecutionStatus::Executed`. When the post
+/// definitively fails, it calls with `ExecutionStatus::Failed`.
+///
+/// Uses the `idx_experiment_assignments_action_id` index for the
+/// lookup. Monotonic: only `dispatched → executed` and
+/// `dispatched → failed` are allowed.
+pub(in crate::autopilot) async fn update_execution_status_by_action_id(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    new_status: crowdrelay_brain::ExecutionStatus,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        UPDATE viryaos_experiment_assignments
+        SET execution_status = $3
+        WHERE workspace_id = $1
+          AND action_id = $2
+          AND execution_status = 'dispatched'
+          AND $3 IN ('executed', 'failed')
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
     .bind(new_status.as_str())
     .execute(&repo.pool)
     .await

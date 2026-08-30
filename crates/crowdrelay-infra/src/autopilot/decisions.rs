@@ -393,6 +393,21 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn update_execution_status_by_action_id(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: uuid::Uuid,
+        new_status: crowdrelay_brain::ExecutionStatus,
+    ) -> Result<(), RepositoryError> {
+        super::operations::experiment_assignments::update_execution_status_by_action_id(
+            self,
+            workspace_id,
+            action_id,
+            new_status,
+        )
+        .await
+    }
+
     async fn get_or_create_experiment_design(
         &self,
         workspace_id: WorkspaceId,
@@ -739,5 +754,23 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         candidate: &DecisionCandidate,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.persist_candidate_impl(workspace_id, candidate).await
+    }
+
+    async fn persist_candidate_with_evidence(
+        &self,
+        workspace_id: WorkspaceId,
+        candidate: &DecisionCandidate,
+        prediction: &crowdrelay_brain::DispatchPrediction,
+        strategy: Option<&str>,
+        holdout_probability: f64,
+    ) -> Result<CandidatePersistence, RepositoryError> {
+        self.persist_candidate_with_evidence_impl(
+            workspace_id,
+            candidate,
+            prediction,
+            strategy,
+            holdout_probability,
+        )
+        .await
     }
 }

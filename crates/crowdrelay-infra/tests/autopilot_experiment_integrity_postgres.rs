@@ -14,7 +14,8 @@
 //! T7: Control evidence idempotency — replaying control assignment
 //!     creation does not duplicate the evidence row.
 //! T8: execution_status is persisted correctly for all arms.
-//! T9: update_execution_status is monotonic — only executed → failed.
+//! T9: update_execution_status is monotonic — only dispatched → executed
+//!     and dispatched → failed are allowed.
 
 use crowdrelay_application::autopilot::AutopilotDecisionRepository;
 use crowdrelay_brain::{
@@ -480,7 +481,8 @@ async fn t8_execution_status_persisted() {
     assert_eq!(withheld_status, "withheld");
 }
 
-/// T9: update_execution_status is monotonic — only executed → failed.
+/// T9: update_execution_status is monotonic — only dispatched → executed
+/// and dispatched → failed are allowed. All other transitions are no-ops.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn t9_execution_status_monotonic() {
