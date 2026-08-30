@@ -14,6 +14,11 @@ pub(crate) fn router() -> Router<crate::AppState> {
             "/v1/admin/ops/trace/{trace_id}",
             get(crate::ops::trace_timeline),
         )
+        .route("/v1/admin/ops/actions", get(crate::ops::list_actions))
+        .route(
+            "/v1/admin/ops/actions/{action_id}",
+            get(crate::ops::get_action),
+        )
         .route("/v1/admin/ops/outbox", get(crate::ops::list_outbox))
         .route("/v1/admin/ops/deliveries", get(crate::ops::list_deliveries))
         .route(
