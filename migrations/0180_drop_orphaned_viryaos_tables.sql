@@ -4,10 +4,12 @@
 -- These tables were part of an early attribution/causal inference design
 -- that was superseded by the viryaos_reach_events + viryaos_reach_conversions
 -- model. The schema was created but the write paths were never wired up.
+--
+-- CASCADE drops dependent indexes/constraints that reference these tables.
 
-DROP TABLE IF EXISTS viryaos_opportunity_episodes;
-DROP TABLE IF EXISTS viryaos_episode_events;
-DROP TABLE IF EXISTS viryaos_audience_exposures;
-DROP TABLE IF EXISTS viryaos_propensity_log;
-DROP TABLE IF EXISTS viryaos_causal_estimates;
-DROP TABLE IF EXISTS viryaos_fan_attribution;
+DROP TABLE IF EXISTS viryaos_opportunity_episodes CASCADE;
+DROP TABLE IF EXISTS viryaos_episode_events CASCADE;
+DROP TABLE IF EXISTS viryaos_audience_exposures CASCADE;
+DROP TABLE IF EXISTS viryaos_propensity_log CASCADE;
+DROP TABLE IF EXISTS viryaos_causal_estimates CASCADE;
+DROP TABLE IF EXISTS viryaos_fan_attribution CASCADE;
