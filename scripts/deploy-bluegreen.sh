@@ -256,8 +256,20 @@ else
   docker network connect --alias "$GREEN_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" 2>/dev/null || true
 fi
 
-# Step 4b: The new container already has the active alias from compose.
-# Verify it resolves and serves the correct SHA.
+# Step 4b: Also add the BLUE_ALIAS (crowdrelay-api) to the new container.
+# This ensures internal consumers that still reference crowdrelay-api:8080
+# (like the rekor-anchor, whose image has a URL allowlist) can reach the
+# new active container. Once the rekor-anchor image is rebuilt with the
+# updated allowlist, this can be removed.
+docker network disconnect "$CROWDRELAY_DOCKER_NETWORK" "$NEW_API" 2>/dev/null || true
+if [[ "$DEPLOY_COLOR" == "green" ]]; then
+  docker network connect --alias "$GREEN_ALIAS" --alias "$ACTIVE_ALIAS" --alias "$BLUE_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$NEW_API" 2>/dev/null || true
+else
+  docker network connect --alias "$BLUE_ALIAS" --alias "$ACTIVE_ALIAS" --alias "$GREEN_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$NEW_API" 2>/dev/null || true
+fi
+
+# Step 4c: The new container now has the active alias. Verify it resolves
+# and serves the correct SHA.
 docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
   --fail --silent --show-error --connect-timeout 3 --max-time 10 \
   "http://${ACTIVE_ALIAS}:8080/v1/health/ready" >/dev/null
