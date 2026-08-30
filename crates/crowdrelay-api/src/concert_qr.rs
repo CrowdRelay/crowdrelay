@@ -14,10 +14,13 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
-use crowdrelay_domain::{EventSlug, FanSessionToken, WorkspaceId};
+use crowdrelay_application::{
+    CheckinCommand, ConcertQrError, ConcertQrRepository, CreateCampaignCommand,
+    RevokeCampaignCommand,
+};
+use crowdrelay_domain::{EventSlug, WorkspaceId};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -171,22 +174,7 @@ pub struct CheckinResponse {
 
 #[derive(Debug, FromRow)]
 struct EventRow {
-    id: Uuid,
-    slug: String,
-    title: String,
-    venue: Option<String>,
     starts_at: OffsetDateTime,
-}
-
-#[derive(Debug, FromRow)]
-struct LockedCampaignRow {
-    id: Uuid,
-    event_id: Uuid,
-    valid_from: OffsetDateTime,
-    valid_until: OffsetDateTime,
-    max_checkins: Option<i32>,
-    active: bool,
-    revoked_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug)]
@@ -247,25 +235,19 @@ pub async fn create_campaign(
             .into_response();
     }
 
-    let mut tx = match state.concert_qr.database.begin().await {
-        Ok(value) => value,
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
+    // Read-only event lookup for time-window validation against the event
+    // start. The repository adapter performs its own locking SELECT within the
+    // write transaction; this read only feeds request-level validation.
     let event = match sqlx::query_as::<_, EventRow>(
         r#"
-        SELECT id, slug, title, venue, starts_at
+        SELECT starts_at
         FROM events
         WHERE workspace_id = $1 AND slug = $2 AND status = 'published'
-        FOR SHARE
         "#,
     )
     .bind(state.concert_qr.workspace_id.into_uuid())
     .bind(event_slug.as_str())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&state.concert_qr.database)
     .await
     {
         Ok(Some(value)) => value,
@@ -288,71 +270,56 @@ pub async fn create_campaign(
             .into_response();
     }
 
-    let campaign_id = Uuid::now_v7();
     let max_checkins = payload
         .max_checkins
         .and_then(|value| i32::try_from(value).ok());
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO concert_qr_campaigns (
-            id, workspace_id, event_id, label, valid_from, valid_until,
-            max_checkins, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-        "#,
-    )
-    .bind(campaign_id)
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(event.id)
-    .bind(label)
-    .bind(valid_from)
-    .bind(valid_until)
-    .bind(max_checkins)
-    .bind(created_at)
-    .execute(&mut *tx)
-    .await;
-    if inserted.is_err() {
-        return Problem::service_unavailable(request_id_value)
-            .private()
-            .into_response();
-    }
-    let request_id_for_db = request_id(&headers);
-    if sqlx::query(
-        r#"
-        INSERT INTO audit_events (
-            workspace_id, actor_kind, action, target_type, target_id, request_id, metadata
-        ) VALUES ($1, 'service', 'concert_qr.created', 'concert_qr_campaign', $2, $3, $4)
-        "#,
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(campaign_id.to_string())
-    .bind(request_id_for_db)
-    .bind(json!({"event_id": event.id, "event_slug": event.slug, "valid_from": valid_from, "valid_until": valid_until, "max_checkins": max_checkins}))
-    .execute(&mut *tx)
-    .await
-    .is_err()
-    {
-        return Problem::service_unavailable(request_id_value).private().into_response();
-    }
-    if tx.commit().await.is_err() {
-        return Problem::service_unavailable(request_id_value)
-            .private()
-            .into_response();
-    }
-
+    let command = CreateCampaignCommand {
+        workspace_id: state.concert_qr.workspace_id.into_uuid(),
+        event_slug: event_slug.as_str().to_owned(),
+        label: label.to_owned(),
+        valid_from,
+        valid_until,
+        max_checkins,
+        created_at,
+        request_id: request_id_value.clone(),
+    };
+    let result = match state.concert_qr_repo.create_campaign(&command).await {
+        Ok(value) => value,
+        Err(ConcertQrError::NotFound) => {
+            return Problem::not_found(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(ConcertQrError::Conflict) => {
+            return Problem::conflict(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(ConcertQrError::Invalid) => {
+            return Problem::unprocessable(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(ConcertQrError::Unavailable) => {
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
     let row = CampaignRow {
-        id: campaign_id,
-        event_id: event.id,
-        event_slug: event.slug,
-        event_title: event.title,
-        venue: event.venue,
-        starts_at: event.starts_at,
+        id: result.campaign_id,
+        event_id: result.event.id,
+        event_slug: result.event.slug,
+        event_title: result.event.title,
+        venue: result.event.venue,
+        starts_at: result.event.starts_at,
         label: label.to_owned(),
         valid_from,
         valid_until,
         max_checkins,
         active: true,
         revoked_at: None,
-        created_at,
+        created_at: result.created_at,
         checkin_count: 0,
     };
     let view = campaign_view(row, Some(&signing_key));
@@ -507,53 +474,26 @@ pub async fn revoke_campaign(
             .private()
             .into_response();
     };
-    let mut tx = match state.concert_qr.database.begin().await {
-        Ok(value) => value,
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
+    let command = RevokeCampaignCommand {
+        workspace_id: state.concert_qr.workspace_id.into_uuid(),
+        campaign_id,
+        request_id: request_id_value.clone(),
     };
-    let updated = match sqlx::query_scalar::<_, Uuid>(
-        r#"
-        UPDATE concert_qr_campaigns
-        SET active = false, revoked_at = COALESCE(revoked_at, now())
-        WHERE workspace_id = $1 AND id = $2
-        RETURNING id
-        "#,
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(campaign_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(value) => value,
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-    if updated.is_none() {
-        return Problem::not_found(request_id_value)
+    match state.concert_qr_repo.revoke_campaign(&command).await {
+        Ok(()) => (StatusCode::NO_CONTENT, [(CACHE_CONTROL, PRIVATE_NO_STORE)]).into_response(),
+        Err(ConcertQrError::NotFound) => Problem::not_found(request_id_value)
             .private()
-            .into_response();
+            .into_response(),
+        Err(ConcertQrError::Conflict) => Problem::conflict(request_id_value)
+            .private()
+            .into_response(),
+        Err(ConcertQrError::Invalid) => Problem::unprocessable(request_id_value)
+            .private()
+            .into_response(),
+        Err(ConcertQrError::Unavailable) => Problem::service_unavailable(request_id_value)
+            .private()
+            .into_response(),
     }
-    if sqlx::query(
-        "INSERT INTO audit_events (workspace_id, actor_kind, action, target_type, target_id, request_id) VALUES ($1, 'service', 'concert_qr.revoked', 'concert_qr_campaign', $2, $3)",
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(campaign_id.to_string())
-    .bind(request_id(&headers))
-    .execute(&mut *tx)
-    .await
-    .is_err()
-        || tx.commit().await.is_err()
-    {
-        return Problem::service_unavailable(request_id_value).private().into_response();
-    }
-    (StatusCode::NO_CONTENT, [(CACHE_CONTROL, PRIVATE_NO_STORE)]).into_response()
 }
 
 pub async fn check_in(
@@ -598,235 +538,56 @@ pub async fn check_in(
             .into_response();
     }
 
-    let mut tx = match state.concert_qr.database.begin().await {
+    let command = CheckinCommand {
+        workspace_id: state.concert_qr.workspace_id.into_uuid(),
+        event_slug: event_slug.as_str().to_owned(),
+        campaign_id: claims.campaign_id,
+        event_id: claims.event_id,
+        expires_at: claims.expires_at,
+        session_token: session.as_str().to_owned(),
+        now,
+        request_id: request_id_value.clone(),
+    };
+    let result = match state.concert_qr_repo.check_in(&command).await {
         Ok(value) => value,
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-    let event = match sqlx::query_as::<_, EventRow>(
-        "SELECT id, slug, title, venue, starts_at FROM events WHERE workspace_id = $1 AND slug = $2 AND id = $3 AND status = 'published' FOR SHARE",
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(event_slug.as_str())
-    .bind(claims.event_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(Some(value)) => value,
-        Ok(None) => return Problem::not_found(request_id_value).private().into_response(),
-        Err(_) => return Problem::service_unavailable(request_id_value).private().into_response(),
-    };
-    let campaign = match sqlx::query_as::<_, LockedCampaignRow>(
-        r#"
-        SELECT id, event_id, valid_from, valid_until, max_checkins, active, revoked_at
-        FROM concert_qr_campaigns
-        WHERE workspace_id = $1 AND id = $2 AND event_id = $3
-        FOR UPDATE
-        "#,
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(claims.campaign_id)
-    .bind(event.id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(Some(value)) => value,
-        Ok(None) => {
+        Err(ConcertQrError::NotFound) => {
             return Problem::not_found(request_id_value)
                 .private()
                 .into_response();
         }
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-    if !campaign.active
-        || campaign.revoked_at.is_some()
-        || now < campaign.valid_from
-        || now > campaign.valid_until
-        || claims.expires_at != campaign.valid_until.unix_timestamp()
-        || campaign.event_id != event.id
-    {
-        return Problem::not_found(request_id_value)
-            .private()
-            .into_response();
-    }
-    let fan_id = match resolve_fan(&mut tx, state.concert_qr.workspace_id, &session).await {
-        Ok(Some(value)) => value,
-        Ok(None) => {
-            return Problem::unauthorized(request_id_value)
-                .private()
-                .into_response();
-        }
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-    // Serialize all check-ins for one fan before testing the unique
-    // (workspace, event, fan) invariant. This keeps retries idempotent even
-    // when two independently issued campaign QR codes are scanned at once.
-    match sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM fans WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(fan_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return Problem::unauthorized(request_id_value)
-                .private()
-                .into_response();
-        }
-        Err(_) => {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    }
-
-    let existing = match sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
-        "SELECT campaign_id, checked_in_at FROM concert_checkins WHERE workspace_id = $1 AND event_id = $2 AND fan_id = $3",
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(event.id)
-    .bind(fan_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(value) => value,
-        Err(_) => return Problem::service_unavailable(request_id_value).private().into_response(),
-    };
-    if let Some((existing_campaign, checked_in_at)) = existing {
-        if tx.commit().await.is_err() {
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-        return (
-            StatusCode::OK,
-            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-            Json(CheckinResponse {
-                event_id: event.id,
-                event_slug: event.slug,
-                campaign_id: existing_campaign,
-                created: false,
-                checked_in_at: format_time(checked_in_at),
-            }),
-        )
-            .into_response();
-    }
-    if let Some(max_checkins) = campaign.max_checkins {
-        let count = match sqlx::query_scalar::<_, i64>(
-            "SELECT count(*)::bigint FROM concert_checkins WHERE workspace_id = $1 AND campaign_id = $2",
-        )
-        .bind(state.concert_qr.workspace_id.into_uuid())
-        .bind(campaign.id)
-        .fetch_one(&mut *tx)
-        .await
-        {
-            Ok(value) => value,
-            Err(_) => return Problem::service_unavailable(request_id_value).private().into_response(),
-        };
-        if count >= i64::from(max_checkins) {
+        Err(ConcertQrError::Conflict) => {
             return Problem::conflict(request_id_value)
                 .private()
                 .into_response();
         }
-    }
-
-    let checkin_id = Uuid::now_v7();
-    let checked_in_at = now;
-    if sqlx::query(
-        "INSERT INTO concert_checkins (id, workspace_id, event_id, campaign_id, fan_id, checked_in_at, request_id) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(checkin_id)
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(event.id)
-    .bind(campaign.id)
-    .bind(fan_id)
-    .bind(checked_in_at)
-    .bind(request_id(&headers))
-    .execute(&mut *tx)
-    .await
-    .is_err()
-    {
-        return Problem::service_unavailable(request_id_value).private().into_response();
-    }
-    // A venue check-in is stronger evidence than a simple interest click, so it
-    // also enrolls the fan in any event-scoped ticket draw idempotently.
-    if sqlx::query(
-        "INSERT INTO event_interests (workspace_id, event_id, fan_id, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, event_id, fan_id) DO NOTHING",
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(event.id)
-    .bind(fan_id)
-    .bind(checked_in_at)
-    .execute(&mut *tx)
-    .await
-    .is_err()
-    {
-        return Problem::service_unavailable(request_id_value).private().into_response();
-    }
-    if sqlx::query(
-        r#"
-        INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, request_id)
-        VALUES ($1, 'concert.checked_in', 1, $2, $3)
-        "#,
-    )
-    .bind(state.concert_qr.workspace_id.into_uuid())
-    .bind(json!({"checkin_id": checkin_id, "campaign_id": campaign.id, "event_id": event.id, "event_slug": event.slug, "fan_id": fan_id, "checked_in_at": checked_in_at}))
-    .bind(request_id(&headers))
-    .execute(&mut *tx)
-    .await
-    .is_err()
-        || tx.commit().await.is_err()
-    {
-        return Problem::service_unavailable(request_id_value).private().into_response();
-    }
-
+        Err(ConcertQrError::Invalid) => {
+            return Problem::unprocessable(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(ConcertQrError::Unavailable) => {
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let status = if result.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     (
-        StatusCode::CREATED,
+        status,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
         Json(CheckinResponse {
-            event_id: event.id,
-            event_slug: event.slug,
-            campaign_id: campaign.id,
-            created: true,
-            checked_in_at: format_time(checked_in_at),
+            event_id: result.event_id,
+            event_slug: result.event_slug,
+            campaign_id: result.campaign_id,
+            created: result.created,
+            checked_in_at: format_time(result.checked_in_at),
         }),
     )
         .into_response()
-}
-
-async fn resolve_fan(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: WorkspaceId,
-    session: &FanSessionToken,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
-        r#"
-        UPDATE fan_sessions
-        SET last_seen_at = now()
-        WHERE workspace_id = $1
-          AND session_token_hash = digest($2, 'sha256')
-          AND revoked_at IS NULL
-          AND expires_at > now()
-        RETURNING fan_id
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(session.as_str())
-    .fetch_optional(&mut **tx)
-    .await
 }
 
 fn campaign_view(row: CampaignRow, signing_key: Option<&[u8; 32]>) -> CampaignView {

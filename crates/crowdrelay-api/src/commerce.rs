@@ -255,13 +255,6 @@ struct InventoryStocktakeItemView {
     available_quantity: i64,
 }
 
-#[derive(Debug, FromRow)]
-struct ExistingStocktake {
-    id: Uuid,
-    request_hash: Vec<u8>,
-    created_at: OffsetDateTime,
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct InventoryOverviewView {
     #[serde(with = "time::serde::rfc3339")]

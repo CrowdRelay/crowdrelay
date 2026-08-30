@@ -40,8 +40,10 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use crowdrelay_infra::{
-    area_admin::PostgresAreaAdminRepository, autopilot::PostgresAutopilotRepository, database,
-    ecosystem::PostgresEcosystemRepository,
+    area_admin::PostgresAreaAdminRepository, autopilot::PostgresAutopilotRepository,
+    beacon_signal::PostgresBeaconReleaseRepository,
+    commerce_inventory::PostgresCommerceInventoryRepository,
+    concert_qr::PostgresConcertQrRepository, database, ecosystem::PostgresEcosystemRepository,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -156,6 +158,12 @@ pub struct AppState {
     /// Built from the pool this state already owns, so callers do not grow
     /// another constructor argument for it.
     pub(crate) ecosystem: PostgresEcosystemRepository,
+    /// Beacon release + signal repository (write port). Built from the pool.
+    pub(crate) beacon_release: PostgresBeaconReleaseRepository,
+    /// Commerce inventory repository (write port). Built from the pool.
+    pub(crate) commerce_inventory: PostgresCommerceInventoryRepository,
+    /// Concert QR repository (write port). Built from the pool.
+    pub(crate) concert_qr_repo: PostgresConcertQrRepository,
     pub(crate) push: push::PushPublicState,
     pub(crate) tenant: tenant::TenantProfile,
 }
@@ -185,6 +193,9 @@ impl AppState {
         tenant: tenant::TenantProfile,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
+        let beacon_release = PostgresBeaconReleaseRepository::new(database.clone());
+        let commerce_inventory = PostgresCommerceInventoryRepository::new(database.clone());
+        let concert_qr_repo = PostgresConcertQrRepository::new(database.clone());
         let area_admin = crowdrelay_application::AreaAdminService::new(Arc::new(
             PostgresAreaAdminRepository::new(database.clone()),
         ));
@@ -207,6 +218,9 @@ impl AppState {
             autopilot,
             autopilot_runtime_enabled,
             ecosystem,
+            beacon_release,
+            commerce_inventory,
+            concert_qr_repo,
             push,
             tenant,
         }

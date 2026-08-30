@@ -12,7 +12,6 @@ use axum::{
 use crowdrelay_domain::{BeaconReleaseCampaignState, BeaconReleaseProgress};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -28,7 +27,6 @@ pub use admin::{
 };
 pub use member::{confirm_release_delivery, decline_release_delivery, my_release_campaigns};
 
-const RELEASE_MEMBER_URL: &str = "https://virya.music/pl/latarnik/#wydania";
 /// Upper bound on the recipient roster returned by the admin release listing.
 ///
 /// Delivered recipients accumulate for the lifetime of the workspace, so an
@@ -43,37 +41,6 @@ const MAX_SKU_LEN: usize = 128;
 const MAX_NAME_LEN: usize = 160;
 const MAX_PHONE_LEN: usize = 32;
 const MAX_LOCKER_LEN: usize = 32;
-
-#[derive(Debug, Serialize)]
-struct ReleaseMailCopy {
-    subject: String,
-    text: String,
-}
-
-fn release_delivery_copy(
-    locale: &str,
-    display_name: &str,
-    title: &str,
-    deadline: OffsetDateTime,
-) -> ReleaseMailCopy {
-    if locale.starts_with("pl") {
-        ReleaseMailCopy {
-            subject: format!("Dziękujemy Latarniku — {title} czeka na Ciebie"),
-            text: format!(
-                "Dziękujemy Latarniku, {display_name}!\n\nMamy nowe fizyczne wydanie Viryi: {title}. Twój egzemplarz jest zarezerwowany w puli Latarników. Żebyśmy faktycznie mogli go wysłać, wejdź do swojego panelu i potwierdź dla tej premiery imię i nazwisko odbiorcy, telefon oraz Paczkomat przed {deadline}.\n\n{RELEASE_MEMBER_URL}\n\nJeśli chcesz pomóc przy tej premierze, w Press Roomie masz gotowe materiały. Najbardziej pomagają nam: recenzja lub artykuł, radio/podcast/wywiad, zdjęcia albo wideo, udostępnienie premiery oraz kontakt do sensownego medium, promotora lub klubu. Nic z tego nie jest obowiązkiem — płyta jest naszym podziękowaniem za bycie częścią Latarnika.\n\nMasz pytanie? Wojtek: 784947481.\n\nVirya",
-                deadline = deadline.date(),
-            ),
-        }
-    } else {
-        ReleaseMailCopy {
-            subject: format!("Thank you, Beacon — {title} is reserved for you"),
-            text: format!(
-                "Thank you, Beacon, {display_name}!\n\nWe have a new physical Virya release: {title}. Your copy is reserved in the Beacon pool. To receive it, open your Beacon panel and confirm the recipient name, phone number and parcel-locker destination for this release before {deadline}.\n\n{RELEASE_MEMBER_URL}\n\nThe Press Room contains ready-to-use material if you want to help with the release. Reviews/articles, radio/podcasts/interviews, live photos/video, sharing the release, and relevant media/promoter/venue introductions are especially useful. None of this is an obligation — the record is our thank-you for being part of Beacon.\n\nQuestions? Wojtek: +48 784947481.\n\nVirya",
-                deadline = deadline.date(),
-            ),
-        }
-    }
-}
 
 #[derive(Clone, Debug, FromRow)]
 struct ReleaseCampaignRow {
@@ -281,13 +248,6 @@ struct MemberReleaseCampaignsResponse {
     campaigns: Vec<MemberReleaseCampaignView>,
 }
 
-#[derive(Debug, FromRow)]
-struct InventoryAvailability {
-    sku: String,
-    on_hand: i64,
-    reserved: i64,
-}
-
 fn clean_text(value: &str, max_len: usize) -> Option<String> {
     let value = value.trim();
     (!value.is_empty() && value.chars().count() <= max_len).then(|| value.to_owned())
@@ -388,34 +348,6 @@ async fn load_campaigns(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
-async fn inventory_availability_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    variant_id: Uuid,
-) -> Result<Option<InventoryAvailability>, sqlx::Error> {
-    sqlx::query_as::<_, InventoryAvailability>(
-        r#"
-        SELECT variant.sku,
-          COALESCE((SELECT SUM(ledger.delta)::bigint FROM inventory_ledger ledger
-                    WHERE ledger.workspace_id=variant.workspace_id AND ledger.variant_id=variant.id),0)::bigint AS on_hand,
-          COALESCE((SELECT SUM(item.quantity)::bigint
-                    FROM inventory_reservation_items item
-                    JOIN inventory_reservations reservation
-                      ON reservation.workspace_id=item.workspace_id AND reservation.id=item.reservation_id
-                    WHERE item.workspace_id=variant.workspace_id AND item.variant_id=variant.id
-                      AND reservation.status='active'
-                      AND (reservation.expires_at IS NULL OR reservation.expires_at>now())),0)::bigint AS reserved
-        FROM merch_variants variant
-        WHERE variant.workspace_id=$1 AND variant.id=$2 AND variant.active
-        FOR UPDATE OF variant
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(variant_id)
-    .fetch_optional(&mut **tx)
-    .await
-}
-
 pub(super) struct OperatorActionRecord<'a> {
     pub action: &'a str,
     pub target_type: &'a str,
@@ -480,11 +412,6 @@ pub(super) async fn executor_capability_available_tx(
     .bind(capability)
     .fetch_one(&mut **tx)
     .await
-}
-
-fn request_hash(campaign_id: Uuid, variant_id: Uuid, quantity: i32) -> Vec<u8> {
-    Sha256::digest(format!("beacon-release:{campaign_id}:{variant_id}:{quantity}").as_bytes())
-        .to_vec()
 }
 
 fn private_json<T: Serialize>(status: StatusCode, body: T) -> Response {

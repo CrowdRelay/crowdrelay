@@ -26,7 +26,11 @@ pub mod agent_outcomes;
 pub mod area_admin;
 pub mod autopilot;
 pub mod beacon_release;
+pub mod beacon_release_admin;
+pub mod beacon_signal;
 pub mod cache;
+pub mod commerce_inventory;
+pub mod concert_qr;
 pub mod ecosystem;
 pub mod events;
 pub mod fan_lifecycle;
@@ -48,7 +52,29 @@ pub use beacon_release::{
     BeaconReleaseActivationCopy, BeaconReleaseRecipientTransition, BeaconReleaseTransitionError,
     beacon_release_activation_copy, validate_beacon_release_recipient_transition,
 };
+pub use beacon_release_admin::{
+    BeaconReleaseAdminError, BeaconReleaseAdminRepository, CloseReleaseCampaignCommand,
+    CloseReleaseCampaignResult, CreateReleaseCampaignCommand, CreateReleaseCampaignResult,
+    LaunchReleaseCampaignCommand, LaunchReleaseCampaignResult, UpdateReleaseRecipientCommand,
+    UpdateReleaseRecipientResult,
+};
+pub use beacon_signal::{
+    BeaconPreferences, BeaconSignalRepository, BeaconSignalRepositoryError, CreateInviteCommand,
+    CreateInviteResult, CreatePressRequestCommand, CreatePressRequestResult, EmitNearbyCommand,
+    EmitNearbyResult, ExchangeInviteCommand, ExchangeInviteResult, LeaveCommand, LogoutCommand,
+    RecordEngagementCommand, RecordEngagementResult, SubmitCoverageCommand, SubmitCoverageResult,
+    UpdatePreferencesCommand,
+};
 pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
+pub use commerce_inventory::{
+    CommerceInventoryError, CommerceInventoryRepository, InventoryActivationState,
+    MarkInventoryReadyCommand, MarkInventoryReadyResult, StocktakeCommand, StocktakeItemInput,
+    StocktakeItemResult, StocktakeResult,
+};
+pub use concert_qr::{
+    CheckinCommand, CheckinResult, ConcertEventInfo, ConcertQrError, ConcertQrRepository,
+    CreateCampaignCommand, CreateCampaignResult, RevokeCampaignCommand,
+};
 /// Re-exported brain types used in API responses.
 pub use crowdrelay_brain::ReachMetrics;
 pub use ecosystem::{

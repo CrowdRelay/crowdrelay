@@ -645,84 +645,9 @@ fn valid_engagement_status(value: &str) -> bool {
     )
 }
 
-fn engagement_rank(value: &str) -> u8 {
-    match value {
-        "eligible" => 0,
-        "notified" => 1,
-        "opened" => 2,
-        "interested" => 3,
-        "helping" => 4,
-        "completed" => 5,
-        "declined" => 6,
-        _ => 0,
-    }
-}
-
-fn next_engagement_status(
-    current: Option<&str>,
-    action: EngagementAction,
-) -> Result<&'static str, ()> {
-    let target = action.as_str();
-    let Some(current) = current else {
-        return Ok(target);
-    };
-    if current == "completed" {
-        return if action == EngagementAction::Completed {
-            Ok("completed")
-        } else {
-            Err(())
-        };
-    }
-    if current == "declined" {
-        return if action == EngagementAction::Declined {
-            Ok("declined")
-        } else {
-            Err(())
-        };
-    }
-    if action == EngagementAction::Declined {
-        return Ok("declined");
-    }
-    if engagement_rank(target) >= engagement_rank(current) {
-        Ok(target)
-    } else {
-        Ok(match current {
-            "notified" => "notified",
-            "opened" => "opened",
-            "interested" => "interested",
-            "helping" => "helping",
-            _ => "eligible",
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn engagement_state_is_monotonic_and_terminal() {
-        assert_eq!(
-            next_engagement_status(Some("notified"), EngagementAction::Opened),
-            Ok("opened")
-        );
-        assert_eq!(
-            next_engagement_status(Some("helping"), EngagementAction::Opened),
-            Ok("helping")
-        );
-        assert_eq!(
-            next_engagement_status(Some("helping"), EngagementAction::Completed),
-            Ok("completed")
-        );
-        assert_eq!(
-            next_engagement_status(Some("declined"), EngagementAction::Interested),
-            Err(())
-        );
-        assert_eq!(
-            next_engagement_status(Some("completed"), EngagementAction::Opened),
-            Err(())
-        );
-    }
 
     #[test]
     fn urls_are_fail_closed() {
