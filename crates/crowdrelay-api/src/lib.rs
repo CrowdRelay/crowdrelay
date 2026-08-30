@@ -115,6 +115,7 @@ pub use ticketing::TicketingState;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_CROWDRELAY_CORRELATION_ID: HeaderName =
     HeaderName::from_static("x-crowdrelay-correlation-id");
+const X_TRACE_ID: HeaderName = HeaderName::from_static("x-trace-id");
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 const SERVER_TIMING: HeaderName = HeaderName::from_static("server-timing");
 const X_CROWDRELAY_RELEASE: HeaderName = HeaderName::from_static("x-crowdrelay-release");
@@ -275,11 +276,13 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             IF_NONE_MATCH,
             X_REQUEST_ID,
             X_CROWDRELAY_CORRELATION_ID,
+            X_TRACE_ID.clone(),
         ])
         .expose_headers([
             CACHE_CONTROL,
             ETAG,
             X_REQUEST_ID,
+            X_TRACE_ID.clone(),
             SERVER_TIMING.clone(),
             X_CROWDRELAY_RELEASE.clone(),
         ]);
@@ -494,6 +497,23 @@ async fn normalize_request_id(
         }
     }
     request.headers_mut().remove(&X_CROWDRELAY_CORRELATION_ID);
+    // Extract or generate a trace_id for end-to-end execution tracing.
+    // The trace_id propagates through API → outbox → worker → agents →
+    // executor → measurement, connecting every event in an action's
+    // lifecycle. If the caller provides X-Trace-Id, we reuse it; otherwise
+    // we generate a new UUID v7 (time-ordered for index locality).
+    let trace_id = request
+        .headers()
+        .get(&X_TRACE_ID)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok())
+        .unwrap_or_else(uuid::Uuid::now_v7);
+    // Store in request extensions for handlers to access via Extension<Uuid>.
+    request.extensions_mut().insert(trace_id);
+    // Also set the header so downstream middleware and the response see it.
+    if let Ok(value) = HeaderValue::from_str(&trace_id.to_string()) {
+        request.headers_mut().insert(X_TRACE_ID.clone(), value);
+    }
     next.run(request).await
 }
 
@@ -750,6 +770,17 @@ pub(crate) fn request_id(headers: &HeaderMap) -> Option<String> {
         .get(&X_REQUEST_ID)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+/// Extracts the trace_id from the X-Trace-Id header. Returns None if no
+/// trace_id was set. Used by the trace timeline endpoint and by handlers
+/// that need to propagate the trace_id to downstream systems.
+#[allow(dead_code)]
+pub(crate) fn trace_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
+    headers
+        .get(&X_TRACE_ID)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value.trim()).ok())
 }
 
 pub(crate) fn record_rate_limited(class: &'static str) {
