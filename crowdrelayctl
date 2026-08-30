@@ -486,8 +486,16 @@ reconcile_edge_caddyfile() {
   [[ -f "$edge_caddyfile" ]] || return 0
   if grep -qF "reverse_proxy crowdrelay-api-green:8080" "$edge_caddyfile"; then
     echo "Reconciling edge Caddyfile: crowdrelay-api-green → crowdrelay-api"
-    sed -i "s|reverse_proxy crowdrelay-api-green:8080|reverse_proxy crowdrelay-api:8080|" "$edge_caddyfile"
+    # Inode-safe rewrite: sed -i creates a new inode, breaking Docker bind mounts.
+    local tmp
+    tmp="$(mktemp)"
+    sed "s|reverse_proxy crowdrelay-api-green:8080|reverse_proxy crowdrelay-api:8080|" "$edge_caddyfile" > "$tmp"
+    cat "$tmp" > "$edge_caddyfile"
+    rm -f "$tmp"
     docker exec "$edge_container" caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1 || true
+    # Verify the container saw the update
+    grep -Fq "reverse_proxy crowdrelay-api:8080" <(docker exec "$edge_container" cat /etc/caddy/Caddyfile 2>/dev/null) || \
+      echo "WARNING: edge Caddyfile may not have updated inside container" >&2
   fi
 }
 

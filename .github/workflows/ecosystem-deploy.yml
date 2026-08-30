@@ -116,6 +116,17 @@ jobs:
           [[ "${{ inputs.skip_n8n }}" == "true" ]] && args+=(--skip-n8n)
           bash scripts/deploy-ecosystem.sh "${{ steps.target.outputs.sha }}" "${args[@]}"
 
+      - name: Post-deploy production smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Source production env for smoke URLs, then run the smoke script
+          ssh virya-crowdrelay 'set -euo pipefail; cd /opt/crowdrelay && source .crowdrelay.local.sh 2>/dev/null || true; export CROWDRELAY_BASE_URL="${CROWDRELAY_PUBLIC_BASE_URL:-https://signal-api.virya.music}" VIRYA_BASE_URL="https://virya.music"; bash scripts/production-smoke.sh' 2>&1 || {
+            echo "❌ Post-deploy production smoke failed"
+            exit 1
+          }
+          echo "✅ Post-deploy production smoke passed"
+
       - name: Report deploy status
         if: always()
         shell: bash

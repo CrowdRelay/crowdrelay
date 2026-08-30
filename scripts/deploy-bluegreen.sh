@@ -53,7 +53,9 @@ rollback() {
   if [[ "$CADDY_SWITCHED" == true ]]; then
     printf 'ROLLBACK=START reason=caddy-switched reverting upstream to %s\n' "${CURRENT_ALIAS:-}" >&2
     if [[ -n "$CADDY_BACKUP" && -f "$CADDY_BACKUP" ]]; then
-      cp "$CADDY_BACKUP" "$EDGE_CADDYFILE"
+      # Inode-safe restore: cat preserves the bind-mounted inode, cp would
+      # create a new one and the container would serve stale config.
+      cat "$CADDY_BACKUP" > "$EDGE_CADDYFILE"
       docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1 || true
       printf 'ROLLBACK=CADDY_REVERTED upstream=%s\n' "${CURRENT_ALIAS:-}" >&2
     fi
@@ -210,9 +212,16 @@ printf 'MIGRATIONS=PASS\n'
 # --- 4. Switch edge Caddy to new app ----------------------------------------
 
 printf '\n==> 4/6 — Switch edge Caddy upstream to %s\n' "$DEPLOY_COLOR"
-sed -i "s|reverse_proxy ${CURRENT_ALIAS}:8080|reverse_proxy ${NEW_ALIAS}:8080|" "$EDGE_CADDYFILE"
 
-# Verify the sed changed something
+# Inode-safe rewrite: sed -i creates a new inode, which breaks Docker bind
+# mounts (the container keeps pointing at the old inode). Writing via cat
+# preserves the inode so the container sees the updated content.
+caddy_tmp="$(mktemp)"
+sed "s|reverse_proxy ${CURRENT_ALIAS}:8080|reverse_proxy ${NEW_ALIAS}:8080|" "$EDGE_CADDYFILE" > "$caddy_tmp"
+cat "$caddy_tmp" > "$EDGE_CADDYFILE"
+rm -f "$caddy_tmp"
+
+# Verify the rewrite changed something
 grep -Fq "reverse_proxy ${NEW_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile was not updated to ${DEPLOY_COLOR} upstream"
 grep -Fq "reverse_proxy ${CURRENT_ALIAS}:8080" "$EDGE_CADDYFILE" && fail "Caddyfile still contains old upstream — ambiguous state"
 
@@ -220,15 +229,30 @@ grep -Fq "reverse_proxy ${CURRENT_ALIAS}:8080" "$EDGE_CADDYFILE" && fail "Caddyf
 AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
 AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
 if [[ -f "$AREA_CADDYFILE" ]]; then
-  sed -i "s|http://${CURRENT_ALIAS}:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE"
+  area_tmp="$(mktemp)"
+  sed "s|http://${CURRENT_ALIAS}:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp"
+  cat "$area_tmp" > "$AREA_CADDYFILE"
+  rm -f "$area_tmp"
   # Also handle the bare "api" hostname used before the first green deploy
-  sed -i "s|http://api:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE"
-  docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
+  area_tmp2="$(mktemp)"
+  sed "s|http://api:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp2"
+  cat "$area_tmp2" > "$AREA_CADDYFILE"
+  rm -f "$area_tmp2"
+  # Force-recreate picks up the new bind-mounted config reliably.
+  docker compose -f compose.area-management.yaml up -d --force-recreate area-management-proxy >/dev/null 2>&1 || \
+    docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
   printf 'AREA_PROXY=PASS upstream=%s\n' "$NEW_ALIAS"
 fi
 
 # Graceful Caddy reload (zero-downtime: in-flight requests complete, new ones go to new app)
 docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force
+
+# Verify the container actually sees the updated Caddyfile (bind mounts can
+# silently serve stale content if the inode was swapped).
+docker exec "$EDGE_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || fail "edge Caddyfile failed validation after reload"
+cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE" || fail "edge Caddyfile inside container does not match host file"
+grep -Fq "reverse_proxy ${NEW_ALIAS}:8080" <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) || fail "edge Caddy still proxies to old alias after reload"
+
 CADDY_SWITCHED=true
 printf 'CADDY_SWITCH=PASS upstream=%s\n' "$NEW_ALIAS"
 
@@ -251,21 +275,29 @@ for path in "public/cities?limit=100" "public/events?limit=50"; do
 done
 printf 'PUBLIC_SMOKE=PASS\n'
 
-# Verify public meta matches target (non-blocking — CDN may cache briefly)
-public_meta="$(curl -sS --connect-timeout 3 --max-time 10 "${public_url%/}/v1/meta" 2>/dev/null || true)"
-if [[ -n "$public_meta" ]]; then
-  actual="$(printf '%s' "$public_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
-  if [[ "$actual" == "$TARGET" ]]; then
-    printf 'PUBLIC_META=PASS gitSha=%s\n' "$actual"
-  else
-    printf 'PUBLIC_META=STALE observed=%s expected=%s blocking=false\n' "${actual:-unavailable}" "$TARGET" >&2
+# Verify public meta matches target (blocking — stale edge or CDN must be caught)
+public_meta=""
+actual=""
+for meta_attempt in $(seq 1 12); do
+  public_meta="$(curl -sS --connect-timeout 3 --max-time 10 "${public_url%/}/v1/meta" 2>/dev/null || true)"
+  if [[ -n "$public_meta" ]]; then
+    actual="$(printf '%s' "$public_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
+    if [[ "$actual" == "$TARGET" ]]; then
+      break
+    fi
   fi
+  sleep 5
+done
+if [[ "$actual" == "$TARGET" ]]; then
+  printf 'PUBLIC_META=PASS gitSha=%s\n' "$actual"
+else
+  fail "public meta gitSha mismatch after 60s: got=${actual:-unavailable} expected=$TARGET"
 fi
 
 # --- 6. Stop old containers, finalize ---------------------------------------
 
 printf '\n==> 6/6 — Stop old containers, finalize\n'
-docker stop "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
+docker stop --time 30 "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 docker rm "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 
 # Update the pin to the new SHA

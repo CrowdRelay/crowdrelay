@@ -56,7 +56,7 @@ signal-api.virya.music {
 
 	reverse_proxy crowdrelay-api:8080 {
 		health_uri /v1/health/ready
-		health_interval 30s
+		health_interval 5s
 		transport http {
 			dial_timeout 2s
 			response_header_timeout 10s

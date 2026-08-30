@@ -96,10 +96,10 @@ class EcosystemDeployContract(unittest.TestCase):
         # The compose up command may span multiple lines, so search for
         # the "up -d" with "api-green" and the "caddy reload" that switches.
         green_start = BLUEGREEN_TEXT.index("up -d --no-deps --wait")
-        # Find the actual caddy reload that switches traffic (not the one in rollback)
-        # The switching reload is after the sed command that updates the Caddyfile
-        sed_idx = BLUEGREEN_TEXT.index('sed -i "s|reverse_proxy')
-        caddy_switch = BLUEGREEN_TEXT.index("caddy reload", sed_idx)
+        # Find the actual caddy reload that switches traffic (not the one in rollback).
+        # The Caddyfile is rewritten with an inode-safe cat pattern, then caddy reload follows.
+        rewrite_idx = BLUEGREEN_TEXT.index('cat "$caddy_tmp" > "$EDGE_CADDYFILE"')
+        caddy_switch = BLUEGREEN_TEXT.index("caddy reload", rewrite_idx)
         self.assertLess(green_start, caddy_switch, "green must start before Caddy switch")
 
     def test_bluegreen_health_checks_green_directly(self) -> None:

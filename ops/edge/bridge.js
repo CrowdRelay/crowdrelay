@@ -103,7 +103,11 @@ const ticketMailerToken = mustRead(TICKET_MAILER_TOKEN_PATH, 'ticket mailer toke
 const internalToken = mustRead(INTERNAL_TOKEN_PATH, 'bridge internal token', 32);
 const config = loadJson(CONFIG_PATH, 'bridge config');
 const routes = loadJson(ROUTES_PATH, 'route map');
-if (Object.keys(routes).length !== 48) throw new Error(`route map must contain exactly 48 event types, got ${Object.keys(routes).length}`);
+if (Object.keys(routes).length === 0) throw new Error('route map must contain at least one event type');
+for (const [eventType, workflowId] of Object.entries(routes)) {
+  if (typeof eventType !== 'string' || eventType.length === 0) throw new Error(`invalid event type in route map: ${JSON.stringify(eventType)}`);
+  if (typeof workflowId !== 'string' || workflowId.length === 0) throw new Error(`invalid workflow id for event type ${eventType}: ${JSON.stringify(workflowId)}`);
+}
 for (const [eventType, workflowId] of Object.entries(routes)) {
   if (!/^[a-z0-9_.-]{3,160}$/.test(eventType) || !/^[A-Za-z0-9-]{8,80}$/.test(String(workflowId))) throw new Error('invalid route map entry');
 }
