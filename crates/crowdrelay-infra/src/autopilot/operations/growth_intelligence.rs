@@ -1098,7 +1098,7 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
         strategy.map(|s| s.to_owned()),
         evidence_quality,
     );
-    let _ = super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await;
+    super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await?;
     Ok(())
 }
 

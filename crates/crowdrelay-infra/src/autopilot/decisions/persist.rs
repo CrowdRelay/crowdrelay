@@ -383,6 +383,16 @@ macro_rules! decision_persist {
             let prediction_json = serde_json::to_value(prediction)
                 .unwrap_or(serde_json::json!({}));
             let kind = assignment.kind();
+            // The assignment was constructed with action_id=None (withheld),
+            // but this path creates a real action — so execution_status
+            // must be Executed, not Withheld.
+            let execution_status = if assignment.arm
+                == crowdrelay_brain::TreatmentAssignment::Treatment
+            {
+                crowdrelay_brain::ExecutionStatus::Executed
+            } else {
+                assignment.execution_status
+            };
             sqlx::query(
                 r#"
                 INSERT INTO viryaos_experiment_assignments
@@ -393,9 +403,9 @@ macro_rules! decision_persist {
                      experiment_uuid, assignment_round,
                      eligibility_criteria, selection_context,
                      interference_policy, assignment_time_contamination,
-                     experiment_status)
+                     experiment_status, execution_status)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20, $21, $22, $23)
+                        $17, $18, $19, $20, $21, $22, $23, $24)
                 ON CONFLICT (workspace_id, experiment_uuid, assignment_round, unit_id)
                 DO NOTHING
                 "#,
@@ -423,6 +433,7 @@ macro_rules! decision_persist {
             .bind(assignment.interference_policy.as_str())
             .bind(assignment.interference_score)
             .bind(assignment.experiment_status.as_str())
+            .bind(execution_status.as_str())
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;

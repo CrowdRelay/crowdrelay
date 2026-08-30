@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use crowdrelay_brain::{
-    AttributionResult, CausalModel, DispatchPrediction, ExperimentAssignment, ExperimentDesign,
-    ExperimentUnitKind, ExplorationMemory, FanOutcome, FanProvenanceEvent,
+    AttributionResult, CausalModel, DispatchPrediction, ExecutionStatus, ExperimentAssignment,
+    ExperimentDesign, ExperimentUnitKind, ExplorationMemory, FanOutcome, FanProvenanceEvent,
     GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
@@ -341,6 +341,21 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         assignment: &ExperimentAssignment,
         strategy: Option<&str>,
+    ) -> Result<(), RepositoryError>;
+
+    /// Transitions the execution_status of an experiment assignment.
+    ///
+    /// Monotonic: only `executed → failed` is allowed. All other
+    /// transitions are silently no-ops (the DB WHERE clause prevents
+    /// them). This is the one transition point from the executor/result
+    /// path.
+    ///
+    /// Retry-safe: setting the same status is a no-op (idempotent).
+    async fn update_execution_status(
+        &self,
+        workspace_id: WorkspaceId,
+        assignment_id: &str,
+        new_status: ExecutionStatus,
     ) -> Result<(), RepositoryError>;
 
     /// Get-or-creates a persisted experiment design.

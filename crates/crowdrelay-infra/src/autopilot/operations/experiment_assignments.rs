@@ -59,7 +59,10 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
     let eligibility_criteria = serde_json::json!({
         "is_direct_action": true,
         "template_id": intervention_key,
-        "portfolio_selected": true,
+        // portfolio_selected is NOT recorded here because the
+        // experiment is designed BEFORE portfolio selection.
+        // The population is "all eligible candidates", not
+        // "portfolio-selected candidates".
     });
     let selection_context = serde_json::json!({
         "holdout_probability": holdout_probability,
@@ -266,7 +269,16 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
     let prediction_json =
         serde_json::to_value(&assignment.prediction).unwrap_or(serde_json::json!({}));
     let kind = assignment.kind();
-    sqlx::query(
+
+    // P0-2: Use a transaction so that control assignment + control evidence
+    // are atomic. A crash between them is now impossible — they commit
+    // together or not at all.
+    let mut tx = pool.begin().await.map_err(map_sqlx)?;
+
+    // INSERT assignment — RETURNING id lets us detect first creation vs
+    // retry. On retry (ON CONFLICT DO NOTHING), no row is returned and we
+    // skip evidence creation to prevent duplicates.
+    let inserted = sqlx::query(
         r#"
         INSERT INTO viryaos_experiment_assignments
             (id, workspace_id, unit_id, unit_kind, arm, assigned_at,
@@ -276,11 +288,12 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
              experiment_uuid, assignment_round,
              eligibility_criteria, selection_context,
              interference_policy, assignment_time_contamination,
-             experiment_status)
+             experiment_status, execution_status)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                $17, $18, $19, $20, $21, $22, $23)
+                $17, $18, $19, $20, $21, $22, $23, $24)
         ON CONFLICT (workspace_id, experiment_uuid, assignment_round, unit_id)
         DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(&assignment.assignment_id)
@@ -306,15 +319,16 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
     .bind(assignment.interference_policy.as_str())
     .bind(assignment.interference_score)
     .bind(assignment.experiment_status.as_str())
-    .execute(pool)
+    .bind(assignment.execution_status.as_str())
+    .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlx)?;
 
-    // Also record a control evidence row when this is a control arm,
-    // so the measurement system can measure the control group's fan
-    // growth. The evidence row uses the assignment_id as the linking
-    // key and has action_id=NULL (per migration 0163).
-    if assignment.arm == crowdrelay_brain::TreatmentAssignment::Control {
+    // Only record control evidence on FIRST creation (inserted=Some).
+    // On retry (inserted=None), the evidence already exists — skip to
+    // prevent duplicates. The evidence INSERT is in the same transaction
+    // as the assignment INSERT — atomic.
+    if assignment.arm == crowdrelay_brain::TreatmentAssignment::Control && inserted.is_some() {
         let evidence_quality = if assignment.is_interference_controllable {
             crowdrelay_brain::EvidenceQuality::RandomizedHoldout
         } else {
@@ -360,8 +374,43 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
             strategy.map(|s| s.to_owned()),
             evidence_quality,
         );
-        let _ = super::evidence::record_growth_evidence(repo, workspace_id, &evidence).await;
+        super::evidence::record_growth_evidence_in_tx(&mut tx, workspace_id, &evidence).await?;
     }
+    tx.commit().await.map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// Transitions the execution_status of an experiment assignment.
+///
+/// Monotonic: only `executed → failed` is allowed. All other transitions
+/// are silently no-ops (the WHERE clause prevents them). This is the
+/// one transition point from the executor/result path.
+///
+/// Retry-safe: setting the same status is a no-op (idempotent).
+pub(in crate::autopilot) async fn update_execution_status(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    assignment_id: &str,
+    new_status: crowdrelay_brain::ExecutionStatus,
+) -> Result<(), RepositoryError> {
+    // Only executed → failed is allowed. The WHERE clause enforces this
+    // at the DB level — no application-level race condition possible.
+    sqlx::query(
+        r#"
+        UPDATE viryaos_experiment_assignments
+        SET execution_status = $3
+        WHERE workspace_id = $1
+          AND id = $2
+          AND execution_status = 'executed'
+          AND $3 = 'failed'
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(assignment_id)
+    .bind(new_status.as_str())
+    .execute(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
     Ok(())
 }
 

@@ -9,9 +9,18 @@
 //!     get_or_create_experiment_design return the same UUID.
 //! T5: Atomic treatment bookkeeping — if the assignment INSERT fails,
 //!     the action is also not persisted (transaction rollback).
+//! T6: Control evidence persistence — recording a control assignment
+//!     also creates the control evidence row (atomic, not silent).
+//! T7: Control evidence idempotency — replaying control assignment
+//!     creation does not duplicate the evidence row.
+//! T8: execution_status is persisted correctly for all arms.
+//! T9: update_execution_status is monotonic — only executed → failed.
 
 use crowdrelay_application::autopilot::AutopilotDecisionRepository;
-use crowdrelay_brain::{ExperimentStatus, ExperimentUnitKind};
+use crowdrelay_brain::{
+    DispatchContext, DispatchPrediction, ExecutionStatus, ExperimentAssignment, ExperimentStatus,
+    ExperimentUnitKind, TreatmentAssignment,
+};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use sqlx::postgres::PgPoolOptions;
@@ -251,4 +260,322 @@ async fn t1_design_persists_status_and_unit_kind() {
     assert_eq!(design.unit_kind, ExperimentUnitKind::TargetCommunity);
     assert_eq!(design.experiment_status, ExperimentStatus::Active);
     assert_eq!(design.eligible_units.len(), 20);
+}
+
+// ── P0-2: Control evidence + execution_status tests ──
+
+fn make_prediction() -> DispatchPrediction {
+    DispatchPrediction {
+        template_id: "community.engage".to_owned(),
+        expected_new_fans: 5.0,
+        expected_signal_installs: 1.0,
+        context: DispatchContext::default(),
+    }
+}
+
+/// T6: Control evidence persistence — recording a control assignment
+/// also creates the control evidence row. The write is atomic (same
+/// transaction), not silent.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t6_control_evidence_not_silent() {
+    let f = setup().await.expect("fixture");
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t6",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t6control".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+
+    let pred = make_prediction();
+    let assignment = ExperimentAssignment::from_design(
+        &design,
+        "r/t6control",
+        "r/t6control",
+        TreatmentAssignment::Control,
+        &pred,
+        None,
+    );
+
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
+        .await
+        .expect("control assignment recording");
+
+    // Verify the evidence row exists.
+    let evidence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND treatment = 'control'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("evidence count query");
+
+    assert_eq!(
+        evidence_count, 1,
+        "control evidence must exist — silent failure is not allowed"
+    );
+}
+
+/// T7: Control evidence idempotency — replaying control assignment
+/// creation does not duplicate the evidence row.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t7_control_evidence_idempotent_on_retry() {
+    let f = setup().await.expect("fixture");
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t7",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t7control".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+
+    let pred = make_prediction();
+    let assignment = ExperimentAssignment::from_design(
+        &design,
+        "r/t7control",
+        "r/t7control",
+        TreatmentAssignment::Control,
+        &pred,
+        None,
+    );
+
+    // Record twice (simulating retry).
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
+        .await
+        .expect("first control assignment recording");
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
+        .await
+        .expect("retry control assignment recording");
+
+    // Verify exactly 1 evidence row (not 2).
+    let evidence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND treatment = 'control'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("evidence count query");
+
+    assert_eq!(
+        evidence_count, 1,
+        "retry must not duplicate control evidence — idempotency required"
+    );
+
+    // Verify exactly 1 assignment row (not 2).
+    let assignment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND arm = 'control'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment count query");
+
+    assert_eq!(
+        assignment_count, 1,
+        "retry must not duplicate control assignment — idempotency required"
+    );
+}
+
+/// T8: execution_status is persisted correctly for all arms.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t8_execution_status_persisted() {
+    let f = setup().await.expect("fixture");
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t8",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t8control".to_string(), "r/t8treatment".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+
+    let pred = make_prediction();
+
+    // Control assignment → execution_status='control'
+    let control = ExperimentAssignment::from_design(
+        &design,
+        "r/t8control",
+        "r/t8control",
+        TreatmentAssignment::Control,
+        &pred,
+        None,
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &control, Some("discovery"))
+        .await
+        .expect("control assignment recording");
+
+    // Withheld-treatment assignment → execution_status='withheld'
+    let withheld = ExperimentAssignment::from_design(
+        &design,
+        "r/t8treatment",
+        "r/t8treatment",
+        TreatmentAssignment::Treatment,
+        &pred,
+        None, // no action_id → withheld
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &withheld, Some("discovery"))
+        .await
+        .expect("withheld assignment recording");
+
+    // Verify control execution_status.
+    let control_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t8control'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("control status query");
+    assert_eq!(control_status, "control");
+
+    // Verify withheld execution_status.
+    let withheld_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t8treatment'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("withheld status query");
+    assert_eq!(withheld_status, "withheld");
+}
+
+/// T9: update_execution_status is monotonic — only executed → failed.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t9_execution_status_monotonic() {
+    let f = setup().await.expect("fixture");
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t9",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t9control".to_string(), "r/t9treatment".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+
+    let pred = make_prediction();
+
+    // Control assignment → execution_status='control'
+    let control = ExperimentAssignment::from_design(
+        &design,
+        "r/t9control",
+        "r/t9control",
+        TreatmentAssignment::Control,
+        &pred,
+        None,
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &control, Some("discovery"))
+        .await
+        .expect("control assignment recording");
+
+    // Attempt to transition control → failed (should be no-op).
+    f.repository
+        .update_execution_status(
+            f.workspace_id,
+            &control.assignment_id,
+            ExecutionStatus::Failed,
+        )
+        .await
+        .expect("update attempt");
+
+    let control_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t9control'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("control status query");
+    assert_eq!(
+        control_status, "control",
+        "control is terminal — update must be a no-op"
+    );
+
+    // Withheld-treatment assignment → execution_status='withheld'
+    let withheld = ExperimentAssignment::from_design(
+        &design,
+        "r/t9treatment",
+        "r/t9treatment",
+        TreatmentAssignment::Treatment,
+        &pred,
+        None,
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &withheld, Some("discovery"))
+        .await
+        .expect("withheld assignment recording");
+
+    // Attempt to transition withheld → failed (should be no-op).
+    f.repository
+        .update_execution_status(
+            f.workspace_id,
+            &withheld.assignment_id,
+            ExecutionStatus::Failed,
+        )
+        .await
+        .expect("update attempt");
+
+    let withheld_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t9treatment'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("withheld status query");
+    assert_eq!(
+        withheld_status, "withheld",
+        "withheld is terminal — update must be a no-op"
+    );
 }

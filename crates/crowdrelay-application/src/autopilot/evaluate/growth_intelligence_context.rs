@@ -340,8 +340,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             }
             let persisted = self.persist(candidate, limits, report).await?;
             if let Some(action_id) = persisted {
-                let _ = self
-                    .repository
+                self.repository
                     .record_dispatch_prediction(
                         self.workspace_id,
                         action_id,
@@ -349,7 +348,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         Some(strategy.as_str()),
                         0.0,
                     )
-                    .await;
+                    .await?;
             }
             dispatched_count += 1;
         }
@@ -395,8 +394,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         )
                         .await?;
                     if let Some(action_id) = persisted.action_id {
-                        let _ = self
-                            .repository
+                        self.repository
                             .record_dispatch_prediction(
                                 self.workspace_id,
                                 action_id,
@@ -404,7 +402,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                                 Some(strategy.as_str()),
                                 *effective_holdout,
                             )
-                            .await;
+                            .await?;
                         // P1-f: Emit Exposure provenance event for
                         // community-engager actions. The exposure is
                         // anonymous (fan_id=None) — we know the post was
@@ -456,14 +454,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             prediction,
                             None, // action_id=None — not dispatched
                         );
-                    let _ = self
-                        .repository
+                    self.repository
                         .record_experiment_assignment(
                             self.workspace_id,
                             &withheld_assignment,
                             Some(strategy.as_str()),
                         )
-                        .await;
+                        .await?;
                 }
             }
         }

@@ -378,6 +378,21 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn update_execution_status(
+        &self,
+        workspace_id: WorkspaceId,
+        assignment_id: &str,
+        new_status: crowdrelay_brain::ExecutionStatus,
+    ) -> Result<(), RepositoryError> {
+        super::operations::experiment_assignments::update_execution_status(
+            self,
+            workspace_id,
+            assignment_id,
+            new_status,
+        )
+        .await
+    }
+
     async fn get_or_create_experiment_design(
         &self,
         workspace_id: WorkspaceId,

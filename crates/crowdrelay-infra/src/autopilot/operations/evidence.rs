@@ -25,6 +25,54 @@ pub(in crate::autopilot) async fn record_growth_evidence(
     evidence: &GrowthEvidence,
 ) -> Result<(), RepositoryError> {
     let pool = &repo.pool;
+    let mut tx = pool.begin().await.map_err(map_sqlx)?;
+    record_growth_evidence_in_tx(&mut tx, workspace_id, evidence).await?;
+    tx.commit().await.map_err(map_sqlx)?;
+
+    // Also write an immutable evidence event for the dispatch.
+    let context_json = serde_json::to_value(&evidence.context).unwrap_or(serde_json::json!({}));
+    let event = crowdrelay_brain::EvidenceEvent {
+        workspace_id: workspace_id.into_uuid(),
+        action_id: evidence.action_id,
+        opportunity_id: evidence.opportunity_id.clone(),
+        episode_id: evidence.episode_id.clone(),
+        event_type: crowdrelay_brain::EvidenceEventType::ActionDispatched,
+        payload: serde_json::json!({
+            "channel": evidence.channel.as_str(),
+            "estimated_reach": evidence.estimated_reach,
+            "treatment": evidence.treatment.as_str(),
+            "propensity": evidence.propensity,
+            "predicted_fans": evidence.predicted_fans,
+            "predicted_signal_installs": evidence.predicted_signal_installs,
+            "strategy": evidence.strategy,
+            "evidence_quality": evidence.evidence_quality.as_str(),
+            "context": context_json,
+        }),
+        occurred_at: evidence.timestamp,
+    };
+    // Best-effort event write — don't fail the dispatch if the event log
+    // write fails. The evidence table is the source of truth; the event
+    // log is the audit trail.
+    let _ = record_evidence_event(repo, workspace_id, &event).await;
+
+    // Upsert the derived episode.
+    let _ = upsert_growth_episode(repo, workspace_id, evidence).await;
+
+    Ok(())
+}
+
+/// Records the growth evidence row within an existing transaction.
+/// This is the critical write — the source of truth for the learning
+/// loop. The event log and episode upsert are best-effort and remain
+/// in the non-transactional `record_growth_evidence` wrapper.
+///
+/// Used by `record_experiment_assignment` to make control evidence
+/// atomic with the assignment INSERT.
+pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    evidence: &GrowthEvidence,
+) -> Result<(), RepositoryError> {
     let context_json = serde_json::to_value(&evidence.context).unwrap_or(serde_json::json!({}));
     sqlx::query(
         r#"
@@ -69,38 +117,9 @@ pub(in crate::autopilot) async fn record_growth_evidence(
     .bind(evidence.measurement_delay_days.map(|v| v as i32))
     .bind(&evidence.episode_id)
     .bind(evidence.resolved_at)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-
-    // Also write an immutable evidence event for the dispatch.
-    let event = crowdrelay_brain::EvidenceEvent {
-        workspace_id: workspace_id.into_uuid(),
-        action_id: evidence.action_id,
-        opportunity_id: evidence.opportunity_id.clone(),
-        episode_id: evidence.episode_id.clone(),
-        event_type: crowdrelay_brain::EvidenceEventType::ActionDispatched,
-        payload: serde_json::json!({
-            "channel": evidence.channel.as_str(),
-            "estimated_reach": evidence.estimated_reach,
-            "treatment": evidence.treatment.as_str(),
-            "propensity": evidence.propensity,
-            "predicted_fans": evidence.predicted_fans,
-            "predicted_signal_installs": evidence.predicted_signal_installs,
-            "strategy": evidence.strategy,
-            "evidence_quality": evidence.evidence_quality.as_str(),
-            "context": context_json,
-        }),
-        occurred_at: evidence.timestamp,
-    };
-    // Best-effort event write — don't fail the dispatch if the event log
-    // write fails. The evidence table is the source of truth; the event
-    // log is the audit trail.
-    let _ = record_evidence_event(repo, workspace_id, &event).await;
-
-    // Upsert the derived episode.
-    let _ = upsert_growth_episode(repo, workspace_id, evidence).await;
-
     Ok(())
 }
 

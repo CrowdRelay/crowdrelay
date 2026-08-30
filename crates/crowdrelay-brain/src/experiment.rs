@@ -282,6 +282,102 @@ impl ExperimentStatus {
     }
 }
 
+/// The realized execution status of an experiment assignment.
+///
+/// This is SEPARATE from `arm` (the randomized assignment):
+/// - `arm` = what was randomized (Z) — ITT analysis uses this
+/// - `execution_status` = what actually happened (T) — per-protocol
+///   / treatment-on-treated analysis uses this
+/// - outcome (Y) = what resulted
+///
+/// # Lifecycle
+///
+/// `execution_status` is a lifecycle fact, NOT a static property.
+/// It is set initially at assignment creation and may transition
+/// as the execution lifecycle progresses:
+///
+/// ```text
+/// Control → control (terminal)
+/// Treatment + not selected by portfolio → withheld (terminal)
+/// Treatment + selected + action created → executed
+/// Treatment + action later fails → failed
+/// ```
+///
+/// `from_design()` sets the INITIAL status based on arm + action_id.
+/// The `update_execution_status()` repository method transitions
+/// status as the execution lifecycle progresses.
+///
+/// # Monotonicity
+///
+/// Status transitions are monotonic:
+/// - `control` is terminal — never transitions
+/// - `withheld` is terminal — never transitions (the unit was never dispatched)
+/// - `executed` → `failed` is the only allowed forward transition
+/// - Retry must never regress a finalized status
+///
+/// # Hard invariant
+///
+/// `execution_status` must never be derived from `action_id` NULL
+/// semantics at query time. It is an explicit persisted field.
+/// `action_id` is a linkage field only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatus {
+    /// Control arm — no treatment was ever intended. Terminal.
+    Control,
+    /// Treatment arm, but portfolio did not select this candidate
+    /// for dispatch. Terminal — the unit was never dispatched.
+    Withheld,
+    /// Treatment arm, action created and dispatched. The action
+    /// may later succeed or fail — `executed` means "crossed the
+    /// dispatch boundary", not "successfully delivered".
+    Executed,
+    /// Treatment arm, action was dispatched but later failed.
+    /// Set by `update_execution_status()` when the action lifecycle
+    /// transitions to failed.
+    Failed,
+}
+
+impl ExecutionStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Withheld => "withheld",
+            Self::Executed => "executed",
+            Self::Failed => "failed",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "control" => Some(Self::Control),
+            "withheld" => Some(Self::Withheld),
+            "executed" => Some(Self::Executed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Whether this status is terminal — no further transitions possible.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Control | Self::Withheld | Self::Failed)
+    }
+
+    /// Whether transitioning from `self` to `new` is allowed.
+    /// Only `executed → failed` is a valid forward transition.
+    #[must_use]
+    pub const fn can_transition_to(self, new: Self) -> bool {
+        matches!((self, new), (Self::Executed, Self::Failed))
+    }
+}
+
+fn default_execution_status() -> ExecutionStatus {
+    ExecutionStatus::Executed
+}
+
 /// A first-class experiment assignment — the unit being randomized, the
 /// arm, and the metadata needed for causal inference.
 ///
@@ -301,11 +397,24 @@ impl ExperimentStatus {
 ///
 /// # Estimand
 ///
-/// The holdout estimates "effect of dispatching this selected action",
-/// NOT "effect of this action in the entire world." The `eligibility_criteria`
-/// and `selection_context` record what made this candidate eligible and
-/// what the portfolio state was at selection time, making the estimand
-/// explicit for future policy evaluation.
+/// The experiment estimates the ITT (intent-to-treat) effect of
+/// assignment among eligible candidates — NOT "effect of dispatching
+/// the selected action."
+///
+/// - `arm` (Z) = what was randomized. ITT analysis uses this.
+/// - `execution_status` (T) = what actually happened. Per-protocol
+///   / treatment-on-treated analysis uses this.
+/// - outcome (Y) = what resulted.
+///
+/// `execution_status` is a lifecycle fact, not a static property.
+/// It is set initially at assignment creation and may transition
+/// (executed → failed) as the execution lifecycle progresses.
+/// See `ExecutionStatus` for the transition rules.
+///
+/// The `eligibility_criteria` records what made this candidate
+/// eligible (direct action, template_id). The `selection_context`
+/// records the PRE-PORTFOLIO state at experiment design time —
+/// NOT post-selection state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExperimentAssignment {
     /// Unique assignment ID — unique per row. Stored as `id` in the DB.
@@ -365,14 +474,17 @@ pub struct ExperimentAssignment {
     /// `interference_policy.is_interference_controllable()`.
     pub is_interference_controllable: bool,
     /// What made this candidate eligible for the experiment — the
-    /// estimand is "effect among eligible/selected candidates", not
-    /// "effect among all opportunities." Records: portfolio selected,
-    /// direct action, not scanner/strategist, etc.
+    /// estimand is "effect among eligible candidates", not "effect
+    /// among all opportunities." Records: direct action, template_id.
+    /// Does NOT record portfolio_selected — the experiment is designed
+    /// before portfolio selection.
     #[serde(default)]
     pub eligibility_criteria: serde_json::Value,
-    /// The portfolio state at selection time — how many candidates,
-    /// what was the best alternative, etc. Makes the selection-biased
-    /// estimand explicit for future policy evaluation.
+    /// The PRE-PORTFOLIO state at experiment design time — holdout
+    /// probability, strategy, etc. Recorded BEFORE the portfolio
+    /// optimizer runs. Do NOT mutate after portfolio selection. If
+    /// post-selection outcome is needed, add a separate immutable
+    /// portfolio_outcome record.
     #[serde(default)]
     pub selection_context: serde_json::Value,
     /// The operational status of the experiment at assignment time.
@@ -382,6 +494,12 @@ pub struct ExperimentAssignment {
     /// was applied, even though the arm is `Treatment`.
     #[serde(default = "default_experiment_status")]
     pub experiment_status: ExperimentStatus,
+    /// The realized execution status — what actually happened.
+    /// SEPARATE from `arm` (what was randomized).
+    /// See `ExecutionStatus` for the causal semantics and
+    /// lifecycle transitions.
+    #[serde(default = "default_execution_status")]
+    pub execution_status: ExecutionStatus,
 }
 
 impl ExperimentAssignment {
@@ -423,6 +541,14 @@ impl ExperimentAssignment {
             "asgn:{}:{}:{}",
             design.experiment_uuid, design.assignment_round, unit_id
         );
+        // Compute the INITIAL execution_status from arm + action_id.
+        // This is the only time execution_status is derived from
+        // action_id — subsequent transitions use update_execution_status().
+        let execution_status = match (arm, action_id) {
+            (TreatmentAssignment::Control, _) => ExecutionStatus::Control,
+            (TreatmentAssignment::Treatment, Some(_)) => ExecutionStatus::Executed,
+            (TreatmentAssignment::Treatment, None) => ExecutionStatus::Withheld,
+        };
         Self {
             assignment_id,
             experiment_uuid: design.experiment_uuid,
@@ -449,6 +575,7 @@ impl ExperimentAssignment {
             eligibility_criteria: design.eligibility_criteria.clone(),
             selection_context: design.selection_context.clone(),
             experiment_status: design.experiment_status,
+            execution_status,
         }
     }
 }
@@ -476,6 +603,15 @@ impl ExperimentAssignment {
 /// happens via the hierarchical learner (calibration, treatment-effect
 /// posteriors), not via shared experiment identity. The learner pools
 /// evidence across experiments; the experiments themselves remain separate.
+///
+/// # Estimand
+///
+/// The estimand is the ITT effect of assignment among all eligible
+/// candidates — NOT "effect among portfolio-selected candidates."
+/// The experiment is designed BEFORE portfolio selection. The
+/// `eligibility_criteria` records eligibility, not selection.
+/// The `selection_context` records pre-portfolio state, not
+/// post-selection outcome.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExperimentDesign {
     /// The experiment UUID — shared by all assignments in this experiment.
@@ -517,12 +653,15 @@ pub struct ExperimentDesign {
     /// for each assignment is `1.0 - holdout_probability`.
     pub holdout_probability: f64,
     /// What made these candidates eligible for the experiment. Shared
-    /// by all assignments in this experiment. Records: portfolio selected,
-    /// direct action, not scanner/strategist, etc.
+    /// by all assignments in this experiment. Records: direct action,
+    /// template_id. Does NOT record portfolio_selected — the experiment
+    /// is designed before portfolio selection.
     pub eligibility_criteria: serde_json::Value,
-    /// The portfolio state at experiment design time — how many candidates,
-    /// what was the best alternative, etc. Makes the selection-biased
-    /// estimand explicit for future policy evaluation.
+    /// The PRE-PORTFOLIO state at experiment design time — holdout
+    /// probability, strategy, etc. Recorded BEFORE the portfolio
+    /// optimizer runs. Do NOT mutate after portfolio selection. If
+    /// post-selection outcome is needed, add a separate immutable
+    /// portfolio_outcome record.
     pub selection_context: serde_json::Value,
     /// The operational status — whether this experiment has enough power
     /// to produce a meaningful randomized holdout. When `InsufficientPower`,
@@ -574,7 +713,10 @@ impl ExperimentDesign {
         let eligibility_criteria = serde_json::json!({
             "is_direct_action": true,
             "template_id": intervention_key,
-            "portfolio_selected": true,
+            // portfolio_selected is NOT recorded here because the
+            // experiment is designed BEFORE portfolio selection.
+            // The population is "all eligible candidates", not
+            // "portfolio-selected candidates".
         });
         let selection_context = serde_json::json!({
             "holdout_probability": holdout_probability,
@@ -1153,5 +1295,154 @@ mod tests {
             None,
         );
         assert!((a.interference_score - 0.0).abs() < 1e-10);
+    }
+
+    // ── ExecutionStatus + estimand integrity tests (P0) ──
+
+    fn make_design() -> ExperimentDesign {
+        ExperimentDesign::new(
+            uuid::Uuid::now_v7(),
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/test".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.10,
+            "discovery",
+        )
+    }
+
+    // EST-1: execution_status lifecycle — from_design() sets correct
+    // initial status for each arm + action_id combination.
+    #[test]
+    fn est_1_execution_status_initial_from_arm_and_action_id() {
+        let design = make_design();
+        let pred = make_prediction("community.engage");
+
+        // Control → control (terminal)
+        let control = ExperimentAssignment::from_design(
+            &design,
+            "unit-1",
+            "cand-1",
+            TreatmentAssignment::Control,
+            &pred,
+            None,
+        );
+        assert_eq!(control.execution_status, ExecutionStatus::Control);
+
+        // Treatment + action_id=Some → executed
+        let executed = ExperimentAssignment::from_design(
+            &design,
+            "unit-1",
+            "cand-1",
+            TreatmentAssignment::Treatment,
+            &pred,
+            Some(uuid::Uuid::now_v7()),
+        );
+        assert_eq!(executed.execution_status, ExecutionStatus::Executed);
+
+        // Treatment + action_id=None → withheld (terminal)
+        let withheld = ExperimentAssignment::from_design(
+            &design,
+            "unit-1",
+            "cand-1",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        assert_eq!(withheld.execution_status, ExecutionStatus::Withheld);
+    }
+
+    // EST-2: eligibility_criteria does not contain portfolio_selected.
+    #[test]
+    fn est_2_eligibility_criteria_no_portfolio_selected() {
+        let design = make_design();
+        let obj = design.eligibility_criteria.as_object().unwrap();
+        assert!(
+            !obj.contains_key("portfolio_selected"),
+            "eligibility_criteria must not contain portfolio_selected — \
+             the experiment is designed before portfolio selection"
+        );
+        assert!(obj.contains_key("is_direct_action"));
+        assert!(obj.contains_key("template_id"));
+    }
+
+    // EST-3: selection_context is explicitly pre-selection.
+    // It records holdout_probability and strategy — NOT portfolio outcome.
+    #[test]
+    fn est_3_selection_context_is_pre_selection() {
+        let design = make_design();
+        let ctx = design.selection_context.as_object().unwrap();
+        assert!(ctx.contains_key("holdout_probability"));
+        assert!(ctx.contains_key("strategy"));
+        // Must NOT contain post-selection fields
+        assert!(!ctx.contains_key("portfolio_selected_count"));
+        assert!(!ctx.contains_key("best_alternative"));
+        assert!(!ctx.contains_key("selected_keys"));
+    }
+
+    // EST-4: execution_status does not imply causal assignment.
+    // arm and execution_status are independent dimensions.
+    // Control always has execution_status=Control regardless of action_id.
+    #[test]
+    fn est_4_execution_status_independent_from_arm() {
+        let design = make_design();
+        let pred = make_prediction("community.engage");
+
+        // Control with action_id=Some (shouldn't happen, but verify)
+        // still gets execution_status=Control — arm takes precedence.
+        let control_with_action = ExperimentAssignment::from_design(
+            &design,
+            "unit-1",
+            "cand-1",
+            TreatmentAssignment::Control,
+            &pred,
+            Some(uuid::Uuid::now_v7()),
+        );
+        assert_eq!(
+            control_with_action.execution_status,
+            ExecutionStatus::Control
+        );
+        assert_eq!(control_with_action.arm, TreatmentAssignment::Control);
+    }
+
+    // EST-5: retry does not regress finalized execution_status.
+    // The update_execution_status SQL only allows executed → failed.
+    // All other transitions are no-ops. This test verifies the
+    // monotonicity logic at the type level.
+    #[test]
+    fn est_5_execution_status_monotonic() {
+        // Control is terminal — no transition possible.
+        assert!(ExecutionStatus::Control.is_terminal());
+        // Withheld is terminal — no transition possible.
+        assert!(ExecutionStatus::Withheld.is_terminal());
+        // Executed can transition to Failed.
+        assert!(!ExecutionStatus::Executed.is_terminal());
+        // Failed is terminal — no transition possible.
+        assert!(ExecutionStatus::Failed.is_terminal());
+
+        // The only allowed forward transition:
+        assert!(ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Failed));
+        // No backward transitions:
+        assert!(!ExecutionStatus::Failed.can_transition_to(ExecutionStatus::Executed));
+        assert!(!ExecutionStatus::Withheld.can_transition_to(ExecutionStatus::Executed));
+        assert!(!ExecutionStatus::Control.can_transition_to(ExecutionStatus::Withheld));
+        // No self-transitions (idempotent no-ops at DB level, but not
+        // "allowed forward transitions" at the type level):
+        assert!(!ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Executed));
+        assert!(!ExecutionStatus::Failed.can_transition_to(ExecutionStatus::Failed));
+    }
+
+    #[test]
+    fn execution_status_round_trips() {
+        for status in [
+            ExecutionStatus::Control,
+            ExecutionStatus::Withheld,
+            ExecutionStatus::Executed,
+            ExecutionStatus::Failed,
+        ] {
+            assert_eq!(ExecutionStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(ExecutionStatus::parse("unknown"), None);
     }
 }
