@@ -100,9 +100,11 @@ class ReferralConversionContract(unittest.TestCase):
 class SchemaVersionContract(unittest.TestCase):
     def test_schema_version_matches_latest_migration(self) -> None:
         meta = read(API / "meta.rs")
-        migrations = sorted(MIGRATIONS.glob("0*.sql"))
-        latest = int(migrations[-1].stem.split("_")[0])
-        self.assertIn(f"SCHEMA_VERSION: u32 = {latest}", meta)
+        # SCHEMA_VERSION is now auto-discovered by build.rs from the
+        # migrations directory, so we verify the env-var pattern is present
+        # and build.rs exists rather than checking a hardcoded number.
+        self.assertIn("CROWDRELAY_SCHEMA_VERSION", meta)
+        self.assertTrue((ROOT / "crates/crowdrelay-api/build.rs").is_file())
 
 
 class FanListActivationContract(unittest.TestCase):

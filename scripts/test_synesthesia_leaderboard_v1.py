@@ -62,13 +62,9 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
         self.assertIn("/public/synesthesia/runs/{run_id}/leaderboard:", spec)
         self.assertIn("SynesthesiaLeaderboardResponse:", spec)
         self.assertIn("SynesthesiaLeaderboardPublishResponse:", spec)
-        # Track the latest migration rather than pinning a literal, so adding a
-        # migration does not fail this unrelated contract.
-        latest = max(
-            int(path.name[:4])
-            for path in (ROOT / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql")
-        )
-        self.assertIn(f"SCHEMA_VERSION: u32 = {latest}", meta)
+        # SCHEMA_VERSION is auto-discovered by build.rs — verify the pattern.
+        self.assertIn("CROWDRELAY_SCHEMA_VERSION", meta)
+        self.assertTrue((ROOT / "crates/crowdrelay-api/build.rs").is_file())
         self.assertIn('"synesthesia_leaderboard_v1"', meta)
 
 

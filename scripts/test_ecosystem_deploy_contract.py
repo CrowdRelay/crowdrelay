@@ -89,18 +89,15 @@ class EcosystemDeployContract(unittest.TestCase):
         self.assertIn("rollback()", BLUEGREEN_TEXT)
         self.assertIn("ROLLBACK=START", BLUEGREEN_TEXT)
         self.assertIn("ROLLBACK=COMPLETE", BLUEGREEN_TEXT)
-        self.assertIn("CADDY_SWITCHED", BLUEGREEN_TEXT)
+        self.assertIn("ALIAS_MOVE=PASS", BLUEGREEN_TEXT)
 
     def test_bluegreen_starts_green_before_switching(self) -> None:
-        # Green containers must start before the Caddy switch.
-        # The compose up command may span multiple lines, so search for
-        # the "up -d" with "api-green" and the "caddy reload" that switches.
+        # Green containers must start before the alias move (which switches traffic).
         green_start = BLUEGREEN_TEXT.index("up -d --no-deps --wait")
-        # Find the actual caddy reload that switches traffic (not the one in rollback).
-        # The Caddyfile is rewritten with an inode-safe cat pattern, then caddy reload follows.
-        rewrite_idx = BLUEGREEN_TEXT.index('cat "$caddy_tmp" > "$EDGE_CADDYFILE"')
-        caddy_switch = BLUEGREEN_TEXT.index("caddy reload", rewrite_idx)
-        self.assertLess(green_start, caddy_switch, "green must start before Caddy switch")
+        # The alias move is the traffic switch — it disconnects the old
+        # container and connects the new one with the active alias.
+        alias_move = BLUEGREEN_TEXT.index("ALIAS_MOVED=true")
+        self.assertLess(green_start, alias_move, "green must start before alias move")
 
     def test_bluegreen_health_checks_green_directly(self) -> None:
         # Alternating blue-green: the new color is health-checked directly

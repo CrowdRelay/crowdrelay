@@ -5,8 +5,31 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 const API_VERSION: &str = "1";
-pub(crate) const SCHEMA_VERSION: u32 = 181;
+/// Auto-discovered by `build.rs` from the latest migration file prefix.
+/// Never edit this manually — add a migration and the value updates automatically.
+pub(crate) const SCHEMA_VERSION: u32 = parse_schema_version(env!("CROWDRELAY_SCHEMA_VERSION"));
 const CACHE: &str = "public, max-age=30, s-maxage=30, stale-while-revalidate=60";
+
+/// Const-eval string-to-u32 parser for the build-time env var.
+/// `env!()` returns a `&'static str` but we need a `const u32`, and
+/// `.parse()`/iterators/`.get()` are not yet stable as `const fn`, so we
+/// index manually. The loop bound is `bytes.len()` so the index is always
+/// in range — the clippy indexing_slicing lint is allowed here for that
+/// reason. The build.rs guarantees the input is digits-only.
+#[allow(clippy::indexing_slicing)]
+const fn parse_schema_version(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut n: u32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b >= b'0' && b <= b'9' {
+            n = n * 10 + (b - b'0') as u32;
+        }
+        i += 1;
+    }
+    n
+}
 
 pub(crate) fn git_sha() -> Option<&'static str> {
     option_env!("CROWDRELAY_GIT_SHA").filter(|value| !value.is_empty())
@@ -80,14 +103,4 @@ pub async fn get() -> impl IntoResponse {
             capabilities,
         }),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compatibility_contract_tracks_latest_migration() {
-        assert_eq!(SCHEMA_VERSION, 181);
-    }
 }
