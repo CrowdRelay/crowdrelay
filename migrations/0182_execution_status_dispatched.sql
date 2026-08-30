@@ -17,6 +17,6 @@ ALTER TABLE viryaos_experiment_assignments
 
 -- Index for looking up assignments by action_id — used by the community
 -- executor to transition execution_status (Dispatched → Executed / Failed).
-CREATE INDEX IF NOT EXISTS idx_experiment_assignments_action_id
+CREATE INDEX IF NOT EXISTS viryaos_experiment_assignments_action_id_idx
     ON viryaos_experiment_assignments (workspace_id, action_id)
     WHERE action_id IS NOT NULL;

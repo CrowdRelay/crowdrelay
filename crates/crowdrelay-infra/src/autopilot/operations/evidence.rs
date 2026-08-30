@@ -13,23 +13,19 @@ use time::OffsetDateTime;
 use super::{PostgresAutopilotRepository, map_sqlx};
 use crowdrelay_application::RepositoryError;
 
-/// Records a growth evidence row at dispatch time. The outcome fields are
-/// left NULL — they are filled in when measurements arrive.
+/// Records the best-effort audit trail for a growth evidence row:
+/// the immutable `action_dispatched` event in `viryaos_evidence_events`
+/// and the derived episode upsert in `viryaos_growth_episodes`.
 ///
-/// This also writes an immutable `action_dispatched` event to the
-/// `viryaos_evidence_events` table and upserts the derived episode in
-/// `viryaos_growth_episodes`.
-pub(in crate::autopilot) async fn record_growth_evidence(
+/// This is NOT transactional with the evidence row — the evidence table
+/// is the source of truth, and the event log / episode table are the
+/// audit trail. Call this AFTER the transaction that writes the evidence
+/// row commits. Failures are silently swallowed (best-effort).
+pub(in crate::autopilot) async fn record_evidence_audit_trail(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     evidence: &GrowthEvidence,
-) -> Result<(), RepositoryError> {
-    let pool = &repo.pool;
-    let mut tx = pool.begin().await.map_err(map_sqlx)?;
-    record_growth_evidence_in_tx(&mut tx, workspace_id, evidence).await?;
-    tx.commit().await.map_err(map_sqlx)?;
-
-    // Also write an immutable evidence event for the dispatch.
+) {
     let context_json = serde_json::to_value(&evidence.context).unwrap_or(serde_json::json!({}));
     let event = crowdrelay_brain::EvidenceEvent {
         workspace_id: workspace_id.into_uuid(),
@@ -57,8 +53,6 @@ pub(in crate::autopilot) async fn record_growth_evidence(
 
     // Upsert the derived episode.
     let _ = upsert_growth_episode(repo, workspace_id, evidence).await;
-
-    Ok(())
 }
 
 /// Records the growth evidence row within an existing transaction.
