@@ -853,9 +853,18 @@ pub(super) async fn emit_external_action(
     .await?;
     let emission_key = format!("autopilot-action:{}", action_id);
     let outbox_id = Uuid::now_v7();
+    // Propagate trace context (trace_id, causation_id) from the autopilot
+    // action onto the outbox event so the trace spine stays continuous from
+    // decision → action → outbox delivery. The action_id is already a bind
+    // parameter; we join to fetch its trace columns inside the same CTE so
+    // the outbox insert and the emission insert commit atomically.
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
-        WITH emission AS (
+        WITH action_trace AS (
+            SELECT trace_id, causation_id
+            FROM viryaos_autopilot_actions
+            WHERE id = $2
+        ), emission AS (
             INSERT INTO viryaos_autopilot_action_emissions (
                 workspace_id, action_id, emission_key, outbox_event_id
             ) VALUES ($1,$2,$3,$4)
@@ -864,10 +873,10 @@ pub(super) async fn emit_external_action(
         ), outbox AS (
             INSERT INTO outbox_events (
                 id, workspace_id, event_type, event_version, payload,
-                request_id, max_attempts
+                request_id, max_attempts, trace_id, causation_id, action_id
             )
-            SELECT $4,$1,$5,$6,$7,$3,12
-            FROM emission
+            SELECT $4,$1,$5,$6,$7,$3,12,at.trace_id,at.causation_id,$2
+            FROM emission CROSS JOIN action_trace at
             RETURNING id
         )
         SELECT id FROM outbox

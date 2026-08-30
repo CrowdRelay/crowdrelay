@@ -108,6 +108,12 @@ pub struct ValidatedOutcome {
     pub payload: OutcomePayload,
     pub confidence_basis_points: i32,
     pub idempotency_key: String,
+    /// Trace id propagated from the agents service (written to
+    /// `agent_outcomes.trace_id`). When present, it links the autopilot
+    /// decision/action created here back to the original brain trace that
+    /// dispatched the agent worker. None for legacy rows predating the
+    /// trace spine.
+    pub trace_id: Option<Uuid>,
 }
 
 /// Why an outcome was rejected. Stored in `rejection_reason` for auditability;
@@ -148,6 +154,7 @@ pub fn validate(
     payload: &serde_json::Value,
     confidence_basis_points: i32,
     idempotency_key: String,
+    trace_id: Option<Uuid>,
 ) -> Result<ValidatedOutcome, OutcomeValidationError> {
     if schema_version != 1 {
         return Err(OutcomeValidationError::UnknownSchemaVersion(schema_version));
@@ -182,6 +189,7 @@ pub fn validate(
         payload,
         confidence_basis_points,
         idempotency_key,
+        trace_id,
     })
 }
 
@@ -209,6 +217,7 @@ mod tests {
             &payload("because"),
             7500,
             "agent:task:0".to_owned(),
+            None,
         )
         .expect("valid outcome");
         assert_eq!(outcome.kind, OutcomeKind::PressPitch);
@@ -230,6 +239,7 @@ mod tests {
             &payload("x"),
             100,
             "k".to_owned(),
+            None,
         )
         .expect_err("v2 rejected");
         assert!(matches!(
@@ -250,6 +260,7 @@ mod tests {
             &payload("x"),
             100,
             "k".to_owned(),
+            None,
         )
         .expect_err("unknown kind rejected");
         assert!(matches!(err, OutcomeValidationError::UnknownKind(_)));
@@ -267,6 +278,7 @@ mod tests {
             &payload("x"),
             10001,
             "k".to_owned(),
+            None,
         )
         .expect_err("confidence rejected");
         assert!(matches!(
@@ -293,6 +305,7 @@ mod tests {
                 &payload("x"),
                 100,
                 "k".to_owned(),
+                None,
             )
             .expect("valid");
             assert_eq!(outcome.kind.disposition(), "recommend_only");
@@ -311,6 +324,7 @@ mod tests {
             &payload("push notification draft"),
             8000,
             "k".to_owned(),
+            None,
         )
         .expect("valid signal_push outcome");
         assert_eq!(outcome.kind, OutcomeKind::SignalPush);

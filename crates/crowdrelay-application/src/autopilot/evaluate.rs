@@ -6,7 +6,7 @@ use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
 use crowdrelay_domain::{
-    FanId, WorkspaceId,
+    FanId, TraceContext, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},
     audience_lifecycle::{
         FanLifecycleDecision, FanLifecycleSnapshot, LifecycleTemplate, evaluate_fan_lifecycle,
@@ -801,7 +801,11 @@ where
         };
         let persisted = self
             .repository
-            .persist_candidate(self.workspace_id, candidate, Some(Uuid::now_v7()))
+            .persist_candidate(
+                self.workspace_id,
+                candidate,
+                &TraceContext::root(self.workspace_id),
+            )
             .await?;
         if persisted.decision_created {
             report.decisions = report.decisions.saturating_add(1);

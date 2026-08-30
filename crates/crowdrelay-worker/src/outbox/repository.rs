@@ -303,6 +303,7 @@ impl PgOutboxStore {
                 event.created_at AS event_created_at,
                 event.request_id,
                 event.trace_id,
+                event.action_id,
                 endpoint.id AS endpoint_id,
                 endpoint.url AS endpoint_url,
                 endpoint.signing_secret_ref,
@@ -461,6 +462,32 @@ impl PgOutboxStore {
         .await
         .map_err(StoreError::Database)?;
 
+        // When the outcome is ambiguous (transport exhausted after
+        // timeouts where the request may have reached the provider),
+        // transition the linked autopilot action to `unknown` in the
+        // same transaction. This prevents a false SUCCEEDED/FAILED and
+        // enters the action into the reconciliation queue. The action
+        // ledger trigger (migration 0190) maps `unknown → UNKNOWN`.
+        if resolution.outcome == super::model::AttemptOutcome::Ambiguous
+            && let Some(action_id) = claim.action_id
+        {
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions
+                SET status = 'unknown',
+                    updated_at = now()
+                WHERE id = $1
+                  AND workspace_id = $2
+                  AND status IN ('succeeded', 'processing', 'queued', 'running')
+                "#,
+            )
+            .bind(action_id)
+            .bind(claim.workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        }
+
         transaction.commit().await.map_err(StoreError::Database)?;
         Ok(())
     }
@@ -494,7 +521,12 @@ async fn mark_exhausted_outbox_leases_dead(
 async fn mark_exhausted_delivery_leases_dead(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), StoreError> {
-    sqlx::query(
+    // Mark exhausted delivery leases as dead. A lease expiring after max
+    // attempts means the worker crashed during the final attempt — we
+    // don't know if the request reached the provider. This is externally
+    // ambiguous, so also transition any linked autopilot action to
+    // `unknown` in the same transaction.
+    let dead_delivery_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         UPDATE webhook_deliveries
         SET
@@ -509,11 +541,36 @@ async fn mark_exhausted_delivery_leases_dead(
         WHERE status = 'processing'
           AND lease_expires_at <= now()
           AND attempt_count >= max_attempts
+        RETURNING id
         "#,
     )
-    .execute(&mut **transaction)
+    .fetch_all(&mut **transaction)
     .await
     .map_err(StoreError::Database)?;
+
+    if !dead_delivery_ids.is_empty() {
+        // Transition linked autopilot actions to unknown — the worker
+        // crashed during the final attempt and we don't know if the
+        // provider received the request.
+        sqlx::query(
+            r#"
+            UPDATE viryaos_autopilot_actions AS action
+            SET status = 'unknown', updated_at = now()
+            FROM webhook_deliveries AS delivery
+            JOIN outbox_events AS event
+                ON event.workspace_id = delivery.workspace_id
+                AND event.id = delivery.outbox_event_id
+            WHERE delivery.id = ANY($1)
+              AND event.action_id = action.id
+              AND action.status IN ('succeeded', 'processing', 'queued', 'running')
+            "#,
+        )
+        .bind(&dead_delivery_ids)
+        .execute(&mut **transaction)
+        .await
+        .map_err(StoreError::Database)?;
+    }
+
     Ok(())
 }
 

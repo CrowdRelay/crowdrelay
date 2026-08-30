@@ -147,6 +147,7 @@ pub use referrals::{
     FanSessionTokenError, MerchCoupon, MerchCouponError, PhysicalRewardGrant, PhysicalRewardStatus,
     QualifiedReferral, ReferralProgress, ReferralStatus, RewardDrawPrizeKind, WeightedDrawEntry,
 };
+pub use trace::{CausationId, TraceContext, TraceId};
 pub use values::{
     CitySlug, CountryCode, CountryCodeError, DestinationUrl, DestinationUrlError, EventSlug,
     NormalizedEmail, NormalizedEmailError, ReferralCode, ReferralCodeError, SlugError,

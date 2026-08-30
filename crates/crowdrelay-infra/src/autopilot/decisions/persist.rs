@@ -28,7 +28,7 @@ async fn persist_decision_and_action_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     candidate: &DecisionCandidate,
-    trace_id: Option<Uuid>,
+    trace: &TraceContext,
 ) -> Result<DecisionActionOutcome, RepositoryError> {
     // ── Quota check ──
     if matches!(
@@ -97,7 +97,7 @@ async fn persist_decision_and_action_tx(
     .bind(&candidate.input_snapshot)
     .bind(&candidate.policy_snapshot)
     .bind(&action_json)
-    .bind(trace_id)
+    .bind(trace.trace_id().into_uuid())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
@@ -123,14 +123,14 @@ async fn persist_decision_and_action_tx(
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class,
             approved_at, approved_by, approval_expires_at,
-            trace_id
+            trace_id, causation_id
         )
         VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
             CASE WHEN $10 = 'queued' THEN now() ELSE NULL END,
             CASE WHEN $10 = 'queued' THEN 'policy:bounded_auto' ELSE NULL END,
             CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END,
-            $12
+            $12, $13
         )
         ON CONFLICT DO NOTHING
         RETURNING id
@@ -149,7 +149,9 @@ async fn persist_decision_and_action_tx(
     // Recorded now rather than derived at read time: this is the class
     // the action was authorised under, which is what an audit needs.
     .bind(candidate.action.action_class().as_str())
-    .bind(trace_id)
+    .bind(trace.trace_id().into_uuid())
+    // The action is caused by the decision — causation_id = decision_id.
+    .bind(decision_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
@@ -158,7 +160,7 @@ async fn persist_decision_and_action_tx(
     if inserted.is_some() && status == "awaiting_approval" {
         sqlx::query(
             r#"
-            INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts, trace_id, action_id)
+            INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts, trace_id, causation_id, action_id)
             VALUES (
                 $1, 'crowdrelay.autopilot.approval_requested', 1,
                 jsonb_build_object(
@@ -174,6 +176,7 @@ async fn persist_decision_and_action_tx(
                 ),
                 12,
                 $9,
+                $2,
                 $2
             )
             "#,
@@ -186,7 +189,7 @@ async fn persist_decision_and_action_tx(
         .bind(candidate.subject.uuid())
         .bind(candidate.reason)
         .bind(i32::from(candidate.confidence.basis_points()))
-        .bind(trace_id)
+        .bind(trace.trace_id().into_uuid())
         .execute(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
@@ -313,12 +316,12 @@ macro_rules! decision_persist {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let outcome =
-                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace_id)
+                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace)
                     .await?;
             let result = match outcome {
                 DecisionActionOutcome::Throttled => CandidatePersistence {
@@ -376,13 +379,13 @@ macro_rules! decision_persist {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         _holdout_probability: f64,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             // ── Shared primitive: quota + decision + action + outbox ──
             let outcome =
-                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace_id)
+                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace)
                     .await?;
             let (decision_created, real_action_id, inserted) = match outcome {
                 DecisionActionOutcome::Throttled => {
@@ -527,13 +530,13 @@ macro_rules! decision_persist {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             // ── Shared primitive: quota + decision + action + outbox ──
             let outcome =
-                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace_id)
+                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace)
                     .await?;
             let result = match outcome {
                 DecisionActionOutcome::Throttled => CandidatePersistence {

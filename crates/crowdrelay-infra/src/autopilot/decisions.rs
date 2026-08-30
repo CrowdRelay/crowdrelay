@@ -428,7 +428,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.persist_treatment_with_assignment_impl(
             workspace_id,
@@ -437,7 +437,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             prediction,
             strategy,
             holdout_probability,
-            trace_id,
+            trace,
         )
         .await
     }
@@ -727,9 +727,9 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError> {
-        self.persist_candidate_impl(workspace_id, candidate, trace_id)
+        self.persist_candidate_impl(workspace_id, candidate, trace)
             .await
     }
 
@@ -740,7 +740,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.persist_candidate_with_evidence_impl(
             workspace_id,
@@ -748,7 +748,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             prediction,
             strategy,
             holdout_probability,
-            trace_id,
+            trace,
         )
         .await
     }

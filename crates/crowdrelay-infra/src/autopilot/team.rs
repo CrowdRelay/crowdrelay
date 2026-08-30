@@ -480,15 +480,21 @@ pub(super) async fn queue_team_email_action(
     };
     let decision_key = format!("team-email-decision:{assignment_id}:{suffix}");
     let idempotency_key = format!("team-email:{assignment_id}:{suffix}");
+    // System-initiated action: start a root trace so the team email lifecycle
+    // is observable in the trace timeline even though no evaluator decision
+    // preceded it.
+    let trace = TraceContext::root(workspace_id);
+    let trace_id = trace.trace_id().into_uuid();
+    let causation_id = trace.causation_id().map(|c| c.into_uuid());
     let decision_id =
         if let Some(id) = sqlx::query_scalar::<_, Uuid>(
             r#"INSERT INTO viryaos_autopilot_decisions (
                id, workspace_id, decision_key, context, subject_kind, subject_id,
                decision_kind, confidence_basis_points, disposition, reason,
-               input_snapshot, policy_snapshot, recommendation, evaluated_at
+               input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
            ) VALUES ($1,$2,$3,$4,'team_assignment',$5,'team.email.route',10000,
                      'auto_execute','Durable human handoff notification',
-                     $6,$7,$8,$9)
+                     $6,$7,$8,$9,$10)
            ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id"#,
         )
         .bind(Uuid::now_v7())
@@ -500,6 +506,7 @@ pub(super) async fn queue_team_email_action(
         .bind(json!({"provider_completion_required":true,"capability":"team.email"}))
         .bind(json!({"send_friendly_email":true}))
         .bind(now)
+        .bind(trace_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx)?
@@ -527,9 +534,10 @@ pub(super) async fn queue_team_email_action(
     sqlx::query(
         r#"INSERT INTO viryaos_autopilot_actions (
                id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
-               idempotency_key, payload, status, approved_at, approved_by, available_at
+               idempotency_key, payload, status, approved_at, approved_by, available_at,
+               trace_id, causation_id
            ) VALUES ($1,$2,$3,$4,'team.assignment.email','team_assignment',$5,$6,$7,
-                     'queued',$8,'system:team-router',$8)
+                     'queued',$8,'system:team-router',$8,$9,$10)
            ON CONFLICT (workspace_id, idempotency_key) DO NOTHING"#,
     )
     .bind(Uuid::now_v7())
@@ -540,6 +548,8 @@ pub(super) async fn queue_team_email_action(
     .bind(idempotency_key)
     .bind(payload)
     .bind(now)
+    .bind(trace_id)
+    .bind(causation_id)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;

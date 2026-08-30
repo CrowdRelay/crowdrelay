@@ -350,7 +350,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     prediction,
                     Some(strategy.as_str()),
                     0.0,
-                    Some(Uuid::now_v7()),
+                    &TraceContext::root(self.workspace_id),
                 )
                 .await?;
             if persisted.action_id.is_some() {
@@ -396,7 +396,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             prediction,
                             Some(strategy.as_str()),
                             *effective_holdout,
-                            Some(Uuid::now_v7()),
+                            &TraceContext::root(self.workspace_id),
                         )
                         .await?;
                     if let Some(action_id) = persisted.action_id {

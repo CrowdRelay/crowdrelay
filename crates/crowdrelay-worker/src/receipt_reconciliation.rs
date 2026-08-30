@@ -12,7 +12,7 @@
 //! sample — silently, forever (the 2026-08-29 edge outage produced exactly
 //! this: three actions whose receipts had to be re-inserted by hand).
 //!
-//! This worker runs three sweeps per cycle:
+//! This worker runs four sweeps per cycle:
 //!
 //! 1. **Gap detection.** Actions that were dispatched to an executor,
 //!    finished (dispatch-wise) more than [`RECEIPT_GAP_THRESHOLD`] ago,
@@ -33,6 +33,15 @@
 //!     - a non-crash `failed` means the post definitively
 //!       never went out (failed), and a crash-marked `failed` stays
 //!       `unknown` because only a human looking at Reddit can tell.
+//!
+//! 2c. **Resolution from outbox delivery.** Actions that entered
+//!     `unknown` because of ambiguous outbox delivery (transport timeout
+//!     after max attempts) are reconciled against the outbox's own
+//!     delivery status — the external truth of whether the webhook was
+//!     eventually delivered:
+//!     - outbox event delivered → `succeeded`;
+//!     - outbox event dead with permanent rejection → `failed`;
+//!     - outbox event dead with ambiguous error → stays `unknown`.
 //!
 //! Experiment assignments follow the action through every transition so
 //! the causal learner never counts an unresolved intervention as either
@@ -149,8 +158,9 @@ impl ReceiptReconciliationWorker {
         let gaps = self.detect_receipt_gaps(&mut transaction).await?;
         let by_receipt = self.resolve_from_receipts(&mut transaction).await?;
         let by_community = self.resolve_community_posts(&mut transaction).await?;
+        let by_outbox = self.resolve_from_outbox(&mut transaction).await?;
         transaction.commit().await?;
-        Ok(gaps + by_receipt + by_community)
+        Ok(gaps + by_receipt + by_community + by_outbox)
     }
 
     /// Sweep 1: dispatch-confirmed actions whose terminal receipt never
@@ -306,6 +316,83 @@ impl ReceiptReconciliationWorker {
                 CommunityResolution::ResolveSucceeded => ActionOutcome::Succeeded,
                 CommunityResolution::ResolveFailed => ActionOutcome::Failed,
                 CommunityResolution::LeaveUnknown => continue,
+            };
+            resolved += resolve_action(self.workspace_id, transaction, action_id, outcome).await?;
+        }
+        Ok(resolved)
+    }
+
+    /// Sweep 2c: resolve `unknown` actions from their outbox delivery
+    /// status. This is the authoritative reconciliation for actions that
+    /// entered `unknown` because of ambiguous transport failures (timeout
+    /// after max attempts — the request may or may not have reached the
+    /// provider).
+    ///
+    /// The outbox delivery status is the external truth: if the webhook
+    /// was eventually delivered (by a retry from a different worker, or a
+    /// late lease recovery), the action succeeded. If the outbox event is
+    /// dead with a permanent rejection, the action failed. If it's dead
+    /// with an ambiguous error, the action stays `unknown` — only a
+    /// provider-specific reconciliation or manual check can resolve it.
+    async fn resolve_from_outbox(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<usize, ReceiptReconciliationError> {
+        // Find unknown actions that have a linked outbox event, and check
+        // the outbox event's delivery status. Skip community.engage
+        // actions (handled by sweep 2b) and actions that already have
+        // executor receipts (handled by sweep 2a).
+        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT a.id, e.status, e.last_error_kind
+            FROM viryaos_autopilot_actions a
+            JOIN outbox_events e
+                ON e.workspace_id = a.workspace_id
+                AND e.action_id = a.id
+            WHERE a.workspace_id = $1
+              AND a.status = 'unknown'
+              AND a.action_kind <> 'community.engage.request'
+              AND NOT EXISTS (
+                  SELECT 1 FROM viryaos_autopilot_execution_reports r
+                  WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
+                    AND r.status IN ('succeeded', 'failed')
+              )
+            LIMIT $2
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(SWEEP_BATCH_LIMIT)
+        .fetch_all(&mut **transaction)
+        .await?;
+
+        let mut resolved = 0usize;
+        for (action_id, outbox_status, last_error_kind) in rows {
+            let outcome = match outbox_status.as_str() {
+                // Outbox event was delivered → the side effect happened.
+                "delivered" => ActionOutcome::Succeeded,
+                // Outbox event is dead → check the error kind.
+                "dead" => {
+                    match last_error_kind.as_deref() {
+                        // Permanent rejection (provider saw it and rejected)
+                        // → definitively failed.
+                        Some(kind)
+                            if kind.starts_with("http_permanent")
+                                || kind == "recipient_ineligible"
+                                || kind.starts_with("secret_")
+                                || kind.starts_with("endpoint_")
+                                || kind == "invalid_signing_secret"
+                                || kind == "event_serialization" =>
+                        {
+                            ActionOutcome::Failed
+                        }
+                        // Ambiguous errors (transport_timeout,
+                        // transport_request, lease_expired) → stay
+                        // unknown. Only external truth can resolve these.
+                        _ => continue,
+                    }
+                }
+                // Pending/processing → still in flight, don't touch.
+                _ => continue,
             };
             resolved += resolve_action(self.workspace_id, transaction, action_id, outcome).await?;
         }

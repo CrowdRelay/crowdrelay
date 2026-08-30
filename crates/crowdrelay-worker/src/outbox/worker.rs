@@ -478,6 +478,12 @@ fn final_outcome(
         DispatchDisposition::Delivered => AttemptOutcome::Delivered,
         DispatchDisposition::Retryable if attempt_number < max_attempts => AttemptOutcome::Retry,
         DispatchDisposition::Retryable | DispatchDisposition::Permanent => AttemptOutcome::Dead,
+        // Ambiguous: the request may have reached the provider. If we
+        // still have retries, retry (the provider deduplicates or the
+        // operation is idempotent). If retries are exhausted, the
+        // outcome is ambiguous — not definitively failed.
+        DispatchDisposition::Ambiguous if attempt_number < max_attempts => AttemptOutcome::Retry,
+        DispatchDisposition::Ambiguous => AttemptOutcome::Ambiguous,
     }
 }
 
@@ -686,7 +692,9 @@ impl RunStats {
         match outcome {
             AttemptOutcome::Delivered => self.delivered = self.delivered.saturating_add(1),
             AttemptOutcome::Retry => self.retried = self.retried.saturating_add(1),
-            AttemptOutcome::Dead => self.dead = self.dead.saturating_add(1),
+            AttemptOutcome::Dead | AttemptOutcome::Ambiguous => {
+                self.dead = self.dead.saturating_add(1)
+            }
         }
     }
 }
@@ -725,6 +733,20 @@ mod tests {
         assert_eq!(
             final_outcome(DispatchDisposition::Permanent, 1, 12),
             AttemptOutcome::Dead
+        );
+    }
+
+    #[test]
+    fn ambiguous_disposition_retries_until_exhausted_then_ambiguous() {
+        // Ambiguous with retries left → Retry (provider may deduplicate)
+        assert_eq!(
+            final_outcome(DispatchDisposition::Ambiguous, 1, 3),
+            AttemptOutcome::Retry
+        );
+        // Ambiguous at max attempts → Ambiguous (not Dead)
+        assert_eq!(
+            final_outcome(DispatchDisposition::Ambiguous, 3, 3),
+            AttemptOutcome::Ambiguous
         );
     }
 

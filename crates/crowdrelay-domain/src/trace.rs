@@ -24,6 +24,13 @@
 //! All trace columns in the database are nullable. Old code that doesn't
 //! populate them leaves NULL. New code populates them. The timeline query
 //! handles NULL trace_ids gracefully (returns partial results).
+//!
+//! # New-write invariant (enforced by the type system)
+//!
+//! Every new autonomous execution path MUST carry a `TraceContext`. The
+//! persist API takes `&TraceContext`, not `Option<Uuid>`, so it is
+//! impossible to create a new autonomous decision/action without a trace.
+//! Legacy rows may have NULL trace_id; new autonomous writes may not.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -158,19 +165,23 @@ impl From<CausationId> for Uuid {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TraceContext {
     /// The trace this event belongs to.
-    pub trace_id: TraceId,
+    pub(crate) trace_id: TraceId,
     /// The event that caused this one, if any.
-    pub causation_id: Option<CausationId>,
+    pub(crate) causation_id: Option<CausationId>,
     /// The workspace this trace belongs to.
-    pub tenant_id: WorkspaceId,
+    pub(crate) tenant_id: WorkspaceId,
     /// The action this trace is tracking, if tied to a specific action.
-    pub action_id: Option<Uuid>,
+    pub(crate) action_id: Option<Uuid>,
     /// The decision that created this action, if applicable.
-    pub decision_id: Option<Uuid>,
+    pub(crate) decision_id: Option<Uuid>,
 }
 
 impl TraceContext {
     /// Creates a new trace context for a root event (no causation).
+    ///
+    /// This is the entry point for every new autonomous execution flow.
+    /// The trace_id is generated here and propagated through every
+    /// downstream event via `child()` or `for_action()`.
     #[must_use]
     pub fn root(tenant_id: WorkspaceId) -> Self {
         Self {
@@ -179,6 +190,40 @@ impl TraceContext {
             tenant_id,
             action_id: None,
             decision_id: None,
+        }
+    }
+
+    /// Creates a root trace context that already carries a decision_id.
+    ///
+    /// Used when the decision has already been created and we need a
+    /// trace context for the action that follows from it.
+    #[must_use]
+    pub fn root_for_decision(tenant_id: WorkspaceId, decision_id: Uuid) -> Self {
+        Self {
+            trace_id: TraceId::new(),
+            causation_id: None,
+            tenant_id,
+            action_id: None,
+            decision_id: Some(decision_id),
+        }
+    }
+
+    /// Creates a trace context for continuing an existing trace into a
+    /// new action. The trace_id is carried from the parent context;
+    /// the action_id and decision_id are set explicitly.
+    #[must_use]
+    pub fn for_action(
+        tenant_id: WorkspaceId,
+        trace_id: TraceId,
+        action_id: Uuid,
+        decision_id: Option<Uuid>,
+    ) -> Self {
+        Self {
+            trace_id,
+            causation_id: Some(CausationId::from_uuid(decision_id.unwrap_or(action_id))),
+            tenant_id,
+            action_id: Some(action_id),
+            decision_id,
         }
     }
 
@@ -207,6 +252,36 @@ impl TraceContext {
         self.decision_id = Some(decision_id);
         self
     }
+
+    /// Returns the trace identifier.
+    #[must_use]
+    pub const fn trace_id(&self) -> TraceId {
+        self.trace_id
+    }
+
+    /// Returns the causation identifier, if any.
+    #[must_use]
+    pub const fn causation_id(&self) -> Option<CausationId> {
+        self.causation_id
+    }
+
+    /// Returns the workspace identifier.
+    #[must_use]
+    pub const fn tenant_id(&self) -> WorkspaceId {
+        self.tenant_id
+    }
+
+    /// Returns the action identifier, if tied to a specific action.
+    #[must_use]
+    pub const fn action_id(&self) -> Option<Uuid> {
+        self.action_id
+    }
+
+    /// Returns the decision identifier, if applicable.
+    #[must_use]
+    pub const fn decision_id(&self) -> Option<Uuid> {
+        self.decision_id
+    }
 }
 
 #[cfg(test)]
@@ -223,9 +298,35 @@ mod tests {
     #[test]
     fn root_context_has_no_causation() {
         let ctx = TraceContext::root(WorkspaceId::new());
-        assert!(ctx.causation_id.is_none());
-        assert!(ctx.action_id.is_none());
-        assert!(ctx.decision_id.is_none());
+        assert!(ctx.causation_id().is_none());
+        assert!(ctx.action_id().is_none());
+        assert!(ctx.decision_id().is_none());
+    }
+
+    #[test]
+    fn root_for_decision_carries_decision_id() {
+        let decision_id = Uuid::now_v7();
+        let ctx = TraceContext::root_for_decision(WorkspaceId::new(), decision_id);
+        assert_eq!(ctx.decision_id(), Some(decision_id));
+        assert!(ctx.action_id().is_none());
+        assert!(ctx.causation_id().is_none());
+    }
+
+    #[test]
+    fn for_action_carries_trace_and_action() {
+        let trace_id = TraceId::new();
+        let action_id = Uuid::now_v7();
+        let decision_id = Uuid::now_v7();
+        let ctx =
+            TraceContext::for_action(WorkspaceId::new(), trace_id, action_id, Some(decision_id));
+        assert_eq!(ctx.trace_id(), trace_id);
+        assert_eq!(ctx.action_id(), Some(action_id));
+        assert_eq!(ctx.decision_id(), Some(decision_id));
+        // Causation is the decision_id (parent event)
+        assert_eq!(
+            ctx.causation_id(),
+            Some(CausationId::from_uuid(decision_id))
+        );
     }
 
     #[test]
@@ -233,9 +334,9 @@ mod tests {
         let root = TraceContext::root(WorkspaceId::new());
         let cause = CausationId::from_uuid(Uuid::now_v7());
         let child = root.child(cause);
-        assert_eq!(child.trace_id, root.trace_id);
-        assert_eq!(child.tenant_id, root.tenant_id);
-        assert_eq!(child.causation_id, Some(cause));
+        assert_eq!(child.trace_id(), root.trace_id());
+        assert_eq!(child.tenant_id(), root.tenant_id());
+        assert_eq!(child.causation_id(), Some(cause));
     }
 
     #[test]
@@ -243,8 +344,8 @@ mod tests {
         let ctx = TraceContext::root(WorkspaceId::new())
             .with_action(Uuid::now_v7())
             .with_decision(Uuid::now_v7());
-        assert!(ctx.action_id.is_some());
-        assert!(ctx.decision_id.is_some());
+        assert!(ctx.action_id().is_some());
+        assert!(ctx.decision_id().is_some());
     }
 
     #[test]

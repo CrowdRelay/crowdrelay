@@ -21,6 +21,7 @@ pub(super) struct DeliveryClaim {
     pub event_created_at: OffsetDateTime,
     pub request_id: Option<String>,
     pub trace_id: Option<Uuid>,
+    pub action_id: Option<Uuid>,
     pub endpoint_id: Uuid,
     pub endpoint_url: String,
     pub signing_secret_ref: String,
@@ -51,6 +52,12 @@ pub(super) enum AttemptOutcome {
     Delivered,
     Retry,
     Dead,
+    /// The transport exhausted retries after ambiguous failures (e.g.,
+    /// provider timeouts where the request may or may not have reached
+    /// the provider). The outbox delivery is dead (transport gave up),
+    /// but the linked autopilot action transitions to `unknown` because
+    /// we cannot confirm whether the side effect happened.
+    Ambiguous,
 }
 
 impl AttemptOutcome {
@@ -59,6 +66,7 @@ impl AttemptOutcome {
             Self::Delivered => "delivered",
             Self::Retry => "retry",
             Self::Dead => "dead",
+            Self::Ambiguous => "ambiguous",
         }
     }
 
@@ -66,7 +74,7 @@ impl AttemptOutcome {
         match self {
             Self::Delivered => "delivered",
             Self::Retry => "pending",
-            Self::Dead => "dead",
+            Self::Dead | Self::Ambiguous => "dead",
         }
     }
 }

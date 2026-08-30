@@ -160,6 +160,8 @@ pub struct TraceTimelineEvent {
     state: Option<String>,
     action_id: Option<String>,
     decision_id: Option<String>,
+    causation_id: Option<String>,
+    event_id: Option<String>,
     certainty: String,
 }
 
@@ -198,7 +200,8 @@ async fn load_trace_timeline(
 ) -> Result<Vec<TraceTimelineEvent>, OpsError> {
     sqlx::query_as::<_, TraceTimelineEvent>(
         r#"
-        SELECT occurred_at, source, kind, state, action_id, decision_id, certainty
+        SELECT occurred_at, source, kind, state, action_id, decision_id,
+               causation_id, event_id, certainty
         FROM (
             -- Autopilot decision: the starting point of a trace
             SELECT
@@ -208,6 +211,8 @@ async fn load_trace_timeline(
                 NULL::text AS state,
                 NULL::text AS action_id,
                 id::text AS decision_id,
+                NULL::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM viryaos_autopilot_decisions
             WHERE workspace_id = $1 AND trace_id = $2
@@ -222,6 +227,8 @@ async fn load_trace_timeline(
                 status::text AS state,
                 id::text AS action_id,
                 decision_id::text AS decision_id,
+                causation_id::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM viryaos_autopilot_actions
             WHERE workspace_id = $1 AND trace_id = $2
@@ -234,8 +241,10 @@ async fn load_trace_timeline(
                 'outbox'::text AS source,
                 event_type::text AS kind,
                 NULL::text AS state,
-                NULL::text AS action_id,
+                action_id::text AS action_id,
                 NULL::text AS decision_id,
+                causation_id::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM outbox_events
             WHERE workspace_id = $1 AND trace_id = $2
@@ -248,8 +257,10 @@ async fn load_trace_timeline(
                 'delivery'::text AS source,
                 endpoint.name::text AS kind,
                 delivery.status::text AS state,
-                NULL::text AS action_id,
+                outbox.action_id::text AS action_id,
                 NULL::text AS decision_id,
+                outbox.causation_id::text AS causation_id,
+                delivery.id::text AS event_id,
                 'FACT'::text AS certainty
             FROM webhook_deliveries AS delivery
             JOIN outbox_events AS outbox
@@ -270,6 +281,8 @@ async fn load_trace_timeline(
                 NULL::text AS state,
                 action_id::text AS action_id,
                 NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                id::text AS event_id,
                 'INFERENCE'::text AS certainty
             FROM viryaos_autopilot_measurements
             WHERE workspace_id = $1 AND trace_id = $2
@@ -284,6 +297,8 @@ async fn load_trace_timeline(
                 NULL::text AS state,
                 action_id::text AS action_id,
                 NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM viryaos_evidence_events
             WHERE workspace_id = $1 AND trace_id = $2
@@ -298,6 +313,8 @@ async fn load_trace_timeline(
                 status::text AS state,
                 action_id::text AS action_id,
                 NULL::text AS decision_id,
+                causation_id::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM viryaos_reach_events
             WHERE workspace_id = $1 AND trace_id = $2
@@ -312,6 +329,8 @@ async fn load_trace_timeline(
                 NULL::text AS state,
                 target_id::text AS action_id,
                 NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM audit_events
             WHERE workspace_id = $1 AND trace_id = $2
@@ -326,6 +345,8 @@ async fn load_trace_timeline(
                 NULL::text AS state,
                 NULL::text AS action_id,
                 NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                id::text AS event_id,
                 'FACT'::text AS certainty
             FROM agent_outcomes
             WHERE workspace_id = $1 AND trace_id = $2

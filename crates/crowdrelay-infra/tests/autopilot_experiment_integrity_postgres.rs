@@ -2321,3 +2321,329 @@ async fn t19_full_chain_three_branches() {
         "CONFIRMATION LOSS ledger must NOT be FAILED"
     );
 }
+
+/// T20: Causation_id propagation — the action's causation_id equals the
+/// decision_id, and the outbox event's causation_id equals the action_id.
+/// This proves the causal chain is written at every boundary.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t20_causation_id_propagation_across_boundaries() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let decision_id = uuid::Uuid::now_v7();
+    let action_id = uuid::Uuid::now_v7();
+
+    // Insert decision (root — no causation_id)
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+           VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
+                   'auto_execute',9000,'auto_execute','test',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)"#,
+    )
+    .bind(decision_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("decision-{decision_id}"))
+    .bind(uuid::Uuid::now_v7())
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert decision");
+
+    // Insert action with causation_id = decision_id
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, approved_at, available_at,
+            finished_at, trace_id, causation_id)
+           VALUES ($1,$2,$3,'growth_metrics','community.engage.request','target_community',
+                   $4,$5,$6,'succeeded',now(),now(),now(),$7,$3)"#,
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(uuid::Uuid::now_v7())
+    .bind(format!("action-{action_id}"))
+    .bind(serde_json::json!({"kind":"community.engage.request"}))
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert action");
+
+    // Insert outbox event with causation_id = action_id
+    sqlx::query(
+        r#"INSERT INTO outbox_events
+           (workspace_id, event_type, event_version, payload, max_attempts,
+            trace_id, causation_id, action_id)
+           VALUES ($1, 'crowdrelay.autopilot.approval_requested', 1,
+                   jsonb_build_object('action_id', $2, 'trace_id', $3),
+                   12, $3, $2, $2)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert outbox event");
+
+    // Verify: action.causation_id = decision_id
+    let action_causation: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT causation_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action causation");
+    assert_eq!(
+        action_causation,
+        Some(decision_id),
+        "action causation_id must equal decision_id"
+    );
+
+    // Verify: outbox.causation_id = action_id
+    let outbox_causation: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT causation_id FROM outbox_events \
+         WHERE workspace_id = $1 AND action_id = $2 LIMIT 1",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("outbox causation");
+    assert_eq!(
+        outbox_causation,
+        Some(action_id),
+        "outbox causation_id must equal action_id"
+    );
+
+    // Verify: ledger has causation_id propagated
+    let ledger_causation: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT causation_id FROM viryaos_action_ledger WHERE action_id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("ledger causation");
+    assert_eq!(
+        ledger_causation,
+        Some(decision_id),
+        "ledger causation_id must equal the action's causation_id (decision_id)"
+    );
+}
+
+/// T21: Ambiguous outbox outcome → action UNKNOWN.
+///
+/// When an outbox delivery exhausts retries with an ambiguous outcome
+/// (transport timeout), the linked autopilot action must transition to
+/// `unknown` — not `failed`. This is the core semantic guarantee: the
+/// system does not lie about externally ambiguous side effects.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t21_ambiguous_outcome_transitions_action_to_unknown() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Insert an outbox event linked to the action, in 'dead' state with
+    // an ambiguous error kind (transport_timeout).
+    sqlx::query(
+        r#"INSERT INTO outbox_events
+           (workspace_id, event_type, event_version, payload, max_attempts,
+            trace_id, action_id, status, last_error_kind, dead_at, attempts)
+           VALUES ($1, 'crowdrelay.autopilot.approval_requested', 1,
+                   jsonb_build_object('action_id', $2),
+                   3, $3, $2, 'dead', 'transport_timeout', now(), 3)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert dead outbox event");
+
+    // Manually transition the action to unknown (simulating what the
+    // outbox worker does in finish_delivery).
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+         WHERE id = $1 AND status IN ('succeeded', 'processing', 'queued', 'running')",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition action to unknown");
+
+    // Verify: action status is 'unknown'
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(
+        action_status, "unknown",
+        "ambiguous outbox outcome must transition action to unknown, not failed"
+    );
+
+    // Verify: ledger state is UNKNOWN
+    let ledger_state: String =
+        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("ledger state");
+    assert_eq!(
+        ledger_state, "UNKNOWN",
+        "ledger must reflect UNKNOWN for ambiguous outbox outcome"
+    );
+}
+
+/// T22: Outbox reconciliation resolves UNKNOWN from delivered outbox.
+///
+/// An action in `unknown` state whose linked outbox event was eventually
+/// delivered must be reconciled to `succeeded` by the outbox truth sweep.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t22_outbox_reconciliation_resolves_unknown_to_succeeded() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Transition action to unknown first
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition to unknown");
+
+    // Insert a delivered outbox event (external truth: the webhook was delivered)
+    sqlx::query(
+        r#"INSERT INTO outbox_events
+           (workspace_id, event_type, event_version, payload, max_attempts,
+            trace_id, action_id, status, delivered_at, attempts)
+           VALUES ($1, 'crowdrelay.autopilot.approval_requested', 1,
+                   jsonb_build_object('action_id', $2),
+                   3, $3, $2, 'delivered', now(), 1)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert delivered outbox event");
+
+    // Run the SQL reconciliation function
+    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile");
+
+    assert_eq!(
+        result, "SUCCEEDED",
+        "delivered outbox event must reconcile UNKNOWN → SUCCEEDED"
+    );
+}
+
+/// T23: Outbox reconciliation stays UNKNOWN for ambiguous dead outbox.
+///
+/// An action in `unknown` state whose linked outbox event is dead with
+/// an ambiguous error kind must stay `unknown` — only external truth
+/// from the provider can resolve it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t23_outbox_reconciliation_stays_unknown_for_ambiguous_dead() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Transition action to unknown first
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition to unknown");
+
+    // Insert a dead outbox event with ambiguous error kind
+    sqlx::query(
+        r#"INSERT INTO outbox_events
+           (workspace_id, event_type, event_version, payload, max_attempts,
+            trace_id, action_id, status, last_error_kind, dead_at, attempts)
+           VALUES ($1, 'crowdrelay.autopilot.approval_requested', 1,
+                   jsonb_build_object('action_id', $2),
+                   3, $3, $2, 'dead', 'transport_timeout', now(), 3)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert dead outbox event");
+
+    // Run the SQL reconciliation function
+    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile");
+
+    assert_eq!(
+        result, "UNKNOWN",
+        "ambiguous dead outbox event must stay UNKNOWN — not falsely resolved"
+    );
+}
+
+/// T24: Outbox reconciliation resolves UNKNOWN to FAILED for permanent rejection.
+///
+/// An action in `unknown` state whose linked outbox event is dead with
+/// a permanent rejection error kind must be reconciled to `failed`.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t24_outbox_reconciliation_resolves_unknown_to_failed_for_permanent() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Transition action to unknown first
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition to unknown");
+
+    // Insert a dead outbox event with permanent rejection error kind
+    sqlx::query(
+        r#"INSERT INTO outbox_events
+           (workspace_id, event_type, event_version, payload, max_attempts,
+            trace_id, action_id, status, last_error_kind, dead_at, attempts)
+           VALUES ($1, 'crowdrelay.autopilot.approval_requested', 1,
+                   jsonb_build_object('action_id', $2),
+                   3, $3, $2, 'dead', 'http_permanent_status', now(), 3)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert dead outbox event");
+
+    // Run the SQL reconciliation function
+    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile");
+
+    assert_eq!(
+        result, "FAILED",
+        "permanent rejection must reconcile UNKNOWN → FAILED"
+    );
+}

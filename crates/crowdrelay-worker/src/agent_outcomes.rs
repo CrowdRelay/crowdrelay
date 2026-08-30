@@ -147,7 +147,7 @@ impl AgentOutcomeWorker {
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING id, workspace_id, task_id, result_id, kind, schema_version,
-                      payload, confidence_basis_points, idempotency_key
+                      payload, confidence_basis_points, idempotency_key, trace_id
             "#,
         )
         .bind(self.workspace_id.into_uuid())
@@ -167,6 +167,7 @@ impl AgentOutcomeWorker {
                 &row.payload,
                 row.confidence_basis_points,
                 row.idempotency_key.clone(),
+                row.trace_id,
             ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -219,9 +220,9 @@ impl AgentOutcomeWorker {
             INSERT INTO viryaos_autopilot_decisions (
                 id, workspace_id, decision_key, context, subject_kind, subject_id,
                 decision_kind, confidence_basis_points, disposition, reason,
-                input_snapshot, policy_snapshot, recommendation
+                input_snapshot, policy_snapshot, recommendation, trace_id
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             ON CONFLICT (workspace_id, decision_key) DO NOTHING
             RETURNING id
             "#,
@@ -254,6 +255,7 @@ impl AgentOutcomeWorker {
         .bind(&input_snapshot)
         .bind(json!({ "source": "agent_outcome", "schema_version": outcome.schema_version }))
         .bind(json!({}))
+        .bind(outcome.trace_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -475,11 +477,13 @@ impl AgentOutcomeWorker {
                     INSERT INTO viryaos_autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
-                        action_class, approved_at, approved_by, approval_expires_at
+                        action_class, approved_at, approved_by, approval_expires_at,
+                        trace_id, causation_id
                     )
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                        now(), 'policy:bounded_auto', NULL
+                        now(), 'policy:bounded_auto', NULL,
+                        $12, NULL
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -496,6 +500,7 @@ impl AgentOutcomeWorker {
                 .bind(&payload)
                 .bind("queued")
                 .bind(action_class)
+                .bind(outcome.trace_id)
                 .fetch_optional(&mut *tx)
                 .await?
             } else {
@@ -504,12 +509,14 @@ impl AgentOutcomeWorker {
                     INSERT INTO viryaos_autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
-                        action_class, approved_at, approved_by, approval_expires_at
+                        action_class, approved_at, approved_by, approval_expires_at,
+                        trace_id, causation_id
                     )
                     VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         NULL, NULL,
-                        now() + INTERVAL '72 hours'
+                        now() + INTERVAL '72 hours',
+                        $12, NULL
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -526,6 +533,7 @@ impl AgentOutcomeWorker {
                 .bind(&payload)
                 .bind("awaiting_approval")
                 .bind(action_class)
+                .bind(outcome.trace_id)
                 .fetch_optional(&mut *tx)
                 .await?
             };
@@ -790,4 +798,5 @@ struct OutcomeRow {
     payload: Value,
     confidence_basis_points: i32,
     idempotency_key: String,
+    trace_id: Option<Uuid>,
 }

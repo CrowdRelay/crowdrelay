@@ -192,15 +192,23 @@ pub(super) fn classify_http_status(status: StatusCode) -> DispatchResult {
 }
 
 fn classify_transport_error(error: &reqwest::Error) -> DispatchResult {
-    let kind = if error.is_timeout() {
-        "transport_timeout"
-    } else if error.is_connect() {
-        "transport_connect"
-    } else {
-        "transport_request"
-    };
+    // A timeout after the connection was established means the request
+    // was sent but we got no response — the provider may or may not have
+    // processed it. This is externally ambiguous.
+    if error.is_timeout() {
+        return DispatchResult::ambiguous("transport_timeout");
+    }
 
-    DispatchResult::retryable(None, kind)
+    // A connection error means the request never reached the provider —
+    // safe to retry without ambiguity.
+    if error.is_connect() {
+        return DispatchResult::retryable(None, "transport_connect");
+    }
+
+    // Other transport errors (body read, decode, etc.) — the request was
+    // sent but we couldn't read the response. Treat as ambiguous since
+    // the provider may have processed the request.
+    DispatchResult::ambiguous("transport_request")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +216,13 @@ pub(super) enum DispatchDisposition {
     Delivered,
     Retryable,
     Permanent,
+    /// The request was sent but no response was received (e.g., HTTP
+    /// timeout after the connection was established). The provider may
+    /// or may not have processed the request — the side effect is
+    /// externally ambiguous. Retries are safe (the provider deduplicates
+    /// or the operation is idempotent), but if retries are exhausted,
+    /// the outcome must not be reported as definitively failed.
+    Ambiguous,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +267,14 @@ impl DispatchResult {
             error_kind: Some(error_kind),
         }
     }
+
+    pub const fn ambiguous(error_kind: &'static str) -> Self {
+        Self {
+            disposition: DispatchDisposition::Ambiguous,
+            response_status: None,
+            error_kind: Some(error_kind),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -279,6 +302,7 @@ mod tests {
             event_created_at: OffsetDateTime::UNIX_EPOCH,
             request_id: Some("019fa000-0000-7000-8000-000000000001".to_owned()),
             trace_id: Some(Uuid::from_u128(0x019fa000_0000_7000_8000_000000000002)),
+            action_id: None,
             endpoint_id: Uuid::from_u128(4),
             endpoint_url: "https://n8n.example/webhook".to_owned(),
             signing_secret_ref: "n8n/current".to_owned(),

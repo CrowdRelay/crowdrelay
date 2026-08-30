@@ -7,7 +7,7 @@ use crowdrelay_brain::{
     GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
-    AutopilotActionId, AutopilotMeasurementId, PlayId, WorkspaceId,
+    AutopilotActionId, AutopilotMeasurementId, PlayId, TraceContext, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::AutonomyLevel,
@@ -40,7 +40,6 @@ use crowdrelay_domain::{
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
 
@@ -411,7 +410,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         prediction: &DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError>;
 
     /// Evaluates contamination over the full measurement window.
@@ -699,7 +698,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError>;
 
     /// Persists a candidate with dispatch prediction and initial growth
@@ -717,7 +716,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         prediction: &DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
-        trace_id: Option<Uuid>,
+        trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError>;
 }
 

@@ -74,7 +74,7 @@ use crowdrelay_domain::pricing::TicketYieldPolicy;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
     EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId, PlayId,
-    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, WorkspaceId,
+    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, TraceContext, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
