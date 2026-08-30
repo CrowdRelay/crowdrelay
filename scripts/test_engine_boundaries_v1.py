@@ -37,7 +37,7 @@ CONTEXTS = [
     "experimentation", "fan_activation", "fan_lifecycle", "fan_privacy",
     "free_reach", "funding", "growth_debt", "growth_metrics", "live_opportunities",
     "market_intelligence", "merch_bundle", "merchandising", "negotiation",
-    "objectives", "operator_brief", "outreach", "playlist_placement",
+    "objectives", "outreach", "playlist_placement",
     "play_measurement", "plays", "pricing", "promotion", "release_autopilot",
     "show_operations", "show_settlement", "show_growth", "target_discovery",
     "tour_economics", "mobile_fan",

@@ -35,7 +35,6 @@ use crowdrelay_worker::{
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     growth_metric_sync::GrowthMetricSyncWorker,
-    operator_brief::OperatorBriefWorker,
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     push_delivery::PushDeliveryWorker,
@@ -56,10 +55,6 @@ const DATABASE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OPS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Reddit public search tolerates slow, sparse polling.
 const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-/// The brief itself is once a day; this is only how often the rule is asked
-/// whether a day has passed. Cheap, and it means a restart cannot push the
-/// brief a whole cycle late.
-const OPERATOR_BRIEF_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// The graph changes at human speed; an hour of decay lag is invisible.
 const AUDIENCE_GRAPH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Agent outcome polling cadence. Outcomes are not time-critical — the
@@ -357,14 +352,6 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             None
         }
     };
-    // Deliberately not gated on `autopilot_enabled`: an operator whose agent is
-    // switched off is exactly the one who most needs to be told so.
-    let operator_brief = OperatorBriefWorker::new(
-        database.clone(),
-        workspace_id,
-        OPERATOR_BRIEF_INTERVAL,
-        config.database.operation_timeout,
-    );
     let audience_graph_sweeper = AudienceGraphSweeper::new(
         database.clone(),
         workspace_id,
@@ -421,7 +408,6 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let team_email_shutdown = shutdown_receiver.clone();
     let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
-    let operator_brief_shutdown = shutdown_receiver.clone();
     let discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
@@ -491,10 +477,6 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     runtime_tasks.spawn(async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
         "CrowdRelay ops watchdog"
-    });
-    runtime_tasks.spawn(async move {
-        operator_brief.run(operator_brief_shutdown).await;
-        "CrowdRelay operator brief"
     });
     runtime_tasks.spawn(async move {
         audience_graph_sweeper.run(audience_graph_shutdown).await;

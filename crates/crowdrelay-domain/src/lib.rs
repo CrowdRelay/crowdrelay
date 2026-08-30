@@ -85,7 +85,6 @@ pub mod merchandising;
 pub mod negotiation;
 pub mod next_best_action;
 pub mod objectives;
-pub mod operator_brief;
 pub mod outreach;
 pub mod performance;
 pub mod play_measurement;

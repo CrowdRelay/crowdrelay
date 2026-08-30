@@ -1,5 +1,4 @@
-"""Contract tests for reply triage, calendar routing, and operator brief
-per-capability alerts — Phase 19 completion + self-starting 10.
+"""Contract tests for reply triage and calendar routing.
 
 Pinned:
 - Reply triage domain classifier exists, classifies all dispositions, routes
@@ -120,20 +119,6 @@ class CalendarRoutingContract(unittest.TestCase):
         self.assertIn("calendar_routing_conflict", self.growth_debt)
         self.assertIn("review_calendar_routing", self.growth_debt)
         self.assertIn("raise_growth_debt_calendar_routing_conflict", self.growth_debt)
-
-
-class OperatorBriefCapabilityAlertsContract(unittest.TestCase):
-    def setUp(self) -> None:
-        self.brief = read(DOMAIN / "operator_brief.rs")
-
-    def test_parked_capabilities_field_exists(self) -> None:
-        self.assertIn("parked_capabilities", self.brief)
-
-    def test_parked_capability_struct_exists(self) -> None:
-        self.assertIn("pub struct ParkedCapability", self.brief)
-        self.assertIn("capability:", self.brief)
-        self.assertIn("parked_count:", self.brief)
-        self.assertIn("days_since_heartbeat:", self.brief)
 
 
 class DomainLayeringContract(unittest.TestCase):

@@ -50,12 +50,6 @@ Register submission platforms with `POST /v1/admin/autopilot/outreach/submission
 
 Nothing is contacted as a result of ingestion. An operator confirms the route through `POST /v1/admin/autopilot/outreach/candidates/{candidate_id}/confirm`, and only then does an email route become an outreach target.
 
-## The daily operator brief
-
-`crowdrelay.ops.operator_brief` is a first-party notice to the band's own operator, not an audience message, and it rides the ops-alert channel and workflow that already carry `crowdrelay.ops.status_changed`. The workflow must branch on the event type: the payload is `headline`, `summary`, `snapshot` and `observed_at`, with no `alert_key` or `state`, because a brief is not a condition that opens and recovers.
-
-CrowdRelay sends at most one a day and decides on its own whether there is anything worth saying; the executor delivers it and never suppresses, batches or re-sends it. Deliver it even while the agent is disabled — an operator whose agent is switched off with work waiting is precisely the reader the brief exists for, and a delivery path that goes quiet with the agent reproduces the silence it was built to break.
-
 ## Off-platform metric feeds
 
 `GET /v1/admin/autopilot/growth-metrics/coverage` reports which of `spotify`, `youtube`, `bandsintown` and `social` the agent can currently see. A platform with no series reads as `missing`, not as quiet.
