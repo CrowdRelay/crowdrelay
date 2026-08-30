@@ -190,41 +190,79 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
     };
 
     // P1-a: Construct the design from persisted columns only.
-    let experiment_uuid: uuid::Uuid = row.try_get("experiment_uuid").unwrap_or_default();
-    let assignment_round: i32 = row.try_get("assignment_round").unwrap_or(1);
-    let status_str: String = row
-        .try_get("experiment_status")
-        .unwrap_or_else(|_| "active".to_string());
+    // HARD RULE: no silent fallback for persisted causal metadata. Schema
+    // corruption or incompatible persisted data must fail loudly, not
+    // silently substitute caller-provided values. The design is immutable
+    // after creation — the persisted state IS the truth.
+    let experiment_uuid: uuid::Uuid = row
+        .try_get("experiment_uuid")
+        .map_err(|e| {
+            tracing::error!(error = %e, column = "experiment_uuid", "failed to read persisted experiment design column");
+            RepositoryError::Unexpected
+        })?;
+    let assignment_round: i32 = row.try_get("assignment_round").map_err(|e| {
+        tracing::error!(error = %e, column = "assignment_round", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let status_str: String = row.try_get("experiment_status").map_err(|e| {
+        tracing::error!(error = %e, column = "experiment_status", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
     let expected_treatment: Option<i32> = row.try_get("expected_treatment_count").ok().flatten();
     let expected_control: Option<i32> = row.try_get("expected_control_count").ok().flatten();
-    let persisted_holdout: f64 = row
-        .try_get("holdout_probability")
-        .unwrap_or(holdout_probability);
-    let persisted_interference_str: String = row
-        .try_get("interference_policy")
-        .unwrap_or_else(|_| interference_policy.as_str().to_string());
-    let persisted_unit_kind_str: String = row
-        .try_get("unit_kind")
-        .unwrap_or_else(|_| unit_kind.as_str().to_string());
-    let persisted_eligible: serde_json::Value = row
-        .try_get("eligible_units")
-        .unwrap_or(serde_json::json!([]));
-    let persisted_estimand: serde_json::Value = row.try_get("estimand").unwrap_or(estimand);
-    let persisted_eligibility: serde_json::Value = row
-        .try_get("eligibility_criteria")
-        .unwrap_or(eligibility_criteria);
-    let persisted_selection: serde_json::Value = row
-        .try_get("selection_context")
-        .unwrap_or(selection_context);
-    let designed_at: time::OffsetDateTime = row.try_get("designed_at").unwrap_or(now);
+    let persisted_holdout: f64 = row.try_get("holdout_probability").map_err(|e| {
+        tracing::error!(error = %e, column = "holdout_probability", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let persisted_interference_str: String = row.try_get("interference_policy").map_err(|e| {
+        tracing::error!(error = %e, column = "interference_policy", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let persisted_unit_kind_str: String = row.try_get("unit_kind").map_err(|e| {
+        tracing::error!(error = %e, column = "unit_kind", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let persisted_eligible: serde_json::Value = row.try_get("eligible_units").map_err(|e| {
+        tracing::error!(error = %e, column = "eligible_units", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let persisted_estimand: serde_json::Value = row.try_get("estimand").map_err(|e| {
+        tracing::error!(error = %e, column = "estimand", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let persisted_eligibility: serde_json::Value =
+        row.try_get("eligibility_criteria").map_err(|e| {
+            tracing::error!(error = %e, column = "eligibility_criteria", "failed to read persisted experiment design column");
+            RepositoryError::Unexpected
+        })?;
+    let persisted_selection: serde_json::Value = row.try_get("selection_context").map_err(|e| {
+        tracing::error!(error = %e, column = "selection_context", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
+    let designed_at: time::OffsetDateTime = row.try_get("designed_at").map_err(|e| {
+        tracing::error!(error = %e, column = "designed_at", "failed to read persisted experiment design column");
+        RepositoryError::Unexpected
+    })?;
 
     let persisted_unit_kind =
-        crowdrelay_brain::ExperimentUnitKind::parse(&persisted_unit_kind_str).unwrap_or(unit_kind);
+        crowdrelay_brain::ExperimentUnitKind::parse(&persisted_unit_kind_str).ok_or_else(|| {
+            tracing::error!(value = %persisted_unit_kind_str, "failed to parse persisted unit_kind");
+            RepositoryError::Unexpected
+        })?;
     let persisted_interference =
-        crowdrelay_brain::InterferencePolicy::parse(&persisted_interference_str)
-            .unwrap_or(interference_policy);
+        crowdrelay_brain::InterferencePolicy::parse(&persisted_interference_str).ok_or_else(|| {
+            tracing::error!(value = %persisted_interference_str, "failed to parse persisted interference_policy");
+            RepositoryError::Unexpected
+        })?;
     let persisted_eligible_units: Vec<String> =
-        serde_json::from_value(persisted_eligible).unwrap_or(eligible_units);
+        serde_json::from_value(persisted_eligible).map_err(|e| {
+            tracing::error!(error = %e, "failed to deserialize persisted eligible_units");
+            RepositoryError::Unexpected
+        })?;
+    let experiment_status = crowdrelay_brain::ExperimentStatus::parse(&status_str).ok_or_else(|| {
+        tracing::error!(value = %status_str, "failed to parse persisted experiment_status");
+        RepositoryError::Unexpected
+    })?;
 
     Ok(crowdrelay_brain::ExperimentDesign {
         experiment_uuid,
@@ -239,8 +277,7 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
         holdout_probability: persisted_holdout,
         eligibility_criteria: persisted_eligibility,
         selection_context: persisted_selection,
-        experiment_status: crowdrelay_brain::ExperimentStatus::parse(&status_str)
-            .unwrap_or(crowdrelay_brain::ExperimentStatus::Active),
+        experiment_status,
         expected_treatment_count: expected_treatment.map(|v| v as u32),
         expected_control_count: expected_control.map(|v| v as u32),
     })
@@ -394,9 +431,10 @@ pub(in crate::autopilot) async fn update_execution_status(
     assignment_id: &str,
     new_status: crowdrelay_brain::ExecutionStatus,
 ) -> Result<(), RepositoryError> {
-    // Only dispatched → executed and dispatched → failed are allowed.
-    // The WHERE clause enforces this at the DB level — no application-
-    // level race condition possible.
+    // Only dispatched → executed, dispatched → failed, and
+    // dispatched → unknown are allowed. The WHERE clause enforces this
+    // at the DB level — no application-level race condition possible.
+    // Unknown is non-terminal: it can later resolve to executed or failed.
     sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
@@ -404,7 +442,7 @@ pub(in crate::autopilot) async fn update_execution_status(
         WHERE workspace_id = $1
           AND id = $2
           AND execution_status = 'dispatched'
-          AND $3 IN ('executed', 'failed')
+          AND $3 IN ('executed', 'failed', 'unknown')
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -422,11 +460,15 @@ pub(in crate::autopilot) async fn update_execution_status(
 /// This is the primary transition path for the community executor:
 /// when `community_posts.status` becomes `'posted'`, the executor
 /// calls this with `ExecutionStatus::Executed`. When the post
-/// definitively fails, it calls with `ExecutionStatus::Failed`.
+/// definitively fails, it calls with `ExecutionStatus::Failed`. When
+/// confirmation is lost (stale posting), it calls with
+/// `ExecutionStatus::Unknown`.
 ///
 /// Uses the `idx_experiment_assignments_action_id` index for the
-/// lookup. Monotonic: only `dispatched → executed` and
-/// `dispatched → failed` are allowed.
+/// lookup. Monotonic: only `dispatched → executed`,
+/// `dispatched → failed`, and `dispatched → unknown` are allowed.
+/// `unknown` is non-terminal and can later resolve to `executed` or
+/// `failed` via reconciliation.
 pub(in crate::autopilot) async fn update_execution_status_by_action_id(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -440,7 +482,7 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
         WHERE workspace_id = $1
           AND action_id = $2
           AND execution_status = 'dispatched'
-          AND $3 IN ('executed', 'failed')
+          AND $3 IN ('executed', 'failed', 'unknown')
         "#,
     )
     .bind(workspace_id.into_uuid())

@@ -347,10 +347,14 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     /// This is the primary transition path for the community executor:
     /// when `community_posts.status` becomes `'posted'`, the executor
     /// calls this with `ExecutionStatus::Executed`. When the post
-    /// definitively fails, it calls with `ExecutionStatus::Failed`.
+    /// definitively fails, it calls with `ExecutionStatus::Failed`. When
+    /// confirmation is lost (stale posting from a worker crash), it calls
+    /// with `ExecutionStatus::Unknown`.
     ///
-    /// Monotonic: only `dispatched → executed` and `dispatched → failed`
-    /// are allowed. All other transitions are silently no-ops.
+    /// Monotonic: only `dispatched → executed`, `dispatched → failed`,
+    /// and `dispatched → unknown` are allowed. `unknown` is non-terminal
+    /// and can later resolve to `executed` or `failed` via reconciliation.
+    /// All other transitions are silently no-ops.
     async fn update_execution_status_by_action_id(
         &self,
         workspace_id: WorkspaceId,

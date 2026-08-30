@@ -290,6 +290,20 @@ async fn load_trace_timeline(
 
             UNION ALL
 
+            -- Reach event: the outbound contact attempt
+            SELECT
+                sent_at AS occurred_at,
+                'reach'::text AS source,
+                channel::text AS kind,
+                status::text AS state,
+                action_id::text AS action_id,
+                NULL::text AS decision_id,
+                'FACT'::text AS certainty
+            FROM viryaos_reach_events
+            WHERE workspace_id = $1 AND trace_id = $2
+
+            UNION ALL
+
             -- Audit event: the operator-visible audit trail
             SELECT
                 occurred_at,

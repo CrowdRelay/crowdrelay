@@ -349,6 +349,24 @@ pub enum ExecutionStatus {
     /// Set by `update_execution_status()` when the executor reports
     /// failure. Terminal — no further transitions.
     Failed,
+    /// Treatment arm, execution outcome cannot be established. The
+    /// intervention may have succeeded, but confirmation was lost (e.g.,
+    /// worker crash during the Reddit API call). NOT a failure. NOT a
+    /// success.
+    ///
+    /// # Unknown invariant
+    ///
+    /// - Excluded from realized-treatment analysis
+    /// - Excluded from failed-treatment counts
+    /// - Does not lower the estimated treatment effect as if failure occurred
+    /// - Does not increase it as if execution occurred
+    /// - Remains eligible for later resolution (non-terminal: → Executed or Failed)
+    ///
+    /// Set by the community executor's `recover_stale_posting` when a
+    /// `posting` row is stale (worker crash during posting). The action
+    /// ledger maps the corresponding action status to UNKNOWN, which
+    /// triggers reconciliation.
+    Unknown,
 }
 
 impl ExecutionStatus {
@@ -360,6 +378,7 @@ impl ExecutionStatus {
             Self::Dispatched => "dispatched",
             Self::Executed => "executed",
             Self::Failed => "failed",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -371,6 +390,7 @@ impl ExecutionStatus {
             "dispatched" => Some(Self::Dispatched),
             "executed" => Some(Self::Executed),
             "failed" => Some(Self::Failed),
+            "unknown" => Some(Self::Unknown),
             _ => None,
         }
     }
@@ -384,14 +404,30 @@ impl ExecutionStatus {
         )
     }
 
+    /// Whether this status represents an unresolved execution — the
+    /// intervention may have happened, but confirmation was lost.
+    /// Unknown is NOT terminal and NOT evidence of treatment or failure.
+    #[must_use]
+    pub const fn is_unresolved(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
     /// Whether transitioning from `self` to `new` is allowed.
-    /// Only `dispatched → executed` and `dispatched → failed` are
-    /// valid forward transitions.
+    /// Valid forward transitions:
+    /// - `dispatched → executed` (intervention confirmed)
+    /// - `dispatched → failed` (intervention definitively failed)
+    /// - `dispatched → unknown` (execution outcome cannot be established)
+    /// - `unknown → executed` (reconciliation confirmed the intervention)
+    /// - `unknown → failed` (reconciliation confirmed the intervention failed)
     #[must_use]
     pub const fn can_transition_to(self, new: Self) -> bool {
         matches!(
             (self, new),
-            (Self::Dispatched, Self::Executed) | (Self::Dispatched, Self::Failed)
+            (Self::Dispatched, Self::Executed)
+                | (Self::Dispatched, Self::Failed)
+                | (Self::Dispatched, Self::Unknown)
+                | (Self::Unknown, Self::Executed)
+                | (Self::Unknown, Self::Failed)
         )
     }
 }
@@ -1456,19 +1492,27 @@ mod tests {
         assert!(ExecutionStatus::Control.is_terminal());
         // Withheld is terminal — no transition possible.
         assert!(ExecutionStatus::Withheld.is_terminal());
-        // Dispatched is non-terminal — can transition to Executed or Failed.
+        // Dispatched is non-terminal — can transition to Executed, Failed, or Unknown.
         assert!(!ExecutionStatus::Dispatched.is_terminal());
         // Executed is terminal — external intervention confirmed.
         assert!(ExecutionStatus::Executed.is_terminal());
         // Failed is terminal — no transition possible.
         assert!(ExecutionStatus::Failed.is_terminal());
+        // Unknown is non-terminal — can resolve to Executed or Failed.
+        assert!(!ExecutionStatus::Unknown.is_terminal());
+        assert!(ExecutionStatus::Unknown.is_unresolved());
 
         // The only allowed forward transitions from Dispatched:
         assert!(ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Executed));
         assert!(ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Failed));
+        assert!(ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Unknown));
+        // Unknown can resolve to Executed or Failed:
+        assert!(ExecutionStatus::Unknown.can_transition_to(ExecutionStatus::Executed));
+        assert!(ExecutionStatus::Unknown.can_transition_to(ExecutionStatus::Failed));
         // No backward transitions:
         assert!(!ExecutionStatus::Failed.can_transition_to(ExecutionStatus::Executed));
         assert!(!ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Failed));
+        assert!(!ExecutionStatus::Unknown.can_transition_to(ExecutionStatus::Dispatched));
         assert!(!ExecutionStatus::Withheld.can_transition_to(ExecutionStatus::Dispatched));
         assert!(!ExecutionStatus::Control.can_transition_to(ExecutionStatus::Withheld));
         // No self-transitions (idempotent no-ops at DB level, but not
@@ -1476,6 +1520,7 @@ mod tests {
         assert!(!ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Dispatched));
         assert!(!ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Executed));
         assert!(!ExecutionStatus::Failed.can_transition_to(ExecutionStatus::Failed));
+        assert!(!ExecutionStatus::Unknown.can_transition_to(ExecutionStatus::Unknown));
     }
 
     #[test]
@@ -1486,9 +1531,10 @@ mod tests {
             ExecutionStatus::Dispatched,
             ExecutionStatus::Executed,
             ExecutionStatus::Failed,
+            ExecutionStatus::Unknown,
         ] {
             assert_eq!(ExecutionStatus::parse(status.as_str()), Some(status));
         }
-        assert_eq!(ExecutionStatus::parse("unknown"), None);
+        assert_eq!(ExecutionStatus::parse("invalid"), None);
     }
 }

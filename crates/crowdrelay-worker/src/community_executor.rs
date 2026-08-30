@@ -22,8 +22,13 @@
 //! next poll reclaims. A crash during `posting` (between the Reddit API call
 //! and the DB update) is recovered by reclaiming `posting` rows older than
 //! 5 minutes — but we do NOT re-submit to Reddit (to avoid duplicate posts).
-//! Instead, the row is marked `failed` with a message directing the operator
-//! to check Reddit manually.
+//! The `community_posts` row is marked `failed`, but the parent autopilot
+//! action is transitioned to `unknown` (NOT `failed`) because the Reddit post
+//! may have actually succeeded — we lost confirmation, not the intervention.
+//! The experiment assignment is also transitioned to `unknown`, which excludes
+//! it from both realized-treatment and failed-treatment counts in the causal
+//! learner. Unknown is non-terminal: it can later resolve to `executed` or
+//! `failed` via reconciliation.
 //!
 //! ## Concurrency
 //! The claim query uses `FOR UPDATE SKIP LOCKED` so multiple worker instances
@@ -297,30 +302,102 @@ impl CommunityExecutorWorker {
 
     /// Recovers `posting` rows that have been stuck longer than the stale
     /// threshold. These are from a worker crash during the Reddit API call.
-    /// We mark them as `failed` rather than re-submitting to avoid duplicate
-    /// posts on Reddit (the original post may have succeeded).
+    ///
+    /// The community_posts row is marked `failed` (the DB record failed), but
+    /// the parent autopilot action is transitioned to `unknown` — NOT `failed`.
+    /// This is because the Reddit post may have actually succeeded; we simply
+    /// lost confirmation. The action ledger maps `unknown` to UNKNOWN, which
+    /// triggers reconciliation rather than treating it as a failed treatment.
+    ///
+    /// The experiment assignment is transitioned to `unknown` as well, so the
+    /// causal learner excludes it from both realized-treatment and
+    /// failed-treatment counts. Unknown is non-terminal: it can later resolve
+    /// to `executed` or `failed` via reconciliation.
     async fn recover_stale_posting(&self) -> Result<(), CommunityExecutorError> {
+        let ws = self.workspace_id.into_uuid();
+
+        // Step 1: Find stale posting rows and collect their action_ids.
+        let stale_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            r#"
+            SELECT id, action_id FROM community_posts
+            WHERE workspace_id = $1
+              AND status = 'posting'
+              AND updated_at < now() - make_interval(secs => $2::double precision)
+            "#,
+        )
+        .bind(ws)
+        .bind(POSTING_STALE_THRESHOLD.as_secs() as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if stale_rows.is_empty() {
+            return Ok(());
+        }
+
+        // Step 2: Mark community_posts as failed (the DB record failed).
+        let post_ids: Vec<Uuid> = stale_rows.iter().map(|(id, _)| *id).collect();
         let result = sqlx::query(
             r#"
             UPDATE community_posts
             SET status = 'failed',
                 error_message = 'worker crashed during posting — check Reddit manually',
                 updated_at = now()
-            WHERE workspace_id = $1
-              AND status = 'posting'
-              AND updated_at < now() - make_interval(secs => $2::double precision)
+            WHERE id = ANY($1)
             "#,
         )
-        .bind(self.workspace_id.into_uuid())
-        .bind(POSTING_STALE_THRESHOLD.as_secs() as i64)
+        .bind(&post_ids)
         .execute(&self.pool)
         .await?;
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                recovered = result.rows_affected(),
-                "recovered stale posting rows (marked failed — check Reddit manually)"
-            );
+
+        // Step 3: Transition autopilot actions to 'unknown' (not 'failed').
+        // The Reddit post may have succeeded — we lost confirmation, not
+        // the intervention itself. Only transition actions that are currently
+        // 'succeeded' or 'processing' (the premature success or in-flight state).
+        let action_ids: Vec<Uuid> = stale_rows
+            .iter()
+            .filter_map(|(_, action_id)| *action_id)
+            .collect();
+        if !action_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions
+                SET status = 'unknown',
+                    finished_at = NULL,
+                    updated_at = now()
+                WHERE id = ANY($1)
+                  AND workspace_id = $2
+                  AND status IN ('succeeded', 'processing')
+                "#,
+            )
+            .bind(&action_ids)
+            .bind(ws)
+            .execute(&self.pool)
+            .await?;
+
+            // Step 4: Transition experiment assignments to 'unknown'.
+            // Unknown is excluded from both realized-treatment and
+            // failed-treatment counts. It can later resolve to 'executed'
+            // or 'failed' via reconciliation.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_experiment_assignments
+                SET execution_status = 'unknown',
+                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = experiment_assignments.action_id))
+                WHERE workspace_id = $1
+                  AND action_id = ANY($2)
+                  AND execution_status = 'dispatched'
+                "#,
+            )
+            .bind(ws)
+            .bind(&action_ids)
+            .execute(&self.pool)
+            .await?;
         }
+
+        tracing::info!(
+            recovered = result.rows_affected(),
+            "recovered stale posting rows (community_posts=failed, action=unknown — check Reddit manually)"
+        );
         Ok(())
     }
 
@@ -480,16 +557,18 @@ impl CommunityExecutorWorker {
         .bind(&reddit_result.post_url)
         .execute(&self.pool)
         .await?;
-        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).execute(&self.pool).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer)
+        sqlx::query(r#"INSERT INTO viryaos_reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4), $6) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).bind(action.trace_id).execute(&self.pool).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer)
         // Transition the experiment assignment execution_status from
         // dispatched → executed. This is the actual execution boundary:
         // the external intervention (Reddit post) has been confirmed.
         // Monotonic: only dispatched → executed is allowed; if the
         // assignment is not in 'dispatched' state, this is a no-op.
+        // Propagate trace_id from the autopilot action for trace continuity.
         sqlx::query(
             r#"
             UPDATE viryaos_experiment_assignments
-            SET execution_status = 'executed'
+            SET execution_status = 'executed',
+                trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
             WHERE workspace_id = $1
               AND action_id = $2
               AND execution_status = 'dispatched'
@@ -967,7 +1046,8 @@ impl CommunityExecutorWorker {
             sqlx::query(
                 r#"
                 UPDATE viryaos_experiment_assignments
-                SET execution_status = 'failed'
+                SET execution_status = 'failed',
+                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2))
                 WHERE workspace_id = $1
                   AND action_id = $2
                   AND execution_status = 'dispatched'
@@ -1017,7 +1097,6 @@ struct ClaimedAction {
     title: String,
     body: String,
     smart_link: Option<String>,
-    #[allow(dead_code)]
     trace_id: Option<Uuid>,
 }
 

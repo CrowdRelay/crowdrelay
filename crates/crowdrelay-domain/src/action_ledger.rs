@@ -35,6 +35,17 @@
 //! `UNKNOWN` as a failure (to avoid duplicate side effects). Instead,
 //! `UNKNOWN` triggers reconciliation, which may resolve to `SUCCEEDED` or
 //! `FAILED`.
+//!
+//! # UNKNOWN in the community executor
+//!
+//! When the community executor detects a stale `posting` row (worker crash
+//! during the Reddit API call), it transitions the autopilot action to
+//! `'unknown'` — NOT `'failed'`. The Reddit post may have actually succeeded;
+//! we simply lost confirmation. The action ledger maps `'unknown'` to
+//! `UNKNOWN`, and the experiment assignment is also transitioned to
+//! `'unknown'`, which excludes it from both realized-treatment and
+//! failed-treatment counts in the causal learner. `UNKNOWN` is non-terminal:
+//! it can later resolve to `SUCCEEDED` or `FAILED` via reconciliation.
 
 use std::fmt;
 
