@@ -37,9 +37,10 @@ BLUE_API="crowdrelay-api-1"
 BLUE_WORKER="crowdrelay-worker-1"
 GREEN_ALIAS="crowdrelay-api-green"
 BLUE_ALIAS="crowdrelay-api"
+ACTIVE_ALIAS="crowdrelay-api-active"
 CADDY_BACKUP=""
 NEW_STARTED=false
-CADDY_SWITCHED=false
+ALIAS_MOVED=false
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -50,15 +51,18 @@ rollback() {
   local status="${1:-1}"
   trap - ERR INT TERM HUP
 
-  if [[ "$CADDY_SWITCHED" == true ]]; then
-    printf 'ROLLBACK=START reason=caddy-switched reverting upstream to %s\n' "${CURRENT_ALIAS:-}" >&2
-    if [[ -n "$CADDY_BACKUP" && -f "$CADDY_BACKUP" ]]; then
-      # Inode-safe restore: cat preserves the bind-mounted inode, cp would
-      # create a new one and the container would serve stale config.
-      cat "$CADDY_BACKUP" > "$EDGE_CADDYFILE"
-      docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1 || true
-      printf 'ROLLBACK=CADDY_REVERTED upstream=%s\n' "${CURRENT_ALIAS:-}" >&2
+  if [[ "$ALIAS_MOVED" == true ]]; then
+    printf 'ROLLBACK=START reason=alias-moved reverting active alias to %s\n' "${CURRENT_API:-}" >&2
+    # Move the active alias back to the old container
+    docker network disconnect "$CROWDRELAY_DOCKER_NETWORK" "$NEW_API" >/dev/null 2>&1 || true
+    docker network connect --alias "$ACTIVE_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" >/dev/null 2>&1 || true
+    # Restore color-specific alias on old container
+    if [[ "$DEPLOY_COLOR" == "green" ]]; then
+      docker network connect --alias "$BLUE_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" >/dev/null 2>&1 || true
+    else
+      docker network connect --alias "$GREEN_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" >/dev/null 2>&1 || true
     fi
+    printf 'ROLLBACK=ALIAS_REVERTED active=%s\n' "${CURRENT_API:-}" >&2
   fi
 
   if [[ "$NEW_STARTED" == true ]]; then
@@ -103,6 +107,19 @@ source .crowdrelay.local.sh
 
 [[ -f "$EDGE_CADDYFILE" && ! -L "$EDGE_CADDYFILE" ]] || fail "missing edge Caddyfile: $EDGE_CADDYFILE"
 docker inspect "$EDGE_CONTAINER" --format '{{.State.Status}}' 2>/dev/null | grep -q running || fail "edge Caddy is not running"
+
+# Pre-deploy: verify the Caddyfile uses the stable active alias, not a
+# color-specific name. If it doesn't, fix it before deploying.
+if ! grep -Fq "reverse_proxy ${ACTIVE_ALIAS}:8080" "$EDGE_CADDYFILE"; then
+  printf 'RECONCILE=FIX Caddyfile does not use %s, repairing\n' "$ACTIVE_ALIAS"
+  sed "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy ${ACTIVE_ALIAS}:8080|g; s|reverse_proxy ${GREEN_ALIAS}:8080|reverse_proxy ${ACTIVE_ALIAS}:8080|g" "$EDGE_CADDYFILE" > /tmp/caddy-reconcile.tmp
+  cat /tmp/caddy-reconcile.tmp > "$EDGE_CADDYFILE"
+  rm -f /tmp/caddy-reconcile.tmp
+  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1
+  sleep 3
+  grep -Fq "reverse_proxy ${ACTIVE_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile reconciliation failed — cannot find ${ACTIVE_ALIAS}"
+  printf 'RECONCILE=PASS Caddyfile now uses %s\n' "$ACTIVE_ALIAS"
+fi
 
 # Pre-deploy: reconcile edge Caddy bind mount.
 # The ecosystem deploy syncs source code (git merge) which may replace the
@@ -223,52 +240,56 @@ docker compose --env-file "$env_file" -f "$compose_file" \
   run --rm -T setup </dev/null
 printf 'MIGRATIONS=PASS\n'
 
-# --- 4. Switch edge Caddy to new app ----------------------------------------
+# --- 4. Move active alias to new API -----------------------------------------
 
-printf '\n==> 4/6 — Switch edge Caddy upstream to %s\n' "$DEPLOY_COLOR"
-
-# Inode-safe rewrite: sed -i creates a new inode, which breaks Docker bind
-# mounts (the container keeps pointing at the old inode). Writing via cat
-# preserves the inode so the container sees the updated content.
-caddy_tmp="$(mktemp)"
-sed "s|reverse_proxy ${CURRENT_ALIAS}:8080|reverse_proxy ${NEW_ALIAS}:8080|" "$EDGE_CADDYFILE" > "$caddy_tmp"
-cat "$caddy_tmp" > "$EDGE_CADDYFILE"
-rm -f "$caddy_tmp"
-
-# Verify the rewrite changed something
-grep -Fq "reverse_proxy ${NEW_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile was not updated to ${DEPLOY_COLOR} upstream"
-grep -Fq "reverse_proxy ${CURRENT_ALIAS}:8080" "$EDGE_CADDYFILE" && fail "Caddyfile still contains old upstream — ambiguous state"
-
-# Also update the area management proxy Caddyfile if it exists.
-AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
-AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
-if [[ -f "$AREA_CADDYFILE" ]]; then
-  area_tmp="$(mktemp)"
-  sed "s|http://${CURRENT_ALIAS}:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp"
-  cat "$area_tmp" > "$AREA_CADDYFILE"
-  rm -f "$area_tmp"
-  # Also handle the bare "api" hostname used before the first green deploy
-  area_tmp2="$(mktemp)"
-  sed "s|http://api:8080|http://${NEW_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp2"
-  cat "$area_tmp2" > "$AREA_CADDYFILE"
-  rm -f "$area_tmp2"
-  # Force-recreate picks up the new bind-mounted config reliably.
-  docker compose -f compose.area-management.yaml up -d --force-recreate area-management-proxy >/dev/null 2>&1 || \
-    docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
-  printf 'AREA_PROXY=PASS upstream=%s\n' "$NEW_ALIAS"
+printf '\n==> 4/6 — Move %s alias to %s API\n' "$ACTIVE_ALIAS" "$DEPLOY_COLOR"
+# The Caddyfile always points to crowdrelay-api-active:8080. We move the
+# active alias from the old container to the new container.
+#
+# Step 4a: Remove the active alias from the old container.
+docker network disconnect "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" 2>/dev/null || true
+# Reconnect the old container without the active alias but keep its
+# color-specific alias so it's still reachable for drain/stop.
+if [[ "$DEPLOY_COLOR" == "green" ]]; then
+  docker network connect --alias "$BLUE_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" 2>/dev/null || true
+else
+  docker network connect --alias "$GREEN_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" 2>/dev/null || true
 fi
 
-# Graceful Caddy reload (zero-downtime: in-flight requests complete, new ones go to new app)
-docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --force
+# Step 4b: The new container already has the active alias from compose.
+# Verify it resolves and serves the correct SHA.
+docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
+  --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+  "http://${ACTIVE_ALIAS}:8080/v1/health/ready" >/dev/null
 
-# Verify the container actually sees the updated Caddyfile (bind mounts can
-# silently serve stale content if the inode was swapped).
-docker exec "$EDGE_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || fail "edge Caddyfile failed validation after reload"
-cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE" || fail "edge Caddyfile inside container does not match host file"
-grep -Fq "reverse_proxy ${NEW_ALIAS}:8080" <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) || fail "edge Caddy still proxies to old alias after reload"
+active_meta="$(docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
+  --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+  "http://${ACTIVE_ALIAS}:8080/v1/meta")"
+printf '%s' "$active_meta" | python3 -c "
+import json, sys
+expected = sys.argv[1]
+data = json.load(sys.stdin)
+actual = data.get('gitSha', '')
+if actual != expected:
+    raise SystemExit(f'active alias meta mismatch: got={actual} expected={expected}')
+" "$TARGET"
 
-CADDY_SWITCHED=true
-printf 'CADDY_SWITCH=PASS upstream=%s\n' "$NEW_ALIAS"
+ALIAS_MOVED=true
+printf 'ALIAS_MOVE=PASS active=%s container=%s\n' "$ACTIVE_ALIAS" "$NEW_API"
+
+# Also update the area management proxy Caddyfile if it references a
+# color-specific alias. The area proxy should use the stable alias too.
+AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
+AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
+if [[ -f "$AREA_CADDYFILE" ]] && ! grep -Fq "http://${ACTIVE_ALIAS}:8080" "$AREA_CADDYFILE"; then
+  area_tmp="$(mktemp)"
+  sed "s|http://${BLUE_ALIAS}:8080|http://${ACTIVE_ALIAS}:8080|g; s|http://${GREEN_ALIAS}:8080|http://${ACTIVE_ALIAS}:8080|g; s|http://api:8080|http://${ACTIVE_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp"
+  cat "$area_tmp" > "$AREA_CADDYFILE"
+  rm -f "$area_tmp"
+  docker compose -f compose.area-management.yaml up -d --force-recreate area-management-proxy >/dev/null 2>&1 || \
+    docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
+  printf 'AREA_PROXY=PASS upstream=%s\n' "$ACTIVE_ALIAS"
+fi
 
 # --- 5. Verify public health ------------------------------------------------
 
