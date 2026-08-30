@@ -1593,10 +1593,10 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
 /// T15: SQL/Rust reconciliation parity.
 ///
 /// The SQL fallback function `viryaos_action_ledger_reconcile` and the
-/// Rust `resolve_community_post` function must produce identical
-/// classification for the same community_posts fixture states. This
-/// proves the SQL fallback does not have weaker causal semantics than
-/// the primary Rust reconciler.
+/// Rust `community_post_to_evidence` + `resolve_outcome` pipeline must
+/// produce identical classification for the same community_posts fixture
+/// states. This proves the SQL fallback does not have weaker causal
+/// semantics than the primary Rust reconciler.
 ///
 /// This test also verifies that the SQL function correctly matches
 /// `action_kind = 'community.engage.request'` (the real action_kind

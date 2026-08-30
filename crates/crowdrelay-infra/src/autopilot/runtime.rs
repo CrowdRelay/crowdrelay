@@ -450,15 +450,17 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .fetch_one(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
-                        if provider_already_succeeded {
-                            // Canonical resolver: a late failure after a
-                            // prior success is NoChange — do not regress.
-                            let _resolution = resolve_outcome(
-                                ResolutionEvidence::TerminalReceipt {
-                                    succeeded: false,
-                                    prior_success_exists: true,
-                                },
-                            );
+                        // Build the canonical evidence from the receipt +
+                        // the prior-success check. The resolver drives the
+                        // decision; the SQL below applies it.
+                        let resolution = resolve_outcome(
+                            ResolutionEvidence::TerminalReceipt {
+                                succeeded: false,
+                                prior_success_exists: provider_already_succeeded,
+                            },
+                        );
+                        if resolution == Resolution::NoChange {
+                            // Late failure after prior success — do not regress.
                             transaction.commit().await.map_err(map_sqlx)?;
                             return Ok(ExecutionReportMutation {
                                 report_id: id,
@@ -467,17 +469,8 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 replayed: false,
                             });
                         }
-
-                        // Canonical resolver: definitive failure, no prior
-                        // success → Failed. This resolves both the action
-                        // and the assignment atomically.
-                        debug_assert_eq!(
-                            resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                                succeeded: false,
-                                prior_success_exists: false,
-                            }),
-                            Resolution::Failed
-                        );
+                        // resolution == Resolution::Failed — apply the
+                        // transition atomically.
 
                         // Resolve the action from unknown → failed (if it
                         // was unknown — the gap detector may have marked it
@@ -638,15 +631,13 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         }
 
                         // Canonical resolver: terminal success receipt →
-                        // Executed. This resolves both the action and the
-                        // assignment atomically in this transaction.
-                        debug_assert_eq!(
-                            resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                                succeeded: true,
-                                prior_success_exists: false,
-                            }),
-                            Resolution::Executed
-                        );
+                        // Executed. The resolver drives the decision; the
+                        // SQL below applies it atomically.
+                        let resolution = resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                            succeeded: true,
+                            prior_success_exists: false,
+                        });
+                        debug_assert_eq!(resolution, Resolution::Executed);
 
                         // Resolve the action from unknown → succeeded (if
                         // it was unknown — the gap detector may have marked

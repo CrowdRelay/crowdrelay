@@ -174,34 +174,30 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                ge.sample_size, ge.contamination, ge.measurement_delay_days,
                ge.episode_id, ge.resolved_at
         FROM viryaos_growth_evidence ge
-        -- LEFT JOIN experiment_assignments to exclude unresolved (unknown)
-        -- executions from the causal learner. This is an explicit defense
-        -- at the learning boundary — do NOT rely on the implicit chain
-        -- (unknown → no measurement → resolved_at NULL → not loaded).
-        --
-        -- Treatment-class semantics:
-        --   executed  → realized treatment (eligible as treated)
-        --   failed    → realized non-treatment (eligible as non-treated)
-        --   withheld  → no treatment (eligible as non-treated)
-        --   control   → control arm (eligible as control)
-        --   unknown   → unresolved; EXCLUDE from all causal estimation
-        --
-        -- Do NOT use a generic != unknown filter as the treatment inclusion
-        -- rule. The treatment/non-treatment distinction is handled downstream
-        -- by the causal model's arm + evidence_quality logic, not by this
-        -- filter. This filter only excludes `unknown` — the dangerous case
-        -- where we cannot establish whether the treatment happened.
-        --
-        -- LEFT JOIN (not INNER): evidence without an assignment (legacy,
-        -- non-experiment) is still loaded. Only rows that HAVE an
-        -- assignment with execution_status='unknown' are excluded.
-        -- No fan-out: viryaos_experiment_assignments has a unique
-        -- constraint on (workspace_id, action_id) — one evidence row
-        -- joins to at most one assignment row.
-        LEFT JOIN viryaos_experiment_assignments ea
-          ON ea.workspace_id = ge.workspace_id AND ea.action_id = ge.action_id
+        -- LATERAL subquery: pick at most ONE assignment row per evidence
+        -- row to prevent fan-out. The experiment_assignments table does
+        -- NOT have a unique constraint on (workspace_id, action_id) —
+        -- only a non-unique index. A plain LEFT JOIN could duplicate
+        -- evidence rows if multiple assignments exist for one action.
+        -- LATERAL + LIMIT 1 guarantees one row per evidence.
+        LEFT JOIN LATERAL (
+            SELECT execution_status
+            FROM viryaos_experiment_assignments ea
+            WHERE ea.workspace_id = ge.workspace_id AND ea.action_id = ge.action_id
+            LIMIT 1
+        ) ea ON true
         WHERE ge.workspace_id = $1
           AND ge.resolved_at IS NOT NULL
+          -- Exclude unresolved (unknown) executions from the causal
+          -- learner. This is an explicit defense at the learning
+          -- boundary — do NOT rely on the implicit chain
+          -- (unknown → no measurement → resolved_at NULL → not loaded).
+          --
+          -- This filter only excludes `unknown` — the dangerous case
+          -- where we cannot establish whether the treatment happened.
+          -- The treatment/non-treatment distinction (executed vs failed
+          -- vs control) is handled downstream by the causal model's
+          -- arm + evidence_quality logic, not by this filter.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
           AND ($2::timestamptz IS NULL OR ge.timestamp > $2)
         ORDER BY ge.timestamp ASC

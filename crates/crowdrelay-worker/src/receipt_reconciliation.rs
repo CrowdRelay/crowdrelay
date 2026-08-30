@@ -255,12 +255,26 @@ impl ReceiptReconciliationWorker {
         &self,
         transaction: &mut Transaction<'_, Postgres>,
     ) -> Result<usize, ReceiptReconciliationError> {
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        // Load the latest terminal receipt per unknown action, plus
+        // whether any earlier succeeded receipt exists for the same
+        // action+executor. This is needed for the canonical resolver's
+        // monotonicity guard: a late failure after a prior success →
+        // NoChange, not Failed.
+        let rows: Vec<(Uuid, String, bool)> = sqlx::query_as(
             r#"
-            SELECT a.id, r.status
+            SELECT a.id, r.status, r.prior_success
             FROM viryaos_autopilot_actions a
             JOIN LATERAL (
-                SELECT status FROM viryaos_autopilot_execution_reports r
+                SELECT status,
+                       EXISTS (
+                           SELECT 1 FROM viryaos_autopilot_execution_reports r2
+                           WHERE r2.workspace_id = a.workspace_id
+                             AND r2.action_id = a.id
+                             AND r2.executor_id = r.executor_id
+                             AND r2.status = 'succeeded'
+                             AND (r2.occurred_at, r2.id) < (r.occurred_at, r.id)
+                       ) AS prior_success
+                FROM viryaos_autopilot_execution_reports r
                 WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                   AND r.status IN ('succeeded', 'failed')
                 ORDER BY r.occurred_at DESC, r.id DESC
@@ -277,14 +291,12 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, receipt_status) in rows {
-            // Use the canonical resolver. The receipt is a terminal
-            // executor report — no prior success check is needed here
-            // because the LATERAL subquery already picks the latest
-            // terminal receipt by occurred_at DESC.
+        for (action_id, receipt_status, prior_success_exists) in rows {
+            // Use the canonical resolver with the correct monotonicity
+            // flag. A late failure after a prior success → NoChange.
             let evidence = ResolutionEvidence::TerminalReceipt {
                 succeeded: receipt_status == "succeeded",
-                prior_success_exists: false,
+                prior_success_exists,
             };
             match resolve_outcome(evidence) {
                 Resolution::Executed => {
@@ -408,34 +420,29 @@ impl ReceiptReconciliationWorker {
 
         let mut resolved = 0usize;
         for (action_id, outbox_status, last_error_kind) in rows {
-            let outcome = match outbox_status.as_str() {
-                // Outbox event was delivered → the side effect happened.
-                "delivered" => ActionOutcome::Succeeded,
-                // Outbox event is dead → check the error kind.
-                "dead" => {
-                    match last_error_kind.as_deref() {
-                        // Permanent rejection (provider saw it and rejected)
-                        // → definitively failed.
-                        Some(kind)
-                            if kind.starts_with("http_permanent")
-                                || kind == "recipient_ineligible"
-                                || kind.starts_with("secret_")
-                                || kind.starts_with("endpoint_")
-                                || kind == "invalid_signing_secret"
-                                || kind == "event_serialization" =>
-                        {
-                            ActionOutcome::Failed
-                        }
-                        // Ambiguous errors (transport_timeout,
-                        // transport_request, lease_expired) → stay
-                        // unknown. Only external truth can resolve these.
-                        _ => continue,
-                    }
+            // Route through the canonical resolver via the outbox adapter.
+            let evidence = outbox_event_to_evidence(&outbox_status, last_error_kind.as_deref());
+            match resolve_outcome(evidence) {
+                Resolution::Executed => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Succeeded,
+                    )
+                    .await?;
                 }
-                // Pending/processing → still in flight, don't touch.
-                _ => continue,
-            };
-            resolved += resolve_action(self.workspace_id, transaction, action_id, outcome).await?;
+                Resolution::Failed => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Failed,
+                    )
+                    .await?;
+                }
+                Resolution::Unknown | Resolution::NoChange => continue,
+            }
         }
         Ok(resolved)
     }
@@ -607,9 +614,68 @@ fn community_post_to_evidence(
     }
 }
 
+/// Provider-specific adapter: translates outbox event delivery state into
+/// canonical [`ResolutionEvidence`] facts for the [`resolve_outcome`]
+/// resolver.
+///
+/// This is the ONLY place that knows about `outbox_events.status` values
+/// and which error kinds are permanent vs ambiguous. The canonical
+/// resolver (`resolve_outcome`) makes the semantic decision; this adapter
+/// just converts provider state into domain facts.
+fn outbox_event_to_evidence(
+    outbox_status: &str,
+    last_error_kind: Option<&str>,
+) -> ResolutionEvidence {
+    match outbox_status {
+        // Outbox event was delivered → the side effect happened.
+        "delivered" => ResolutionEvidence::ProviderDelivery {
+            confirmed: true,
+            definitive_failure: false,
+            confirmation_lost: false,
+        },
+        // Outbox event is dead → check the error kind.
+        "dead" => {
+            let permanent = matches!(
+                last_error_kind,
+                Some(kind)
+                    if kind.starts_with("http_permanent")
+                        || kind == "recipient_ineligible"
+                        || kind.starts_with("secret_")
+                        || kind.starts_with("endpoint_")
+                        || kind == "invalid_signing_secret"
+                        || kind == "event_serialization"
+            );
+            if permanent {
+                // Permanent rejection (provider saw it and rejected)
+                // → definitively failed.
+                ResolutionEvidence::ProviderDelivery {
+                    confirmed: false,
+                    definitive_failure: true,
+                    confirmation_lost: false,
+                }
+            } else {
+                // Ambiguous errors (transport_timeout, transport_request,
+                // lease_expired) → confirmation lost. Only external truth
+                // can resolve these.
+                ResolutionEvidence::ProviderDelivery {
+                    confirmed: false,
+                    definitive_failure: false,
+                    confirmation_lost: true,
+                }
+            }
+        }
+        // Pending/processing → still in flight, no evidence yet.
+        _ => ResolutionEvidence::ProviderDelivery {
+            confirmed: false,
+            definitive_failure: false,
+            confirmation_lost: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{community_post_to_evidence, requires_terminal_receipt};
+    use super::{community_post_to_evidence, outbox_event_to_evidence, requires_terminal_receipt};
     use crowdrelay_application::autopilot::AutopilotActionPayload;
     use crowdrelay_domain::FanId;
     use crowdrelay_domain::action_ledger::{Resolution, resolve_outcome};
@@ -701,5 +767,56 @@ mod tests {
         assert_eq!(resolve_outcome(evidence), Resolution::Failed);
         let evidence = community_post_to_evidence("failed", Some("worker crashed during posting"));
         assert_eq!(resolve_outcome(evidence), Resolution::Unknown);
+    }
+
+    // ── outbox_event_to_evidence adapter tests ──
+
+    #[test]
+    fn delivered_outbox_resolves_executed() {
+        let evidence = outbox_event_to_evidence("delivered", None);
+        assert_eq!(resolve_outcome(evidence), Resolution::Executed);
+    }
+
+    #[test]
+    fn dead_outbox_permanent_rejection_resolves_failed() {
+        for kind in [
+            "http_permanent_status",
+            "recipient_ineligible",
+            "secret_missing",
+            "endpoint_unreachable",
+            "invalid_signing_secret",
+            "event_serialization",
+        ] {
+            let evidence = outbox_event_to_evidence("dead", Some(kind));
+            assert_eq!(
+                resolve_outcome(evidence),
+                Resolution::Failed,
+                "permanent error kind {kind} must resolve to Failed"
+            );
+        }
+    }
+
+    #[test]
+    fn dead_outbox_ambiguous_error_stays_unknown() {
+        for kind in ["transport_timeout", "transport_request", "lease_expired"] {
+            let evidence = outbox_event_to_evidence("dead", Some(kind));
+            assert_eq!(
+                resolve_outcome(evidence),
+                Resolution::Unknown,
+                "ambiguous error kind {kind} must stay unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn in_flight_outbox_statuses_stay_unknown() {
+        for status in ["pending", "processing", "leased"] {
+            let evidence = outbox_event_to_evidence(status, None);
+            assert_eq!(
+                resolve_outcome(evidence),
+                Resolution::Unknown,
+                "in-flight status {status} should stay unknown"
+            );
+        }
     }
 }
