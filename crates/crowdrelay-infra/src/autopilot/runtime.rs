@@ -460,6 +460,23 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             });
                         }
 
+                        // The executor definitively failed and no prior
+                        // success exists — transition the experiment
+                        // assignment from dispatched → failed so the causal
+                        // learner sees the correct treatment realization (T).
+                        sqlx::query(
+                            r#"UPDATE viryaos_experiment_assignments
+                               SET execution_status = 'failed'
+                               WHERE workspace_id = $1
+                                 AND action_id = $2
+                                 AND execution_status = 'dispatched'"#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+
                         let reason = command.error_kind.as_deref().unwrap_or("executor_failures");
                         sqlx::query(
                             r#"
@@ -576,6 +593,27 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 _ => {}
                             }
                         }
+
+                        // The executor confirmed delivery — transition the
+                        // experiment assignment from dispatched → executed so
+                        // the causal learner sees the correct treatment
+                        // realization (T). This is the normal success path:
+                        // the action was marked `succeeded` at dispatch time,
+                        // and the receipt confirms the external side effect
+                        // actually happened. Without this, assignments stay
+                        // `dispatched` forever even after confirmed delivery.
+                        sqlx::query(
+                            r#"UPDATE viryaos_experiment_assignments
+                               SET execution_status = 'executed'
+                               WHERE workspace_id = $1
+                                 AND action_id = $2
+                                 AND execution_status = 'dispatched'"#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
 
                         sqlx::query(
                             r#"

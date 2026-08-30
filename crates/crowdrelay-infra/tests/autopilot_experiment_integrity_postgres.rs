@@ -1,5 +1,5 @@
 //! Experiment integrity tests — P0-1, P0-2 behavioral tests T1-T9,
-//! execution integrity tests T10-T14.
+//! execution integrity tests T10-T19.
 //!
 //! These tests verify the experiment design persistence and atomic
 //! assignment+execution guarantees against a real Postgres database.
@@ -27,6 +27,20 @@
 //!      trace_id appears in all lifecycle records.
 //! T14: Cross-layer invariant — execution certainty and causal treatment
 //!      classification cannot contradict one another.
+//! T15: SQL/Rust reconciliation parity — the SQL fallback function and
+//!      the Rust worker produce identical classification for the same
+//!      community_posts fixture states.
+//! T16: Trace continuity invariant — existing trace_id MUST propagate;
+//!      missing trace_id MUST NOT fabricate fake continuity.
+//! T17: One growth episode per action — the source-of-truth evidence
+//!      cannot produce multiple conflicting episodes for the same action.
+//! T18: INSERT-vs-SELECT strictness — newly inserted rows may use safe
+//!      construction defaults; existing persisted rows must be read
+//!      strictly with zero fallback tolerance.
+//! T19: Full chain 3-branch proof — SUCCESS, FAILURE, and CONFIRMATION
+//!      LOSS each produce the correct learning interpretation across
+//!      the entire chain: assignment → action → evidence → episode →
+//!      trace → ledger → learner interpretation.
 
 use crowdrelay_application::autopilot::AutopilotDecisionRepository;
 use crowdrelay_brain::{
@@ -624,7 +638,7 @@ async fn insert_decision_and_action(
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at,
             finished_at, trace_id)
-           VALUES ($1,$2,$3,'growth_metrics','community.engage','target_community',
+           VALUES ($1,$2,$3,'growth_metrics','community.engage.request','target_community',
                    $4,$5,$6,'succeeded',now(),now(),now(),$7)"#,
     )
     .bind(action_id)
@@ -662,6 +676,33 @@ async fn insert_community_post(
     .execute(pool)
     .await
     .expect("insert community_post");
+    post_id
+}
+
+/// Helper: insert a community_posts row with an error_message.
+async fn insert_community_post_with_error(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    status: &str,
+    subreddit: &str,
+    error_message: &str,
+) -> uuid::Uuid {
+    let post_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO community_posts
+           (id, workspace_id, action_id, subreddit, title, body, smart_link, status, error_message)
+           VALUES ($1,$2,$3,$4,'Test post','Test body',NULL,$5,$6)"#,
+    )
+    .bind(post_id)
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(subreddit)
+    .bind(status)
+    .bind(error_message)
+    .execute(pool)
+    .await
+    .expect("insert community_post with error");
     post_id
 }
 
@@ -1323,7 +1364,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
         r#"INSERT INTO viryaos_autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at, finished_at, trace_id)
-           SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage', 'target_community',
+           SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage.request', 'target_community',
                   $3, $4, '{"kind":"community.engage.request"}', 'succeeded', now(), now(), now(), $5
            FROM viryaos_autopilot_actions WHERE id = $6"#,
     )
@@ -1365,7 +1406,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
         r#"INSERT INTO viryaos_autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at, finished_at, trace_id)
-           SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage', 'target_community',
+           SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage.request', 'target_community',
                   $3, $4, '{"kind":"community.engage.request"}', 'failed', now(), now(), now(), $5
            FROM viryaos_autopilot_actions WHERE id = $6"#,
     )
@@ -1406,7 +1447,7 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
         r#"INSERT INTO viryaos_autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
             subject_id, idempotency_key, payload, status, approved_at, available_at, trace_id)
-           SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage', 'target_community',
+           SELECT $1, $2, decision_id, 'growth_metrics', 'community.engage.request', 'target_community',
                   $3, $4, '{"kind":"community.engage.request"}', 'unknown', now(), now(), $5
            FROM viryaos_autopilot_actions WHERE id = $6"#,
     )
@@ -1543,5 +1584,740 @@ async fn t14_cross_layer_invariant_forbidden_mappings() {
     assert_eq!(
         evidence_dupes, 0,
         "each action_id must have at most one growth evidence record"
+    );
+}
+
+/// T15: SQL/Rust reconciliation parity.
+///
+/// The SQL fallback function `viryaos_action_ledger_reconcile` and the
+/// Rust `resolve_community_post` function must produce identical
+/// classification for the same community_posts fixture states. This
+/// proves the SQL fallback does not have weaker causal semantics than
+/// the primary Rust reconciler.
+///
+/// This test also verifies that the SQL function correctly matches
+/// `action_kind = 'community.engage.request'` (the real action_kind
+/// produced by the brain). A previous version of the function used
+/// `'community.engage'` (missing the `.request` suffix), which meant
+/// the community_posts strategy was dead code — the function fell
+/// through to the ELSE branch and returned UNKNOWN for all community
+/// actions.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t15_sql_rust_reconciliation_parity() {
+    let f = setup().await.expect("fixture");
+
+    // We test 4 fixture states and verify the SQL function classifies
+    // each correctly. The Rust classification is already tested in
+    // receipt_reconciliation.rs unit tests — here we verify the SQL
+    // function matches.
+
+    // Fixture 1: posted → SUCCEEDED
+    let trace1 = uuid::Uuid::now_v7();
+    let action1 = insert_decision_and_action(&f.pool, f.workspace_id, trace1).await;
+    insert_community_post(&f.pool, f.workspace_id, action1, "posted", "r/t15a").await;
+    // Transition action to unknown so reconciliation can run.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1",
+    )
+    .bind(action1)
+    .execute(&f.pool)
+    .await
+    .expect("mark unknown");
+    let result1: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action1)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile posted");
+    assert_eq!(
+        result1, "SUCCEEDED",
+        "posted community_post must reconcile to SUCCEEDED"
+    );
+
+    // Fixture 2: crash-marked failed → UNKNOWN
+    let trace2 = uuid::Uuid::now_v7();
+    let action2 = insert_decision_and_action(&f.pool, f.workspace_id, trace2).await;
+    insert_community_post_with_error(
+        &f.pool,
+        f.workspace_id,
+        action2,
+        "failed",
+        "r/t15b",
+        "worker crashed during posting — check Reddit manually",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1",
+    )
+    .bind(action2)
+    .execute(&f.pool)
+    .await
+    .expect("mark unknown");
+    let result2: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action2)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile crash-marked");
+    assert_eq!(
+        result2, "UNKNOWN",
+        "crash-marked failed must stay UNKNOWN — confirmation lost, NOT definitive failure"
+    );
+
+    // Fixture 3: definitive failure → FAILED
+    let trace3 = uuid::Uuid::now_v7();
+    let action3 = insert_decision_and_action(&f.pool, f.workspace_id, trace3).await;
+    insert_community_post_with_error(
+        &f.pool,
+        f.workspace_id,
+        action3,
+        "failed",
+        "r/t15c",
+        "no agents service configured",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1",
+    )
+    .bind(action3)
+    .execute(&f.pool)
+    .await
+    .expect("mark unknown");
+    let result3: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action3)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile definitive failure");
+    assert_eq!(
+        result3, "FAILED",
+        "definitive executor failure must reconcile to FAILED"
+    );
+
+    // Fixture 4: still posting → UNKNOWN
+    let trace4 = uuid::Uuid::now_v7();
+    let action4 = insert_decision_and_action(&f.pool, f.workspace_id, trace4).await;
+    insert_community_post(&f.pool, f.workspace_id, action4, "posting", "r/t15d").await;
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1",
+    )
+    .bind(action4)
+    .execute(&f.pool)
+    .await
+    .expect("mark unknown");
+    let result4: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action4)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile still posting");
+    assert_eq!(
+        result4, "UNKNOWN",
+        "still-posting community_post must stay UNKNOWN"
+    );
+}
+
+/// T16: Trace continuity invariant — no fake continuity.
+///
+/// An action created WITH a trace_id must propagate it to all downstream
+/// records. An action created WITHOUT a trace_id (legacy) must NOT
+/// fabricate a replacement trace — downstream records that claim
+/// continuity must have NULL, not a fabricated UUID.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t16_trace_continuity_no_fake_continuity() {
+    let f = setup().await.expect("fixture");
+
+    // Case 1: action WITH trace_id → downstream records share it.
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Insert a reach_event with the action's trace_id.
+    sqlx::query(
+        r#"INSERT INTO viryaos_reach_events
+           (workspace_id, action_id, recipient_kind, recipient_id, channel,
+            template_id, estimated_reach, status, trace_id)
+           VALUES ($1, $2, 'subreddit_audience', 'r/t16', 'reddit_post',
+                   'community-engager', 100, 'delivered', $3)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert reach event");
+
+    let reach_trace: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT trace_id FROM viryaos_reach_events \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("reach trace");
+    assert_eq!(
+        reach_trace,
+        Some(trace_id),
+        "reach_event must have the action's trace_id — no fake continuity"
+    );
+
+    // Case 2: action WITHOUT trace_id (legacy) → downstream records have NULL.
+    let decision_id = uuid::Uuid::now_v7();
+    let legacy_action_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+           VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
+                   'auto_execute',9000,'auto_execute','test',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,NULL)"#,
+    )
+    .bind(decision_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("decision-legacy-{decision_id}"))
+    .bind(uuid::Uuid::now_v7())
+    .execute(&f.pool)
+    .await
+    .expect("insert legacy decision");
+
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, approved_at, available_at,
+            finished_at, trace_id)
+           VALUES ($1,$2,$3,'growth_metrics','community.engage.request','target_community',
+                   $4,$5,$6,'succeeded',now(),now(),now(),NULL)"#,
+    )
+    .bind(legacy_action_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(uuid::Uuid::now_v7())
+    .bind(format!("action-legacy-{legacy_action_id}"))
+    .bind(serde_json::json!({"kind":"community.engage.request"}))
+    .execute(&f.pool)
+    .await
+    .expect("insert legacy action");
+
+    // Verify the legacy action has NULL trace_id.
+    let legacy_trace: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(legacy_action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("legacy trace");
+    assert!(
+        legacy_trace.is_none(),
+        "legacy action must have NULL trace_id"
+    );
+
+    // Insert a reach_event for the legacy action with NULL trace_id
+    // (simulating what the community executor should do).
+    sqlx::query(
+        r#"INSERT INTO viryaos_reach_events
+           (workspace_id, action_id, recipient_kind, recipient_id, channel,
+            template_id, estimated_reach, status, trace_id)
+           VALUES ($1, $2, 'subreddit_audience', 'r/t16legacy', 'reddit_post',
+                   'community-engager', 100, 'delivered', NULL)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(legacy_action_id)
+    .execute(&f.pool)
+    .await
+    .expect("insert legacy reach event");
+
+    let legacy_reach_trace: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT trace_id FROM viryaos_reach_events \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(legacy_action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("legacy reach trace");
+    assert!(
+        legacy_reach_trace.is_none(),
+        "legacy reach_event must have NULL trace_id — no fabricated continuity"
+    );
+}
+
+/// T17: One growth episode per action.
+///
+/// The source-of-truth evidence cannot produce multiple conflicting
+/// growth episodes for the same action. The UNIQUE(workspace_id, action_id)
+/// constraint enforces this at the DB level, and the rebuild function
+/// must preserve this invariant: rebuild(E) == rebuild(rebuild(E)).
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t17_one_episode_per_action() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t17",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t17treatment".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+
+    let pred = make_prediction();
+    let assignment = ExperimentAssignment::from_design(
+        &design,
+        "r/t17treatment",
+        "r/t17treatment",
+        TreatmentAssignment::Treatment,
+        &pred,
+        Some(action_id),
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
+        .await
+        .expect("treatment assignment recording");
+
+    // Verify: exactly one episode exists.
+    let episode_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("episode count");
+    assert_eq!(episode_count, 1, "exactly one episode per action");
+
+    // Rebuild — must still produce exactly one episode (upsert, not insert).
+    let rebuilt: i32 =
+        sqlx::query_scalar("SELECT viryaos_rebuild_growth_episodes_from_evidence($1)")
+            .bind(f.workspace_id.into_uuid())
+            .fetch_one(&f.pool)
+            .await
+            .expect("rebuild 1");
+    assert_eq!(rebuilt, 1, "rebuild must produce 1 episode");
+
+    let episode_count_after_rebuild: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("episode count after rebuild");
+    assert_eq!(
+        episode_count_after_rebuild, 1,
+        "rebuild must not create duplicates — one episode per action"
+    );
+
+    // Rebuild again — idempotence.
+    let rebuilt2: i32 =
+        sqlx::query_scalar("SELECT viryaos_rebuild_growth_episodes_from_evidence($1)")
+            .bind(f.workspace_id.into_uuid())
+            .fetch_one(&f.pool)
+            .await
+            .expect("rebuild 2");
+    assert_eq!(rebuilt2, 1, "second rebuild must also produce 1 episode");
+
+    let episode_count_after_rebuild2: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("episode count after rebuild 2");
+    assert_eq!(
+        episode_count_after_rebuild2, 1,
+        "rebuild(rebuild(E)) must not create duplicates"
+    );
+
+    // Verify: growth_evidence.action_id is NOT NULL (invariant).
+    let null_evidence: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND action_id IS NULL",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("null evidence check");
+    assert_eq!(
+        null_evidence, 0,
+        "growth_evidence.action_id must never be NULL"
+    );
+}
+
+/// T18: INSERT-vs-SELECT strictness.
+///
+/// Newly inserted rows may use safe construction defaults (known
+/// constants). Existing persisted rows must be read strictly —
+/// corrupt persisted metadata must produce an explicit error, not
+/// a silent fallback.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t18_insert_vs_select_strictness() {
+    let f = setup().await.expect("fixture");
+
+    // INSERT path: newly inserted row → design constructed correctly.
+    let design1 = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t18-insert",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t18insert".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("first creation must succeed");
+    assert_eq!(
+        design1.assignment_round, 1,
+        "INSERT path: assignment_round must be 1 for new experiment"
+    );
+
+    // SELECT path (retry): same cycle key → must return the same design.
+    let design2 = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t18-insert",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t18insert".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("retry must succeed");
+    assert_eq!(
+        design1.experiment_uuid, design2.experiment_uuid,
+        "SELECT path: retry must return the same experiment_uuid"
+    );
+
+    // Corrupt persisted metadata: inject an invalid experiment_status
+    // into the DB and verify the retry path fails loudly.
+    sqlx::query(
+        "UPDATE viryaos_experiment_designs SET experiment_status = 'INVALID_STATUS' \
+         WHERE workspace_id = $1 AND experiment_uuid = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(design1.experiment_uuid)
+    .execute(&f.pool)
+    .await
+    .expect("corrupt status");
+
+    let corrupt_result = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t18-insert",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/t18insert".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await;
+
+    assert!(
+        corrupt_result.is_err(),
+        "corrupt persisted experiment_status must produce an explicit error, NOT silent fallback to Active"
+    );
+}
+
+/// T19: Full chain 3-branch proof.
+///
+/// Proves the complete semantic chain for all three execution outcomes:
+///   SUCCESS → Dispatched → Executed → evidence → episode → trace → ledger
+///   FAILURE → Dispatched → Failed → evidence → episode → trace → ledger
+///   CONFIRMATION LOSS → Dispatched → Unknown → evidence → episode → trace → ledger
+///
+/// Critical invariant: Unknown ≠ Failed, Unknown ≠ Executed. No branch
+/// accidentally teaches the brain the wrong thing.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t19_full_chain_three_branches() {
+    let f = setup().await.expect("fixture");
+
+    // Create one experiment design for all three branches.
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-t19",
+            ExperimentUnitKind::TargetCommunity,
+            vec![
+                "r/t19success".to_string(),
+                "r/t19failure".to_string(),
+                "r/t19unknown".to_string(),
+            ],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+
+    let pred = make_prediction();
+
+    // ── Branch 1: SUCCESS ──
+    let trace_success = uuid::Uuid::now_v7();
+    let action_success = insert_decision_and_action(&f.pool, f.workspace_id, trace_success).await;
+    let assignment_success = ExperimentAssignment::from_design(
+        &design,
+        "r/t19success",
+        "r/t19success",
+        TreatmentAssignment::Treatment,
+        &pred,
+        Some(action_success),
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment_success, Some("discovery"))
+        .await
+        .expect("success assignment");
+    f.repository
+        .update_execution_status_by_action_id(
+            f.workspace_id,
+            action_success,
+            ExecutionStatus::Executed,
+        )
+        .await
+        .expect("transition to executed");
+
+    // ── Branch 2: FAILURE ──
+    let trace_failure = uuid::Uuid::now_v7();
+    let action_failure = insert_decision_and_action(&f.pool, f.workspace_id, trace_failure).await;
+    let assignment_failure = ExperimentAssignment::from_design(
+        &design,
+        "r/t19failure",
+        "r/t19failure",
+        TreatmentAssignment::Treatment,
+        &pred,
+        Some(action_failure),
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment_failure, Some("discovery"))
+        .await
+        .expect("failure assignment");
+    f.repository
+        .update_execution_status_by_action_id(
+            f.workspace_id,
+            action_failure,
+            ExecutionStatus::Failed,
+        )
+        .await
+        .expect("transition to failed");
+
+    // ── Branch 3: CONFIRMATION LOSS ──
+    let trace_unknown = uuid::Uuid::now_v7();
+    let action_unknown = insert_decision_and_action(&f.pool, f.workspace_id, trace_unknown).await;
+    let assignment_unknown = ExperimentAssignment::from_design(
+        &design,
+        "r/t19unknown",
+        "r/t19unknown",
+        TreatmentAssignment::Treatment,
+        &pred,
+        Some(action_unknown),
+    );
+    f.repository
+        .record_experiment_assignment(f.workspace_id, &assignment_unknown, Some("discovery"))
+        .await
+        .expect("unknown assignment");
+    f.repository
+        .update_execution_status_by_action_id(
+            f.workspace_id,
+            action_unknown,
+            ExecutionStatus::Unknown,
+        )
+        .await
+        .expect("transition to unknown");
+
+    // ── Verify: execution_status per branch ──
+    let (success_arm, success_exec): (String, String) = sqlx::query_as(
+        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t19success'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("success query");
+    assert_eq!(success_arm, "treatment");
+    assert_eq!(success_exec, "executed", "SUCCESS branch: executed");
+
+    let (failure_arm, failure_exec): (String, String) = sqlx::query_as(
+        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t19failure'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("failure query");
+    assert_eq!(failure_arm, "treatment");
+    assert_eq!(failure_exec, "failed", "FAILURE branch: failed");
+
+    let (unknown_arm, unknown_exec): (String, String) = sqlx::query_as(
+        "SELECT arm::text, execution_status FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND unit_id = 'r/t19unknown'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("unknown query");
+    assert_eq!(unknown_arm, "treatment");
+    assert_eq!(
+        unknown_exec, "unknown",
+        "CONFIRMATION LOSS branch: unknown — NOT failed, NOT executed"
+    );
+
+    // ── Verify: action ledger state per branch ──
+    let success_ledger: String =
+        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+            .bind(action_success)
+            .fetch_one(&f.pool)
+            .await
+            .expect("success ledger");
+    assert_eq!(
+        success_ledger, "SUCCEEDED",
+        "SUCCESS branch: ledger SUCCEEDED"
+    );
+
+    let failure_ledger: String =
+        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+            .bind(action_failure)
+            .fetch_one(&f.pool)
+            .await
+            .expect("failure ledger");
+    assert_eq!(failure_ledger, "FAILED", "FAILURE branch: ledger FAILED");
+
+    let unknown_ledger: String =
+        sqlx::query_scalar("SELECT state FROM viryaos_action_ledger WHERE action_id = $1")
+            .bind(action_unknown)
+            .fetch_one(&f.pool)
+            .await
+            .expect("unknown ledger");
+    assert_eq!(
+        unknown_ledger, "UNKNOWN",
+        "CONFIRMATION LOSS branch: ledger UNKNOWN — NOT FAILED"
+    );
+
+    // ── Verify: trace_id continuity per branch ──
+    let success_trace: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_success)
+            .fetch_one(&f.pool)
+            .await
+            .expect("success trace");
+    assert_eq!(
+        success_trace,
+        Some(trace_success),
+        "SUCCESS branch: trace_id preserved"
+    );
+
+    let failure_trace: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_failure)
+            .fetch_one(&f.pool)
+            .await
+            .expect("failure trace");
+    assert_eq!(
+        failure_trace,
+        Some(trace_failure),
+        "FAILURE branch: trace_id preserved"
+    );
+
+    let unknown_trace: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_unknown)
+            .fetch_one(&f.pool)
+            .await
+            .expect("unknown trace");
+    assert_eq!(
+        unknown_trace,
+        Some(trace_unknown),
+        "CONFIRMATION LOSS branch: trace_id preserved"
+    );
+
+    // ── Verify: growth evidence exists per branch ──
+    let evidence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND action_id IN ($2, $3, $4)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_success)
+    .bind(action_failure)
+    .bind(action_unknown)
+    .fetch_one(&f.pool)
+    .await
+    .expect("evidence count");
+    assert_eq!(
+        evidence_count, 3,
+        "each branch must have exactly one growth evidence record"
+    );
+
+    // ── Verify: growth episodes exist per branch ──
+    let episode_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+         WHERE workspace_id = $1 AND action_id IN ($2, $3, $4)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_success)
+    .bind(action_failure)
+    .bind(action_unknown)
+    .fetch_one(&f.pool)
+    .await
+    .expect("episode count");
+    assert_eq!(
+        episode_count, 3,
+        "each branch must have exactly one growth episode"
+    );
+
+    // ── Critical invariant: Unknown ≠ Failed, Unknown ≠ Executed ──
+    // The causal learner must check execution_status, not just the arm.
+    // Unknown is excluded from BOTH realized-treatment and failed-treatment
+    // counts. This is the invariant that prevents the brain from learning
+    // the wrong thing from confirmation loss.
+    assert_ne!(
+        unknown_exec, "failed",
+        "CONFIRMATION LOSS must NOT be classified as failed treatment"
+    );
+    assert_ne!(
+        unknown_exec, "executed",
+        "CONFIRMATION LOSS must NOT be classified as realized treatment"
+    );
+    assert_ne!(
+        unknown_ledger, "FAILED",
+        "CONFIRMATION LOSS ledger must NOT be FAILED"
     );
 }

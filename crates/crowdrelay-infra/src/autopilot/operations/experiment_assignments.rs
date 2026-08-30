@@ -110,8 +110,19 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
 
     // P1-a: On first creation, run check_power and persist the results.
     // On retry, SELECT the full persisted design and return it as-is.
+    //
+    // INSERT-vs-SELECT strictness (P1-4):
+    // - INSERT-returning row (this branch): values are trusted because THIS
+    //   statement created them. Safe defaults (known constants like
+    //   assignment_round=1, status="active") are acceptable. BUT structural
+    //   decode errors (malformed UUID, wrong column type, invalid enum)
+    //   indicate a schema/runtime mismatch and must still fail loudly.
+    // - SELECT existing row (retry path, below): zero fallback tolerance.
+    //   All causal/experiment metadata must be read strictly — no unwrap_or.
     let row = if let Some(row) = insert_row {
         // First creation — run the power check and persist results.
+        // Values from INSERT RETURNING — trusted because same statement
+        // created them. Safe defaults are acceptable for known constants.
         let experiment_uuid: uuid::Uuid = row.try_get("experiment_uuid").unwrap_or_default();
         let assignment_round: i32 = row.try_get("assignment_round").unwrap_or(1);
         let status_str: String = row

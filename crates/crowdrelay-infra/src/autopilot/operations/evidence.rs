@@ -4,6 +4,13 @@
 //! resolved evidence for learning. This module provides the SQL functions
 //! to read and write the `viryaos_growth_evidence` table.
 //!
+//! `viryaos_growth_evidence` is the primary read path for learning. The
+//! `viryaos_growth_episodes` table (migration 0155) is a derived write-only
+//! projection that is kept up to date as an audit trail; it is not read by
+//! production learning code today despite the migration comment claiming
+//! otherwise. `viryaos_evidence_events` is the immutable append-only event
+//! log from which episodes can be rebuilt.
+//!
 //! See `crates/crowdrelay-brain/src/evidence.rs` for the domain types.
 
 use crowdrelay_brain::{DispatchContext, GrowthEvidence, ReachChannel};

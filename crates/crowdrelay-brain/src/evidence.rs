@@ -1,5 +1,5 @@
-//! Growth Evidence — the unified, immutable evidence record that all
-//! learning subsystems consume.
+//! Growth Evidence — the unified evidence record that all learning
+//! subsystems consume.
 //!
 //! The brain has multiple learning subsystems: the causal model, treatment
 //! effects, reach conversion, calibration, strategy learning. Previously,
@@ -8,12 +8,17 @@
 //! `viryaos_reach_events`, and the experiment engine logged propensities
 //! separately.
 //!
-//! This module defines `GrowthEvidence` — a single immutable record that
-//! captures the full evidence tuple for one dispatch: action, reach,
-//! exposure, treatment assignment, propensity, outcome, prediction, and
-//! context. All learning subsystems consume the same evidence, which
-//! stops the brain from turning into 15 sophisticated subsystems with
-//! slightly different ideas of what happened.
+//! This module defines `GrowthEvidence` — a single record that captures
+//! the full evidence tuple for one dispatch: action, reach, exposure,
+//! treatment assignment, propensity, outcome, prediction, and context.
+//! All learning subsystems consume the same evidence, which stops the
+//! brain from turning into 15 sophisticated subsystems with slightly
+//! different ideas of what happened.
+//!
+//! `GrowthEvidence` is **mutable**: dispatch creates it (with outcome
+//! fields `None`), measurement updates it with observed outcomes, and
+//! conversion sets the `converted`/`converted_fan_id` fields. For a
+//! truly immutable event log, see `EvidenceEvent` (append-only).
 //!
 //! # Lifecycle
 //!

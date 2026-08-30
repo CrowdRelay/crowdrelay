@@ -101,6 +101,12 @@ pub struct CreditEntry {
     /// 'randomized_holdout' and final_contamination < 0.1). False for
     /// proportional attribution. The learner must distinguish
     /// attribution from causal evidence.
+    ///
+    /// NOTE: This field is currently always `false` — the attribution
+    /// worker does not yet set it to `true`. It is a forward-compatible
+    /// contract that will be wired when the attribution worker gains
+    /// access to experiment assignment quality metadata. Until then,
+    /// all credit entries carry `ModeledAttribution` evidence quality.
     #[serde(default)]
     pub is_causal_evidence: bool,
 }

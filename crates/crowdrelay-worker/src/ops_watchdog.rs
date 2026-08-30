@@ -36,6 +36,14 @@ use tokio::{
 
 const ALERT_REPEAT_AFTER: time::Duration = time::Duration::hours(6);
 
+/// How long an action may remain in `unknown` state before the watchdog
+/// alerts. This measures **unknown_age** (time since the action ledger
+/// entered `UNKNOWN` state), NOT dispatch_age. Transient unknowns created
+/// by the reconciliation sweep are expected to resolve within this window;
+/// an unknown that persists longer indicates the operator needs to check
+/// the provider manually.
+const UNKNOWN_ALERT_AGE_THRESHOLD: Duration = Duration::from_secs(60 * 60);
+
 #[derive(Debug, Error)]
 enum OpsWatchdogError {
     #[error("operational watchdog database operation failed")]
@@ -140,7 +148,13 @@ impl OpsWatchdogWorker {
 struct OpsSnapshot {
     executor_registered: i64,
     executor_active: i64,
+    /// Total count of actions in `unknown` status (for details).
     unknown_actions: i64,
+    /// Count of `unknown` actions whose `unknown_age` exceeds the alert
+    /// threshold — i.e., actions that have been unresolved long enough
+    /// to warrant operator attention. Transient unknowns (during active
+    /// reconciliation) do not trigger the alert.
+    stale_unknown_actions: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -169,11 +183,22 @@ async fn load_snapshot(
             count(*)::bigint AS executor_registered,
             count(*) FILTER (WHERE expires_at>now())::bigint AS executor_active,
             (SELECT count(*) FROM viryaos_autopilot_actions a
-             WHERE a.workspace_id=$1 AND a.status='unknown')::bigint AS unknown_actions
+             WHERE a.workspace_id=$1 AND a.status='unknown')::bigint AS unknown_actions,
+            -- stale_unknown_actions: unknown actions whose unknown_age
+            -- (from the action ledger's state_entered_at) exceeds the
+            -- alert threshold. This avoids alerting on transient unknowns
+            -- that the reconciliation sweep is actively resolving.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             JOIN viryaos_action_ledger al ON al.action_id = a.id
+             WHERE a.workspace_id=$1 AND a.status='unknown'
+               AND al.state='UNKNOWN'
+               AND al.state_entered_at < now() - make_interval(secs => $2::double precision)
+            )::bigint AS stale_unknown_actions
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
     .bind(workspace_id.into_uuid())
+    .bind(UNKNOWN_ALERT_AGE_THRESHOLD.as_secs() as i64)
     .fetch_one(&mut **transaction)
     .await
 }
@@ -194,9 +219,10 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             key: "execution.unknown_outcome",
             severity: "warning",
             summary: "Autopilot actions stuck in unknown execution outcome",
-            active: snapshot.unknown_actions > 0,
+            active: snapshot.stale_unknown_actions > 0,
             details: json!({
                 "unknown_actions": snapshot.unknown_actions,
+                "stale_unknown_actions": snapshot.stale_unknown_actions,
             }),
         },
     ]
@@ -295,6 +321,7 @@ mod tests {
             executor_registered: 1,
             executor_active: 1,
             unknown_actions: 0,
+            stale_unknown_actions: 0,
         }
     }
 
@@ -320,9 +347,28 @@ mod tests {
     }
 
     #[test]
-    fn unknown_action_outcomes_are_detected() {
+    fn transient_unknown_does_not_alert() {
+        // Unknown actions that are within the alert age threshold
+        // (stale_unknown_actions = 0) should NOT trigger the alert —
+        // the reconciliation sweep may still resolve them.
         let mut snapshot = healthy();
         snapshot.unknown_actions = 2;
+        snapshot.stale_unknown_actions = 0;
+        let active = conditions(&snapshot)
+            .into_iter()
+            .filter(|condition| condition.active)
+            .map(|condition| condition.key)
+            .collect::<Vec<_>>();
+        assert!(!active.contains(&"execution.unknown_outcome"));
+    }
+
+    #[test]
+    fn stale_unknown_action_outcomes_are_detected() {
+        // Unknown actions whose unknown_age exceeds the threshold
+        // should trigger the alert.
+        let mut snapshot = healthy();
+        snapshot.unknown_actions = 2;
+        snapshot.stale_unknown_actions = 1;
         let active = conditions(&snapshot)
             .into_iter()
             .filter(|condition| condition.active)

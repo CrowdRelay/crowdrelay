@@ -12,7 +12,7 @@
 //! sample — silently, forever (the 2026-08-29 edge outage produced exactly
 //! this: three actions whose receipts had to be re-inserted by hand).
 //!
-//! This worker runs two sweeps per cycle:
+//! This worker runs three sweeps per cycle:
 //!
 //! 1. **Gap detection.** Actions that were dispatched to an executor,
 //!    finished (dispatch-wise) more than [`RECEIPT_GAP_THRESHOLD`] ago,
@@ -21,20 +21,28 @@
 //!    intervention may have happened, and the 7-day delayed-receipt
 //!    acceptance window may still deliver one.
 //!
-//! 2. **Resolution.** Actions already in `unknown` are resolved from the
-//!    best available evidence:
-//!    - a terminal receipt that arrived late (possibly after the gap
-//!      sweep ran) resolves to `succeeded`/`failed`;
-//!    - `community.engage.request` actions resolve from their
-//!      `community_posts` row — `posted` means the Reddit post exists
-//!      (succeeded), a non-crash `failed` means the post definitively
-//!      never went out (failed), and a crash-marked `failed` stays
-//!      `unknown` because only a human looking at Reddit can tell.
+//! 2a. **Resolution from receipts.** Actions already in `unknown` are
+//!     resolved from a late-arriving terminal receipt:
+//!     - `succeeded` receipt → `succeeded`/`executed`;
+//!     - `failed` receipt → `failed`/`failed`.
+//!
+//! 2b. **Resolution from community_posts.** `community.engage.request`
+//!     actions never file executor receipts — the community executor *is*
+//!     the executor, and `community_posts` is its receipt:
+//!     - `posted` means the Reddit post exists (succeeded);
+//!     - a non-crash `failed` means the post definitively
+//!       never went out (failed), and a crash-marked `failed` stays
+//!       `unknown` because only a human looking at Reddit can tell.
 //!
 //! Experiment assignments follow the action through every transition so
 //! the causal learner never counts an unresolved intervention as either
 //! treatment or failure. The ops watchdog alerts on the remaining
 //! `unknown` population (`execution.unknown_outcome`).
+//!
+//! Note: `record_execution_report` (in `runtime.rs`) handles the normal
+//! success path — when a terminal receipt arrives on time, it transitions
+//! the assignment `dispatched → executed/failed` immediately. This worker
+//! only handles the gap/late/unknown paths.
 
 use std::time::Duration;
 
@@ -52,11 +60,21 @@ use tokio::{
 use uuid::Uuid;
 
 /// How long after dispatch an external action may sit `succeeded` without
-/// a terminal receipt before it is treated as a lost receipt. Chosen well
-/// under the API's 7-day delayed-receipt acceptance window: a late receipt
-/// arriving after the transition still resolves the action back via
-/// sweep 2, because the receipt handler records evidence regardless of
-/// the action's status.
+/// a terminal receipt before it is treated as a lost receipt. This measures
+/// **dispatch_age** (time since `finished_at` was set by `actions_execution.rs`
+/// when the action was dispatch-confirmed), NOT **unknown_age** (time since
+/// the action entered the `unknown` state). The gap sweep only operates on
+/// `status = 'succeeded'` actions, where `finished_at` is guaranteed non-NULL
+/// by the table's CHECK constraint.
+///
+/// Chosen well under the API's 7-day delayed-receipt acceptance window: a
+/// late receipt arriving after the transition still resolves the action
+/// back via sweep 2, because the receipt handler records evidence
+/// regardless of the action's status.
+///
+/// The watchdog's `execution.unknown_outcome` alert uses a separate
+/// `unknown_age` clock (from `action_ledger.state_entered_at` when
+/// `state = 'UNKNOWN'`) — see `ops_watchdog.rs`.
 const RECEIPT_GAP_THRESHOLD: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Upper bound on rows examined per phase per cycle, so a large backlog
@@ -541,5 +559,24 @@ mod tests {
                 "status {status} should stay unknown"
             );
         }
+    }
+
+    #[test]
+    fn unrelated_failure_messages_do_not_match_crash_prefix() {
+        // Errors that happen to contain "crash" or "posting" but do not
+        // start with the exact crash marker prefix must be treated as
+        // definitive failures, not confirmation loss.
+        assert_eq!(
+            resolve_community_post("failed", Some("subreddit crashed during posting")),
+            CommunityResolution::ResolveFailed,
+        );
+        assert_eq!(
+            resolve_community_post("failed", Some("posting failed: rate limit")),
+            CommunityResolution::ResolveFailed,
+        );
+        assert_eq!(
+            resolve_community_post("failed", Some("worker crashed during posting")),
+            CommunityResolution::LeaveUnknown,
+        );
     }
 }

@@ -7,11 +7,12 @@
 //!
 //! # Enforcement
 //!
-//! The state machine is enforced by the SQL trigger in migration 0185
-//! (`viryaos_action_ledger_sync`). This Rust module is the domain-level
-//! documentation and test surface for the same rules. The trigger and
-//! `can_transition_to` must stay in sync — if you add a transition here,
-//! add it to the trigger too.
+//! The state machine is enforced by SQL triggers in migrations 0185 and 0190
+//! (`viryaos_action_ledger_sync`). Migration 0185 covers the base transitions;
+//! migration 0190 adds the `unknown → UNKNOWN` and `SUCCEEDED → FAILED/UNKNOWN`
+//! correction mappings. This Rust module is the domain-level documentation and
+//! test surface for the same rules. The triggers and `can_transition_to` must
+//! stay in sync — if you add a transition here, add it to the trigger too.
 //!
 //! # State transitions
 //!
@@ -27,6 +28,11 @@
 //! CANCELLED   → (terminal)
 //! REVOKED     → (terminal)
 //! ```
+//!
+//! `PLANNED` and `REVOKED` are defined in the state machine but are not
+//! currently reachable from any `autopilot_actions.status` value. They exist
+//! for forward compatibility (planning phase, explicit revocation). No trigger
+//! mapping produces them today.
 //!
 //! # SUCCEEDED correction
 //!
@@ -54,6 +60,72 @@
 //! `'unknown'`, which excludes it from both realized-treatment and
 //! failed-treatment counts in the causal learner. `UNKNOWN` is non-terminal:
 //! it can later resolve to `SUCCEEDED` or `FAILED` via reconciliation.
+//!
+//! # State-machine mapping contract (P1-1)
+//!
+//! CrowdRelay has four interacting state machines. They track two
+//! semantically distinct layers. This contract documents the authoritative
+//! relationship and prevents semantic drift.
+//!
+//! ## Two semantic layers
+//!
+//! 1. **Operational execution state** — "Did CrowdRelay's execution
+//!    pipeline complete, and what is the execution certainty?"
+//!    - `autopilot_actions.status` (primary)
+//!    - `action_ledger.state` (projection, trigger-maintained)
+//!
+//! 2. **Causal treatment realization** — "Was the treatment actually
+//!    realized for causal inference?"
+//!    - `experiment_assignments.execution_status` (independent)
+//!
+//! 3. **Provider delivery state** — "What does the external provider
+//!    (Reddit, email, push) say about delivery?"
+//!    - `community_posts.status` (independent, provider-specific)
+//!
+//! ## Authority
+//!
+//! | System | Field | Authority |
+//! |--------|-------|-----------|
+//! | `autopilot_actions.status` | operational lifecycle | **Primary** |
+//! | `action_ledger.state` | operational certainty | **Projection** (trigger) |
+//! | `experiment_assignments.execution_status` | causal realization | **Independent** |
+//! | `community_posts.status` | provider delivery | **Independent** |
+//!
+//! ## One-way projections (no bidirectional sync loops)
+//!
+//! ```text
+//! autopilot_actions.status → action_ledger.state (via trigger)
+//!   awaiting_approval → AUTHORIZED
+//!   queued → QUEUED
+//!   processing → RUNNING
+//!   succeeded → SUCCEEDED (may later correct to FAILED/UNKNOWN)
+//!   failed → FAILED
+//!   cancelled → CANCELLED
+//!   unknown → UNKNOWN
+//!
+//! autopilot_actions.status → experiment_assignments.execution_status (via worker/runtime)
+//!   dispatched → dispatched (at assignment creation)
+//!   succeeded + terminal receipt → executed (record_execution_report)
+//!   failed + terminal receipt → failed (record_execution_report)
+//!   unknown → unknown (detect_receipt_gaps or community executor crash)
+//!   unknown + late receipt → executed/failed (resolve_from_receipts)
+//!   community.engage: posted → executed (community_executor)
+//!   community.engage: failed (definitive) → failed (community_executor)
+//!   community.engage: failed (crash) → unknown (community_executor)
+//!
+//! community_posts.status → autopilot_actions.status (via worker, NOT trigger)
+//!   posted → succeeded (confirmed external delivery)
+//!   failed (definitive) → failed
+//!   failed (crash-marked) → unknown
+//!   pending/posting/rate_limited → no change (in-flight)
+//! ```
+//!
+//! The experiment assignment execution_status is NOT a projection of the
+//! action ledger — it has its own state machine (`ExecutionStatus` in
+//! `experiment.rs`) with its own transition rules. They mirror each other
+//! in many cases but are NOT identical. The causal learner checks
+//! `execution_status`, not `action_ledger.state`, to decide whether a
+//! treatment was realized.
 
 use std::fmt;
 
