@@ -394,7 +394,7 @@ function requiredUrl(name, allowTrustedHttp = false) {
 
 function normalizeUrl(value, allowTrustedHttp = false) {
   const parsed = new URL(value)
-  const trustedHttpHosts = new Set(["localhost", "127.0.0.1", "crowdrelay-api", "api"])
+  const trustedHttpHosts = new Set(["localhost", "127.0.0.1", "crowdrelay-api", "crowdrelay-api-green", "crowdrelay-api-active", "api"])
   if (parsed.protocol !== "https:" && !(allowTrustedHttp && parsed.protocol === "http:" && trustedHttpHosts.has(parsed.hostname))) {
     throw new Error("URL must use HTTPS or a trusted local service name")
   }
