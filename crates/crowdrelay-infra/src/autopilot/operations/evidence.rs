@@ -199,9 +199,10 @@ pub(in crate::autopilot) async fn load_growth_evidence(
           -- where we cannot establish whether the treatment happened.
           -- The treatment/non-treatment distinction (executed vs failed
           -- vs control) is handled downstream by the causal layer's
-          -- CausalEstimand::includes_in_treatment_effect(), not by this
+          -- CausalEstimand::includes_in_treatment_effect() or
+          -- TreatmentView::includes_in_treatment_effect(), not by this
           -- SQL filter. SQL provides eligible observations; the causal
-          -- layer chooses the estimand.
+          -- layer chooses the estimand or view.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
           AND ($2::timestamptz IS NULL OR ge.timestamp > $2)
         ORDER BY ge.timestamp ASC

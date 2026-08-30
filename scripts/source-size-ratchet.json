@@ -14,7 +14,7 @@
     "crates/crowdrelay-application/src/autopilot/model.rs": 1873,
     "crates/crowdrelay-brain/src/bayesian.rs": 1339,
     "crates/crowdrelay-brain/src/causal_model.rs": 1383,
-    "crates/crowdrelay-brain/src/experiment.rs": 1665,
+    "crates/crowdrelay-brain/src/experiment.rs": 1724,
     "crates/crowdrelay-brain/src/reach.rs": 1260,
     "crates/crowdrelay-brain/src/scenario_tests.rs": 1202,
     "crates/crowdrelay-domain/src/plays.rs": 1532,

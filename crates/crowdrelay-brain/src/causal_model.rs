@@ -1245,16 +1245,20 @@ mod tests {
     // directly manufacture DecisionValue, economic value, portfolio value,
     // or goal value.
     //
-    // This test proves: same candidate, same economic inputs, same
-    // objective, different prediction error → updated belief, NOT
-    // artificial DecisionValue increase.
+    // Two complementary tests prove this invariant:
     //
-    // The test constructs two PredictionOutcomes with the SAME observed
-    // fan count but DIFFERENT expected fan counts (hence different
-    // prediction errors). After updating the model with both, the
-    // treatment-aware stats (which feed DecisionValue) must be identical
-    // regardless of the prediction error — because the outcome model
-    // learns from the observed value, not the error.
+    // 1. prediction_error_does_not_manufacture_decision_value — single
+    //    update, exact equality through the FULL pipeline
+    //    (predict_stats_with_treatment, which includes calibration). A
+    //    single update hasn't diverged calibration yet, so the full
+    //    pipeline output must be identical.
+    //
+    // 2. prediction_error_only_updates_belief_not_economics — multi-update,
+    //    exact equality at the POSTERIOR boundary (predict_stats, raw
+    //    hierarchical posterior without calibration). After many updates,
+    //    calibration legitimately differs (it tracks prediction bias),
+    //    but the raw posterior must remain identical because it learns
+    //    from the observed value, not the error.
 
     #[test]
     fn prediction_error_does_not_manufacture_decision_value() {
@@ -1326,9 +1330,15 @@ mod tests {
     #[test]
     fn prediction_error_only_updates_belief_not_economics() {
         // Stronger version: feed many observations with different prediction
-        // errors but the same observed values. The model's predictions
-        // should converge to the same beliefs, regardless of the prediction
-        // error history.
+        // errors but the same observed values. The model's raw posterior
+        // (before calibration/treatment presentation) must be identical,
+        // regardless of the prediction error history.
+        //
+        // We compare predict_stats() — the raw hierarchical posterior
+        // (mean, variance, confidence) — NOT predict_stats_with_treatment(),
+        // which applies calibration correction that legitimately differs
+        // when prediction history differs. The invariant is at the
+        // posterior-update boundary, not the final output boundary.
         let mut model_a = CausalModel::new();
         let mut model_b = CausalModel::new();
         let template = "t";
@@ -1356,28 +1366,23 @@ mod tests {
             model_b.update(&PredictionOutcome::from_observation(pred, 5.0, 0.0));
         }
 
-        // Both models should have the same expected fan count — they both
+        // Both models should have the same raw posterior — they both
         // observed 5.0 fans ten times. The prediction error (which differs
         // wildly) must not influence the outcome model's belief.
-        let stats_a = model_a.predict_stats_with_treatment(template, &ctx);
-        let stats_b = model_b.predict_stats_with_treatment(template, &ctx);
+        let (expected_a, std_a, conf_a) = model_a.predict_stats(template, &ctx);
+        let (expected_b, std_b, conf_b) = model_b.predict_stats(template, &ctx);
 
         assert_eq!(
-            stats_a.confidence, stats_b.confidence,
+            conf_a, conf_b,
             "both models should have the same confidence (10 observations)"
         );
-        // The expected fans should be very close — both learned from
-        // observed=5.0. Small differences may arise from the context
-        // effect learning (which uses base_mean), but the core belief
-        // must converge to the same observed value.
-        let diff = (stats_a.expected_fans - stats_b.expected_fans).abs();
-        assert!(
-            diff < 1.0,
-            "expected_fans should converge to the same observed value regardless of prediction error, \
-             got model_a={}, model_b={}, diff={}",
-            stats_a.expected_fans,
-            stats_b.expected_fans,
-            diff
+        assert_eq!(
+            expected_a, expected_b,
+            "raw posterior expected_fans must be identical regardless of prediction error"
+        );
+        assert_eq!(
+            std_a, std_b,
+            "raw posterior predict_std must be identical regardless of prediction error"
         );
     }
 }

@@ -218,7 +218,8 @@ pub struct GrowthEvidence {
     /// The realized execution status of the assignment. `None` for
     /// legacy rows or control-arm evidence without an assignment.
     /// Used by the causal learner to select which rows contribute to
-    /// the treatment-effect posterior under the active [`CausalEstimand`].
+    /// the treatment-effect posterior under the active [`CausalEstimand`]
+    /// or [`TreatmentView`].
     pub execution_status: Option<crate::experiment::ExecutionStatus>,
 
     // ── Outcome ──

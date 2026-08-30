@@ -454,11 +454,13 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             .as_deref()
                             .and_then(ActionState::parse)
                             .unwrap_or(ActionState::Running);
-                        let resolution = resolve_outcome(
-                            ResolutionEvidence::TerminalReceipt { succeeded: false },
+                        let transition = legal_transition(
                             current_state,
+                            resolve_observation(ResolutionEvidence::TerminalReceipt {
+                                succeeded: false,
+                            }),
                         );
-                        if resolution == Resolution::NoChange {
+                        if transition == LegalTransition::NoChange {
                             // Late failure after prior success — do not regress.
                             transaction.commit().await.map_err(map_sqlx)?;
                             return Ok(ExecutionReportMutation {
@@ -468,7 +470,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 replayed: false,
                             });
                         }
-                        if resolution == Resolution::Conflict {
+                        if transition == LegalTransition::Conflict {
                             // Contradictory observation: a failure receipt
                             // arrived for an action that is already Succeeded.
                             // This is information, not a silent coercion.
@@ -490,7 +492,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 replayed: false,
                             });
                         }
-                        // resolution == Resolution::Failed — apply the
+                        // transition == Apply(Failed) — apply the
                         // transition atomically.
 
                         // Resolve the action from unknown → failed (if it
@@ -670,15 +672,17 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             .as_deref()
                             .and_then(ActionState::parse)
                             .unwrap_or(ActionState::Running);
-                        let resolution = resolve_outcome(
-                            ResolutionEvidence::TerminalReceipt { succeeded: true },
+                        let transition = legal_transition(
                             current_state,
+                            resolve_observation(ResolutionEvidence::TerminalReceipt {
+                                succeeded: true,
+                            }),
                         );
-                        if resolution == Resolution::NoChange {
+                        if transition == LegalTransition::NoChange {
                             // Already in a terminal state that shouldn't
                             // be changed (e.g. Succeeded → NoChange).
                             // Skip the SQL updates.
-                        } else if resolution == Resolution::Conflict {
+                        } else if transition == LegalTransition::Conflict {
                             // Contradictory observation: a success receipt
                             // arrived for an action that is already Failed.
                             // This is information, not a silent coercion.
@@ -693,7 +697,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 current_state
                             );
                         } else {
-                            // resolution == Resolution::Executed — apply
+                            // transition == Apply(Succeeded) — apply
                             // the transition atomically.
 
                             // Resolve the action from unknown → succeeded.

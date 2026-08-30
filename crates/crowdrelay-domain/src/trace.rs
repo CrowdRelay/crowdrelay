@@ -220,7 +220,11 @@ impl TraceContext {
     ) -> Self {
         Self {
             trace_id,
-            causation_id: Some(CausationId::from_uuid(decision_id.unwrap_or(action_id))),
+            // The cause is the decision, if any. When there is no
+            // decision (e.g. a manually created action), the action is
+            // a root event in the trace — causation_id is None, never
+            // the action_id itself. Self-causation is not meaningful.
+            causation_id: decision_id.map(CausationId::from_uuid),
             tenant_id,
             action_id: Some(action_id),
             decision_id,
@@ -326,6 +330,23 @@ mod tests {
         assert_eq!(
             ctx.causation_id(),
             Some(CausationId::from_uuid(decision_id))
+        );
+    }
+
+    #[test]
+    fn for_action_without_decision_has_no_causation() {
+        // When there is no decision_id, the action is a root event in
+        // the trace. causation_id must be None — never the action_id
+        // itself (that would be self-causation, which is meaningless).
+        let trace_id = TraceId::new();
+        let action_id = Uuid::now_v7();
+        let ctx = TraceContext::for_action(WorkspaceId::new(), trace_id, action_id, None);
+        assert_eq!(ctx.trace_id(), trace_id);
+        assert_eq!(ctx.action_id(), Some(action_id));
+        assert!(ctx.decision_id().is_none());
+        assert!(
+            ctx.causation_id().is_none(),
+            "causation_id must be None when decision_id is None — self-causation is not meaningful"
         );
     }
 

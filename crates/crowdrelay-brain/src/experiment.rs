@@ -57,17 +57,18 @@ pub enum TreatmentAssignment {
 ///
 /// # Why this is a domain type, not a SQL predicate
 ///
-/// ITT / PerProtocol / RealizedTreatment answer different causal questions.
-/// If SQL starts deciding those categories, the causal methodology is
-/// encoded in infrastructure queries — brittle and difficult to audit.
-/// This enum makes the methodology explicit and reviewable.
+/// ITT / PerProtocol answer different causal questions. If SQL starts
+/// deciding those categories, the causal methodology is encoded in
+/// infrastructure queries — brittle and difficult to audit. This enum
+/// makes the methodology explicit and reviewable.
 ///
 /// # Conservative fallback
 ///
 /// `TreatmentOnTreated` is intentionally NOT included. TOT has stronger
 /// identification assumptions than simply knowing `execution_status = executed`.
 /// Do not let naming outrun identification. A future sprint may add TOT
-/// when the implementation can explicitly state and test the assumptions.
+/// to `CausalEstimand` when the implementation can explicitly state and
+/// test the assumptions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CausalEstimand {
@@ -93,20 +94,6 @@ pub enum CausalEstimand {
     /// - failed (treatment arm, execution failed) excluded
     /// - control arm included regardless of execution_status
     PerProtocol,
-    /// Realized treatment: uses execution_status (T) as the treatment
-    /// indicator. This is the internal selection/execution interpretation.
-    ///
-    /// Contract:
-    /// - denominator = executed + control (and withheld as control-like)
-    /// - treatment indicator = execution_status == Executed
-    /// - withheld treated as non-treatment (the unit was never dispatched)
-    /// - failed treated as non-treatment (the intervention did not occur)
-    ///
-    /// NOTE: This is NOT TreatmentOnTreated. TOT requires explicit
-    /// identification assumptions (instrumental variables, compliance
-    /// modeling, etc.) that are not yet implemented. RealizedTreatment
-    /// is a descriptive estimator, not a causal one.
-    RealizedTreatment,
 }
 
 impl CausalEstimand {
@@ -115,7 +102,6 @@ impl CausalEstimand {
         match self {
             Self::IntentToTreat => "intent_to_treat",
             Self::PerProtocol => "per_protocol",
-            Self::RealizedTreatment => "realized_treatment",
         }
     }
 
@@ -156,6 +142,79 @@ impl CausalEstimand {
                     true
                 }
             }
+        }
+    }
+}
+
+/// A descriptive view of realized treatment — NOT a causal estimand.
+///
+/// `TreatmentView` answers a different question than `CausalEstimand`:
+/// "which units actually received the treatment?" rather than "what is
+/// the causal effect of assignment?" The two concepts are semantically
+/// distinct and must not be conflated under a single type.
+///
+/// # Why this is separate from `CausalEstimand`
+///
+/// `RealizedTreatment` uses `execution_status` (T) as the treatment
+/// indicator. This is a **descriptive** observation, not a causal
+/// identification strategy. Housing it in `CausalEstimand` would imply
+/// causal identification that the method does not deliver.
+///
+/// # Conservative fallback
+///
+/// `TreatmentOnTreated` is intentionally NOT included here either. TOT
+/// requires explicit identification assumptions (instrumental variables,
+/// compliance modeling, etc.) that are not yet implemented. A future
+/// sprint may add TOT to `CausalEstimand` — not here — when the
+/// implementation can explicitly state and test the assumptions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreatmentView {
+    /// Realized treatment: uses execution_status (T) as the treatment
+    /// indicator. This is the internal selection/execution interpretation.
+    ///
+    /// Contract:
+    /// - denominator = executed + control (and withheld as control-like)
+    /// - treatment indicator = execution_status == Executed
+    /// - withheld treated as non-treatment (the unit was never dispatched)
+    /// - failed treated as non-treatment (the intervention did not occur)
+    ///
+    /// NOTE: This is NOT TreatmentOnTreated. TOT requires explicit
+    /// identification assumptions (instrumental variables, compliance
+    /// modeling, etc.) that are not yet implemented. RealizedTreatment
+    /// is a descriptive estimator, not a causal one.
+    RealizedTreatment,
+}
+
+impl TreatmentView {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RealizedTreatment => "realized_treatment",
+        }
+    }
+
+    /// Returns whether a given evidence row should update the
+    /// treatment-effect posterior under this descriptive view.
+    ///
+    /// This is the same operation as
+    /// [`CausalEstimand::includes_in_treatment_effect`] but for a
+    /// descriptive view rather than a causal estimand. The two methods
+    /// are intentionally separate — they answer different questions and
+    /// must not be abstracted into a shared trait.
+    ///
+    /// # Parameters
+    /// - `is_treatment_arm`: whether the evidence row's assignment was
+    ///   randomized to the treatment arm (Z = 1).
+    /// - `execution_status`: the realized execution status of the
+    ///   assignment (Executed, Failed, Withheld, Control, etc.).
+    #[must_use]
+    pub fn includes_in_treatment_effect(
+        self,
+        _is_treatment_arm: bool,
+        execution_status: ExecutionStatus,
+    ) -> bool {
+        match self {
             Self::RealizedTreatment => {
                 // Realized treatment: treatment indicator is execution_status.
                 // Executed rows and control rows contribute. Withheld and
