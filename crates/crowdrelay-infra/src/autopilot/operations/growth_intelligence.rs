@@ -264,6 +264,34 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
 
     // Build OutcomeRecord per template by iterating the ordered rows.
     let policy = agent_standing_policy();
+
+    // Load operator feedback (approve/cancel verdicts) from operator_actions.
+    // This is the execution-quality signal: "would a human operator accept
+    // this draft?" — separate from the causal fan-growth signal above. We
+    // join operator_actions with autopilot_actions to get the template_id
+    // and time-to-decision (operator_action.created_at - action.created_at).
+    // Fast = within 1 hour (configurable via GrowthIntelligencePolicy).
+    let operator_feedback_rows: Vec<(String, String, f64)> = sqlx::query_as(
+        r#"
+        SELECT action.payload->>'template_id' AS template_id,
+               oa.action AS operator_action,
+               EXTRACT(EPOCH FROM (oa.created_at - action.created_at)) / 3600.0 AS hours_to_decision
+        FROM operator_actions oa
+        JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
+        WHERE action.workspace_id = $1
+          AND action.action_kind = 'agent.run.request'
+          AND oa.target_type = 'autopilot_action'
+          AND oa.action IN ('approve_autopilot_action', 'cancel_autopilot_action')
+        ORDER BY action.payload->>'template_id', oa.created_at DESC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    let operator_fast_threshold_hours = 1.0_f64;
+
     let standings: std::collections::HashMap<String, Standing> = {
         let mut records: std::collections::HashMap<String, OutcomeRecord> =
             std::collections::HashMap::new();
@@ -284,6 +312,16 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             // else: the streak is broken — but we've already counted the
             // improved/neutral, so the condition above naturally stops
             // incrementing consecutive_worsened for any older worsened rows.
+        }
+        // Fold operator feedback into the records. Operator feedback does NOT
+        // update consecutive_worsened — only measured fan-growth outcomes can
+        // trigger retirement. Operator cancellations affect the weight (and
+        // thus cooldown) but cannot retire a worker on their own.
+        for (template_id, operator_action, hours_to_decision) in &operator_feedback_rows {
+            let record = records.entry(template_id.clone()).or_default();
+            let approved = operator_action == "approve_autopilot_action";
+            let fast = *hours_to_decision <= operator_fast_threshold_hours;
+            *record = (*record).observe_operator(approved, fast);
         }
         records
             .into_iter()

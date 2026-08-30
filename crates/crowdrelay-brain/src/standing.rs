@@ -52,6 +52,16 @@ pub const fn effective_agent_tier(base_tier: AgentTier, standing: Standing) -> A
     }
 }
 
+/// Returns Premium unconditionally for human-contact templates (press-pitch,
+/// community-engager). Standing still controls cooldown and retirement, but a
+/// human-contact dispatch never downgrades to Basic — a bad pitch to a real
+/// contact burns a relationship permanently, so model quality is always
+/// prioritized over cost.
+#[must_use]
+pub const fn human_contact_tier() -> AgentTier {
+    AgentTier::Premium
+}
+
 /// The default standing policy for agent dispatches.
 #[must_use]
 pub const fn agent_standing_policy() -> StandingPolicy {
@@ -194,6 +204,29 @@ mod tests {
         assert_eq!(
             effective_agent_tier(AgentTier::Basic, standing),
             AgentTier::Basic
+        );
+    }
+
+    #[test]
+    fn human_contact_tier_is_always_premium() {
+        // Even with the worst standing, human-contact tier is Premium.
+        let retired = Standing::Retired {
+            reason: RetirementReason::RepeatedlyWorsened,
+        };
+        assert_eq!(human_contact_tier(), AgentTier::Premium);
+        // effective_agent_tier with Premium base also stays Premium
+        // regardless of standing.
+        assert_eq!(
+            effective_agent_tier(AgentTier::Premium, retired),
+            AgentTier::Premium
+        );
+        let weighted_low = Standing::Weighted {
+            basis_points: 1_000,
+            measured: 5,
+        };
+        assert_eq!(
+            effective_agent_tier(AgentTier::Premium, weighted_low),
+            AgentTier::Premium
         );
     }
 }

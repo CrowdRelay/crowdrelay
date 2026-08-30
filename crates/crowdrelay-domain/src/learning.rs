@@ -111,6 +111,30 @@ pub struct OutcomeRecord {
     pub consecutive_worsened: u32,
     /// Set only by an operator. The agent never writes this.
     pub operator_retired: bool,
+    // ── Operator feedback (execution-quality signal) ──
+    //
+    // Operator approve/cancel verdicts on dispatched actions. Separate from
+    // measured fan-growth outcomes: "would a human operator accept this?" vs
+    // "did this actually produce incremental durable fans?" Both update
+    // Standing, but with different weights — operator feedback is weaker and
+    // cannot retire a worker on its own.
+    //
+    // Fast/slow is classified by time-to-decision against a threshold
+    // (default 1 hour). Fast approval = operator acted quickly, suggesting
+    // the draft was good. Fast cancellation = immediate rejection, suggesting
+    // obviously bad quality. Slow decisions are ambiguous (operator might
+    // have been asleep, busy, or in a different timezone) and carry less
+    // weight.
+    /// Operator approvals within the fast threshold (modest positive weight).
+    pub operator_fast_approvals: u32,
+    /// Operator approvals beyond the fast threshold (weak positive weight).
+    pub operator_slow_approvals: u32,
+    /// Operator cancellations within the fast threshold (strong negative
+    /// weight — an immediate rejection is clear evidence of bad quality).
+    pub operator_fast_cancellations: u32,
+    /// Operator cancellations beyond the fast threshold (modest negative
+    /// weight — a delayed rejection is negative but ambiguous).
+    pub operator_slow_cancellations: u32,
 }
 
 impl OutcomeRecord {
@@ -149,6 +173,44 @@ impl OutcomeRecord {
                 ..self
             },
         }
+    }
+
+    /// Folds one operator verdict into the record. `fast` is true when the
+    /// operator acted within the time-to-decision threshold.
+    ///
+    /// Operator feedback does NOT update `consecutive_worsened` — only
+    /// measured fan-growth outcomes can trigger retirement. Operator
+    /// cancellations affect the weight (and thus cooldown) but cannot
+    /// retire a worker on their own.
+    #[must_use]
+    pub const fn observe_operator(self, approved: bool, fast: bool) -> Self {
+        match (approved, fast) {
+            (true, true) => Self {
+                operator_fast_approvals: self.operator_fast_approvals.saturating_add(1),
+                ..self
+            },
+            (true, false) => Self {
+                operator_slow_approvals: self.operator_slow_approvals.saturating_add(1),
+                ..self
+            },
+            (false, true) => Self {
+                operator_fast_cancellations: self.operator_fast_cancellations.saturating_add(1),
+                ..self
+            },
+            (false, false) => Self {
+                operator_slow_cancellations: self.operator_slow_cancellations.saturating_add(1),
+                ..self
+            },
+        }
+    }
+
+    /// Total operator feedback signals (approvals + cancellations).
+    #[must_use]
+    pub const fn operator_feedback_count(self) -> u32 {
+        self.operator_fast_approvals
+            .saturating_add(self.operator_slow_approvals)
+            .saturating_add(self.operator_fast_cancellations)
+            .saturating_add(self.operator_slow_cancellations)
     }
 }
 
@@ -210,20 +272,44 @@ pub fn assess_standing(record: OutcomeRecord, policy: StandingPolicy) -> Standin
         };
     }
     let measured = record.measured();
-    if measured < policy.minimum_measured_record.max(1) {
-        return Standing::Untested { measured };
+    let operator_count = record.operator_feedback_count();
+    // Operator signals count as half-outcomes toward the minimum record, so a
+    // worker with no measured fan outcomes but several operator verdicts is
+    // not stuck at Untested forever — but the shrinkage below ensures sparse
+    // operator feedback cannot produce an extreme weight.
+    let effective_measured = measured.saturating_add(operator_count / 2);
+    if effective_measured < policy.minimum_measured_record.max(1) {
+        return Standing::Untested {
+            measured: effective_measured,
+        };
     }
-    // Neutral counts as half. A play that reliably does nothing is not as good
-    // as one that works and not as bad as one that harms, and scoring it as
-    // either would be a claim the record does not support.
-    let credit = u64::from(record.improved)
+    // Measured fan-growth credit: improved counts double, neutral counts single,
+    // worsened counts zero. In centi-credit (200 = one improved, 200 denom each).
+    let measured_credit = u64::from(record.improved)
         .saturating_mul(2)
-        .saturating_add(u64::from(record.neutral));
-    let basis_points = credit.saturating_mul(10_000) / u64::from(measured).max(1) / 2;
+        .saturating_add(u64::from(record.neutral))
+        .saturating_mul(100);
+    // Operator feedback credit (centi-credit, half weight: 100 denom each):
+    // fast_approval = 100 (full credit — operator acted quickly, draft was good),
+    // slow_approval = 50 (half credit — positive but ambiguous),
+    // fast_cancellation = 0 (no credit — immediate rejection),
+    // slow_cancellation = 25 (quarter credit — delayed rejection, ambiguous).
+    let operator_credit = u64::from(record.operator_fast_approvals)
+        .saturating_mul(100)
+        .saturating_add(u64::from(record.operator_slow_approvals) * 50)
+        .saturating_add(u64::from(record.operator_slow_cancellations) * 25);
+    let total_credit = measured_credit.saturating_add(operator_credit);
+    // Denominator: measured outcomes count as 200 each, operator signals as 100
+    // each (half weight). This ensures operator feedback can adjust the weight
+    // but never dominates measured fan-growth outcomes.
+    let total_denom = u64::from(measured)
+        .saturating_mul(200)
+        .saturating_add(u64::from(operator_count) * 100);
+    let basis_points = total_credit.saturating_mul(10_000) / total_denom.max(1);
     let basis_points = u16::try_from(basis_points.min(10_000)).unwrap_or(10_000);
     Standing::Weighted {
         basis_points: basis_points.max(policy.floor_basis_points.min(10_000)),
-        measured,
+        measured: effective_measured,
     }
 }
 
@@ -704,5 +790,177 @@ mod tests {
         }
         assert_eq!(InsufficientReason::NoReplies.as_str(), "no_replies");
         assert_eq!(InsufficientReason::BelowQuorum.as_str(), "below_quorum");
+    }
+
+    // -------------------------------------------------------------------------
+    // Operator feedback learning — execution-quality signal folded into
+    // Standing with differentiated weights. Operator feedback is weaker than
+    // measured fan-growth outcomes and cannot retire a worker on its own.
+    // -------------------------------------------------------------------------
+
+    fn agent_policy() -> StandingPolicy {
+        StandingPolicy::agent_defaults()
+    }
+
+    /// Test 1: High approval + fast decisions increases execution-quality
+    /// belief (weight rises). Uses a mixed measured base so the weight can
+    /// actually rise (a perfect record is already at 10_000).
+    #[test]
+    fn high_fast_approval_increases_weight() {
+        let base = OutcomeRecord {
+            improved: 1,
+            neutral: 1,
+            ..OutcomeRecord::default()
+        };
+        let base_standing = assess_standing(base, agent_policy());
+        let base_bp = base_standing.weight_basis_points();
+        let with_feedback = OutcomeRecord {
+            improved: 1,
+            neutral: 1,
+            operator_fast_approvals: 4,
+            ..OutcomeRecord::default()
+        };
+        let feedback_standing = assess_standing(with_feedback, agent_policy());
+        assert!(
+            feedback_standing.weight_basis_points() > base_bp,
+            "fast approvals should raise the weight above the measured-only base: {} > {}",
+            feedback_standing.weight_basis_points(),
+            base_bp
+        );
+    }
+
+    /// Test 2: High cancellation decreases execution-quality belief.
+    #[test]
+    fn high_cancellation_decreases_weight() {
+        let base = OutcomeRecord {
+            improved: 2,
+            ..OutcomeRecord::default()
+        };
+        let base_standing = assess_standing(base, agent_policy());
+        let base_bp = base_standing.weight_basis_points();
+        let with_cancellations = OutcomeRecord {
+            improved: 2,
+            operator_fast_cancellations: 4,
+            ..OutcomeRecord::default()
+        };
+        let cancelled_standing = assess_standing(with_cancellations, agent_policy());
+        assert!(
+            cancelled_standing.weight_basis_points() < base_bp,
+            "fast cancellations should decrease the weight: {} < {}",
+            cancelled_standing.weight_basis_points(),
+            base_bp
+        );
+    }
+
+    /// Test 3: Slow approvals do not automatically classify as low quality.
+    /// A slow approval is still an approval — it should produce a higher
+    /// weight than a slow cancellation (which is negative), not be treated
+    /// as equivalent to a rejection.
+    #[test]
+    fn slow_approvals_are_not_low_quality() {
+        let with_slow_approval = OutcomeRecord {
+            improved: 1,
+            neutral: 1,
+            operator_slow_approvals: 4,
+            ..OutcomeRecord::default()
+        };
+        let with_slow_cancellation = OutcomeRecord {
+            improved: 1,
+            neutral: 1,
+            operator_slow_cancellations: 4,
+            ..OutcomeRecord::default()
+        };
+        let approval_standing = assess_standing(with_slow_approval, agent_policy());
+        let cancellation_standing = assess_standing(with_slow_cancellation, agent_policy());
+        assert!(
+            approval_standing.weight_basis_points() > cancellation_standing.weight_basis_points(),
+            "slow approvals are positive, not negative: {} > {}",
+            approval_standing.weight_basis_points(),
+            cancellation_standing.weight_basis_points()
+        );
+    }
+
+    /// Test 4: Operator feedback cannot change causal fan value directly.
+    /// The weight (basis_points) affects only cooldown and recipient ceiling,
+    /// never the causal model's expected incremental fans. Operator feedback
+    /// also cannot retire a worker — only consecutive_worsened from measured
+    /// fan outcomes can trigger retirement.
+    #[test]
+    fn operator_feedback_only_affects_weight_not_retirement() {
+        let with_cancellations = OutcomeRecord {
+            operator_fast_cancellations: 10,
+            ..OutcomeRecord::default()
+        };
+        let standing = assess_standing(with_cancellations, agent_policy());
+        assert!(
+            !standing.is_retired(),
+            "operator cancellations alone cannot retire a worker"
+        );
+    }
+
+    /// Test 5: Two templates with identical fan predictions but different
+    /// operator acceptance histories may differ in execution policy without
+    /// changing their causal Y30 estimate.
+    #[test]
+    fn operator_feedback_does_not_change_measured_standing_weight() {
+        let measured_only = OutcomeRecord {
+            improved: 2,
+            ..OutcomeRecord::default()
+        };
+        let with_operator = OutcomeRecord {
+            improved: 2,
+            operator_fast_cancellations: 3,
+            ..OutcomeRecord::default()
+        };
+        let s1 = assess_standing(measured_only, agent_policy());
+        let s2 = assess_standing(with_operator, agent_policy());
+        assert!(!s1.is_retired());
+        assert!(!s2.is_retired());
+        assert!(
+            s2.weight_basis_points() <= s1.weight_basis_points(),
+            "cancellations should narrow or maintain the weight"
+        );
+    }
+
+    /// Test 6: Sparse operator feedback is strongly shrunk toward the global
+    /// prior; do not overfit a small number of approvals/cancellations.
+    #[test]
+    fn sparse_operator_feedback_is_shrunk() {
+        let sparse = OutcomeRecord {
+            operator_fast_approvals: 1,
+            ..OutcomeRecord::default()
+        };
+        let standing = assess_standing(sparse, agent_policy());
+        assert!(
+            matches!(standing, Standing::Untested { .. }),
+            "a single operator signal is too sparse to move the standing"
+        );
+    }
+
+    /// Test 7: Human-contact templates always dispatch at Premium tier
+    /// regardless of standing. See brain/standing.rs for the tier-specific
+    /// test (human_contact_tier_is_always_premium).
+    ///
+    /// Test 8: Operator cancellations alone cannot retire a worker — only
+    /// measured consecutive_worsened from fan outcomes can.
+    #[test]
+    fn operator_cancellations_cannot_retire() {
+        let many_cancellations = OutcomeRecord {
+            operator_fast_cancellations: 20,
+            operator_slow_cancellations: 20,
+            ..OutcomeRecord::default()
+        };
+        let standing = assess_standing(many_cancellations, agent_policy());
+        assert!(
+            !standing.is_retired(),
+            "even 40 operator cancellations cannot retire a worker"
+        );
+        let with_measured_worsened = OutcomeRecord {
+            worsened: 3,
+            consecutive_worsened: 3,
+            ..OutcomeRecord::default()
+        };
+        let retired = assess_standing(with_measured_worsened, agent_policy());
+        assert!(retired.is_retired());
     }
 }

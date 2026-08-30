@@ -834,6 +834,9 @@ fn play_record(row: &PlayLearningRow) -> Result<OutcomeRecord, RepositoryError> 
         // however the counts move.
         operator_retired: row.retired_reason.as_deref()
             == Some(RetirementReason::OperatorRetired.as_str()),
+        // Operator feedback fields are only populated for agent dispatch
+        // standings, not play/outreach standings.
+        ..OutcomeRecord::default()
     })
 }
 
@@ -949,6 +952,7 @@ fn outreach_kind_record(row: &OutreachKindLearningRow) -> Result<OutcomeRecord, 
         consecutive_worsened: count(row.consecutive_worsened)?,
         operator_retired: row.retired_reason.as_deref()
             == Some(RetirementReason::OperatorRetired.as_str()),
+        ..OutcomeRecord::default()
     })
 }
 
