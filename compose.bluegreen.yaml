@@ -48,7 +48,7 @@ services:
         max-file: "3"
     networks:
       runtime:
-        aliases: [crowdrelay-api-green]
+        aliases: [crowdrelay-api-green, crowdrelay-api-active]
 
   worker-green:
     image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_GREEN_TAG:?Set CROWDRELAY_GREEN_TAG to sha-<full commit SHA>}
