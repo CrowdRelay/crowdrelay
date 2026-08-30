@@ -18,9 +18,28 @@ Music teams juggle a dozen disconnected tools: a spreadsheet for fans, an email 
 
 ## The brain
 
-There is no LLM making decisions in here — deliberately. The brain is deterministic: state machines, enums, persisted snapshots, explicit conditions, bounded authority, retries, and failure handling. It finds opportunities, makes decisions, executes work, survives failures, and knows when it's not allowed to act.
+CrowdRelay separates decision-making from model-generated content.
 
-LLM-assisted creative work (press pitches, social posts, campaign analysis) is dispatched to the separately deployed [`crowdrelay-agents`](https://github.com/CrowdRelay/crowdrelay-agents) service. The LLMs produce drafts seeded with real tenant data; the brain decides what to do with them.
+The brain maintains the operational state, finds opportunities, decides what is worth doing, applies authority and resource constraints, executes actions, measures outcomes, and uses what it learns to change future decisions.
+
+Its decision layer combines:
+
+- candidate generation and information-seeking signals
+- portfolio optimization
+- causal experiments and attribution
+- outcome and strategy learning
+- provenance and evidence tracking
+- explicit authority, budget, and safety constraints
+
+Models can produce language or creative work. The brain decides whether that work should happen, under what constraints, and what should happen next. LLM-assisted creative work (press pitches, social posts, campaign analysis) is dispatched to the separately deployed [`crowdrelay-agents`](https://github.com/CrowdRelay/crowdrelay-agents) service; the LLMs produce drafts seeded with real tenant data, and the brain decides what to do with them.
+
+The system is deliberately built so that:
+
+what happened ≠ what was attributed ≠ what was causally supported ≠ what was predicted ≠ what was worth doing
+
+The core execution and decision infrastructure is already in place. The learning and causal layer is actively evolving as it is exercised against real outcomes and adversarial tests.
+
+The goal is not better suggestions. The goal is a system that gets better at making decisions that produce incremental durable fans.
 
 ## Authority model
 
@@ -34,7 +53,7 @@ Money and contracts stay behind approval in every posture.
 
 ## Measurement and learning
 
-Executed actions settle against benchmarks after their horizon. Effects are labelled `improved`, `neutral`, or `worsened` — never a raw score without context. Strategies whose record repeatedly worsens retire themselves with a stated reason. Attribution is honest: smart-link clicks are attribution; follower movement after a campaign is correlational, always labelled as such.
+Executed actions settle against benchmarks after their horizon. Effects are labelled `improved`, `neutral`, or `worsened` — never a raw score without context. Strategies whose record repeatedly worsens retire themselves with a stated reason. Attribution is honest: smart-link clicks are attribution; follower movement after a campaign is correlational, always labelled as such. Causal experiments (randomized holdout with power analysis) separate treatment effect from observational correlation — where the experiment population is large enough to support it.
 
 The daily brief breaks silence only for things that lie when quiet: halted ceilings, stale approvals, dead executors, pending withdrawals. Everything else waits for somebody to look at the panel.
 
@@ -65,5 +84,5 @@ Blue-green with zero-downtime Caddy cutover. The deploy waits for CI, pulls immu
 ---
 
 <p align="center">
-  Built with Rust, Postgres, and a stubborn refusal to let AI make business decisions.
+  Built with Rust, Postgres, and a stubborn refusal to let AI make business decisions it can't learn from.
 </p>
