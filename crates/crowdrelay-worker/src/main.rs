@@ -434,24 +434,10 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let meta_oauth_config = crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig {
-        platform: crowdrelay_domain::fanbase::Platform::Meta,
-        client_id: std::env::var("CROWDRELAY_FANBASE_OAUTH_META_CLIENT_ID").unwrap_or_default(),
-        client_secret: std::env::var("CROWDRELAY_FANBASE_OAUTH_META_CLIENT_SECRET")
-            .unwrap_or_default(),
-        authorize_url: "https://www.facebook.com/v21.0/dialog/oauth".to_owned(),
-        token_url: "https://graph.facebook.com/v21.0/oauth/access_token".to_owned(),
-        scopes: vec!["ads_management".to_owned(), "ads_read".to_owned()],
-    };
-    let meta_config = if meta_oauth_config.client_id.is_empty() {
-        None
-    } else {
-        Some(meta_oauth_config)
-    };
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
-        meta_config,
+        None,
         config.response_encryption_key.clone(),
         config.database.operation_timeout,
     )

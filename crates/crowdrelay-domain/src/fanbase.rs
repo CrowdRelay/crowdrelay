@@ -141,11 +141,6 @@ impl Platform {
             Self::Youtube => &["https://www.googleapis.com/auth/youtube.readonly"],
         }
     }
-
-    /// Whether this platform supports OAuth connection (vs API-key only).
-    pub const fn supports_oauth(self) -> bool {
-        !matches!(self, Self::Bandsintown)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

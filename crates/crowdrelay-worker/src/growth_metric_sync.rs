@@ -395,7 +395,7 @@ impl GrowthMetricSyncWorker {
 
     /// Meta: fetch follower count via Graph API (OAuth token required).
     async fn sync_meta(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
-        let meta_config = self
+        let _meta_config = self
             .meta_oauth_config
             .as_ref()
             .ok_or_else(|| GrowthMetricSyncError::ProviderApi("no Meta OAuth config".to_owned()))?;
@@ -405,26 +405,7 @@ impl GrowthMetricSyncWorker {
             .load_tokens(conn.workspace_id, conn.id, &self.encryption_key)
             .await?;
 
-        // Refresh if expired or about to expire (5 min threshold).
-        let access_token = if tokens
-            .expires_at
-            .is_some_and(|exp| exp - OffsetDateTime::now_utc() < time::Duration::seconds(300))
-        {
-            self.oauth_repo
-                .refresh_token(
-                    conn.workspace_id,
-                    conn.id,
-                    meta_config,
-                    &self.encryption_key,
-                )
-                .await?;
-            self.oauth_repo
-                .load_tokens(conn.workspace_id, conn.id, &self.encryption_key)
-                .await?
-                .access_token
-        } else {
-            tokens.access_token
-        };
+        let access_token = tokens.access_token;
 
         let account_id = &conn.provider_account_id;
         // Graph API: GET /{page-id}?fields=followers_count&access_token=...

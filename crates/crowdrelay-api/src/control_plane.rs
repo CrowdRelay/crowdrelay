@@ -160,14 +160,6 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::fanbase::list_fanbase_connections),
         )
         .route(
-            "/v1/control-plane/fanbases/connections/oauth/{platform}/start",
-            post(crate::fanbase::start_fanbase_oauth),
-        )
-        .route(
-            "/v1/control-plane/fanbases/connections/oauth/{platform}/callback",
-            post(crate::fanbase::fanbase_oauth_callback),
-        )
-        .route(
             "/v1/control-plane/fanbases/connections/{connection_id}",
             axum::routing::delete(crate::fanbase::delete_fanbase_connection),
         )

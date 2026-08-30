@@ -53,8 +53,6 @@ const POSTING_STALE_THRESHOLD: Duration = Duration::from_secs(300);
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(600);
 /// Maximum posts per workspace per 24 hours across all platforms.
 const MAX_POSTS_PER_24H: i64 = 3;
-/// Token refresh threshold: if the token expires within this window, refresh.
-const TOKEN_REFRESH_THRESHOLD: Duration = Duration::from_secs(300);
 
 const USER_AGENT: &str = "CrowdRelay/1.0 (social executor)";
 
@@ -312,7 +310,7 @@ impl SocialExecutorWorker {
     }
 
     /// Posts to the platform via its Graph API. Loads the OAuth token from
-    /// `fanbase_connections`, refreshes if needed, and submits the post.
+    /// `fanbase_connections` and submits the post.
     async fn post_to_platform(
         &self,
         row: &PendingPostRow,
@@ -329,13 +327,6 @@ impl SocialExecutorWorker {
             }
         };
 
-        // Find the config for this platform.
-        let config = self
-            .platform_configs
-            .iter()
-            .find(|c| c.platform == platform)
-            .ok_or(SocialExecutorError::NoPlatformConnection)?;
-
         // Find the connection ID for this platform from fanbase_connections.
         let connection_id = self.find_platform_connection(platform).await?;
 
@@ -349,35 +340,7 @@ impl SocialExecutorWorker {
             )
             .await?;
 
-        // Refresh token if it expires within the threshold.
-        let needs_refresh = tokens
-            .expires_at
-            .map(|exp| exp < OffsetDateTime::now_utc() + TOKEN_REFRESH_THRESHOLD)
-            .unwrap_or(true);
-
-        let access_token = if needs_refresh {
-            tracing::info!(connection_id = %connection_id, "refreshing platform OAuth token");
-            self.oauth_repo
-                .refresh_token(
-                    self.workspace_id.into_uuid(),
-                    connection_id,
-                    config,
-                    &self.encryption_key,
-                )
-                .await?;
-            // Reload after refresh.
-            let refreshed = self
-                .oauth_repo
-                .load_tokens(
-                    self.workspace_id.into_uuid(),
-                    connection_id,
-                    &self.encryption_key,
-                )
-                .await?;
-            refreshed.access_token
-        } else {
-            tokens.access_token
-        };
+        let access_token = tokens.access_token;
 
         // Submit the post via the platform's API.
         match row.platform.as_str() {

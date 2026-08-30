@@ -660,7 +660,8 @@ impl CommunityExecutorWorker {
 
     /// Loads the OAuth token, refreshing it if it's expired or about to expire.
     /// Falls back to password grant (script app) if no connection exists or
-    /// refresh fails and script credentials are configured.
+    /// the token is expired — Reddit script apps don't issue refresh tokens,
+    /// so we re-authenticate with username/password instead.
     async fn load_valid_tokens(
         &self,
         connection_id: Uuid,
@@ -674,45 +675,17 @@ impl CommunityExecutorWorker {
             )
             .await?;
 
-        // Refresh if the token expires within the threshold or is already expired.
+        // Reddit script apps don't issue refresh tokens. When the access
+        // token is expired or about to expire, re-authenticate via password
+        // grant instead of trying to refresh.
         let needs_refresh = tokens
             .expires_at
             .map(|exp| exp < OffsetDateTime::now_utc() + TOKEN_REFRESH_THRESHOLD)
             .unwrap_or(true);
 
         if needs_refresh {
-            tracing::info!(connection_id = %connection_id, "refreshing Reddit OAuth token");
-            match self
-                .oauth_repo
-                .refresh_token(
-                    self.workspace_id.into_uuid(),
-                    connection_id,
-                    &self.reddit_config,
-                    &self.encryption_key,
-                )
-                .await
-            {
-                Ok(()) => {
-                    let refreshed = self
-                        .oauth_repo
-                        .load_tokens(
-                            self.workspace_id.into_uuid(),
-                            connection_id,
-                            &self.encryption_key,
-                        )
-                        .await?;
-                    Ok(refreshed)
-                }
-                Err(error) => {
-                    // Refresh failed — try password grant if script credentials
-                    // are configured. This is the script-app fallback path.
-                    tracing::warn!(
-                        error = %error,
-                        "Reddit token refresh failed, trying password grant"
-                    );
-                    self.password_grant_fallback().await
-                }
-            }
+            tracing::info!(connection_id = %connection_id, "Reddit token expired, re-authenticating via password grant");
+            self.password_grant_fallback().await
         } else {
             Ok(tokens)
         }
