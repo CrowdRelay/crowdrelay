@@ -302,6 +302,7 @@ impl PgOutboxStore {
                 event.payload,
                 event.created_at AS event_created_at,
                 event.request_id,
+                event.trace_id,
                 endpoint.id AS endpoint_id,
                 endpoint.url AS endpoint_url,
                 endpoint.signing_secret_ref,

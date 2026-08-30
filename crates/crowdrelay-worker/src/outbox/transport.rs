@@ -26,6 +26,7 @@ pub const CROWDRELAY_TIMESTAMP: &str = "CrowdRelay-Timestamp";
 pub const CROWDRELAY_SIGNATURE: &str = "CrowdRelay-Signature";
 
 const CROWDRELAY_REQUEST_ID: &str = "CrowdRelay-Request-Id";
+const CROWDRELAY_TRACE_ID: &str = "CrowdRelay-Trace-Id";
 
 #[derive(Clone, Debug)]
 pub(super) struct WebhookDispatcher {
@@ -129,6 +130,16 @@ fn protocol_headers(
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(CROWDRELAY_REQUEST_ID.as_bytes()),
             HeaderValue::from_str(request_id),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+
+    if let Some(trace_id) = claim.trace_id {
+        // Trace_id propagation is best-effort — same rationale as request_id.
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(CROWDRELAY_TRACE_ID.as_bytes()),
+            HeaderValue::from_str(&trace_id.to_string()),
         ) {
             headers.insert(name, value);
         }
@@ -267,6 +278,7 @@ mod tests {
             payload: json!({"fan_id": "not-logged"}),
             event_created_at: OffsetDateTime::UNIX_EPOCH,
             request_id: Some("019fa000-0000-7000-8000-000000000001".to_owned()),
+            trace_id: Some(Uuid::from_u128(0x019fa000_0000_7000_8000_000000000002)),
             endpoint_id: Uuid::from_u128(4),
             endpoint_url: "https://n8n.example/webhook".to_owned(),
             signing_secret_ref: "n8n/current".to_owned(),
@@ -286,6 +298,14 @@ mod tests {
         assert_eq!(headers[CROWDRELAY_EVENT_VERSION], "1");
         assert_eq!(headers[CROWDRELAY_TIMESTAMP], "1785240000");
         assert_eq!(headers[CROWDRELAY_SIGNATURE], "v1=abc");
+        Ok(())
+    }
+
+    #[test]
+    fn propagates_trace_id_header() -> Result<(), Box<dyn std::error::Error>> {
+        let claim = claim();
+        let headers = protocol_headers(&claim, "evt_0003", 1_785_240_000, "v1=abc")?;
+        assert!(headers.contains_key(CROWDRELAY_TRACE_ID));
         Ok(())
     }
 

@@ -20,6 +20,7 @@ pub(super) struct DeliveryClaim {
     pub payload: Value,
     pub event_created_at: OffsetDateTime,
     pub request_id: Option<String>,
+    pub trace_id: Option<Uuid>,
     pub endpoint_id: Uuid,
     pub endpoint_url: String,
     pub signing_secret_ref: String,
