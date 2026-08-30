@@ -104,6 +104,20 @@ source .crowdrelay.local.sh
 [[ -f "$EDGE_CADDYFILE" && ! -L "$EDGE_CADDYFILE" ]] || fail "missing edge Caddyfile: $EDGE_CADDYFILE"
 docker inspect "$EDGE_CONTAINER" --format '{{.State.Status}}' 2>/dev/null | grep -q running || fail "edge Caddy is not running"
 
+# Pre-deploy: reconcile edge Caddy bind mount.
+# The ecosystem deploy syncs source code (git merge) which may replace the
+# Caddyfile with a new inode. The Docker bind mount still points at the old
+# inode, so the container serves stale config. Detect and fix this before
+# the deploy proceeds.
+if ! cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE"; then
+  printf 'EDGE_RECONCILE=STALE restarting edge Caddy to pick up bind-mounted Caddyfile\n' >&2
+  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || fail "failed to restart edge Caddy"
+  sleep 3
+  cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE" || \
+    fail "edge Caddyfile still stale after restart — manual intervention required"
+  printf 'EDGE_RECONCILE=PASS\n'
+fi
+
 env_file="$(absolute_path "${CROWDRELAY_ENV_FILE:-deploy/.env.production}")"
 compose_file="$(absolute_path "${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}")"
 export CROWDRELAY_ENV_FILE="$env_file"
