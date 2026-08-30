@@ -331,9 +331,11 @@ done
 printf 'PUBLIC_SMOKE=PASS\n'
 
 # Verify public meta matches target (blocking — stale edge or CDN must be caught)
+# Caddy re-resolves DNS on reload but CDN/edge caches may take longer to
+# expire. Poll for up to 120 seconds (24 attempts × 5s).
 public_meta=""
 actual=""
-for meta_attempt in $(seq 1 12); do
+for meta_attempt in $(seq 1 24); do
   public_meta="$(curl -sS --connect-timeout 3 --max-time 10 "${public_url%/}/v1/meta" 2>/dev/null || true)"
   if [[ -n "$public_meta" ]]; then
     actual="$(printf '%s' "$public_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
@@ -346,7 +348,7 @@ done
 if [[ "$actual" == "$TARGET" ]]; then
   printf 'PUBLIC_META=PASS gitSha=%s\n' "$actual"
 else
-  fail "public meta gitSha mismatch after 60s: got=${actual:-unavailable} expected=$TARGET"
+  fail "public meta gitSha mismatch after 120s: got=${actual:-unavailable} expected=$TARGET"
 fi
 
 # --- 6. Stop old containers, finalize ---------------------------------------
