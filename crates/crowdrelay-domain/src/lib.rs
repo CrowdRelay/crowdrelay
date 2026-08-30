@@ -52,6 +52,7 @@
 pub mod acquisition;
 pub mod acquisition_channel;
 pub mod action_class;
+pub mod action_ledger;
 pub mod admission;
 pub mod area;
 pub mod audience_graph;
