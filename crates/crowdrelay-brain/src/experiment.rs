@@ -48,6 +48,125 @@ pub enum TreatmentAssignment {
     Control,
 }
 
+/// The causal estimand the learner is computing — an explicit, versioned
+/// domain decision, not a SQL filtering choice.
+///
+/// Each estimand has a contract defining which execution_status categories
+/// are included and how they're weighted. SQL provides eligible observations
+/// (raw execution_status); the causal layer chooses the estimand.
+///
+/// # Why this is a domain type, not a SQL predicate
+///
+/// ITT / PerProtocol / RealizedTreatment answer different causal questions.
+/// If SQL starts deciding those categories, the causal methodology is
+/// encoded in infrastructure queries — brittle and difficult to audit.
+/// This enum makes the methodology explicit and reviewable.
+///
+/// # Conservative fallback
+///
+/// `TreatmentOnTreated` is intentionally NOT included. TOT has stronger
+/// identification assumptions than simply knowing `execution_status = executed`.
+/// Do not let naming outrun identification. A future sprint may add TOT
+/// when the implementation can explicitly state and test the assumptions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CausalEstimand {
+    /// Intent-to-treat: denominator = assigned treatment + control.
+    /// Withholding retained. Execution failure retained.
+    /// Uses arm (Z), not execution_status (T).
+    ///
+    /// Contract:
+    /// - denominator = all assigned units (treatment + control)
+    /// - treatment indicator = arm == Treatment
+    /// - withholding (treatment arm, not dispatched) retained as treatment
+    /// - execution failure retained as treatment
+    /// - no exclusion based on execution_status
+    IntentToTreat,
+    /// Per-protocol: denominator = protocol-compliant units only.
+    /// Excludes withheld and failed treatments from the treatment arm.
+    /// Control arm included as-is.
+    ///
+    /// Contract:
+    /// - denominator = executed (treatment) + control
+    /// - treatment indicator = arm == Treatment AND execution_status == Executed
+    /// - withheld (treatment arm, not dispatched) excluded
+    /// - failed (treatment arm, execution failed) excluded
+    /// - control arm included regardless of execution_status
+    PerProtocol,
+    /// Realized treatment: uses execution_status (T) as the treatment
+    /// indicator. This is the internal selection/execution interpretation.
+    ///
+    /// Contract:
+    /// - denominator = executed + control (and withheld as control-like)
+    /// - treatment indicator = execution_status == Executed
+    /// - withheld treated as non-treatment (the unit was never dispatched)
+    /// - failed treated as non-treatment (the intervention did not occur)
+    ///
+    /// NOTE: This is NOT TreatmentOnTreated. TOT requires explicit
+    /// identification assumptions (instrumental variables, compliance
+    /// modeling, etc.) that are not yet implemented. RealizedTreatment
+    /// is a descriptive estimator, not a causal one.
+    RealizedTreatment,
+}
+
+impl CausalEstimand {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IntentToTreat => "intent_to_treat",
+            Self::PerProtocol => "per_protocol",
+            Self::RealizedTreatment => "realized_treatment",
+        }
+    }
+
+    /// Returns whether a given evidence row should update the
+    /// treatment-effect posterior under this estimand.
+    ///
+    /// The outcome model (`P(Y|action,context)`) is always updated from
+    /// all rows regardless of estimand — it learns the raw expected fan
+    /// count, which is estimand-agnostic. This method only governs
+    /// whether the row contributes to the treatment-effect posterior
+    /// (`P(τ|context)`).
+    ///
+    /// # Parameters
+    /// - `is_treatment_arm`: whether the evidence row's assignment was
+    ///   randomized to the treatment arm (Z = 1).
+    /// - `execution_status`: the realized execution status of the
+    ///   assignment (Executed, Failed, Withheld, Control, etc.).
+    #[must_use]
+    pub fn includes_in_treatment_effect(
+        self,
+        is_treatment_arm: bool,
+        execution_status: ExecutionStatus,
+    ) -> bool {
+        match self {
+            Self::IntentToTreat => {
+                // ITT includes all assigned units. The treatment indicator
+                // is the arm, not the execution. Both treatment and control
+                // rows update the posterior (control provides the
+                // counterfactual).
+                true
+            }
+            Self::PerProtocol => {
+                // Per-protocol: treatment arm must have executed. Control
+                // arm always included.
+                if is_treatment_arm {
+                    execution_status == ExecutionStatus::Executed
+                } else {
+                    true
+                }
+            }
+            Self::RealizedTreatment => {
+                // Realized treatment: treatment indicator is execution_status.
+                // Executed rows and control rows contribute. Withheld and
+                // failed do not (they're non-treatment).
+                execution_status == ExecutionStatus::Executed
+                    || execution_status == ExecutionStatus::Control
+            }
+        }
+    }
+}
+
 impl TreatmentAssignment {
     /// Returns 1.0 for treatment, 0.0 for control — used in IPW calculations.
     #[must_use]
@@ -56,6 +175,12 @@ impl TreatmentAssignment {
             Self::Treatment => 1.0,
             Self::Control => 0.0,
         }
+    }
+
+    /// Returns `true` if this is the treatment arm.
+    #[must_use]
+    pub const fn is_treatment(self) -> bool {
+        matches!(self, Self::Treatment)
     }
 
     #[must_use]

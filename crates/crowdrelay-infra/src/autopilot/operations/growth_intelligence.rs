@@ -720,7 +720,20 @@ fn apply_evidence_to_model(
     model: &mut crowdrelay_brain::CausalModel,
     evidence: &[crowdrelay_brain::GrowthEvidence],
 ) {
-    use crowdrelay_brain::{DispatchPrediction, EstimationRegime, PredictionOutcome};
+    use crowdrelay_brain::{
+        CausalEstimand, DispatchPrediction, EstimationRegime, ExecutionStatus, PredictionOutcome,
+    };
+
+    // The active causal estimand. This is the explicit domain decision
+    // that determines which evidence rows contribute to the treatment-
+    // effect posterior. SQL provides eligible observations; the causal
+    // layer chooses the estimand. Do NOT let naming outrun identification.
+    //
+    // ITT is the safest default: it includes all assigned units, uses the
+    // arm (Z) as the treatment indicator, and does not exclude based on
+    // execution_status. This avoids the semantic shortcut of equating
+    // `execution_status = executed` with "TOT is identified".
+    let estimand = CausalEstimand::IntentToTreat;
 
     for ev in evidence {
         let template = extract_template_from_opportunity(&ev.opportunity_id);
@@ -739,6 +752,11 @@ fn apply_evidence_to_model(
         // counterfactual-adjusted DiD estimate. These are separate learning
         // targets and must not be conflated.
         //
+        // The outcome model is ALWAYS updated from all rows regardless of
+        // estimand — it learns the raw expected fan count, which is
+        // estimand-agnostic. The estimand only gates the treatment-effect
+        // posterior.
+        //
         // We use `observed_fans` (raw count) when available. If only the
         // incremental estimate is available (legacy evidence rows), we
         // skip the outcome model update rather than feeding it a DiD
@@ -752,6 +770,28 @@ fn apply_evidence_to_model(
             };
             let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
             model.update(&outcome);
+        }
+
+        // Determine whether this evidence row contributes to the
+        // treatment-effect posterior under the active estimand.
+        //
+        // The estimand's `includes_in_treatment_effect` method is the
+        // ONLY place that decides this — not SQL, not ad-hoc filtering.
+        // If execution_status is missing (legacy rows), default to
+        // Executed for treatment arm and Control for control arm, which
+        // preserves the old behavior under ITT.
+        let execution_status = ev
+            .execution_status
+            .unwrap_or(if ev.treatment.is_treatment() {
+                ExecutionStatus::Executed
+            } else {
+                ExecutionStatus::Control
+            });
+        let contributes_to_tau =
+            estimand.includes_in_treatment_effect(ev.treatment.is_treatment(), execution_status);
+
+        if !contributes_to_tau {
+            continue;
         }
 
         // Update the Y14 treatment-effect posterior from the incremental
@@ -1086,4 +1126,95 @@ pub(in crate::autopilot) async fn load_last_dispatched_template(
     .await
     .map_err(map_sqlx)?;
     Ok(template)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_evidence_to_model;
+    use crowdrelay_brain::{CausalModel, DispatchContext, GrowthEvidence, TreatmentAssignment};
+
+    /// Brain-level evidence-eligibility invariant:
+    ///
+    /// Evidence with a treatment assignment but NO observed outcome
+    /// (`observed_incremental_fans = None`) must NOT move the
+    /// treatment-effect posterior. The `apply_evidence_to_model`
+    /// function guards `update_treatment_effect` behind
+    /// `if let Some(tau_y14) = ev.observed_incremental_fans`, so
+    /// absent outcomes are naturally skipped. This test proves the
+    /// guard works by constructing real evidence and passing it
+    /// through the actual evidence-processing path.
+    ///
+    /// This is the brain-level complement to T25i (which proves the
+    /// SQL boundary excludes UNKNOWN evidence). Together they form
+    /// two independent defenses:
+    /// - T25i → SQL/persistence learning-boundary proof
+    /// - This test → model-level evidence-eligibility proof
+    #[test]
+    fn evidence_without_observed_outcome_does_not_update_treatment_posterior() {
+        let mut model = CausalModel::new();
+        let ctx = DispatchContext::default();
+        let template = "community.engage";
+        let before = model.predict_stats_with_treatment(template, &ctx);
+
+        // Construct real evidence with treatment assignment but no
+        // observed outcome. This is what an unresolved/UNKNOWN dispatch
+        // looks like if it somehow reached the learner.
+        let evidence = GrowthEvidence {
+            opportunity_id: Some(format!("{template}:subreddit:community.engage.request:ctx")),
+            treatment: TreatmentAssignment::Treatment,
+            observed_incremental_fans: None, // ← no outcome
+            observed_fans: None,             // ← no raw outcome either
+            ..GrowthEvidence::default()
+        };
+
+        // Pass through the real evidence-processing path.
+        apply_evidence_to_model(&mut model, &[evidence]);
+
+        let after = model.predict_stats_with_treatment(template, &ctx);
+        assert_eq!(
+            before.treatment_effect, after.treatment_effect,
+            "treatment posterior must not move when observed outcome is absent"
+        );
+        assert_eq!(
+            before.treatment_confidence, after.treatment_confidence,
+            "treatment confidence must not change when observed outcome is absent"
+        );
+        assert_eq!(
+            before.use_treatment_effect, after.use_treatment_effect,
+            "treatment activation must not change when observed outcome is absent"
+        );
+    }
+
+    /// Positive control: evidence WITH an observed outcome DOES move
+    /// the treatment-effect posterior. This proves the evidence path
+    /// is actually exercised — without this test, the negative test
+    /// above could be vacuously true because `apply_evidence_to_model`
+    /// does nothing at all.
+    #[test]
+    fn evidence_with_observed_outcome_updates_treatment_posterior() {
+        let mut model = CausalModel::new();
+        let ctx = DispatchContext::default();
+        let template = "community.engage";
+        let before = model.predict_stats_with_treatment(template, &ctx);
+
+        // Construct evidence with a real observed outcome.
+        let evidence = GrowthEvidence {
+            opportunity_id: Some(format!("{template}:subreddit:community.engage.request:ctx")),
+            treatment: TreatmentAssignment::Treatment,
+            observed_incremental_fans: Some(5.0), // ← real outcome
+            observed_fans: Some(10.0),            // ← raw outcome
+            predicted_fans: 3.0,
+            ..GrowthEvidence::default()
+        };
+
+        apply_evidence_to_model(&mut model, &[evidence]);
+
+        let after = model.predict_stats_with_treatment(template, &ctx);
+        // The treatment effect estimate should have moved from the
+        // prior (0.0) toward the observed value (5.0).
+        assert_ne!(
+            before.treatment_effect, after.treatment_effect,
+            "treatment posterior must move when an observed outcome is present"
+        );
+    }
 }

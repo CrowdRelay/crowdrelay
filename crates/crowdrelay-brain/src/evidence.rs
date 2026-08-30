@@ -215,6 +215,11 @@ pub struct GrowthEvidence {
     pub treatment: TreatmentAssignment,
     /// The propensity (probability of treatment assignment) for IPW.
     pub propensity: f64,
+    /// The realized execution status of the assignment. `None` for
+    /// legacy rows or control-arm evidence without an assignment.
+    /// Used by the causal learner to select which rows contribute to
+    /// the treatment-effect posterior under the active [`CausalEstimand`].
+    pub execution_status: Option<crate::experiment::ExecutionStatus>,
 
     // ── Outcome ──
     /// Raw observed fan count in the measurement window.
@@ -275,6 +280,7 @@ impl Default for GrowthEvidence {
             actual_reach: None,
             treatment: TreatmentAssignment::Treatment,
             propensity: 1.0,
+            execution_status: None,
             observed_fans: None,
             observed_incremental_fans: None,
             durable_fans_30d: None,
@@ -326,6 +332,7 @@ impl GrowthEvidence {
             actual_reach: None,
             treatment,
             propensity,
+            execution_status: None,
             observed_fans: None,
             observed_incremental_fans: None,
             durable_fans_30d: None,

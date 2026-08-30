@@ -58,7 +58,9 @@ use std::time::Duration;
 use crate::community_executor::CRASH_POSTING_ERROR_PREFIX;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
 use crowdrelay_domain::WorkspaceId;
-use crowdrelay_domain::action_ledger::{Resolution, ResolutionEvidence, resolve_outcome};
+use crowdrelay_domain::action_ledger::{
+    ActionState, ProviderDeliveryState, Resolution, ResolutionEvidence, resolve_outcome,
+};
 use crowdrelay_infra::autopilot::payload_requires_executor;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -257,9 +259,11 @@ impl ReceiptReconciliationWorker {
     ) -> Result<usize, ReceiptReconciliationError> {
         // Load the latest terminal receipt per unknown action, plus
         // whether any earlier succeeded receipt exists for the same
-        // action+executor. This is needed for the canonical resolver's
-        // monotonicity guard: a late failure after a prior success →
-        // NoChange, not Failed.
+        // action+executor. If a prior success exists, the effective
+        // observation is Executed regardless of the latest receipt's
+        // status — the caller adjusts the evidence before calling the
+        // pure resolver. The current state is always Unknown (the query
+        // filters status = 'unknown').
         let rows: Vec<(Uuid, String, bool)> = sqlx::query_as(
             r#"
             SELECT a.id, r.status, r.prior_success
@@ -292,13 +296,20 @@ impl ReceiptReconciliationWorker {
 
         let mut resolved = 0usize;
         for (action_id, receipt_status, prior_success_exists) in rows {
-            // Use the canonical resolver with the correct monotonicity
-            // flag. A late failure after a prior success → NoChange.
-            let evidence = ResolutionEvidence::TerminalReceipt {
-                succeeded: receipt_status == "succeeded",
-                prior_success_exists,
+            // If a prior succeeded receipt exists, the effective
+            // observation is Executed — regardless of the latest
+            // receipt's status. This is the caller's responsibility:
+            // the pure resolver (resolve_observation) knows nothing
+            // about persistence-derived state. legal_transition
+            // (Unknown, Executed) → Apply(Succeeded) resolves correctly.
+            let evidence = if prior_success_exists {
+                ResolutionEvidence::TerminalReceipt { succeeded: true }
+            } else {
+                ResolutionEvidence::TerminalReceipt {
+                    succeeded: receipt_status == "succeeded",
+                }
             };
-            match resolve_outcome(evidence) {
+            match resolve_outcome(evidence, ActionState::Unknown) {
                 Resolution::Executed => {
                     resolved += resolve_action(
                         self.workspace_id,
@@ -318,6 +329,14 @@ impl ReceiptReconciliationWorker {
                     .await?;
                 }
                 Resolution::Unknown | Resolution::NoChange => continue,
+                Resolution::Conflict => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        "CONFLICT: contradictory evidence for terminal action — \
+                         not changing state. Investigate the contradictory evidence."
+                    );
+                    continue;
+                }
             }
         }
         Ok(resolved)
@@ -350,7 +369,7 @@ impl ReceiptReconciliationWorker {
         for (action_id, post_status, error_message) in rows {
             // Use the canonical resolver via the provider-specific adapter.
             let evidence = community_post_to_evidence(&post_status, error_message.as_deref());
-            match resolve_outcome(evidence) {
+            match resolve_outcome(evidence, ActionState::Unknown) {
                 Resolution::Executed => {
                     resolved += resolve_action(
                         self.workspace_id,
@@ -370,6 +389,14 @@ impl ReceiptReconciliationWorker {
                     .await?;
                 }
                 Resolution::Unknown | Resolution::NoChange => continue,
+                Resolution::Conflict => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        "CONFLICT: contradictory evidence for terminal action — \
+                         not changing state. Investigate the contradictory evidence."
+                    );
+                    continue;
+                }
             }
         }
         Ok(resolved)
@@ -422,7 +449,7 @@ impl ReceiptReconciliationWorker {
         for (action_id, outbox_status, last_error_kind) in rows {
             // Route through the canonical resolver via the outbox adapter.
             let evidence = outbox_event_to_evidence(&outbox_status, last_error_kind.as_deref());
-            match resolve_outcome(evidence) {
+            match resolve_outcome(evidence, ActionState::Unknown) {
                 Resolution::Executed => {
                     resolved += resolve_action(
                         self.workspace_id,
@@ -442,6 +469,14 @@ impl ReceiptReconciliationWorker {
                     .await?;
                 }
                 Resolution::Unknown | Resolution::NoChange => continue,
+                Resolution::Conflict => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        "CONFLICT: contradictory evidence for terminal action — \
+                         not changing state. Investigate the contradictory evidence."
+                    );
+                    continue;
+                }
             }
         }
         Ok(resolved)
@@ -587,30 +622,22 @@ fn community_post_to_evidence(
     error_message: Option<&str>,
 ) -> ResolutionEvidence {
     match post_status {
-        "posted" => ResolutionEvidence::ProviderDelivery {
-            confirmed: true,
-            definitive_failure: false,
-            confirmation_lost: false,
-        },
+        "posted" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed),
         "failed" => {
             // The stale-posting recovery marks crash rows with this
             // prefix; those are confirmation-lost, not definitive failures.
             let crashed = error_message
                 .is_some_and(|message| message.starts_with(CRASH_POSTING_ERROR_PREFIX));
-            ResolutionEvidence::ProviderDelivery {
-                confirmed: false,
-                definitive_failure: !crashed,
-                confirmation_lost: crashed,
+            if crashed {
+                ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost)
+            } else {
+                ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)
             }
         }
         // `pending`/`posting`/`rate_limited` are in-flight or awaiting
         // retry; `awaiting_manual_post` is waiting on the operator. All
         // resolve later through their own paths.
-        _ => ResolutionEvidence::ProviderDelivery {
-            confirmed: false,
-            definitive_failure: false,
-            confirmation_lost: false,
-        },
+        _ => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::InFlight),
     }
 }
 
@@ -628,11 +655,7 @@ fn outbox_event_to_evidence(
 ) -> ResolutionEvidence {
     match outbox_status {
         // Outbox event was delivered → the side effect happened.
-        "delivered" => ResolutionEvidence::ProviderDelivery {
-            confirmed: true,
-            definitive_failure: false,
-            confirmation_lost: false,
-        },
+        "delivered" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed),
         // Outbox event is dead → check the error kind.
         "dead" => {
             let permanent = matches!(
@@ -648,28 +671,16 @@ fn outbox_event_to_evidence(
             if permanent {
                 // Permanent rejection (provider saw it and rejected)
                 // → definitively failed.
-                ResolutionEvidence::ProviderDelivery {
-                    confirmed: false,
-                    definitive_failure: true,
-                    confirmation_lost: false,
-                }
+                ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)
             } else {
                 // Ambiguous errors (transport_timeout, transport_request,
                 // lease_expired) → confirmation lost. Only external truth
                 // can resolve these.
-                ResolutionEvidence::ProviderDelivery {
-                    confirmed: false,
-                    definitive_failure: false,
-                    confirmation_lost: true,
-                }
+                ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost)
             }
         }
         // Pending/processing → still in flight, no evidence yet.
-        _ => ResolutionEvidence::ProviderDelivery {
-            confirmed: false,
-            definitive_failure: false,
-            confirmation_lost: false,
-        },
+        _ => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::InFlight),
     }
 }
 
@@ -678,7 +689,7 @@ mod tests {
     use super::{community_post_to_evidence, outbox_event_to_evidence, requires_terminal_receipt};
     use crowdrelay_application::autopilot::AutopilotActionPayload;
     use crowdrelay_domain::FanId;
-    use crowdrelay_domain::action_ledger::{Resolution, resolve_outcome};
+    use crowdrelay_domain::action_ledger::{ActionState, Resolution, resolve_outcome};
     use uuid::Uuid;
 
     fn community_payload() -> AutopilotActionPayload {
@@ -723,7 +734,10 @@ mod tests {
     #[test]
     fn posted_community_post_resolves_succeeded() {
         let evidence = community_post_to_evidence("posted", None);
-        assert_eq!(resolve_outcome(evidence), Resolution::Executed);
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::Executed
+        );
     }
 
     #[test]
@@ -732,25 +746,39 @@ mod tests {
             "failed",
             Some("worker crashed during posting — check Reddit manually"),
         );
-        assert_eq!(resolve_outcome(evidence), Resolution::Unknown);
+        // ConfirmationLost → observation is Unknown. The action is already
+        // Unknown, so legal_transition(Unknown, Unknown) → NoChange.
+        // The action stays unknown — NoChange is correct.
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::NoChange
+        );
     }
 
     #[test]
     fn definitive_community_failure_resolves_failed() {
         let evidence = community_post_to_evidence("failed", Some("no agents service configured"));
-        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::Failed
+        );
         let evidence = community_post_to_evidence("failed", None);
-        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::Failed
+        );
     }
 
     #[test]
     fn in_flight_community_statuses_stay_unknown() {
         for status in ["pending", "posting", "rate_limited", "awaiting_manual_post"] {
             let evidence = community_post_to_evidence(status, None);
+            // InFlight → observation is Unknown. The action is already
+            // Unknown, so NoChange — the action stays unknown.
             assert_eq!(
-                resolve_outcome(evidence),
-                Resolution::Unknown,
-                "status {status} should stay unknown"
+                resolve_outcome(evidence, ActionState::Unknown),
+                Resolution::NoChange,
+                "status {status} should stay unknown (NoChange from Unknown)"
             );
         }
     }
@@ -762,11 +790,22 @@ mod tests {
         // definitive failures, not confirmation loss.
         let evidence =
             community_post_to_evidence("failed", Some("subreddit crashed during posting"));
-        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::Failed
+        );
         let evidence = community_post_to_evidence("failed", Some("posting failed: rate limit"));
-        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::Failed
+        );
         let evidence = community_post_to_evidence("failed", Some("worker crashed during posting"));
-        assert_eq!(resolve_outcome(evidence), Resolution::Unknown);
+        // Crash marker → ConfirmationLost → Unknown observation.
+        // Action already Unknown → NoChange (stays unknown).
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::NoChange
+        );
     }
 
     // ── outbox_event_to_evidence adapter tests ──
@@ -774,7 +813,10 @@ mod tests {
     #[test]
     fn delivered_outbox_resolves_executed() {
         let evidence = outbox_event_to_evidence("delivered", None);
-        assert_eq!(resolve_outcome(evidence), Resolution::Executed);
+        assert_eq!(
+            resolve_outcome(evidence, ActionState::Unknown),
+            Resolution::Executed
+        );
     }
 
     #[test]
@@ -789,7 +831,7 @@ mod tests {
         ] {
             let evidence = outbox_event_to_evidence("dead", Some(kind));
             assert_eq!(
-                resolve_outcome(evidence),
+                resolve_outcome(evidence, ActionState::Unknown),
                 Resolution::Failed,
                 "permanent error kind {kind} must resolve to Failed"
             );
@@ -800,10 +842,12 @@ mod tests {
     fn dead_outbox_ambiguous_error_stays_unknown() {
         for kind in ["transport_timeout", "transport_request", "lease_expired"] {
             let evidence = outbox_event_to_evidence("dead", Some(kind));
+            // Ambiguous error → ConfirmationLost → Unknown observation.
+            // Action already Unknown → NoChange (stays unknown).
             assert_eq!(
-                resolve_outcome(evidence),
-                Resolution::Unknown,
-                "ambiguous error kind {kind} must stay unknown"
+                resolve_outcome(evidence, ActionState::Unknown),
+                Resolution::NoChange,
+                "ambiguous error kind {kind} must stay unknown (NoChange from Unknown)"
             );
         }
     }
@@ -812,10 +856,12 @@ mod tests {
     fn in_flight_outbox_statuses_stay_unknown() {
         for status in ["pending", "processing", "leased"] {
             let evidence = outbox_event_to_evidence(status, None);
+            // InFlight → Unknown observation. Action already Unknown →
+            // NoChange (stays unknown).
             assert_eq!(
-                resolve_outcome(evidence),
-                Resolution::Unknown,
-                "in-flight status {status} should stay unknown"
+                resolve_outcome(evidence, ActionState::Unknown),
+                Resolution::NoChange,
+                "in-flight status {status} should stay unknown (NoChange from Unknown)"
             );
         }
     }

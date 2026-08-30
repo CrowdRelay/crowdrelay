@@ -3655,3 +3655,539 @@ async fn t25i_unknown_excluded_from_causal_learner() {
         "no fan-out: one evidence record must produce at most one learning row"
     );
 }
+
+// ── T26: Concurrent resolution race ──
+//
+// Two workers attempt to resolve the same UNKNOWN action simultaneously.
+// The FOR UPDATE lock + WHERE status = 'unknown' guard must ensure
+// exactly one worker transitions the action; the other sees it already
+// resolved and does nothing. No duplicate effects, no split-brain.
+
+/// T26: Concurrent resolution race — two workers, one action, one winner.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t26_concurrent_resolution_race_one_winner() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Set the action to 'unknown' (simulating gap detection).
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("set unknown");
+
+    // Insert an assignment in 'dispatched' state.
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        "r/t26-race",
+        "dispatched",
+    )
+    .await;
+
+    // Two concurrent success receipts for the same action.
+    let repo = f.repository.clone();
+    let ws = f.workspace_id;
+    let now = OffsetDateTime::now_utc();
+    let make_cmd = || RecordExecutionReport {
+        action_id: action_id.into(),
+        receipt_key: format!("t26-success-{action_id}"),
+        executor_id: "test-executor".to_owned(),
+        status: ExecutorReportStatus::Succeeded,
+        claim_token: None,
+        provider_reference: Some("msg-t26".to_owned()),
+        error_kind: None,
+        metadata: serde_json::json!({}),
+        occurred_at: now,
+    };
+
+    let (r1, r2) = tokio::join!(
+        repo.record_execution_report(ws, make_cmd()),
+        repo.record_execution_report(ws, make_cmd()),
+    );
+
+    // Both should succeed (no error) — the WHERE guard makes the loser
+    // a no-op. Neither should panic or corrupt state.
+    assert!(r1.is_ok(), "first worker should not error: {:?}", r1);
+    assert!(r2.is_ok(), "second worker should not error: {:?}", r2);
+
+    // Verify: action is succeeded (not duplicated, not corrupted).
+    let final_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("final status");
+    assert_eq!(
+        final_status, "succeeded",
+        "action must be succeeded after concurrent resolution"
+    );
+
+    // Verify: exactly one assignment transition (dispatched → executed).
+    let exec_status: String =
+        sqlx::query_scalar("SELECT execution_status FROM viryaos_experiment_assignments \
+                            WHERE workspace_id = $1 AND action_id = $2")
+            .bind(f.workspace_id.into_uuid())
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("assignment status");
+    assert_eq!(
+        exec_status, "executed",
+        "assignment must be executed — exactly one transition"
+    );
+
+    // Verify: both reports are recorded (audit ledger), but only one
+    // transitioned state.
+    let report_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_autopilot_execution_reports \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("report count");
+    assert_eq!(
+        report_count, 2,
+        "both reports are recorded (audit ledger), but only one transitioned state"
+    );
+}
+
+// ── T27: Contradictory provider facts ──
+//
+// Provider says "posted" (Confirmed) while the action is already Failed.
+// The resolver must surface this as Conflict, not silently revive the
+// action or downgrade the failure. The state must NOT change.
+
+/// T27: Contradictory provider facts — success receipt for a Failed action → Conflict, no state change.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t27_contradictory_provider_facts_no_state_change() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // Set the action to 'failed' (definitive failure).
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'failed', finished_at = now() \
+         WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("set failed");
+
+    // Insert assignment in 'failed' state.
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        "r/t27-contradiction",
+        "failed",
+    )
+    .await;
+
+    // Now a success receipt arrives — contradicting the failed state.
+    let cmd = RecordExecutionReport {
+        action_id: action_id.into(),
+        receipt_key: format!("t27-success-{action_id}"),
+        executor_id: "test-executor".to_owned(),
+        status: ExecutorReportStatus::Succeeded,
+        claim_token: None,
+        provider_reference: Some("msg-t27".to_owned()),
+        error_kind: None,
+        metadata: serde_json::json!({}),
+        occurred_at: OffsetDateTime::now_utc(),
+    };
+
+    // This should NOT error — the resolver surfaces Conflict and returns
+    // early without changing state.
+    let result = f
+        .repository
+        .record_execution_report(f.workspace_id, cmd)
+        .await;
+    assert!(
+        result.is_ok(),
+        "contradictory receipt should not error — it surfaces Conflict: {:?}",
+        result
+    );
+
+    // Verify: action is STILL failed — not revived.
+    let final_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("final status");
+    assert_eq!(
+        final_status, "failed",
+        "contradictory success must NOT revive a failed action"
+    );
+
+    // Verify: assignment is STILL failed — not revived.
+    let exec_status: String =
+        sqlx::query_scalar("SELECT execution_status FROM viryaos_experiment_assignments \
+                            WHERE workspace_id = $1 AND action_id = $2")
+            .bind(f.workspace_id.into_uuid())
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("assignment status");
+    assert_eq!(
+        exec_status, "failed",
+        "contradictory success must NOT revive a failed assignment"
+    );
+}
+
+// ── North Star Test A: success → lost → UNKNOWN → recovery → exactly one effect ──
+//
+// The full lifecycle:
+// 1. Action dispatched (assignment = dispatched)
+// 2. Executor reports success (action = succeeded, assignment = executed)
+// 3. Confirmation lost (community executor crash → action = unknown, assignment = unknown)
+// 4. Reconciliation discovers the post was actually posted → action = succeeded, assignment = executed
+// 5. Assert: exactly one action, one assignment, one evidence, one episode
+// 6. Assert: no double execution, no duplicate evidence, no causal update during UNKNOWN
+
+/// North Star A: success → confirmation lost → UNKNOWN → recovery → exactly one effect.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn north_star_a_success_lost_unknown_recovery_one_effect() {
+    let f = setup().await.expect("fixture");
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+
+    // 1. Insert assignment in 'dispatched' state.
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        "r/north-star-a",
+        "dispatched",
+    )
+    .await;
+
+    // 2. Executor reports success → action = succeeded, assignment = executed.
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("ns-a-success-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: None,
+                provider_reference: Some("msg-ns-a".to_owned()),
+                error_kind: None,
+                metadata: serde_json::json!({}),
+                occurred_at: OffsetDateTime::now_utc(),
+            },
+        )
+        .await
+        .expect("success report");
+
+    let status_after_success: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("status after success");
+    assert_eq!(status_after_success, "succeeded");
+
+    // 3. Confirmation lost — community executor crash marks it unknown.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1 AND workspace_id = $2 AND status IN ('succeeded', 'processing')",
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("confirmation lost");
+
+    sqlx::query(
+        "UPDATE viryaos_experiment_assignments SET execution_status = 'unknown' \
+         WHERE workspace_id = $1 AND action_id = $2 AND execution_status = 'executed'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("assignment to unknown");
+
+    let status_after_loss: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("status after loss");
+    assert_eq!(status_after_loss, "unknown");
+
+    // 4. Reconciliation discovers the post was actually posted.
+    //    Insert a community_posts row with status='posted'.
+    insert_community_post(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        "posted",
+        "r/north-star-a",
+    )
+    .await;
+
+    // Run the SQL reconciliation function (same as T15 uses).
+    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        result, "SUCCEEDED",
+        "reconciliation must recover the action to SUCCEEDED"
+    );
+
+    // 5. Assert: action recovered to succeeded.
+    let status_after_recovery: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("status after recovery");
+    assert_eq!(
+        status_after_recovery, "succeeded",
+        "action must recover to succeeded after reconciliation"
+    );
+
+    // 6. Assert: exactly one evidence record (no duplication during loss/recovery).
+    let evidence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("evidence count");
+    assert_eq!(
+        evidence_count, 1,
+        "exactly one evidence record — no duplication during loss/recovery"
+    );
+
+    // 7. Assert: exactly one episode.
+    let episode_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("episode count");
+    assert_eq!(
+        episode_count, 1,
+        "exactly one episode — no duplication"
+    );
+
+    // 8. Assert: trace_id preserved throughout.
+    let final_trace: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("trace");
+    assert_eq!(
+        final_trace,
+        Some(trace_id),
+        "trace_id must be preserved through loss and recovery"
+    );
+}
+
+// ── North Star Test B: UNKNOWN → definitive proof DID NOT happen → FAILED → safe retry ──
+//
+// The full lifecycle:
+// 1. Action dispatched (assignment = dispatched)
+// 2. Confirmation lost (action = unknown, assignment = unknown)
+// 3. Definitive evidence that the original intervention did NOT happen
+//    (community_posts.status = 'failed' with non-crash error)
+// 4. Reconciliation resolves UNKNOWN → FAILED
+// 5. Assert: action is failed, assignment is failed
+// 6. Assert: retry is permitted (a new action can be created)
+// 7. Assert: the original action stays failed (not revived by the retry)
+// 8. Assert: exactly one eventual real intervention (the retry succeeds)
+
+/// North Star B: UNKNOWN → definitive non-execution → FAILED → safe retry → one effect.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
+    let f = setup().await.expect("fixture");
+    let trace_id_1 = uuid::Uuid::now_v7();
+    let action_id_1 = insert_decision_and_action(&f.pool, f.workspace_id, trace_id_1).await;
+
+    // 1. Insert assignment in 'dispatched' state.
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_id_1,
+        "r/north-star-b-original",
+        "dispatched",
+    )
+    .await;
+
+    // 2. Confirmation lost — action goes to unknown.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(action_id_1)
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("set unknown");
+
+    sqlx::query(
+        "UPDATE viryaos_experiment_assignments SET execution_status = 'unknown' \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id_1)
+    .execute(&f.pool)
+    .await
+    .expect("assignment to unknown");
+
+    // 3. Definitive evidence that the original did NOT happen —
+    //    community_posts.status = 'failed' with a non-crash error message.
+    insert_community_post(
+        &f.pool,
+        f.workspace_id,
+        action_id_1,
+        "failed",
+        "r/north-star-b-original",
+    )
+    .await;
+    // Set a non-crash error message to ensure it's treated as DefinitiveFailure.
+    sqlx::query("UPDATE community_posts SET error_message = 'no agents service configured' \
+                 WHERE workspace_id = $1 AND action_id = $2")
+        .bind(f.workspace_id.into_uuid())
+        .bind(action_id_1)
+        .execute(&f.pool)
+        .await
+        .expect("set error message");
+
+    // 4. Reconciliation resolves UNKNOWN → FAILED via SQL function.
+    let result: String = sqlx::query_scalar("SELECT viryaos_action_ledger_reconcile($1)")
+        .bind(action_id_1)
+        .fetch_one(&f.pool)
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        result, "FAILED",
+        "reconciliation must resolve the action to FAILED"
+    );
+
+    // 5. Assert: action is failed.
+    let status_after_fail: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id_1)
+            .fetch_one(&f.pool)
+            .await
+            .expect("status after fail");
+    assert_eq!(
+        status_after_fail, "failed",
+        "original action must be failed after definitive non-execution"
+    );
+
+    // 6. Retry: create a NEW action for the same opportunity.
+    let trace_id_2 = uuid::Uuid::now_v7();
+    let action_id_2 = insert_decision_and_action(&f.pool, f.workspace_id, trace_id_2).await;
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_id_2,
+        "r/north-star-b-retry",
+        "dispatched",
+    )
+    .await;
+
+    // The retry succeeds.
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id_2.into(),
+                receipt_key: format!("ns-b-retry-{action_id_2}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: None,
+                provider_reference: Some("msg-ns-b-retry".to_owned()),
+                error_kind: None,
+                metadata: serde_json::json!({}),
+                occurred_at: OffsetDateTime::now_utc(),
+            },
+        )
+        .await
+        .expect("retry success");
+
+    // 7. Assert: original action is STILL failed (not revived by retry).
+    let original_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id_1)
+            .fetch_one(&f.pool)
+            .await
+            .expect("original status");
+    assert_eq!(
+        original_status, "failed",
+        "original action must stay failed — retry must not revive it"
+    );
+
+    // 8. Assert: retry action is succeeded.
+    let retry_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id_2)
+            .fetch_one(&f.pool)
+            .await
+            .expect("retry status");
+    assert_eq!(
+        retry_status, "succeeded",
+        "retry action must be succeeded"
+    );
+
+    // 9. Assert: two evidence records (one per action), no duplication.
+    let evidence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_evidence \
+         WHERE workspace_id = $1 AND action_id IN ($2, $3)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id_1)
+    .bind(action_id_2)
+    .fetch_one(&f.pool)
+    .await
+    .expect("evidence count");
+    assert_eq!(
+        evidence_count, 2,
+        "exactly two evidence records — one per action, no duplication"
+    );
+
+    // 10. Assert: two episodes (one per action).
+    let episode_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_growth_episodes \
+         WHERE workspace_id = $1 AND action_id IN ($2, $3)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id_1)
+    .bind(action_id_2)
+    .fetch_one(&f.pool)
+    .await
+    .expect("episode count");
+    assert_eq!(
+        episode_count, 2,
+        "exactly two episodes — one per action"
+    );
+}

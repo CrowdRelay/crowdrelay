@@ -287,6 +287,36 @@ pub fn transition(from: ActionState, to: ActionState) -> Result<ActionState, Ill
 
 // ── Canonical execution resolution ──────────────────────────────────
 
+/// The exclusive delivery state reported by a provider adapter.
+///
+/// This replaces the former three-boolean `ProviderDelivery` struct
+/// (`confirmed`, `definitive_failure`, `confirmation_lost`) which
+/// allowed impossible combinations like `confirmed: true,
+/// definitive_failure: true`. The enum makes those unrepresentable.
+///
+/// Provider adapters (`community_post_to_evidence`,
+/// `outbox_event_to_evidence`) translate external state into this type.
+/// The canonical resolver (`resolve_outcome`) consumes it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderDeliveryState {
+    /// Delivery confirmed — the external side effect happened.
+    /// (e.g. `community_posts.status = 'posted'`, outbox `delivered`.)
+    Confirmed,
+    /// Definitive failure — the external side effect did NOT occur.
+    /// (e.g. pre-Reddit rejection, no agents service, subreddit
+    /// cooldown, permanent outbox rejection.)
+    DefinitiveFailure,
+    /// Confirmation lost — the intervention may have succeeded, but we
+    /// cannot tell (e.g. worker crash during the Reddit API call). Only
+    /// a human checking the external platform can resolve this.
+    /// Maps to business-layer `UNKNOWN`.
+    ConfirmationLost,
+    /// In-flight — pending/posting/rate_limited/processing. No
+    /// terminal evidence yet. Resolves later through the adapter's
+    /// own paths.
+    InFlight,
+}
+
 /// Observed facts about an execution — the pure domain input to the
 /// canonical resolution matrix.
 ///
@@ -307,29 +337,14 @@ pub enum ResolutionEvidence {
     TerminalReceipt {
         /// `true` = succeeded receipt, `false` = failed receipt.
         succeeded: bool,
-        /// Whether a prior succeeded receipt already exists for this
-        /// action+executor. Used for monotonicity: a late failure must
-        /// not downgrade a prior success.
-        prior_success_exists: bool,
     },
     /// A provider-specific delivery confirmation was observed.
     ///
     /// Used by `community.engage.request`: `community_posts` is the
     /// receipt, not an executor report. The adapter translates
-    /// `community_posts.status` + `error_message` into these facts.
-    ProviderDelivery {
-        /// `true` = delivery confirmed (e.g. `community_posts.status = 'posted'`).
-        confirmed: bool,
-        /// `true` = definitive failure — the external side effect did NOT
-        /// occur (pre-Reddit rejection, no agents service, subreddit
-        /// cooldown, etc.).
-        definitive_failure: bool,
-        /// `true` = confirmation lost — the intervention may have
-        /// succeeded, but we cannot tell (e.g. worker crash during the
-        /// Reddit API call). Only a human checking the external platform
-        /// can resolve this.
-        confirmation_lost: bool,
-    },
+    /// `community_posts.status` + `error_message` into
+    /// [`ProviderDeliveryState`] and wraps it here.
+    ProviderDelivery(ProviderDeliveryState),
     /// No new authoritative fact available. The receipt never arrived
     /// and no provider delivery state exists.
     ///
@@ -339,8 +354,54 @@ pub enum ResolutionEvidence {
     NoEvidence,
 }
 
+/// What the external world told us — the pure observation, before any
+/// state-transition policy is applied.
+///
+/// This is the output of [`resolve_observation`]. It contains no
+/// `NoChange` variant because "no change" is a transition-policy
+/// decision, not an observation. An observation is always one of:
+/// the intervention happened, it didn't, or we can't tell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservedResolution {
+    /// The external intervention occurred.
+    Executed,
+    /// The external intervention definitively did NOT occur.
+    Failed,
+    /// Cannot establish whether the intervention occurred.
+    Unknown,
+}
+
+/// The legal state transition resulting from an observation + current
+/// state.
+///
+/// Output of [`legal_transition`]. This is where monotonicity and
+/// state-machine policy live — NOT in the observation resolver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegalTransition {
+    /// The transition is legal — apply the new state.
+    Apply(ActionState),
+    /// The transition is not legal or not needed — do not change state.
+    /// This covers: already in the target state, monotonicity guards
+    /// (late failure after prior success), and terminal-state protection.
+    NoChange,
+    /// A contradictory observation arrived for a terminal state.
+    /// The observation contradicts the persisted state — this is
+    /// information, not a silent coercion. The caller must surface
+    /// this to operator visibility (log + ops watchdog), not silently
+    /// pick the latest thing.
+    ///
+    /// Examples:
+    /// - external fact = Confirmed, current state = Failed
+    /// - external fact = DefinitiveFailure, current state = Succeeded
+    Conflict,
+}
+
 /// The canonical resolution — what the execution outcome means for the
 /// causal learner and the operational state machine.
+///
+/// This is the output of the compatibility wrapper [`resolve_outcome`].
+/// New code should prefer calling [`resolve_observation`] +
+/// [`legal_transition`] directly for clearer DDD separation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Resolution {
     /// The external intervention occurred.
@@ -357,66 +418,201 @@ pub enum Resolution {
     /// Returned for `NoEvidence` and for monotonicity guards
     /// (e.g. late failure after prior success).
     NoChange,
+    /// A contradictory observation arrived for a terminal state.
+    /// The observation contradicts the persisted state — this is
+    /// information, not a silent coercion. The caller must surface
+    /// this to operator visibility (log + ops watchdog), not silently
+    /// pick the latest thing.
+    Conflict,
 }
 
-/// The ONE canonical semantic definition of execution resolution.
+/// Pure observation resolver: maps external facts to what happened.
 ///
-/// ALL reconciliation implementations MUST conform to this matrix:
+/// This function knows NOTHING about the current action state, the
+/// state machine, or monotonicity. It only answers: "given these
+/// external facts, did the intervention happen, not happen, or can't
+/// we tell?"
+///
+/// # Observation matrix
+///
+/// | Observed facts                              | ObservedResolution |
+/// |---------------------------------------------|--------------------|
+/// | `TerminalReceipt { succeeded: true }`       | `Executed`         |
+/// | `TerminalReceipt { succeeded: false }`      | `Failed`           |
+/// | `ProviderDelivery(Confirmed)`               | `Executed`         |
+/// | `ProviderDelivery(DefinitiveFailure)`       | `Failed`           |
+/// | `ProviderDelivery(ConfirmationLost)`        | `Unknown`          |
+/// | `ProviderDelivery(InFlight)`                | `Unknown`          |
+/// | `NoEvidence`                                | `Unknown`          |
+///
+/// # Critical invariant
+///
+/// `NoEvidence` → `Unknown`, NEVER `Failed`. "We don't know" and "we
+/// know it failed" are completely different. The transition policy
+/// ([`legal_transition`]) will prevent `Unknown` from overwriting a
+/// terminal state.
+#[must_use]
+pub fn resolve_observation(evidence: ResolutionEvidence) -> ObservedResolution {
+    match evidence {
+        ResolutionEvidence::TerminalReceipt { succeeded: true } => ObservedResolution::Executed,
+        ResolutionEvidence::TerminalReceipt { succeeded: false } => ObservedResolution::Failed,
+        ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed) => {
+            ObservedResolution::Executed
+        }
+        ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure) => {
+            ObservedResolution::Failed
+        }
+        ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost) => {
+            ObservedResolution::Unknown
+        }
+        ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::InFlight) => {
+            ObservedResolution::Unknown
+        }
+        ResolutionEvidence::NoEvidence => ObservedResolution::Unknown,
+    }
+}
+
+/// State-transition policy: given the current action state and an
+/// observation, determine the legal state transition.
+///
+/// This function encodes:
+/// - **Monotonicity**: a late failure must not downgrade a prior success.
+/// - **Terminal-state protection**: terminal states cannot be overwritten.
+/// - **Idempotency**: if we're already in the target state, no change.
+/// - **State machine legality**: transitions must follow
+///   [`ActionState::can_transition_to`].
+///
+/// # Transition matrix
+///
+/// | Current state | Observation | Result |
+/// |---------------|-------------|--------|
+/// | `Succeeded` | `Executed` | `NoChange` (idempotent — already there) |
+/// | `Succeeded` | `Failed` | `Conflict` (contradicts persisted success) |
+/// | `Succeeded` | `Unknown` | `NoChange` (don't lose certainty) |
+/// | `Failed` | `Executed` | `Conflict` (contradicts persisted failure) |
+/// | `Failed` | `Failed` | `NoChange` (idempotent — already there) |
+/// | `Failed` | `Unknown` | `NoChange` (terminal — no outgoing) |
+/// | `Unknown` | `Executed` | `Apply(Succeeded)` |
+/// | `Unknown` | `Failed` | `Apply(Failed)` |
+/// | `Unknown` | `Unknown` | `NoChange` (no new info) |
+/// | `Reconciling` | `Executed` | `Apply(Succeeded)` |
+/// | `Reconciling` | `Failed` | `Apply(Failed)` |
+/// | `Reconciling` | `Unknown` | `NoChange` (still unknown) |
+/// | `Running` | `Executed` | `Apply(Succeeded)` |
+/// | `Running` | `Failed` | `Apply(Failed)` |
+/// | `Running` | `Unknown` | `Apply(Unknown)` |
+///
+/// # Conflict vs NoChange
+///
+/// `NoChange` means the observation is either idempotent (same direction
+/// as the current state) or non-informative (Unknown when already
+/// terminal). The state is correct; no action needed.
+///
+/// `Conflict` means the observation **contradicts** the persisted state.
+/// This is information — the caller must surface it to operator
+/// visibility, not silently coerce it. Examples:
+/// - external fact = Confirmed, current state = Failed
+/// - external fact = DefinitiveFailure, current state = Succeeded
+#[must_use]
+pub fn legal_transition(current: ActionState, observed: ObservedResolution) -> LegalTransition {
+    match (current, observed) {
+        // ── Succeeded: idempotent for Executed, Conflict for Failed ──
+        // A second success is a no-op. A late failure contradicts the
+        // persisted success — surface as Conflict, don't silently downgrade.
+        // A late unknown must not lose certainty.
+        (ActionState::Succeeded, ObservedResolution::Executed) => LegalTransition::NoChange,
+        (ActionState::Succeeded, ObservedResolution::Failed) => LegalTransition::Conflict,
+        (ActionState::Succeeded, ObservedResolution::Unknown) => LegalTransition::NoChange,
+
+        // ── Failed: idempotent for Failed, Conflict for Executed ──
+        // A late success contradicts the persisted failure — surface as
+        // Conflict, don't silently revive. A late unknown is non-informative.
+        (ActionState::Failed, ObservedResolution::Executed) => LegalTransition::Conflict,
+        (ActionState::Failed, ObservedResolution::Failed) => LegalTransition::NoChange,
+        (ActionState::Failed, ObservedResolution::Unknown) => LegalTransition::NoChange,
+
+        // ── Cancelled / Revoked: terminal — no outgoing transitions ──
+        (ActionState::Cancelled, _) => LegalTransition::NoChange,
+        (ActionState::Revoked, _) => LegalTransition::NoChange,
+
+        // ── Unknown: can resolve to Succeeded or Failed ──
+        (ActionState::Unknown, ObservedResolution::Executed) => {
+            LegalTransition::Apply(ActionState::Succeeded)
+        }
+        (ActionState::Unknown, ObservedResolution::Failed) => {
+            LegalTransition::Apply(ActionState::Failed)
+        }
+        (ActionState::Unknown, ObservedResolution::Unknown) => LegalTransition::NoChange,
+
+        // ── Reconciling: can resolve to Succeeded or Failed ──
+        (ActionState::Reconciling, ObservedResolution::Executed) => {
+            LegalTransition::Apply(ActionState::Succeeded)
+        }
+        (ActionState::Reconciling, ObservedResolution::Failed) => {
+            LegalTransition::Apply(ActionState::Failed)
+        }
+        (ActionState::Reconciling, ObservedResolution::Unknown) => LegalTransition::NoChange,
+
+        // ── Running: can transition to Succeeded, Failed, or Unknown ──
+        (ActionState::Running, ObservedResolution::Executed) => {
+            LegalTransition::Apply(ActionState::Succeeded)
+        }
+        (ActionState::Running, ObservedResolution::Failed) => {
+            LegalTransition::Apply(ActionState::Failed)
+        }
+        (ActionState::Running, ObservedResolution::Unknown) => {
+            LegalTransition::Apply(ActionState::Unknown)
+        }
+
+        // ── Pre-execution states: observations don't apply ──
+        // Planned, Authorized, Queued haven't been dispatched yet.
+        // An observation about execution is not meaningful here.
+        (ActionState::Planned, _) | (ActionState::Authorized, _) | (ActionState::Queued, _) => {
+            LegalTransition::NoChange
+        }
+    }
+}
+
+/// Compatibility wrapper: combines [`resolve_observation`] and
+/// [`legal_transition`] into a single call.
+///
+/// Callers that need the current action state for transition policy
+/// should pass it here. The function:
+/// 1. Resolves the evidence to a pure observation.
+/// 2. Applies the legal-transition policy given the current state.
+/// 3. Maps the result to a [`Resolution`].
+///
+/// ALL reconciliation implementations MUST use this function (or call
+/// [`resolve_observation`] + [`legal_transition`] directly):
 /// - `record_execution_report` (normal receipt path)
 /// - `receipt_reconciliation.rs` (gap/late/worker path)
 /// - `viryaos_action_ledger_reconcile()` SQL function (manual fallback)
 ///
-/// Do NOT duplicate this semantic matrix in callers. Call this function.
-///
-/// # Matrix
-///
-/// | Observed facts                              | Resolution |
-/// |---------------------------------------------|------------|
-/// | `TerminalReceipt { succeeded: true }`       | `Executed` |
-/// | `TerminalReceipt { succeeded: false, no prior }` | `Failed` |
-/// | `TerminalReceipt { succeeded: false, prior success }` | `NoChange` |
-/// | `ProviderDelivery { confirmed: true }`      | `Executed` |
-/// | `ProviderDelivery { definitive_failure: true }` | `Failed` |
-/// | `ProviderDelivery { confirmation_lost: true }`  | `Unknown` |
-/// | `ProviderDelivery { .. }` (in-flight)       | `Unknown` |
-/// | `NoEvidence`                                | `NoChange` |
+/// Do NOT duplicate this semantic matrix in callers.
 ///
 /// # Critical invariants
 ///
-/// - `NoEvidence` → `NoChange`. A missing fact must NEVER default to
-///   `Failed` and must NOT silently become `Executed`.
+/// - `NoEvidence` → observation is `Unknown` → `NoChange` from terminal
+///   states. A missing fact must NEVER default to `Failed` and must NOT
+///   silently become `Executed`.
 /// - `Unknown` means execution may have happened but cannot be established.
 ///   It is NOT a failure and NOT a success.
-/// - A late failure after a prior success → `NoChange` (monotonicity).
+/// - A late failure after a prior success → `Conflict` (contradiction):
+///   `legal_transition(Succeeded, Failed) → Conflict`. The caller must
+///   surface this to operator visibility, not silently downgrade.
+/// - A late success after a prior failure → `Conflict` (contradiction):
+///   `legal_transition(Failed, Executed) → Conflict`. The caller must
+///   surface this, not silently revive.
 #[must_use]
-pub fn resolve_outcome(evidence: ResolutionEvidence) -> Resolution {
-    match evidence {
-        ResolutionEvidence::TerminalReceipt {
-            succeeded: true, ..
-        } => Resolution::Executed,
-        ResolutionEvidence::TerminalReceipt {
-            succeeded: false,
-            prior_success_exists: true,
-        } => Resolution::NoChange,
-        ResolutionEvidence::TerminalReceipt {
-            succeeded: false,
-            prior_success_exists: false,
-        } => Resolution::Failed,
-        ResolutionEvidence::ProviderDelivery {
-            confirmed: true, ..
-        } => Resolution::Executed,
-        ResolutionEvidence::ProviderDelivery {
-            definitive_failure: true,
-            ..
-        } => Resolution::Failed,
-        ResolutionEvidence::ProviderDelivery {
-            confirmation_lost: true,
-            ..
-        } => Resolution::Unknown,
-        // In-flight: not confirmed, not definitively failed, not
-        // confirmation-lost. Still pending/posting/rate_limited.
-        ResolutionEvidence::ProviderDelivery { .. } => Resolution::Unknown,
-        ResolutionEvidence::NoEvidence => Resolution::NoChange,
+pub fn resolve_outcome(evidence: ResolutionEvidence, current_state: ActionState) -> Resolution {
+    let observed = resolve_observation(evidence);
+    match legal_transition(current_state, observed) {
+        LegalTransition::Apply(ActionState::Succeeded) => Resolution::Executed,
+        LegalTransition::Apply(ActionState::Failed) => Resolution::Failed,
+        LegalTransition::Apply(ActionState::Unknown) => Resolution::Unknown,
+        LegalTransition::Apply(_) => Resolution::NoChange,
+        LegalTransition::NoChange => Resolution::NoChange,
+        LegalTransition::Conflict => Resolution::Conflict,
     }
 }
 
@@ -530,122 +726,252 @@ mod tests {
         assert_eq!(ActionState::parse("invalid"), None);
     }
 
-    // ── resolve_outcome canonical matrix tests ──
+    // ── resolve_observation pure mapping tests ──
 
     #[test]
-    fn terminal_receipt_success_resolves_executed() {
+    fn observation_terminal_receipt_success_is_executed() {
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                succeeded: true,
-                prior_success_exists: false,
-            }),
-            Resolution::Executed
-        );
-        // Prior success doesn't matter for a success receipt.
-        assert_eq!(
-            resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                succeeded: true,
-                prior_success_exists: true,
-            }),
-            Resolution::Executed
+            resolve_observation(ResolutionEvidence::TerminalReceipt { succeeded: true }),
+            ObservedResolution::Executed
         );
     }
 
     #[test]
-    fn terminal_receipt_failure_no_prior_resolves_failed() {
+    fn observation_terminal_receipt_failure_is_failed() {
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                succeeded: false,
-                prior_success_exists: false,
-            }),
-            Resolution::Failed
+            resolve_observation(ResolutionEvidence::TerminalReceipt { succeeded: false }),
+            ObservedResolution::Failed
         );
     }
 
     #[test]
-    fn terminal_receipt_failure_with_prior_success_is_no_change() {
-        // Monotonicity: a late failure must not downgrade a prior success.
+    fn observation_provider_delivery_confirmed_is_executed() {
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                succeeded: false,
-                prior_success_exists: true,
-            }),
-            Resolution::NoChange
+            resolve_observation(ResolutionEvidence::ProviderDelivery(
+                ProviderDeliveryState::Confirmed
+            )),
+            ObservedResolution::Executed
         );
     }
 
     #[test]
-    fn provider_delivery_confirmed_resolves_executed() {
+    fn observation_provider_delivery_definitive_failure_is_failed() {
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::ProviderDelivery {
-                confirmed: true,
-                definitive_failure: false,
-                confirmation_lost: false,
-            }),
-            Resolution::Executed
+            resolve_observation(ResolutionEvidence::ProviderDelivery(
+                ProviderDeliveryState::DefinitiveFailure
+            )),
+            ObservedResolution::Failed
         );
     }
 
     #[test]
-    fn provider_delivery_definitive_failure_resolves_failed() {
+    fn observation_provider_delivery_confirmation_lost_is_unknown() {
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::ProviderDelivery {
-                confirmed: false,
-                definitive_failure: true,
-                confirmation_lost: false,
-            }),
-            Resolution::Failed
+            resolve_observation(ResolutionEvidence::ProviderDelivery(
+                ProviderDeliveryState::ConfirmationLost
+            )),
+            ObservedResolution::Unknown
         );
     }
 
     #[test]
-    fn provider_delivery_confirmation_lost_resolves_unknown() {
+    fn observation_provider_delivery_in_flight_is_unknown() {
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::ProviderDelivery {
-                confirmed: false,
-                definitive_failure: false,
-                confirmation_lost: true,
-            }),
-            Resolution::Unknown
+            resolve_observation(ResolutionEvidence::ProviderDelivery(
+                ProviderDeliveryState::InFlight
+            )),
+            ObservedResolution::Unknown
         );
     }
 
     #[test]
-    fn provider_delivery_in_flight_resolves_unknown() {
-        // Not confirmed, not definitively failed, not confirmation-lost.
-        // Still pending/posting/rate_limited — resolve later.
-        assert_eq!(
-            resolve_outcome(ResolutionEvidence::ProviderDelivery {
-                confirmed: false,
-                definitive_failure: false,
-                confirmation_lost: false,
-            }),
-            Resolution::Unknown
-        );
-    }
-
-    #[test]
-    fn no_evidence_resolves_no_change() {
-        // CRITICAL: NoEvidence must NEVER become Failed or Executed.
+    fn observation_no_evidence_is_unknown() {
+        // CRITICAL: NoEvidence → Unknown, NEVER Failed.
         // "We don't know" and "we know it failed" are completely different.
         assert_eq!(
-            resolve_outcome(ResolutionEvidence::NoEvidence),
+            resolve_observation(ResolutionEvidence::NoEvidence),
+            ObservedResolution::Unknown
+        );
+    }
+
+    // ── legal_transition state-policy tests ──
+
+    #[test]
+    fn legal_unknown_plus_executed_applies_succeeded() {
+        assert_eq!(
+            legal_transition(ActionState::Unknown, ObservedResolution::Executed),
+            LegalTransition::Apply(ActionState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn legal_unknown_plus_failed_applies_failed() {
+        assert_eq!(
+            legal_transition(ActionState::Unknown, ObservedResolution::Failed),
+            LegalTransition::Apply(ActionState::Failed)
+        );
+    }
+
+    #[test]
+    fn legal_unknown_plus_unknown_is_no_change() {
+        assert_eq!(
+            legal_transition(ActionState::Unknown, ObservedResolution::Unknown),
+            LegalTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn legal_succeeded_plus_failed_is_conflict() {
+        // A late failure contradicts a persisted success. This is NOT
+        // silently downgraded — it's surfaced as Conflict for operator
+        // visibility. The state machine does not pick the latest thing.
+        assert_eq!(
+            legal_transition(ActionState::Succeeded, ObservedResolution::Failed),
+            LegalTransition::Conflict
+        );
+    }
+
+    #[test]
+    fn legal_succeeded_plus_executed_is_no_change_idempotent() {
+        assert_eq!(
+            legal_transition(ActionState::Succeeded, ObservedResolution::Executed),
+            LegalTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn legal_succeeded_plus_unknown_is_no_change_no_certainty_loss() {
+        // Don't lose certainty from a late ambiguous signal.
+        assert_eq!(
+            legal_transition(ActionState::Succeeded, ObservedResolution::Unknown),
+            LegalTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn legal_failed_plus_executed_is_conflict_cannot_revive() {
+        // A late success contradicts a persisted failure. This is NOT
+        // silently revived — it's surfaced as Conflict for operator
+        // visibility.
+        assert_eq!(
+            legal_transition(ActionState::Failed, ObservedResolution::Executed),
+            LegalTransition::Conflict
+        );
+    }
+
+    #[test]
+    fn legal_failed_plus_failed_is_no_change_idempotent() {
+        assert_eq!(
+            legal_transition(ActionState::Failed, ObservedResolution::Failed),
+            LegalTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn legal_failed_plus_unknown_is_no_change_terminal() {
+        assert_eq!(
+            legal_transition(ActionState::Failed, ObservedResolution::Unknown),
+            LegalTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn legal_reconciling_plus_executed_applies_succeeded() {
+        assert_eq!(
+            legal_transition(ActionState::Reconciling, ObservedResolution::Executed),
+            LegalTransition::Apply(ActionState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn legal_reconciling_plus_failed_applies_failed() {
+        assert_eq!(
+            legal_transition(ActionState::Reconciling, ObservedResolution::Failed),
+            LegalTransition::Apply(ActionState::Failed)
+        );
+    }
+
+    #[test]
+    fn legal_running_plus_unknown_applies_unknown() {
+        assert_eq!(
+            legal_transition(ActionState::Running, ObservedResolution::Unknown),
+            LegalTransition::Apply(ActionState::Unknown)
+        );
+    }
+
+    #[test]
+    fn legal_pre_execution_states_are_no_change() {
+        // Observations about execution are not meaningful before dispatch.
+        for state in [
+            ActionState::Planned,
+            ActionState::Authorized,
+            ActionState::Queued,
+        ] {
+            assert_eq!(
+                legal_transition(state, ObservedResolution::Executed),
+                LegalTransition::NoChange,
+                "{state:?} + Executed should be NoChange"
+            );
+        }
+    }
+
+    // ── resolve_outcome compatibility wrapper tests ──
+
+    #[test]
+    fn resolve_outcome_unknown_plus_success_is_executed() {
+        assert_eq!(
+            resolve_outcome(
+                ResolutionEvidence::TerminalReceipt { succeeded: true },
+                ActionState::Unknown
+            ),
+            Resolution::Executed
+        );
+    }
+
+    #[test]
+    fn resolve_outcome_unknown_plus_failure_is_failed() {
+        assert_eq!(
+            resolve_outcome(
+                ResolutionEvidence::TerminalReceipt { succeeded: false },
+                ActionState::Unknown
+            ),
+            Resolution::Failed
+        );
+    }
+
+    #[test]
+    fn resolve_outcome_succeeded_plus_failure_is_conflict() {
+        // A late failure contradicts a persisted success → Conflict.
+        // The caller must surface this, not silently downgrade.
+        assert_eq!(
+            resolve_outcome(
+                ResolutionEvidence::TerminalReceipt { succeeded: false },
+                ActionState::Succeeded
+            ),
+            Resolution::Conflict
+        );
+    }
+
+    #[test]
+    fn resolve_outcome_no_evidence_from_unknown_is_no_change() {
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::NoEvidence, ActionState::Unknown),
             Resolution::NoChange
         );
     }
 
     #[test]
-    fn no_evidence_does_not_become_failed() {
-        // This is the most important test in the matrix: a missing fact
-        // must not default to failure. If this breaks, the causal learner
-        // will silently treat missing receipts as failures, corrupting
-        // the treatment-effect posterior.
+    fn resolve_outcome_no_evidence_never_becomes_failed() {
+        // The most important invariant: a missing fact must not default
+        // to failure. If this breaks, the causal learner will silently
+        // treat missing receipts as failures, corrupting the treatment-
+        // effect posterior.
         assert_ne!(
-            resolve_outcome(ResolutionEvidence::NoEvidence),
+            resolve_outcome(ResolutionEvidence::NoEvidence, ActionState::Unknown),
             Resolution::Failed
         );
         assert_ne!(
-            resolve_outcome(ResolutionEvidence::NoEvidence),
+            resolve_outcome(ResolutionEvidence::NoEvidence, ActionState::Unknown),
             Resolution::Executed
         );
     }

@@ -108,11 +108,13 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         control = (ROOT / 'crates/crowdrelay-infra/src/autopilot/control.rs').read_text()
         chief = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/chief.rs').read_text()
         failed_arm = runtime[runtime.index('ExecutorReportStatus::Failed =>'):runtime.index('ExecutorReportStatus::Succeeded =>')]
-        self.assertIn('provider_already_succeeded', failed_arm)
-        self.assertIn("report.status='succeeded'", failed_arm)
-        # The canonical resolver (resolve_outcome) drives the decision.
-        # A late failure after a prior success → Resolution::NoChange.
-        self.assertIn('prior_success_exists: provider_already_succeeded', failed_arm)
+        # The two-input resolver loads the current action state within the
+        # transaction and passes it to resolve_outcome(evidence, current_state).
+        # legal_transition(Succeeded, Failed) → NoChange enforces monotonicity.
+        self.assertIn('SELECT status FROM viryaos_autopilot_actions', failed_arm)
+        self.assertIn('FOR UPDATE', failed_arm)
+        self.assertIn('resolve_outcome(', failed_arm)
+        self.assertIn('ResolutionEvidence::TerminalReceipt { succeeded: false }', failed_arm)
         self.assertIn('Resolution::NoChange', failed_arm)
         self.assertIn('NOT EXISTS (', control)
         self.assertIn("success.status=\'succeeded\'", control)

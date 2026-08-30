@@ -435,32 +435,53 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // A delayed failure receipt may drain after the same action has
                         // already been provider-confirmed. Keep it in the immutable audit
                         // ledger, but never let stale transport ordering reopen the circuit.
-                        let provider_already_succeeded = sqlx::query_scalar::<_, bool>(
-                            r#"
-                            SELECT EXISTS (
-                                SELECT 1 FROM viryaos_autopilot_execution_reports report
-                                WHERE report.workspace_id=$1 AND report.action_id=$2
-                                  AND report.executor_id=$3 AND report.status='succeeded'
-                            )
-                            "#,
+                        //
+                        // Load the current action state within this transaction so the
+                        // resolver can enforce monotonicity. The resolver's
+                        // legal_transition(Succeeded, Failed) → NoChange guard
+                        // replaces the old prior_success_exists flag — the current
+                        // state IS the monotonicity guard.
+                        let current_status: Option<String> = sqlx::query_scalar(
+                            "SELECT status FROM viryaos_autopilot_actions \
+                             WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
                         )
                         .bind(workspace_id.into_uuid())
                         .bind(command.action_id.into_uuid())
-                        .bind(&command.executor_id)
-                        .fetch_one(&mut *transaction)
+                        .fetch_optional(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
-                        // Build the canonical evidence from the receipt +
-                        // the prior-success check. The resolver drives the
-                        // decision; the SQL below applies it.
+                        let current_state = current_status
+                            .as_deref()
+                            .and_then(ActionState::parse)
+                            .unwrap_or(ActionState::Running);
                         let resolution = resolve_outcome(
-                            ResolutionEvidence::TerminalReceipt {
-                                succeeded: false,
-                                prior_success_exists: provider_already_succeeded,
-                            },
+                            ResolutionEvidence::TerminalReceipt { succeeded: false },
+                            current_state,
                         );
                         if resolution == Resolution::NoChange {
                             // Late failure after prior success — do not regress.
+                            transaction.commit().await.map_err(map_sqlx)?;
+                            return Ok(ExecutionReportMutation {
+                                report_id: id,
+                                action_id: command.action_id,
+                                status: command.status,
+                                replayed: false,
+                            });
+                        }
+                        if resolution == Resolution::Conflict {
+                            // Contradictory observation: a failure receipt
+                            // arrived for an action that is already Succeeded.
+                            // This is information, not a silent coercion.
+                            // Surface it to operator visibility and do not
+                            // change state.
+                            tracing::warn!(
+                                action_id = %command.action_id,
+                                workspace_id = %workspace_id.into_uuid(),
+                                current_state = ?current_state,
+                                "CONFLICT: failure receipt arrived for action in {:?} state — \
+                                 not downgrading. Investigate the contradictory evidence.",
+                                current_state
+                            );
                             transaction.commit().await.map_err(map_sqlx)?;
                             return Ok(ExecutionReportMutation {
                                 report_id: id,
@@ -630,57 +651,87 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             }
                         }
 
-                        // Canonical resolver: terminal success receipt →
-                        // Executed. The resolver drives the decision; the
-                        // SQL below applies it atomically.
-                        let resolution = resolve_outcome(ResolutionEvidence::TerminalReceipt {
-                            succeeded: true,
-                            prior_success_exists: false,
-                        });
-                        debug_assert_eq!(resolution, Resolution::Executed);
-
-                        // Resolve the action from unknown → succeeded (if
-                        // it was unknown — the gap detector may have marked
-                        // it unknown before this late receipt arrived). The
-                        // WHERE guard makes this idempotent: if the action
-                        // is already `succeeded` or `failed`, this is a
-                        // no-op. The gap detector set finished_at = NULL;
-                        // COALESCE restores it.
-                        sqlx::query(
-                            r#"UPDATE viryaos_autopilot_actions
-                               SET status = 'succeeded',
-                                   finished_at = COALESCE(finished_at, now()),
-                                   updated_at = now()
-                               WHERE workspace_id = $1
-                                 AND id = $2
-                                 AND status = 'unknown'"#,
+                        // Canonical resolver: terminal success receipt.
+                        // Load the current action state within this transaction
+                        // so the resolver can enforce monotonicity and state-
+                        // machine legality. legal_transition(Unknown, Executed)
+                        // → Apply(Succeeded); legal_transition(Succeeded, Executed)
+                        // → NoChange (idempotent).
+                        let current_status: Option<String> = sqlx::query_scalar(
+                            "SELECT status FROM viryaos_autopilot_actions \
+                             WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
                         )
                         .bind(workspace_id.into_uuid())
                         .bind(command.action_id.into_uuid())
-                        .execute(&mut *transaction)
+                        .fetch_optional(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
+                        let current_state = current_status
+                            .as_deref()
+                            .and_then(ActionState::parse)
+                            .unwrap_or(ActionState::Running);
+                        let resolution = resolve_outcome(
+                            ResolutionEvidence::TerminalReceipt { succeeded: true },
+                            current_state,
+                        );
+                        if resolution == Resolution::NoChange {
+                            // Already in a terminal state that shouldn't
+                            // be changed (e.g. Succeeded → NoChange).
+                            // Skip the SQL updates.
+                        } else if resolution == Resolution::Conflict {
+                            // Contradictory observation: a success receipt
+                            // arrived for an action that is already Failed.
+                            // This is information, not a silent coercion.
+                            // Surface it to operator visibility and do not
+                            // change state.
+                            tracing::warn!(
+                                action_id = %command.action_id,
+                                workspace_id = %workspace_id.into_uuid(),
+                                current_state = ?current_state,
+                                "CONFLICT: success receipt arrived for action in {:?} state — \
+                                 not reviving. Investigate the contradictory evidence.",
+                                current_state
+                            );
+                        } else {
+                            // resolution == Resolution::Executed — apply
+                            // the transition atomically.
 
-                        // The executor confirmed delivery — transition the
-                        // experiment assignment to executed so the causal
-                        // learner sees the correct treatment realization
-                        // (T). This covers both dispatched → executed
-                        // (normal path) and unknown → executed (late receipt
-                        // after gap detection). Without this, assignments
-                        // stay `dispatched` or `unknown` forever even after
-                        // confirmed delivery.
-                        sqlx::query(
-                            r#"UPDATE viryaos_experiment_assignments
-                               SET execution_status = 'executed'
-                               WHERE workspace_id = $1
-                                 AND action_id = $2
-                                 AND execution_status IN ('dispatched', 'unknown')"#,
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(command.action_id.into_uuid())
-                        .execute(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
+                            // Resolve the action from unknown → succeeded.
+                            // The WHERE guard makes this idempotent.
+                            sqlx::query(
+                                r#"UPDATE viryaos_autopilot_actions
+                                   SET status = 'succeeded',
+                                       finished_at = COALESCE(finished_at, now()),
+                                       updated_at = now()
+                                   WHERE workspace_id = $1
+                                     AND id = $2
+                                     AND status = 'unknown'"#,
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(command.action_id.into_uuid())
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?;
+
+                            // The executor confirmed delivery — transition
+                            // the experiment assignment to executed so the
+                            // causal learner sees the correct treatment
+                            // realization (T). This covers both dispatched →
+                            // executed (normal path) and unknown → executed
+                            // (late receipt after gap detection).
+                            sqlx::query(
+                                r#"UPDATE viryaos_experiment_assignments
+                                   SET execution_status = 'executed'
+                                   WHERE workspace_id = $1
+                                     AND action_id = $2
+                                     AND execution_status IN ('dispatched', 'unknown')"#,
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(command.action_id.into_uuid())
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?;
+                        }
 
                         sqlx::query(
                             r#"

@@ -1238,31 +1238,146 @@ mod tests {
         assert!(model.predict("t", &ctx) > 0.0);
     }
 
-    // ── UNKNOWN exclusion invariant ──────────────────────────────────
+    // ── Prediction-error isolation invariant ──
     //
-    // The causal learner must never consume evidence from an unresolved
-    // (execution_status = unknown) dispatch. The SQL guard in
-    // `load_growth_evidence` excludes such rows at the query level.
-    // This test documents the brain-level invariant: if no evidence
-    // reaches the model, the treatment-effect posterior must not change.
-    // This is trivially true (no `update_treatment_effect` calls), but
-    // making it explicit prevents future code from accidentally
-    // inferring treatment realization from absence of evidence.
+    // Prediction error (fan_prediction_error, signal_prediction_error) is
+    // a dopamine signal that updates beliefs/calibration. It MUST NOT
+    // directly manufacture DecisionValue, economic value, portfolio value,
+    // or goal value.
+    //
+    // This test proves: same candidate, same economic inputs, same
+    // objective, different prediction error → updated belief, NOT
+    // artificial DecisionValue increase.
+    //
+    // The test constructs two PredictionOutcomes with the SAME observed
+    // fan count but DIFFERENT expected fan counts (hence different
+    // prediction errors). After updating the model with both, the
+    // treatment-aware stats (which feed DecisionValue) must be identical
+    // regardless of the prediction error — because the outcome model
+    // learns from the observed value, not the error.
 
     #[test]
-    fn no_evidence_does_not_change_treatment_posterior() {
-        let model = CausalModel::new();
-        let ctx = DispatchContext::default();
-        let before = model.predict_stats_with_treatment("t", &ctx);
+    fn prediction_error_does_not_manufacture_decision_value() {
+        let mut model_a = CausalModel::new();
+        let mut model_b = CausalModel::new();
 
-        // No evidence → no update calls → posterior unchanged.
-        // This is the brain-level invariant that the SQL guard enforces:
-        // unknown evidence must not enter the learning pipeline, so the
-        // posterior cannot move from it.
-        // (apply_evidence_to_model with an empty slice is a no-op.)
-        let after = model.predict_stats_with_treatment("t", &ctx);
-        assert_eq!(before.treatment_effect, after.treatment_effect);
-        assert_eq!(before.treatment_confidence, after.treatment_confidence);
-        assert_eq!(before.use_treatment_effect, after.use_treatment_effect);
+        // Same template, same context, same observed fans.
+        // Different expected fans → different prediction errors.
+        let template = "community.engage.request";
+        let ctx = DispatchContext::default();
+
+        // Model A: expected 2, observed 5 → error = +3 (surprise reward)
+        let pred_a = DispatchPrediction {
+            template_id: template.to_owned(),
+            expected_new_fans: 2.0,
+            expected_signal_installs: 0.0,
+            context: ctx.clone(),
+        };
+        let outcome_a = PredictionOutcome::from_observation(pred_a, 5.0, 0.0);
+        assert!(
+            outcome_a.fan_prediction_error > 0.0,
+            "model A should have positive prediction error"
+        );
+
+        // Model B: expected 5, observed 5 → error = 0 (no surprise)
+        let pred_b = DispatchPrediction {
+            template_id: template.to_owned(),
+            expected_new_fans: 5.0,
+            expected_signal_installs: 0.0,
+            context: ctx.clone(),
+        };
+        let outcome_b = PredictionOutcome::from_observation(pred_b, 5.0, 0.0);
+        assert!(
+            outcome_b.fan_prediction_error.abs() < 1e-9,
+            "model B should have zero prediction error"
+        );
+
+        // Update both models with the same observed outcome.
+        model_a.update(&outcome_a);
+        model_b.update(&outcome_b);
+
+        // The treatment-aware stats (which feed DecisionValue) must be
+        // identical — both models saw the same observed fan count.
+        let stats_a = model_a.predict_stats_with_treatment(template, &ctx);
+        let stats_b = model_b.predict_stats_with_treatment(template, &ctx);
+
+        assert_eq!(
+            stats_a.expected_fans, stats_b.expected_fans,
+            "expected_fans must be identical regardless of prediction error"
+        );
+        assert_eq!(
+            stats_a.predict_std, stats_b.predict_std,
+            "predict_std must be identical regardless of prediction error"
+        );
+        assert_eq!(
+            stats_a.confidence, stats_b.confidence,
+            "confidence must be identical regardless of prediction error"
+        );
+        assert_eq!(
+            stats_a.treatment_effect, stats_b.treatment_effect,
+            "treatment_effect must be identical regardless of prediction error"
+        );
+        assert_eq!(
+            stats_a.treatment_confidence, stats_b.treatment_confidence,
+            "treatment_confidence must be identical regardless of prediction error"
+        );
+    }
+
+    #[test]
+    fn prediction_error_only_updates_belief_not_economics() {
+        // Stronger version: feed many observations with different prediction
+        // errors but the same observed values. The model's predictions
+        // should converge to the same beliefs, regardless of the prediction
+        // error history.
+        let mut model_a = CausalModel::new();
+        let mut model_b = CausalModel::new();
+        let template = "t";
+        let ctx = DispatchContext::default();
+
+        // Model A: consistently over-predicts (expected=10, observed=5)
+        // → large negative prediction error every time
+        for _ in 0..10 {
+            let pred = DispatchPrediction {
+                template_id: template.to_owned(),
+                expected_new_fans: 10.0,
+                ..Default::default()
+            };
+            model_a.update(&PredictionOutcome::from_observation(pred, 5.0, 0.0));
+        }
+
+        // Model B: consistently under-predicts (expected=0, observed=5)
+        // → large positive prediction error every time
+        for _ in 0..10 {
+            let pred = DispatchPrediction {
+                template_id: template.to_owned(),
+                expected_new_fans: 0.0,
+                ..Default::default()
+            };
+            model_b.update(&PredictionOutcome::from_observation(pred, 5.0, 0.0));
+        }
+
+        // Both models should have the same expected fan count — they both
+        // observed 5.0 fans ten times. The prediction error (which differs
+        // wildly) must not influence the outcome model's belief.
+        let stats_a = model_a.predict_stats_with_treatment(template, &ctx);
+        let stats_b = model_b.predict_stats_with_treatment(template, &ctx);
+
+        assert_eq!(
+            stats_a.confidence, stats_b.confidence,
+            "both models should have the same confidence (10 observations)"
+        );
+        // The expected fans should be very close — both learned from
+        // observed=5.0. Small differences may arise from the context
+        // effect learning (which uses base_mean), but the core belief
+        // must converge to the same observed value.
+        let diff = (stats_a.expected_fans - stats_b.expected_fans).abs();
+        assert!(
+            diff < 1.0,
+            "expected_fans should converge to the same observed value regardless of prediction error, \
+             got model_a={}, model_b={}, diff={}",
+            stats_a.expected_fans,
+            stats_b.expected_fans,
+            diff
+        );
     }
 }

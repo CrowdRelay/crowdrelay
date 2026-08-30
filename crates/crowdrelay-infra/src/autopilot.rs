@@ -76,7 +76,7 @@ use crowdrelay_domain::{
     EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId, PlayId,
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, TraceContext, WorkspaceId,
     action_class::ActionClass,
-    action_ledger::{Resolution, ResolutionEvidence, resolve_outcome},
+    action_ledger::{ActionState, Resolution, ResolutionEvidence, resolve_outcome},
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
     beacons::{BeaconCampaignSnapshot, BeaconDiscoverySnapshot, BeaconInviteSnapshot},

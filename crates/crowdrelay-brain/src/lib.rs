@@ -85,9 +85,9 @@ pub use efe::{
 };
 pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence};
 pub use experiment::{
-    ExecutionStatus, ExperimentAssignment, ExperimentDesign, ExperimentKind, ExperimentStatus,
-    ExperimentUnitKind, FanProvenanceEvent, InterferencePolicy, ProvenanceEventKind,
-    TreatmentAssignment,
+    CausalEstimand, ExecutionStatus, ExperimentAssignment, ExperimentDesign, ExperimentKind,
+    ExperimentStatus, ExperimentUnitKind, FanProvenanceEvent, InterferencePolicy,
+    ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
 pub use opportunity::{OpportunityAction, OpportunityId};

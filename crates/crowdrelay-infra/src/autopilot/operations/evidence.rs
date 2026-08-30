@@ -147,6 +147,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         actual_reach: Option<i32>,
         treatment: String,
         propensity: f64,
+        execution_status: Option<String>,
         observed_fans: Option<f64>,
         observed_incremental_fans: Option<f64>,
         durable_fans_30d: Option<f64>,
@@ -168,6 +169,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         r#"
         SELECT ge.action_id, ge.opportunity_id, ge.timestamp, ge.audience, ge.recipient_id,
                ge.channel, ge.estimated_reach, ge.actual_reach, ge.treatment, ge.propensity,
+               ea.execution_status,
                ge.observed_fans, ge.observed_incremental_fans, ge.durable_fans_30d,
                ge.converted, ge.converted_fan_id, ge.predicted_fans, ge.predicted_signal_installs,
                ge.context, ge.strategy, ge.evidence_quality,
@@ -196,8 +198,10 @@ pub(in crate::autopilot) async fn load_growth_evidence(
           -- This filter only excludes `unknown` — the dangerous case
           -- where we cannot establish whether the treatment happened.
           -- The treatment/non-treatment distinction (executed vs failed
-          -- vs control) is handled downstream by the causal model's
-          -- arm + evidence_quality logic, not by this filter.
+          -- vs control) is handled downstream by the causal layer's
+          -- CausalEstimand::includes_in_treatment_effect(), not by this
+          -- SQL filter. SQL provides eligible observations; the causal
+          -- layer chooses the estimand.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
           AND ($2::timestamptz IS NULL OR ge.timestamp > $2)
         ORDER BY ge.timestamp ASC
@@ -218,6 +222,12 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 "control" => crowdrelay_brain::TreatmentAssignment::Control,
                 _ => crowdrelay_brain::TreatmentAssignment::Treatment,
             };
+            let execution_status = row.execution_status.as_deref().and_then(|s| {
+                serde_json::from_value::<crowdrelay_brain::ExecutionStatus>(
+                    serde_json::Value::String(s.to_owned()),
+                )
+                .ok()
+            });
             GrowthEvidence {
                 workspace_id: workspace_id.into_uuid(),
                 opportunity_id: row.opportunity_id,
@@ -230,6 +240,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 actual_reach: row.actual_reach.map(|v| v.max(0) as u32),
                 treatment,
                 propensity: row.propensity,
+                execution_status,
                 observed_fans: row.observed_fans,
                 observed_incremental_fans: row.observed_incremental_fans,
                 durable_fans_30d: row.durable_fans_30d,
