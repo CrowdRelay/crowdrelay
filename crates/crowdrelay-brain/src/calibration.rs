@@ -391,6 +391,165 @@ impl CalibrationTracker {
     }
 }
 
+/// Regime-isolated calibration — separate `CalibrationTracker` per
+/// estimation regime.
+///
+/// CALIBRATION REGIME ISOLATION — different estimators have different
+/// error-generating processes. A badly calibrated observational predictor
+/// must NOT distort uncertainty for the randomized treatment estimator.
+/// This struct ensures that Y30Direct, Y14Bridged, and OutcomeModel
+/// calibration corrections are fully isolated.
+///
+/// The `EstimationRegime` is determined by the caller (the causal model
+/// knows which regime it's using for each prediction). Each regime has
+/// its own accumulator, slope, and intercept — they never bleed into
+/// each other.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CalibrationByRegime {
+    /// Y30 direct treatment-effect posterior — directly observed durable
+    /// fans. Highest trust. No bridge uncertainty.
+    pub y30_direct: CalibrationTracker,
+    /// Y14 treatment effect + Y14→Y30 bridge model. The bridge inflates
+    /// variance when uncalibrated. Medium trust.
+    pub y14_bridged: CalibrationTracker,
+    /// Outcome model only — no treatment-effect evidence. Observational.
+    /// Lowest causal confidence.
+    pub outcome_model: CalibrationTracker,
+}
+
+impl CalibrationByRegime {
+    /// Creates a new, empty regime-isolated calibration tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a prediction-observation pair for the specified regime.
+    /// Routes to the correct regime-specific tracker.
+    ///
+    /// The `evidence_quality` parameter should come from the actual
+    /// measurement-determined quality (e.g. `ev.evidence_quality.as_str()`),
+    /// NOT synthesized from the regime. This ensures that a Y30 measurement
+    /// that fell back to workspace DiD is correctly recorded as
+    /// `matched_quasi_experiment`, not `randomized_holdout`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_by_regime(
+        &mut self,
+        regime: crate::decision_value::EstimationRegime,
+        template_id: &str,
+        predicted: f64,
+        predicted_std: f64,
+        observed: f64,
+        target: Option<&str>,
+        channel: Option<&str>,
+        evidence_quality: &str,
+    ) {
+        match regime {
+            crate::decision_value::EstimationRegime::Y30Direct => {
+                self.y30_direct.record_with_context(
+                    template_id,
+                    predicted,
+                    predicted_std,
+                    observed,
+                    target,
+                    channel,
+                    Some("y30_direct"),
+                    Some(evidence_quality),
+                );
+            }
+            crate::decision_value::EstimationRegime::Y14Bridged => {
+                self.y14_bridged.record_with_context(
+                    template_id,
+                    predicted,
+                    predicted_std,
+                    observed,
+                    target,
+                    channel,
+                    Some("y14_bridged"),
+                    Some(evidence_quality),
+                );
+            }
+            crate::decision_value::EstimationRegime::OutcomeModel => {
+                self.outcome_model.record_with_context(
+                    template_id,
+                    predicted,
+                    predicted_std,
+                    observed,
+                    target,
+                    channel,
+                    Some("outcome_model"),
+                    Some(evidence_quality),
+                );
+            }
+        }
+    }
+
+    /// Corrects a prediction using the regime-specific calibration.
+    /// Uses the slope and intercept from the correct regime tracker.
+    #[must_use]
+    pub fn correct_prediction_by_regime(
+        &self,
+        regime: crate::decision_value::EstimationRegime,
+        predicted: f64,
+    ) -> f64 {
+        match regime {
+            crate::decision_value::EstimationRegime::Y30Direct => {
+                self.y30_direct.correct_prediction(predicted)
+            }
+            crate::decision_value::EstimationRegime::Y14Bridged => {
+                self.y14_bridged.correct_prediction(predicted)
+            }
+            crate::decision_value::EstimationRegime::OutcomeModel => {
+                self.outcome_model.correct_prediction(predicted)
+            }
+        }
+    }
+
+    /// Corrects prediction uncertainty using the regime-specific
+    /// calibration slope. This is the key method for regime isolation:
+    /// a bad OutcomeModel calibration slope must NOT inflate Y30Direct
+    /// uncertainty.
+    #[must_use]
+    pub fn correct_uncertainty_by_regime(
+        &self,
+        regime: crate::decision_value::EstimationRegime,
+        predicted_std: f64,
+    ) -> f64 {
+        match regime {
+            crate::decision_value::EstimationRegime::Y30Direct => {
+                self.y30_direct.correct_uncertainty(predicted_std)
+            }
+            crate::decision_value::EstimationRegime::Y14Bridged => {
+                self.y14_bridged.correct_uncertainty(predicted_std)
+            }
+            crate::decision_value::EstimationRegime::OutcomeModel => {
+                self.outcome_model.correct_uncertainty(predicted_std)
+            }
+        }
+    }
+
+    /// Returns the calibration bias for a specific template from the
+    /// regime-specific tracker.
+    #[must_use]
+    pub fn bias_for_template_by_regime(
+        &self,
+        regime: crate::decision_value::EstimationRegime,
+        template_id: &str,
+    ) -> f64 {
+        match regime {
+            crate::decision_value::EstimationRegime::Y30Direct => {
+                self.y30_direct.bias_for_template(template_id)
+            }
+            crate::decision_value::EstimationRegime::Y14Bridged => {
+                self.y14_bridged.bias_for_template(template_id)
+            }
+            crate::decision_value::EstimationRegime::OutcomeModel => {
+                self.outcome_model.bias_for_template(template_id)
+            }
+        }
+    }
+}
+
 /// Ordinary Least Squares regression: observed = slope * predicted + intercept.
 ///
 /// Returns `(slope, intercept)`. If the variance of predictions is zero

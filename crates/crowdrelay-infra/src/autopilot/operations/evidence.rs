@@ -76,7 +76,7 @@ pub(in crate::autopilot) async fn record_growth_evidence(
     // Also write an immutable evidence event for the dispatch.
     let event = crowdrelay_brain::EvidenceEvent {
         workspace_id: workspace_id.into_uuid(),
-        action_id: Some(evidence.action_id),
+        action_id: evidence.action_id,
         opportunity_id: evidence.opportunity_id.clone(),
         episode_id: evidence.episode_id.clone(),
         event_type: crowdrelay_brain::EvidenceEventType::ActionDispatched,
@@ -117,7 +117,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
     /// Evidence row from the database.
     #[derive(sqlx::FromRow)]
     struct EvidenceRow {
-        action_id: uuid::Uuid,
+        action_id: Option<uuid::Uuid>,
         opportunity_id: Option<String>,
         timestamp: OffsetDateTime,
         audience: Option<String>,
@@ -469,6 +469,7 @@ pub(in crate::autopilot) async fn discover_competing_actions(
             opportunity_id
         FROM viryaos_growth_evidence
         WHERE workspace_id = $1
+          AND action_id IS NOT NULL
           AND action_id != $2
           AND timestamp >= $3 - INTERVAL '14 days'
           AND timestamp <= $4

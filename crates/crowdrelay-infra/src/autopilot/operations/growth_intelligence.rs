@@ -618,14 +618,20 @@ pub(in crate::autopilot) async fn load_causal_model(
 }
 
 /// Applies a batch of growth evidence to the causal model, updating the
-/// outcome model, context effects, Y14 calibration, the Y14/Y30
-/// treatment-effect posteriors, the Y30 calibration tracker, and the
-/// Y14→Y30 bridge.
+/// outcome model, context effects, regime-isolated calibration, the
+/// Y14/Y30 treatment-effect posteriors, and the Y14→Y30 bridge.
+///
+/// CALIBRATION REGIME ISOLATION: Y14 treatment-effect observations are
+/// recorded to the Y14Bridged regime tracker, Y30 treatment-effect
+/// observations to the Y30Direct regime tracker, and outcome model
+/// observations to the OutcomeModel regime tracker. This ensures that
+/// a badly calibrated observational predictor cannot distort uncertainty
+/// for the randomized treatment estimator.
 fn apply_evidence_to_model(
     model: &mut crowdrelay_brain::CausalModel,
     evidence: &[crowdrelay_brain::GrowthEvidence],
 ) {
-    use crowdrelay_brain::{DispatchPrediction, PredictionOutcome};
+    use crowdrelay_brain::{DispatchPrediction, EstimationRegime, PredictionOutcome};
 
     for ev in evidence {
         let template = extract_template_from_opportunity(&ev.opportunity_id);
@@ -637,16 +643,25 @@ fn apply_evidence_to_model(
         // weak pre/post evidence from dominating strong causal evidence.
         let quality_multiplier = ev.evidence_quality.variance_multiplier();
 
-        // Update the outcome model from the Y14 (incremental) outcome.
-        // Y14 is the early leading signal — available 14 days after dispatch.
-        if let Some(y14_fans) = ev.y14_outcome() {
+        // Update the outcome model (P(Y|action,context)) from the raw
+        // observed fan count — NOT the DiD estimate. The outcome model
+        // learns the expected raw fan count given an action and context.
+        // The treatment-effect posterior (updated below) learns from the
+        // counterfactual-adjusted DiD estimate. These are separate learning
+        // targets and must not be conflated.
+        //
+        // We use `observed_fans` (raw count) when available. If only the
+        // incremental estimate is available (legacy evidence rows), we
+        // skip the outcome model update rather than feeding it a DiD
+        // estimate that would be clamped to 0 on negative values.
+        if let Some(raw_fans) = ev.observed_fans {
             let prediction = DispatchPrediction {
                 template_id: template.clone(),
                 expected_new_fans: ev.predicted_fans,
                 expected_signal_installs: ev.predicted_signal_installs,
                 context: ev.context.clone(),
             };
-            let outcome = PredictionOutcome::from_observation(prediction, y14_fans, 0.0);
+            let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
             model.update(&outcome);
         }
 
@@ -655,22 +670,48 @@ fn apply_evidence_to_model(
         // counterfactual-adjusted τ estimate (already IPW-corrected if
         // propensity is available). The observation variance is scaled by
         // the evidence quality — weak evidence barely moves the posterior.
+        //
+        // Y14 treatment-effect calibration is recorded to the Y14Bridged
+        // regime tracker — separate from Y30Direct and OutcomeModel.
         if let Some(tau_y14) = ev.observed_incremental_fans {
             let obs_var = 2.0 * tau_y14.abs().max(1.0) * quality_multiplier;
             model.update_treatment_effect(&template, subreddit_type, tau_y14, obs_var);
+            // Record Y14Bridged calibration with the actual measurement-
+            // determined evidence quality, not a synthesized one.
+            model.calibration.record_by_regime(
+                EstimationRegime::Y14Bridged,
+                &template,
+                ev.predicted_fans,
+                2.0,
+                tau_y14,
+                subreddit_type,
+                None,
+                ev.evidence_quality.as_str(),
+            );
         }
 
         // When Y30 (durable) is available, update the Y30 treatment-effect
-        // posterior, the Y30 calibration tracker, and the Y14→Y30 bridge.
+        // posterior, the Y30Direct calibration tracker, and the Y14→Y30
+        // bridge.
         if let Some(y30_fans) = ev.y30_outcome() {
             // Y30 treatment-effect update (North Star). Scaled by evidence
             // quality — same rationale as Y14.
             let obs_var = 2.0 * y30_fans.abs().max(1.0) * quality_multiplier;
             model.update_treatment_effect_y30(&template, subreddit_type, y30_fans, obs_var);
-            // Y30 calibration.
-            model
-                .calibration_y30
-                .record(&template, ev.predicted_fans, 2.0, y30_fans);
+            // Y30Direct calibration — isolated from Y14Bridged and
+            // OutcomeModel. A bad OutcomeModel calibration cannot distort
+            // Y30Direct uncertainty. Uses the actual measurement-determined
+            // evidence quality.
+            model.calibration.record_by_regime(
+                EstimationRegime::Y30Direct,
+                &template,
+                ev.predicted_fans,
+                2.0,
+                y30_fans,
+                subreddit_type,
+                None,
+                ev.evidence_quality.as_str(),
+            );
             // Y14→Y30 bridge: update when both outcomes are available.
             if let Some(y14_fans) = ev.y14_outcome() {
                 model.update_bridge(y14_fans, y30_fans);
@@ -859,7 +900,11 @@ async fn full_replay(
             expected_signal_installs: expected_signal,
             context,
         };
-        let outcome_fans = observed_incremental_fans.or(observed_fans).unwrap_or(0.0);
+        // The outcome model learns P(Y|action,context) from raw observed
+        // fan counts, not from DiD estimates. Prefer observed_fans (raw)
+        // and fall back to observed_incremental_fans only for legacy rows
+        // that don't have the raw count populated.
+        let outcome_fans = observed_fans.or(observed_incremental_fans).unwrap_or(0.0);
         let outcome = PredictionOutcome::from_observation(
             prediction,
             outcome_fans,
@@ -951,7 +996,7 @@ pub(in crate::autopilot) async fn record_dispatch_prediction(
     };
     let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
         workspace_id.into_uuid(),
-        action_id,
+        Some(action_id),
         Some(opportunity_id.to_string()),
         recipient_id,
         channel,

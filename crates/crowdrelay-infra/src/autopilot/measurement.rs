@@ -351,40 +351,96 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // differences (DiD) estimate. New fans in the 14-day post-
                 // action window minus the counterfactual (pre-action daily
                 // rate from a matched 14-day window × 14, stored as
-                // baseline_value). This is a quasi-experimental estimate,
-                // not a randomized experiment — the evidence quality is
-                // `MatchedQuasiExperiment`.
+                // baseline_value).
                 //
-                // KNOWN LIMITATION: fans are workspace-level entities (no
-                // community_id on the fans table), so this counts ALL new
-                // fans in the workspace, not just fans attributable to the
-                // target community. When multiple community experiments
-                // run concurrently, they share the same workspace-level
-                // fan count, creating interference. The contamination
-                // estimator and InterferencePolicy detect this and
-                // downgrade evidence quality accordingly. A future schema
-                // change (fan_origins table) could enable per-community
-                // fan counting, but that is beyond the current sprint.
+                // COMMUNITY-LEVEL MEASUREMENT via fan_provenance_events:
+                // When the experiment assignment's unit_kind is
+                // TargetCommunity, we count DISTINCT fans from provenance
+                // events attributed to that community (event_kind =
+                // 'conversion', fan_id IS NOT NULL). This gives a
+                // community-level outcome that matches the experimental
+                // unit — the core requirement for valid causal inference.
+                //
+                // PROVENANCE ≠ CAUSALITY. Community-attributed conversion
+                // is an outcome signal. The incremental causal effect
+                // still requires treatment/control comparison via the
+                // experiment design. When provenance is missing or
+                // insufficient, we fall back to workspace-level DiD and
+                // downgrade evidence quality to MatchedQuasiExperiment.
                 //
                 // Allows negative values — the brain must be able to learn
                 // that an action *harmed* fan growth (e.g. a community post
                 // that alienated the audience). The treatment-effect
                 // posterior supports negative τ via `update_signed`.
                 AutopilotMeasurementKind::IncrementalFanGrowth14d => {
-                    let observed = sqlx::query_scalar::<_, f64>(
+                    // Look up the experiment assignment for this action
+                    // to get unit_id and unit_kind.
+                    let exp_info: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
                         r#"
-                        SELECT COUNT(*)::double precision FROM fans
+                        SELECT unit_id, unit_kind
+                        FROM viryaos_experiment_assignments
                         WHERE workspace_id = $1
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '14 days'
-                          AND status != 'suppressed'
+                          AND action_id = $2
+                          AND experiment_uuid IS NOT NULL
+                        LIMIT 1
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(&self.pool)
+                    .bind(measurement.action_id.into_uuid())
+                    .fetch_optional(&self.pool)
                     .await
                     .map_err(map_sqlx)?;
+                    // If this is a TargetCommunity experiment, try
+                    // community-level provenance measurement first.
+                    let mut community_outcome: Option<f64> = None;
+                    if let Some((unit_id, unit_kind)) = &exp_info
+                        && unit_kind == "target_community"
+                    {
+                        let community_fans: Option<f64> = sqlx::query_scalar::<_, Option<f64>>(
+                            r#"
+                            SELECT COUNT(DISTINCT fan_id)::double precision
+                            FROM fan_provenance_events
+                            WHERE workspace_id = $1
+                              AND community = $2
+                              AND event_kind = 'conversion'
+                              AND fan_id IS NOT NULL
+                              AND occurred_at >= $3
+                              AND occurred_at < $3 + INTERVAL '14 days'
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(unit_id)
+                        .bind(measurement.action_finished_at)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(map_sqlx)?;
+                        // Accept 0.0 as a real community outcome — a
+                        // community that produced zero conversions is
+                        // valid data, not missing data.
+                        if let Some(count) = community_fans {
+                            community_outcome = Some(count);
+                        }
+                    }
+                    // Use community-level outcome if available; otherwise
+                    // fall back to workspace-level DiD.
+                    let observed = if let Some(community_count) = community_outcome {
+                        community_count
+                    } else {
+                        sqlx::query_scalar::<_, f64>(
+                            r#"
+                            SELECT COUNT(*)::double precision FROM fans
+                            WHERE workspace_id = $1
+                              AND created_at >= $2
+                              AND created_at < $2 + INTERVAL '14 days'
+                              AND status != 'suppressed'
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(measurement.action_finished_at)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(map_sqlx)?
+                    };
                     // The baseline_value stores the pre-action daily fan
                     // arrival rate from a matched 14-day window.
                     // Counterfactual = rate × 14 days = pre-period count.
@@ -447,6 +503,13 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // creation. This is the true North Star — fans that stick,
                 // not just fans that sign up.
                 //
+                // COMMUNITY-LEVEL MEASUREMENT via fan_provenance_events:
+                // When the experiment assignment's unit_kind is
+                // TargetCommunity, we count DISTINCT fans from provenance
+                // events with event_kind = 'durability' attributed to that
+                // community. This gives a community-level durable outcome
+                // that matches the experimental unit.
+                //
                 // The measurement is incremental: it subtracts the
                 // counterfactual (baseline daily rate × 14) so Y30 is a
                 // causal incremental outcome, not a raw count. Allows
@@ -458,21 +521,73 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // the query never actually verified the fan was still
                 // active — it only checked not-suppressed twice.
                 AutopilotMeasurementKind::DurableFanGrowth30d => {
-                    let observed = sqlx::query_scalar::<_, f64>(
+                    // Look up the experiment assignment for this action
+                    // to get unit_id and unit_kind.
+                    let exp_info: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
                         r#"
-                        SELECT COUNT(*)::double precision FROM fans
+                        SELECT unit_id, unit_kind
+                        FROM viryaos_experiment_assignments
                         WHERE workspace_id = $1
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '14 days'
-                          AND created_at + INTERVAL '30 days' <= now()
-                          AND status = 'active'
+                          AND action_id = $2
+                          AND experiment_uuid IS NOT NULL
+                        LIMIT 1
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(&self.pool)
+                    .bind(measurement.action_id.into_uuid())
+                    .fetch_optional(&self.pool)
                     .await
                     .map_err(map_sqlx)?;
+                    // If this is a TargetCommunity experiment, try
+                    // community-level provenance measurement first.
+                    let mut community_outcome: Option<f64> = None;
+                    if let Some((unit_id, unit_kind)) = &exp_info
+                        && unit_kind == "target_community"
+                    {
+                        let community_durable: Option<f64> =
+                            sqlx::query_scalar::<_, Option<f64>>(
+                                r#"
+                                SELECT COUNT(DISTINCT fan_id)::double precision
+                                FROM fan_provenance_events
+                                WHERE workspace_id = $1
+                                  AND community = $2
+                                  AND event_kind = 'durability'
+                                  AND fan_id IS NOT NULL
+                                  AND occurred_at >= $3 + INTERVAL '30 days'
+                                  AND occurred_at < $3 + INTERVAL '44 days'
+                                "#,
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(unit_id)
+                            .bind(measurement.action_finished_at)
+                            .fetch_one(&self.pool)
+                            .await
+                            .map_err(map_sqlx)?;
+                        if let Some(count) = community_durable {
+                            community_outcome = Some(count);
+                        }
+                    }
+                    // Use community-level outcome if available; otherwise
+                    // fall back to workspace-level DiD.
+                    let observed = if let Some(community_count) = community_outcome {
+                        community_count
+                    } else {
+                        sqlx::query_scalar::<_, f64>(
+                            r#"
+                            SELECT COUNT(*)::double precision FROM fans
+                            WHERE workspace_id = $1
+                              AND created_at >= $2
+                              AND created_at < $2 + INTERVAL '14 days'
+                              AND created_at + INTERVAL '30 days' <= now()
+                              AND status = 'active'
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(measurement.action_finished_at)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(map_sqlx)?
+                    };
                     // Counterfactual: pre-action daily rate × 14 days.
                     let counterfactual = measurement.baseline_value * 14.0;
                     observed - counterfactual
@@ -669,15 +784,69 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    // Also update the growth evidence table. Set the
-                    // evidence quality to `matched_quasi_experiment` —
-                    // the DiD counterfactual uses a matched 14-day pre-
-                    // period, which is a quasi-experimental method.
+                    // Determine evidence quality from the experiment
+                    // assignment. When the experiment is a randomized
+                    // holdout with community-level provenance measurement,
+                    // the evidence quality is `randomized_holdout`. When
+                    // falling back to workspace-level DiD (no provenance
+                    // available, or unit is workspace-level), the evidence
+                    // quality is downgraded to `matched_quasi_experiment`.
+                    let exp_info: Option<(String, String, String)> =
+                        sqlx::query_as::<_, (String, String, String)>(
+                            r#"
+                            SELECT experiment_kind, unit_id, unit_kind
+                            FROM viryaos_experiment_assignments
+                            WHERE workspace_id = $1
+                              AND action_id = $2
+                              AND experiment_uuid IS NOT NULL
+                            LIMIT 1
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(measurement.action_id.into_uuid())
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                    let evidence_quality = match &exp_info {
+                        Some((kind, unit_id, unit_kind))
+                            if kind == "randomized_holdout"
+                                && unit_kind == "target_community" =>
+                        {
+                            // Check if community-level provenance events
+                            // actually exist for this unit. If not, we
+                            // fell back to workspace DiD and must downgrade.
+                            let has_provenance: bool = sqlx::query_scalar::<_, i64>(
+                                r#"
+                                SELECT COUNT(*)::bigint
+                                FROM fan_provenance_events
+                                WHERE workspace_id = $1
+                                  AND community = $2
+                                  AND event_kind = 'conversion'
+                                  AND fan_id IS NOT NULL
+                                  AND occurred_at >= $3
+                                  AND occurred_at < $3 + INTERVAL '14 days'
+                                "#,
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(unit_id)
+                            .bind(measurement.action_finished_at)
+                            .fetch_one(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?
+                            > 0;
+                            if has_provenance {
+                                "randomized_holdout"
+                            } else {
+                                "matched_quasi_experiment"
+                            }
+                        }
+                        _ => "matched_quasi_experiment",
+                    };
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
                         SET observed_incremental_fans = $3,
-                            evidence_quality = 'matched_quasi_experiment',
+                            evidence_quality = $5,
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -688,6 +857,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
                     .bind(now)
+                    .bind(evidence_quality)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
@@ -746,12 +916,64 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    // Also update the growth evidence table.
+                    // Determine evidence quality from the experiment
+                    // assignment (same logic as IncrementalFanGrowth14d).
+                    // Downgrade to matched_quasi_experiment when community
+                    // provenance is not available, even if the assignment
+                    // was classified as randomized_holdout.
+                    let exp_info: Option<(String, String, String)> =
+                        sqlx::query_as::<_, (String, String, String)>(
+                            r#"
+                            SELECT experiment_kind, unit_id, unit_kind
+                            FROM viryaos_experiment_assignments
+                            WHERE workspace_id = $1
+                              AND action_id = $2
+                              AND experiment_uuid IS NOT NULL
+                            LIMIT 1
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(measurement.action_id.into_uuid())
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                    let evidence_quality = match &exp_info {
+                        Some((kind, unit_id, unit_kind))
+                            if kind == "randomized_holdout"
+                                && unit_kind == "target_community" =>
+                        {
+                            let has_provenance: bool = sqlx::query_scalar::<_, i64>(
+                                r#"
+                                SELECT COUNT(*)::bigint
+                                FROM fan_provenance_events
+                                WHERE workspace_id = $1
+                                  AND community = $2
+                                  AND event_kind = 'durability'
+                                  AND fan_id IS NOT NULL
+                                  AND occurred_at >= $3 + INTERVAL '30 days'
+                                  AND occurred_at < $3 + INTERVAL '44 days'
+                                "#,
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(unit_id)
+                            .bind(measurement.action_finished_at)
+                            .fetch_one(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?
+                            > 0;
+                            if has_provenance {
+                                "randomized_holdout"
+                            } else {
+                                "matched_quasi_experiment"
+                            }
+                        }
+                        _ => "matched_quasi_experiment",
+                    };
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
                         SET durable_fans_30d = $3,
-                            evidence_quality = 'matched_quasi_experiment',
+                            evidence_quality = $5,
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
@@ -762,6 +984,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
                     .bind(now)
+                    .bind(evidence_quality)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;

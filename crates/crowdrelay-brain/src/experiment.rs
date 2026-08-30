@@ -175,19 +175,24 @@ impl InterferencePolicy {
     /// Determines the interference policy from the unit kind and
     /// intervention type (template_id).
     ///
-    /// The template_id encodes the intervention type:
-    /// - `community.engage` → community-level engagement, potentially isolatable
-    /// - `social.post` → social media post, may spill across communities
-    /// - `global.*` or `release.*` → affects all communities, not isolatable
+    /// The template_id encodes the intervention type. Both dot-style
+    /// (`community.engage`) and kebab-style (`community-engager`) are
+    /// accepted:
+    /// - `community.*` / `community-*` → community-level, potentially isolatable
+    /// - `social.*` / `social-*` → social media, may spill across communities
+    /// - `global.*` / `global-*` or `release.*` / `release-*` → all communities, not isolatable
     /// - Scanner/strategist templates → not isolatable (workspace-wide)
     #[must_use]
     pub fn from_unit_and_template(unit_kind: ExperimentUnitKind, template_id: &str) -> Self {
         match unit_kind {
             ExperimentUnitKind::Workspace => Self::NotIsolatable,
             ExperimentUnitKind::TargetCommunity => {
-                if template_id.starts_with("community.") {
+                if template_id.starts_with("community.") || template_id.starts_with("community-") {
                     Self::PotentiallyIsolatable
-                } else if template_id.starts_with("global.") || template_id.starts_with("release.")
+                } else if template_id.starts_with("global.")
+                    || template_id.starts_with("release.")
+                    || template_id.starts_with("global-")
+                    || template_id.starts_with("release-")
                 {
                     Self::NotIsolatable
                 } else {
@@ -328,6 +333,162 @@ impl ExperimentAssignment {
             ExperimentKind::MatchedQuasiExperiment
         }
     }
+
+    /// Constructs an `ExperimentAssignment` from an `ExperimentDesign` for a
+    /// specific unit and arm. This is the canonical way to create assignments
+    /// — the design defines the experiment universe, and each unit gets one
+    /// assignment within that universe.
+    ///
+    /// The `candidate_id` is the decision key of the candidate that triggered
+    /// this unit's inclusion. The `prediction` is the brain's prediction at
+    /// assignment time. The `action_id` is `Some` for treatment arms (the
+    /// dispatched action) and `None` for control arms.
+    #[must_use]
+    pub fn from_design(
+        design: &ExperimentDesign,
+        unit_id: &str,
+        candidate_id: &str,
+        arm: TreatmentAssignment,
+        prediction: &crate::causal_model::DispatchPrediction,
+        action_id: Option<uuid::Uuid>,
+    ) -> Self {
+        let assignment_uuid = uuid::Uuid::now_v7();
+        Self {
+            assignment_id: format!("asgn:{assignment_uuid}"),
+            experiment_uuid: design.experiment_uuid,
+            assignment_round: design.assignment_round,
+            candidate_id: candidate_id.to_owned(),
+            unit_id: unit_id.to_owned(),
+            unit_kind: design.unit_kind,
+            arm,
+            assigned_at: design.assigned_at,
+            propensity: 1.0 - design.holdout_probability,
+            intended_template_id: design.intervention_key.clone(),
+            context: prediction.context.clone(),
+            prediction: prediction.clone(),
+            action_id,
+            contamination_estimate: 0.0,
+            interference_policy: design.interference_policy,
+            is_interference_controllable: design.interference_policy.is_interference_controllable(),
+            eligibility_criteria: design.eligibility_criteria.clone(),
+            selection_context: design.selection_context.clone(),
+        }
+    }
+}
+
+/// A first-class experiment design — defines the experiment universe BEFORE
+/// any arms are assigned.
+///
+/// EXPERIMENT DESIGN ≠ CANDIDATE DISPATCH. The design is created FIRST, then
+/// units are assigned to treatment/control arms within that design. This
+/// ensures that treatment and control are genuinely arms of the same
+/// experiment, not separate experiments that happen to share a label.
+///
+/// # Identity
+///
+/// One `ExperimentDesign` per (cycle, intervention). All eligible units for
+/// that intervention in that cycle share the same `experiment_uuid`. The
+/// `assignment_round` is 1 for each new experiment (each cycle is a new
+/// experiment — we do NOT create one perpetual experiment per intervention,
+/// because that would conflate different contexts, strategies, audiences,
+/// and model versions).
+///
+/// # Cross-experiment learning
+///
+/// Experiments are isolated for causal integrity. Cross-experiment learning
+/// happens via the hierarchical learner (calibration, treatment-effect
+/// posteriors), not via shared experiment identity. The learner pools
+/// evidence across experiments; the experiments themselves remain separate.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExperimentDesign {
+    /// The experiment UUID — shared by all assignments in this experiment.
+    /// Fresh per (cycle, intervention). All eligible units share it.
+    pub experiment_uuid: uuid::Uuid,
+    /// The assignment round — always 1 for a new experiment. Each cycle
+    /// creates a new experiment, so rounds do not increment across cycles.
+    pub assignment_round: u32,
+    /// The intervention key (template_id). Different interventions in the
+    /// same cycle are different experiments. Long-term this may become a
+    /// richer `InterventionDefinition` so treatment-version changes create
+    /// distinct experiments.
+    pub intervention_key: String,
+    /// The kind of experimental unit being randomized.
+    pub unit_kind: ExperimentUnitKind,
+    /// The eligible unit population — all units that could be assigned.
+    /// Each unit gets exactly one assignment (treatment or control).
+    pub eligible_units: Vec<String>,
+    /// The estimand — what this experiment is estimating. Records the
+    /// intervention, strategy, and selection context so the estimand is
+    /// explicit: "effect among eligible/selected candidates under this
+    /// strategy/context", not "effect among all opportunities."
+    pub estimand: serde_json::Value,
+    /// The interference policy — determines isolatability for this
+    /// intervention type. Derived from unit kind + intervention key.
+    pub interference_policy: InterferencePolicy,
+    /// When the experiment was designed (cycle time).
+    pub assigned_at: OffsetDateTime,
+    /// The holdout probability — P(assigned to control). Clamped to
+    /// [0.0, 0.10]. 0.0 = no holdout (all treatment). The propensity
+    /// for each assignment is `1.0 - holdout_probability`.
+    pub holdout_probability: f64,
+    /// What made these candidates eligible for the experiment. Shared
+    /// by all assignments in this experiment. Records: portfolio selected,
+    /// direct action, not scanner/strategist, etc.
+    pub eligibility_criteria: serde_json::Value,
+    /// The portfolio state at experiment design time — how many candidates,
+    /// what was the best alternative, etc. Makes the selection-biased
+    /// estimand explicit for future policy evaluation.
+    pub selection_context: serde_json::Value,
+}
+
+impl ExperimentDesign {
+    /// Creates a new experiment design for a given intervention in a cycle.
+    ///
+    /// The `experiment_uuid` is fresh (caller generates it). The
+    /// `assignment_round` is 1 (each cycle is a new experiment). The
+    /// `interference_policy` is derived from the unit kind and intervention
+    /// key.
+    #[must_use]
+    pub fn new(
+        experiment_uuid: uuid::Uuid,
+        intervention_key: &str,
+        unit_kind: ExperimentUnitKind,
+        eligible_units: Vec<String>,
+        assigned_at: OffsetDateTime,
+        holdout_probability: f64,
+        strategy: &str,
+    ) -> Self {
+        let interference_policy =
+            InterferencePolicy::from_unit_and_template(unit_kind, intervention_key);
+        let estimand = serde_json::json!({
+            "intervention": intervention_key,
+            "strategy": strategy,
+            "unit_kind": unit_kind.as_str(),
+            "population_size": eligible_units.len(),
+        });
+        let eligibility_criteria = serde_json::json!({
+            "is_direct_action": true,
+            "template_id": intervention_key,
+            "portfolio_selected": true,
+        });
+        let selection_context = serde_json::json!({
+            "holdout_probability": holdout_probability,
+            "strategy": strategy,
+        });
+        Self {
+            experiment_uuid,
+            assignment_round: 1,
+            intervention_key: intervention_key.to_owned(),
+            unit_kind,
+            eligible_units,
+            estimand,
+            interference_policy,
+            assigned_at,
+            holdout_probability,
+            eligibility_criteria,
+            selection_context,
+        }
+    }
 }
 
 /// A fan provenance event — an append-only record of a fan's exposure,
@@ -464,5 +625,115 @@ mod tests {
         ] {
             assert_eq!(InterferencePolicy::parse(policy.as_str()), Some(policy));
         }
+    }
+
+    // ── ExperimentDesign tests ──
+
+    fn make_prediction(template: &str) -> crate::causal_model::DispatchPrediction {
+        crate::causal_model::DispatchPrediction {
+            template_id: template.to_owned(),
+            expected_new_fans: 5.0,
+            expected_signal_installs: 1.0,
+            context: crate::causal_model::DispatchContext::default(),
+        }
+    }
+
+    #[test]
+    fn experiment_design_creates_with_correct_identity() {
+        let uuid = uuid::Uuid::now_v7();
+        let design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned(), "r/metalcore".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.05,
+            "discovery",
+        );
+        assert_eq!(design.experiment_uuid, uuid);
+        assert_eq!(design.assignment_round, 1);
+        assert_eq!(design.intervention_key, "community.engage");
+        assert_eq!(design.eligible_units.len(), 2);
+        assert_eq!(
+            design.interference_policy,
+            InterferencePolicy::PotentiallyIsolatable
+        );
+        assert!((design.holdout_probability - 0.05).abs() < 1e-10);
+    }
+
+    #[test]
+    fn from_design_shares_experiment_uuid_across_arms() {
+        let uuid = uuid::Uuid::now_v7();
+        let design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned(), "r/metalcore".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.05,
+            "discovery",
+        );
+        let pred = make_prediction("community.engage");
+        let treatment = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            Some(uuid::Uuid::now_v7()),
+        );
+        let control = ExperimentAssignment::from_design(
+            &design,
+            "r/metalcore",
+            "r/metalcore",
+            TreatmentAssignment::Control,
+            &pred,
+            None,
+        );
+        // Both assignments share the same experiment_uuid and round.
+        assert_eq!(treatment.experiment_uuid, control.experiment_uuid);
+        assert_eq!(treatment.experiment_uuid, uuid);
+        assert_eq!(treatment.assignment_round, control.assignment_round);
+        assert_eq!(treatment.assignment_round, 1);
+        // Different units, different arms.
+        assert_ne!(treatment.unit_id, control.unit_id);
+        assert_ne!(treatment.arm, control.arm);
+        // Same interference policy (derived from the same intervention).
+        assert_eq!(treatment.interference_policy, control.interference_policy);
+        // Propensity is the same (1 - holdout_probability).
+        assert!((treatment.propensity - control.propensity).abs() < 1e-10);
+        assert!((treatment.propensity - 0.95).abs() < 1e-10);
+    }
+
+    #[test]
+    fn from_design_assignment_ids_are_unique() {
+        let uuid = uuid::Uuid::now_v7();
+        let design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.05,
+            "discovery",
+        );
+        let pred = make_prediction("community.engage");
+        let a1 = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        let a2 = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        assert_ne!(a1.assignment_id, a2.assignment_id);
     }
 }

@@ -65,7 +65,9 @@ pub use bayesian::{
     HierarchicalNegBinPosterior, HierarchicalPosterior, NegBinPosterior, NormalPosterior,
     TreatmentEffectPosterior, normal_cdf, normal_pdf,
 };
-pub use calibration::{CalibrationReport, CalibrationTracker, PredictionRecord, ReliabilityBucket};
+pub use calibration::{
+    CalibrationByRegime, CalibrationReport, CalibrationTracker, PredictionRecord, ReliabilityBucket,
+};
 pub use causal_model::{
     CausalModel, DEFAULT_EXPECTED_FANS, DEFAULT_EXPECTED_SIGNAL, DispatchContext,
     DispatchPrediction, MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE, PredictionOutcome,
@@ -82,7 +84,7 @@ pub use efe::{
 };
 pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence};
 pub use experiment::{
-    ExperimentAssignment, ExperimentKind, ExperimentUnitKind, FanProvenanceEvent,
+    ExperimentAssignment, ExperimentDesign, ExperimentKind, ExperimentUnitKind, FanProvenanceEvent,
     InterferencePolicy, ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};

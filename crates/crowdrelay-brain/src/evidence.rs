@@ -188,7 +188,8 @@ pub struct GrowthEvidence {
     /// The stable opportunity ID (template:target:action:context_hash).
     pub opportunity_id: Option<String>,
     /// The autopilot action that triggered this evidence.
-    pub action_id: uuid::Uuid,
+    /// `None` for control-arm evidence rows (no action was dispatched).
+    pub action_id: Option<uuid::Uuid>,
     /// When the evidence was recorded (dispatch time).
     pub timestamp: OffsetDateTime,
 
@@ -260,7 +261,7 @@ impl Default for GrowthEvidence {
         Self {
             workspace_id: uuid::Uuid::nil(),
             opportunity_id: None,
-            action_id: uuid::Uuid::nil(),
+            action_id: Some(uuid::Uuid::nil()),
             timestamp: OffsetDateTime::now_utc(),
             audience: None,
             recipient_id: String::new(),
@@ -295,7 +296,7 @@ impl GrowthEvidence {
     #[must_use]
     pub fn at_dispatch(
         workspace_id: uuid::Uuid,
-        action_id: uuid::Uuid,
+        action_id: Option<uuid::Uuid>,
         opportunity_id: Option<String>,
         recipient_id: String,
         channel: ReachChannel,
@@ -506,7 +507,7 @@ mod tests {
     fn evidence_at_dispatch_has_no_outcome() {
         let evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
-            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
             Some("test:target:scan:ctx".to_owned()),
             "r_MetalMusic".to_owned(),
             ReachChannel::RedditPost,
@@ -529,7 +530,7 @@ mod tests {
     fn evidence_y14_and_y30_are_separate_targets() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
-            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
             None,
             "r_MetalMusic".to_owned(),
             ReachChannel::RedditPost,
@@ -554,7 +555,7 @@ mod tests {
     fn evidence_y14_falls_back_to_raw() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
-            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
             None,
             "r_MetalMusic".to_owned(),
             ReachChannel::RedditPost,
@@ -580,7 +581,7 @@ mod tests {
     fn evidence_prediction_errors_are_separate() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
-            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
             None,
             "r_MetalMusic".to_owned(),
             ReachChannel::RedditPost,
@@ -605,7 +606,7 @@ mod tests {
     fn evidence_serializes_and_deserializes() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
-            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
             Some("test:target:scan:ctx".to_owned()),
             "r_MetalMusic".to_owned(),
             ReachChannel::RedditPost,
@@ -638,7 +639,7 @@ mod tests {
     fn evidence_converted_marks_resolved() {
         let mut evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
-            uuid::Uuid::nil(),
+            Some(uuid::Uuid::nil()),
             None,
             "fan_1".to_owned(),
             ReachChannel::Email,

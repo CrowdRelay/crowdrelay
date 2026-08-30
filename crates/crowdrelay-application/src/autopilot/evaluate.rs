@@ -2,7 +2,9 @@
 
 use uuid::Uuid;
 
-use crowdrelay_brain::{GrowthIntelligencePolicy, GrowthStrategy, context_hash};
+use crowdrelay_brain::{
+    DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
+};
 use crowdrelay_domain::{
     FanId, WorkspaceId,
     action_class::{ActionClass, clamp_disposition},

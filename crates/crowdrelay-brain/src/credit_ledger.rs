@@ -144,10 +144,15 @@ pub trait CreditAllocator: Send + Sync {
 /// where `BOUNDED_PRIOR_WEIGHT = 0.2` — the prior can nudge credit
 /// allocation by at most ~20%, never dominate it.
 ///
-/// Normalize: `credit_weight = w_i / sum(w_j)` only over actions with
-/// `w > 0`. `unattributed = observed_incremental - sum(credited_y14)` —
-/// always preserved. If no actions have `w > 0`, `unattributed =
-/// observed_incremental` (no forced attribution).
+/// GENUINE RESIDUAL: The total attribution mass is bounded by the mean
+/// `attribution_confidence` of the competing actions. When confidence is
+/// low, a genuine residual is preserved — "we don't know" is a valid
+/// outcome, and no forced 100% attribution is applied. Only when all
+/// actions have confidence = 1.0 does the residual collapse to 0.
+///
+/// `total_attribution_mass = mean(attribution_confidence for w > 0).min(1.0)`
+/// `credited_y14 = normalized_weight * total_attribution_mass * observed`
+/// `unattributed = observed - sum(credited_y14)`
 pub struct ProportionalCreditAllocator;
 
 impl CreditAllocator for ProportionalCreditAllocator {
@@ -182,6 +187,27 @@ impl CreditAllocator for ProportionalCreditAllocator {
             };
         }
 
+        // GENUINE RESIDUAL: The total attribution mass is bounded by the
+        // mean attribution_confidence of actions with positive weight.
+        // When confidence is low, a genuine residual is preserved.
+        // This prevents the system from always giving 100% to somebody.
+        let positive_actions: Vec<&ActionExposure> = competing_actions
+            .iter()
+            .zip(weights.iter())
+            .filter(|&(_, &w)| w > 0.0)
+            .map(|(a, _)| a)
+            .collect();
+        let mean_confidence: f64 = if positive_actions.is_empty() {
+            0.0
+        } else {
+            positive_actions
+                .iter()
+                .map(|a| a.attribution_confidence)
+                .sum::<f64>()
+                / positive_actions.len() as f64
+        };
+        let total_attribution_mass = mean_confidence.min(1.0);
+
         let mut credits = Vec::with_capacity(competing_actions.len());
         let mut total_credited_y14 = 0.0_f64;
         for (i, action) in competing_actions.iter().enumerate() {
@@ -190,12 +216,17 @@ impl CreditAllocator for ProportionalCreditAllocator {
                 continue;
             }
             let normalized = weight / total_weight;
-            let credited_y14 = normalized * outcome.observed_incremental_fans;
-            let credited_y30 = outcome.durable_fans_30d.map(|y30| normalized * y30);
+            // Scale by total_attribution_mass to preserve a genuine
+            // residual when confidence is low.
+            let credited_y14 =
+                normalized * total_attribution_mass * outcome.observed_incremental_fans;
+            let credited_y30 = outcome
+                .durable_fans_30d
+                .map(|y30| normalized * total_attribution_mass * y30);
             total_credited_y14 += credited_y14;
             credits.push(CreditEntry {
                 action_id: action.action_id,
-                credit_weight: normalized,
+                credit_weight: normalized * total_attribution_mass,
                 credited_incremental_y14: credited_y14,
                 credited_incremental_y30: credited_y30,
                 attribution_confidence: action.attribution_confidence,
@@ -278,13 +309,56 @@ mod tests {
         let allocator = ProportionalCreditAllocator;
         let outcome = make_outcome(10.0);
         // Single action with 0.5 confidence — gets partial credit.
+        // GENUINE RESIDUAL: total_attribution_mass = 0.5, so only 50%
+        // of the outcome is attributed, and 50% is unattributed.
         let actions = [make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 0.5, 0.0)];
         let result = allocator.allocate(&outcome, &actions);
-        // Single action with w > 0 gets all attributed credit.
+        assert_eq!(result.credits.len(), 1);
+        // 0.5 attribution mass × 10 = 5 fans credited.
+        assert!(
+            (result.credits[0].credited_incremental_y14 - 5.0).abs() < 0.001,
+            "credited = {}",
+            result.credits[0].credited_incremental_y14
+        );
+        // Genuine residual: 10 - 5 = 5 fans unattributed.
+        assert!(
+            (result.unattributed - 5.0).abs() < 0.001,
+            "unattributed = {}",
+            result.unattributed
+        );
+    }
+
+    #[test]
+    fn full_confidence_means_no_residual() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // Single action with confidence=1.0 → 100% attributed, 0 residual.
+        let actions = [make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, 0.0)];
+        let result = allocator.allocate(&outcome, &actions);
         assert_eq!(result.credits.len(), 1);
         assert!((result.credits[0].credited_incremental_y14 - 10.0).abs() < 0.001);
         assert!(
             result.unattributed < 0.001,
+            "unattributed = {}",
+            result.unattributed
+        );
+    }
+
+    #[test]
+    fn low_confidence_leaves_genuine_residual() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // Single action with confidence=0.3 → 30% attributed, 70% residual.
+        let actions = [make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 0.3, 0.0)];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 1);
+        assert!(
+            (result.credits[0].credited_incremental_y14 - 3.0).abs() < 0.001,
+            "credited = {}",
+            result.credits[0].credited_incremental_y14
+        );
+        assert!(
+            (result.unattributed - 7.0).abs() < 0.001,
             "unattributed = {}",
             result.unattributed
         );
@@ -300,7 +374,7 @@ mod tests {
         ];
         let result = allocator.allocate(&outcome, &actions);
         assert_eq!(result.credits.len(), 1);
-        // Only the exposed action gets credit.
+        // Only the exposed action gets credit. confidence=1.0 → full attribution.
         assert!((result.credits[0].credited_incremental_y14 - 10.0).abs() < 0.001);
     }
 
@@ -320,8 +394,9 @@ mod tests {
         // but not dramatically more. tanh(10) ≈ 1.0, tanh(-10) ≈ -1.0.
         // w_high = 1.0 * (1 + 0.2*1) = 1.2
         // w_low  = 1.0 * (1 + 0.2*(-1)) = 0.8
-        // share_high = 1.2 / 2.0 = 0.6 → 6 fans
-        // share_low  = 0.8 / 2.0 = 0.4 → 4 fans
+        // mean_confidence = 1.0 → total_attribution_mass = 1.0
+        // share_high = 1.2 / 2.0 * 1.0 * 10 = 6 fans
+        // share_low  = 0.8 / 2.0 * 1.0 * 10 = 4 fans
         assert!((result.credits[0].credited_incremental_y14 - 6.0).abs() < 0.01);
         assert!((result.credits[1].credited_incremental_y14 - 4.0).abs() < 0.01);
     }

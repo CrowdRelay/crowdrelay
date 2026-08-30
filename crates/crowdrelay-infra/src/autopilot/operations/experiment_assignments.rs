@@ -116,7 +116,7 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
             .unwrap_or(crowdrelay_brain::ReachChannel::Other);
         let evidence = crowdrelay_brain::GrowthEvidence::at_dispatch(
             workspace_id.into_uuid(),
-            assignment.action_id.unwrap_or_else(uuid::Uuid::now_v7),
+            assignment.action_id,
             Some(opportunity_id.to_string()),
             target,
             channel,

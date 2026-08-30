@@ -178,16 +178,11 @@ pub struct CausalModel {
     /// Per-template Signal install EMA. Learned independently from fan
     /// counts because Signal adoption has different drivers.
     pub template_expected_signal: HashMap<String, f64>,
-    /// Calibration tracker for Y14 (14-day incremental) predictions.
-    /// Learns the mapping between predicted and observed incremental fans
-    /// and corrects future predictions to reduce bias. This is the early
-    /// leading signal — available 14 days after dispatch.
-    pub calibration: crate::calibration::CalibrationTracker,
-    /// Calibration tracker for Y30 (30-day durable) predictions. Learns
-    /// the mapping between predicted and observed durable fans. This is
-    /// the North Star target — fans still active after 30 days. It arrives
-    /// later than Y14 but is the ultimate quality signal.
-    pub calibration_y30: crate::calibration::CalibrationTracker,
+    /// Regime-isolated calibration — separate trackers per estimation
+    /// regime (Y30Direct, Y14Bridged, OutcomeModel). This ensures that
+    /// a badly calibrated observational predictor cannot distort
+    /// uncertainty for the randomized treatment estimator.
+    pub calibration: crate::calibration::CalibrationByRegime,
     /// Learned context effects — a hierarchical log-linear GLM that replaces
     /// hardcoded multipliers (×1.5 event, ×0.8 stagnant, etc.) with learned
     /// coefficients in log space. Prevents multiplicative explosion and
@@ -422,8 +417,7 @@ impl CausalModel {
             treatment_effects: TreatmentEffectPosterior::new(),
             treatment_effects_y30: TreatmentEffectPosterior::new(),
             template_expected_signal: HashMap::new(),
-            calibration: crate::calibration::CalibrationTracker::new(),
-            calibration_y30: crate::calibration::CalibrationTracker::new(),
+            calibration: crate::calibration::CalibrationByRegime::new(),
             context_effects: ContextGLM::new(),
             bridge: Y14Y30Bridge::new(),
         }
@@ -512,12 +506,19 @@ impl CausalModel {
             .insert(template.clone(), signal_updated.max(0.0));
         // Record the prediction-observation pair for calibration. This
         // lets the brain detect and correct systematic prediction bias
-        // (e.g. consistently over-predicting fan growth).
-        self.calibration.record(
+        // (e.g. consistently over-predicting fan growth). Routed to the
+        // OutcomeModel regime tracker — the outcome model is the
+        // observational predictor, separate from treatment-effect
+        // calibration.
+        self.calibration.record_by_regime(
+            crate::decision_value::EstimationRegime::OutcomeModel,
             template,
             outcome.prediction.expected_new_fans,
             self.predict_std(template),
             outcome.observed_new_fans,
+            outcome.prediction.context.subreddit_type.as_deref(),
+            None,
+            "observational",
         );
     }
 
@@ -635,8 +636,17 @@ impl CausalModel {
         context: &DispatchContext,
     ) -> TreatmentAwareStats {
         let (expected_fans, predict_std, confidence) = self.predict_stats(template_id, context);
-        // Apply calibration correction to the outcome model prediction.
-        let expected_fans = self.calibration.correct_prediction(expected_fans).max(0.0);
+        // Apply regime-isolated calibration correction to the outcome
+        // model prediction. The OutcomeModel regime tracker is separate
+        // from Y30Direct/Y14Bridged — a bad observational calibration
+        // cannot distort treatment-effect uncertainty.
+        let expected_fans = self
+            .calibration
+            .correct_prediction_by_regime(
+                crate::decision_value::EstimationRegime::OutcomeModel,
+                expected_fans,
+            )
+            .max(0.0);
 
         // Y14 treatment effect (early leading signal).
         let (tau_y14, std_y14, conf_y14) = self

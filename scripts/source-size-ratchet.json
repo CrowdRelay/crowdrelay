@@ -30,6 +30,7 @@
     "crates/crowdrelay-application/src/autopilot/model.rs": 1863,
     "crates/crowdrelay-brain/src/causal_model.rs": 1311,
     "crates/crowdrelay-brain/src/reach.rs": 1260,
-    "crates/crowdrelay-brain/src/bayesian.rs": 1339
+    "crates/crowdrelay-brain/src/bayesian.rs": 1339,
+    "crates/crowdrelay-infra/src/autopilot/measurement.rs": 1210
   }
 }
