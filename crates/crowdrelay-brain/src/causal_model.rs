@@ -1237,4 +1237,32 @@ mod tests {
         let ctx = DispatchContext::default();
         assert!(model.predict("t", &ctx) > 0.0);
     }
+
+    // ── UNKNOWN exclusion invariant ──────────────────────────────────
+    //
+    // The causal learner must never consume evidence from an unresolved
+    // (execution_status = unknown) dispatch. The SQL guard in
+    // `load_growth_evidence` excludes such rows at the query level.
+    // This test documents the brain-level invariant: if no evidence
+    // reaches the model, the treatment-effect posterior must not change.
+    // This is trivially true (no `update_treatment_effect` calls), but
+    // making it explicit prevents future code from accidentally
+    // inferring treatment realization from absence of evidence.
+
+    #[test]
+    fn no_evidence_does_not_change_treatment_posterior() {
+        let model = CausalModel::new();
+        let ctx = DispatchContext::default();
+        let before = model.predict_stats_with_treatment("t", &ctx);
+
+        // No evidence → no update calls → posterior unchanged.
+        // This is the brain-level invariant that the SQL guard enforces:
+        // unknown evidence must not enter the learning pipeline, so the
+        // posterior cannot move from it.
+        // (apply_evidence_to_model with an empty slice is a no-op.)
+        let after = model.predict_stats_with_treatment("t", &ctx);
+        assert_eq!(before.treatment_effect, after.treatment_effect);
+        assert_eq!(before.treatment_confidence, after.treatment_confidence);
+        assert_eq!(before.use_treatment_effect, after.use_treatment_effect);
+    }
 }

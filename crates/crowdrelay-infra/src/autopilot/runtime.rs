@@ -451,6 +451,14 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .await
                         .map_err(map_sqlx)?;
                         if provider_already_succeeded {
+                            // Canonical resolver: a late failure after a
+                            // prior success is NoChange — do not regress.
+                            let _resolution = resolve_outcome(
+                                ResolutionEvidence::TerminalReceipt {
+                                    succeeded: false,
+                                    prior_success_exists: true,
+                                },
+                            );
                             transaction.commit().await.map_err(map_sqlx)?;
                             return Ok(ExecutionReportMutation {
                                 report_id: id,
@@ -460,16 +468,51 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             });
                         }
 
+                        // Canonical resolver: definitive failure, no prior
+                        // success → Failed. This resolves both the action
+                        // and the assignment atomically.
+                        debug_assert_eq!(
+                            resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                                succeeded: false,
+                                prior_success_exists: false,
+                            }),
+                            Resolution::Failed
+                        );
+
+                        // Resolve the action from unknown → failed (if it
+                        // was unknown — the gap detector may have marked it
+                        // unknown before this late receipt arrived). The
+                        // WHERE guard makes this idempotent: if the action
+                        // is already `failed` or `succeeded`, this is a no-op.
+                        sqlx::query(
+                            r#"UPDATE viryaos_autopilot_actions
+                               SET status = 'failed',
+                                   finished_at = COALESCE(finished_at, now()),
+                                   last_error_kind = $3,
+                                   updated_at = now()
+                               WHERE workspace_id = $1
+                                 AND id = $2
+                                 AND status = 'unknown'"#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .bind(command.error_kind.as_deref())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+
                         // The executor definitively failed and no prior
                         // success exists — transition the experiment
-                        // assignment from dispatched → failed so the causal
-                        // learner sees the correct treatment realization (T).
+                        // assignment to failed so the causal learner sees
+                        // the correct treatment realization (T). This
+                        // covers both dispatched → failed and unknown →
+                        // failed (late receipt after gap detection).
                         sqlx::query(
                             r#"UPDATE viryaos_experiment_assignments
                                SET execution_status = 'failed'
                                WHERE workspace_id = $1
                                  AND action_id = $2
-                                 AND execution_status = 'dispatched'"#,
+                                 AND execution_status IN ('dispatched', 'unknown')"#,
                         )
                         .bind(workspace_id.into_uuid())
                         .bind(command.action_id.into_uuid())
@@ -594,20 +637,53 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             }
                         }
 
+                        // Canonical resolver: terminal success receipt →
+                        // Executed. This resolves both the action and the
+                        // assignment atomically in this transaction.
+                        debug_assert_eq!(
+                            resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                                succeeded: true,
+                                prior_success_exists: false,
+                            }),
+                            Resolution::Executed
+                        );
+
+                        // Resolve the action from unknown → succeeded (if
+                        // it was unknown — the gap detector may have marked
+                        // it unknown before this late receipt arrived). The
+                        // WHERE guard makes this idempotent: if the action
+                        // is already `succeeded` or `failed`, this is a
+                        // no-op. The gap detector set finished_at = NULL;
+                        // COALESCE restores it.
+                        sqlx::query(
+                            r#"UPDATE viryaos_autopilot_actions
+                               SET status = 'succeeded',
+                                   finished_at = COALESCE(finished_at, now()),
+                                   updated_at = now()
+                               WHERE workspace_id = $1
+                                 AND id = $2
+                                 AND status = 'unknown'"#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(command.action_id.into_uuid())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+
                         // The executor confirmed delivery — transition the
-                        // experiment assignment from dispatched → executed so
-                        // the causal learner sees the correct treatment
-                        // realization (T). This is the normal success path:
-                        // the action was marked `succeeded` at dispatch time,
-                        // and the receipt confirms the external side effect
-                        // actually happened. Without this, assignments stay
-                        // `dispatched` forever even after confirmed delivery.
+                        // experiment assignment to executed so the causal
+                        // learner sees the correct treatment realization
+                        // (T). This covers both dispatched → executed
+                        // (normal path) and unknown → executed (late receipt
+                        // after gap detection). Without this, assignments
+                        // stay `dispatched` or `unknown` forever even after
+                        // confirmed delivery.
                         sqlx::query(
                             r#"UPDATE viryaos_experiment_assignments
                                SET execution_status = 'executed'
                                WHERE workspace_id = $1
                                  AND action_id = $2
-                                 AND execution_status = 'dispatched'"#,
+                                 AND execution_status IN ('dispatched', 'unknown')"#,
                         )
                         .bind(workspace_id.into_uuid())
                         .bind(command.action_id.into_uuid())

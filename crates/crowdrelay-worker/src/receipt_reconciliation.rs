@@ -58,6 +58,7 @@ use std::time::Duration;
 use crate::community_executor::CRASH_POSTING_ERROR_PREFIX;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::action_ledger::{Resolution, ResolutionEvidence, resolve_outcome};
 use crowdrelay_infra::autopilot::payload_requires_executor;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -277,12 +278,35 @@ impl ReceiptReconciliationWorker {
 
         let mut resolved = 0usize;
         for (action_id, receipt_status) in rows {
-            let outcome = if receipt_status == "succeeded" {
-                ActionOutcome::Succeeded
-            } else {
-                ActionOutcome::Failed
+            // Use the canonical resolver. The receipt is a terminal
+            // executor report — no prior success check is needed here
+            // because the LATERAL subquery already picks the latest
+            // terminal receipt by occurred_at DESC.
+            let evidence = ResolutionEvidence::TerminalReceipt {
+                succeeded: receipt_status == "succeeded",
+                prior_success_exists: false,
             };
-            resolved += resolve_action(self.workspace_id, transaction, action_id, outcome).await?;
+            match resolve_outcome(evidence) {
+                Resolution::Executed => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Succeeded,
+                    )
+                    .await?;
+                }
+                Resolution::Failed => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Failed,
+                    )
+                    .await?;
+                }
+                Resolution::Unknown | Resolution::NoChange => continue,
+            }
         }
         Ok(resolved)
     }
@@ -312,12 +336,29 @@ impl ReceiptReconciliationWorker {
 
         let mut resolved = 0usize;
         for (action_id, post_status, error_message) in rows {
-            let outcome = match resolve_community_post(&post_status, error_message.as_deref()) {
-                CommunityResolution::ResolveSucceeded => ActionOutcome::Succeeded,
-                CommunityResolution::ResolveFailed => ActionOutcome::Failed,
-                CommunityResolution::LeaveUnknown => continue,
-            };
-            resolved += resolve_action(self.workspace_id, transaction, action_id, outcome).await?;
+            // Use the canonical resolver via the provider-specific adapter.
+            let evidence = community_post_to_evidence(&post_status, error_message.as_deref());
+            match resolve_outcome(evidence) {
+                Resolution::Executed => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Succeeded,
+                    )
+                    .await?;
+                }
+                Resolution::Failed => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Failed,
+                    )
+                    .await?;
+                }
+                Resolution::Unknown | Resolution::NoChange => continue,
+            }
         }
         Ok(resolved)
     }
@@ -526,45 +567,52 @@ async fn resolve_action(
     Ok(1)
 }
 
-/// How to resolve a `community.engage.request` action from its
-/// `community_posts` row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommunityResolution {
-    /// The post exists on Reddit — the intervention is confirmed.
-    ResolveSucceeded,
-    /// The post definitively never went out (pre-Reddit failure).
-    ResolveFailed,
-    /// Still unresolved: in flight, awaiting retry, awaiting a manual
-    /// post, or crash-marked (only a human checking Reddit can tell).
-    LeaveUnknown,
-}
-
-fn resolve_community_post(post_status: &str, error_message: Option<&str>) -> CommunityResolution {
+/// Provider-specific adapter: translates `community_posts` state into
+/// canonical [`ResolutionEvidence`] facts for the [`resolve_outcome`]
+/// resolver.
+///
+/// This is the ONLY place that knows about `community_posts.status`
+/// values and the crash marker prefix. The canonical resolver
+/// (`resolve_outcome`) makes the semantic decision; this adapter just
+/// converts provider state into domain facts.
+fn community_post_to_evidence(
+    post_status: &str,
+    error_message: Option<&str>,
+) -> ResolutionEvidence {
     match post_status {
-        "posted" => CommunityResolution::ResolveSucceeded,
+        "posted" => ResolutionEvidence::ProviderDelivery {
+            confirmed: true,
+            definitive_failure: false,
+            confirmation_lost: false,
+        },
         "failed" => {
             // The stale-posting recovery marks crash rows with this
-            // prefix; those stay unknown by design.
+            // prefix; those are confirmation-lost, not definitive failures.
             let crashed = error_message
                 .is_some_and(|message| message.starts_with(CRASH_POSTING_ERROR_PREFIX));
-            if crashed {
-                CommunityResolution::LeaveUnknown
-            } else {
-                CommunityResolution::ResolveFailed
+            ResolutionEvidence::ProviderDelivery {
+                confirmed: false,
+                definitive_failure: !crashed,
+                confirmation_lost: crashed,
             }
         }
         // `pending`/`posting`/`rate_limited` are in-flight or awaiting
         // retry; `awaiting_manual_post` is waiting on the operator. All
         // resolve later through their own paths.
-        _ => CommunityResolution::LeaveUnknown,
+        _ => ResolutionEvidence::ProviderDelivery {
+            confirmed: false,
+            definitive_failure: false,
+            confirmation_lost: false,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CommunityResolution, requires_terminal_receipt, resolve_community_post};
+    use super::{community_post_to_evidence, requires_terminal_receipt};
     use crowdrelay_application::autopilot::AutopilotActionPayload;
     use crowdrelay_domain::FanId;
+    use crowdrelay_domain::action_ledger::{Resolution, resolve_outcome};
     use uuid::Uuid;
 
     fn community_payload() -> AutopilotActionPayload {
@@ -608,41 +656,34 @@ mod tests {
 
     #[test]
     fn posted_community_post_resolves_succeeded() {
-        assert_eq!(
-            resolve_community_post("posted", None),
-            CommunityResolution::ResolveSucceeded
-        );
+        let evidence = community_post_to_evidence("posted", None);
+        assert_eq!(resolve_outcome(evidence), Resolution::Executed);
     }
 
     #[test]
     fn crash_marked_failure_stays_unknown() {
-        assert_eq!(
-            resolve_community_post(
-                "failed",
-                Some("worker crashed during posting — check Reddit manually"),
-            ),
-            CommunityResolution::LeaveUnknown
+        let evidence = community_post_to_evidence(
+            "failed",
+            Some("worker crashed during posting — check Reddit manually"),
         );
+        assert_eq!(resolve_outcome(evidence), Resolution::Unknown);
     }
 
     #[test]
     fn definitive_community_failure_resolves_failed() {
-        assert_eq!(
-            resolve_community_post("failed", Some("no agents service configured")),
-            CommunityResolution::ResolveFailed
-        );
-        assert_eq!(
-            resolve_community_post("failed", None),
-            CommunityResolution::ResolveFailed
-        );
+        let evidence = community_post_to_evidence("failed", Some("no agents service configured"));
+        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        let evidence = community_post_to_evidence("failed", None);
+        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
     }
 
     #[test]
     fn in_flight_community_statuses_stay_unknown() {
         for status in ["pending", "posting", "rate_limited", "awaiting_manual_post"] {
+            let evidence = community_post_to_evidence(status, None);
             assert_eq!(
-                resolve_community_post(status, None),
-                CommunityResolution::LeaveUnknown,
+                resolve_outcome(evidence),
+                Resolution::Unknown,
                 "status {status} should stay unknown"
             );
         }
@@ -653,17 +694,12 @@ mod tests {
         // Errors that happen to contain "crash" or "posting" but do not
         // start with the exact crash marker prefix must be treated as
         // definitive failures, not confirmation loss.
-        assert_eq!(
-            resolve_community_post("failed", Some("subreddit crashed during posting")),
-            CommunityResolution::ResolveFailed,
-        );
-        assert_eq!(
-            resolve_community_post("failed", Some("posting failed: rate limit")),
-            CommunityResolution::ResolveFailed,
-        );
-        assert_eq!(
-            resolve_community_post("failed", Some("worker crashed during posting")),
-            CommunityResolution::LeaveUnknown,
-        );
+        let evidence =
+            community_post_to_evidence("failed", Some("subreddit crashed during posting"));
+        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        let evidence = community_post_to_evidence("failed", Some("posting failed: rate limit"));
+        assert_eq!(resolve_outcome(evidence), Resolution::Failed);
+        let evidence = community_post_to_evidence("failed", Some("worker crashed during posting"));
+        assert_eq!(resolve_outcome(evidence), Resolution::Unknown);
     }
 }

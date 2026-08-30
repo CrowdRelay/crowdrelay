@@ -285,6 +285,141 @@ pub fn transition(from: ActionState, to: ActionState) -> Result<ActionState, Ill
     }
 }
 
+// ── Canonical execution resolution ──────────────────────────────────
+
+/// Observed facts about an execution — the pure domain input to the
+/// canonical resolution matrix.
+///
+/// This type carries **no persistence details**: no SQL, no table names,
+/// no worker internals. Provider-specific adapters convert their state
+/// into these facts before calling [`resolve_outcome`].
+///
+/// # DDD boundary
+///
+/// `resolve_outcome()` must NOT know about SQL, Postgres,
+/// `community_posts`, `autopilot_actions`, HTTP, or worker implementation
+/// details. It operates only on these domain facts. Persistence code is
+/// responsible for loading facts, calling `resolve_outcome()`, and
+/// applying the resulting state transition atomically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolutionEvidence {
+    /// A terminal executor receipt was observed.
+    TerminalReceipt {
+        /// `true` = succeeded receipt, `false` = failed receipt.
+        succeeded: bool,
+        /// Whether a prior succeeded receipt already exists for this
+        /// action+executor. Used for monotonicity: a late failure must
+        /// not downgrade a prior success.
+        prior_success_exists: bool,
+    },
+    /// A provider-specific delivery confirmation was observed.
+    ///
+    /// Used by `community.engage.request`: `community_posts` is the
+    /// receipt, not an executor report. The adapter translates
+    /// `community_posts.status` + `error_message` into these facts.
+    ProviderDelivery {
+        /// `true` = delivery confirmed (e.g. `community_posts.status = 'posted'`).
+        confirmed: bool,
+        /// `true` = definitive failure — the external side effect did NOT
+        /// occur (pre-Reddit rejection, no agents service, subreddit
+        /// cooldown, etc.).
+        definitive_failure: bool,
+        /// `true` = confirmation lost — the intervention may have
+        /// succeeded, but we cannot tell (e.g. worker crash during the
+        /// Reddit API call). Only a human checking the external platform
+        /// can resolve this.
+        confirmation_lost: bool,
+    },
+    /// No new authoritative fact available. The receipt never arrived
+    /// and no provider delivery state exists.
+    ///
+    /// CRITICAL: this maps to [`Resolution::NoChange`], never to
+    /// `Failed` or `Executed`. "We don't know" and "we know it failed"
+    /// are completely different.
+    NoEvidence,
+}
+
+/// The canonical resolution — what the execution outcome means for the
+/// causal learner and the operational state machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Resolution {
+    /// The external intervention occurred.
+    /// Action → `succeeded`, assignment → `executed`.
+    Executed,
+    /// The external intervention definitively did NOT occur.
+    /// Action → `failed`, assignment → `failed`.
+    Failed,
+    /// Cannot establish whether the intervention occurred.
+    /// Action → `unknown`, assignment → `unknown`.
+    /// NOT a failure, NOT a success — triggers reconciliation.
+    Unknown,
+    /// No new authoritative fact — do not change state.
+    /// Returned for `NoEvidence` and for monotonicity guards
+    /// (e.g. late failure after prior success).
+    NoChange,
+}
+
+/// The ONE canonical semantic definition of execution resolution.
+///
+/// ALL reconciliation implementations MUST conform to this matrix:
+/// - `record_execution_report` (normal receipt path)
+/// - `receipt_reconciliation.rs` (gap/late/worker path)
+/// - `viryaos_action_ledger_reconcile()` SQL function (manual fallback)
+///
+/// Do NOT duplicate this semantic matrix in callers. Call this function.
+///
+/// # Matrix
+///
+/// | Observed facts                              | Resolution |
+/// |---------------------------------------------|------------|
+/// | `TerminalReceipt { succeeded: true }`       | `Executed` |
+/// | `TerminalReceipt { succeeded: false, no prior }` | `Failed` |
+/// | `TerminalReceipt { succeeded: false, prior success }` | `NoChange` |
+/// | `ProviderDelivery { confirmed: true }`      | `Executed` |
+/// | `ProviderDelivery { definitive_failure: true }` | `Failed` |
+/// | `ProviderDelivery { confirmation_lost: true }`  | `Unknown` |
+/// | `ProviderDelivery { .. }` (in-flight)       | `Unknown` |
+/// | `NoEvidence`                                | `NoChange` |
+///
+/// # Critical invariants
+///
+/// - `NoEvidence` → `NoChange`. A missing fact must NEVER default to
+///   `Failed` and must NOT silently become `Executed`.
+/// - `Unknown` means execution may have happened but cannot be established.
+///   It is NOT a failure and NOT a success.
+/// - A late failure after a prior success → `NoChange` (monotonicity).
+#[must_use]
+pub fn resolve_outcome(evidence: ResolutionEvidence) -> Resolution {
+    match evidence {
+        ResolutionEvidence::TerminalReceipt {
+            succeeded: true, ..
+        } => Resolution::Executed,
+        ResolutionEvidence::TerminalReceipt {
+            succeeded: false,
+            prior_success_exists: true,
+        } => Resolution::NoChange,
+        ResolutionEvidence::TerminalReceipt {
+            succeeded: false,
+            prior_success_exists: false,
+        } => Resolution::Failed,
+        ResolutionEvidence::ProviderDelivery {
+            confirmed: true, ..
+        } => Resolution::Executed,
+        ResolutionEvidence::ProviderDelivery {
+            definitive_failure: true,
+            ..
+        } => Resolution::Failed,
+        ResolutionEvidence::ProviderDelivery {
+            confirmation_lost: true,
+            ..
+        } => Resolution::Unknown,
+        // In-flight: not confirmed, not definitively failed, not
+        // confirmation-lost. Still pending/posting/rate_limited.
+        ResolutionEvidence::ProviderDelivery { .. } => Resolution::Unknown,
+        ResolutionEvidence::NoEvidence => Resolution::NoChange,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +528,125 @@ mod tests {
             assert_eq!(ActionState::parse(state.as_str()), Some(state));
         }
         assert_eq!(ActionState::parse("invalid"), None);
+    }
+
+    // ── resolve_outcome canonical matrix tests ──
+
+    #[test]
+    fn terminal_receipt_success_resolves_executed() {
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                succeeded: true,
+                prior_success_exists: false,
+            }),
+            Resolution::Executed
+        );
+        // Prior success doesn't matter for a success receipt.
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                succeeded: true,
+                prior_success_exists: true,
+            }),
+            Resolution::Executed
+        );
+    }
+
+    #[test]
+    fn terminal_receipt_failure_no_prior_resolves_failed() {
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                succeeded: false,
+                prior_success_exists: false,
+            }),
+            Resolution::Failed
+        );
+    }
+
+    #[test]
+    fn terminal_receipt_failure_with_prior_success_is_no_change() {
+        // Monotonicity: a late failure must not downgrade a prior success.
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::TerminalReceipt {
+                succeeded: false,
+                prior_success_exists: true,
+            }),
+            Resolution::NoChange
+        );
+    }
+
+    #[test]
+    fn provider_delivery_confirmed_resolves_executed() {
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::ProviderDelivery {
+                confirmed: true,
+                definitive_failure: false,
+                confirmation_lost: false,
+            }),
+            Resolution::Executed
+        );
+    }
+
+    #[test]
+    fn provider_delivery_definitive_failure_resolves_failed() {
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::ProviderDelivery {
+                confirmed: false,
+                definitive_failure: true,
+                confirmation_lost: false,
+            }),
+            Resolution::Failed
+        );
+    }
+
+    #[test]
+    fn provider_delivery_confirmation_lost_resolves_unknown() {
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::ProviderDelivery {
+                confirmed: false,
+                definitive_failure: false,
+                confirmation_lost: true,
+            }),
+            Resolution::Unknown
+        );
+    }
+
+    #[test]
+    fn provider_delivery_in_flight_resolves_unknown() {
+        // Not confirmed, not definitively failed, not confirmation-lost.
+        // Still pending/posting/rate_limited — resolve later.
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::ProviderDelivery {
+                confirmed: false,
+                definitive_failure: false,
+                confirmation_lost: false,
+            }),
+            Resolution::Unknown
+        );
+    }
+
+    #[test]
+    fn no_evidence_resolves_no_change() {
+        // CRITICAL: NoEvidence must NEVER become Failed or Executed.
+        // "We don't know" and "we know it failed" are completely different.
+        assert_eq!(
+            resolve_outcome(ResolutionEvidence::NoEvidence),
+            Resolution::NoChange
+        );
+    }
+
+    #[test]
+    fn no_evidence_does_not_become_failed() {
+        // This is the most important test in the matrix: a missing fact
+        // must not default to failure. If this breaks, the causal learner
+        // will silently treat missing receipts as failures, corrupting
+        // the treatment-effect posterior.
+        assert_ne!(
+            resolve_outcome(ResolutionEvidence::NoEvidence),
+            Resolution::Failed
+        );
+        assert_ne!(
+            resolve_outcome(ResolutionEvidence::NoEvidence),
+            Resolution::Executed
+        );
     }
 }

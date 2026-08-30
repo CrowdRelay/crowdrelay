@@ -27,7 +27,7 @@
     "crates/crowdrelay-infra/src/config.rs": 1558,
     "crates/crowdrelay-infra/src/events.rs": 1226,
     "crates/crowdrelay-infra/src/referrals.rs": 1797,
-    "crates/crowdrelay-infra/tests/autopilot_experiment_integrity_postgres.rs": 2653,
+    "crates/crowdrelay-infra/tests/autopilot_experiment_integrity_postgres.rs": 3657,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
     "crates/crowdrelay-worker/src/community_executor.rs": 1322,
     "crates/crowdrelay-worker/src/draws.rs": 1497,

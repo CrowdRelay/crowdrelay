@@ -166,18 +166,45 @@ pub(in crate::autopilot) async fn load_growth_evidence(
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
         r#"
-        SELECT action_id, opportunity_id, timestamp, audience, recipient_id,
-               channel, estimated_reach, actual_reach, treatment, propensity,
-               observed_fans, observed_incremental_fans, durable_fans_30d,
-               converted, converted_fan_id, predicted_fans, predicted_signal_installs,
-               context, strategy, evidence_quality,
-               sample_size, contamination, measurement_delay_days,
-               episode_id, resolved_at
-        FROM viryaos_growth_evidence
-        WHERE workspace_id = $1
-          AND resolved_at IS NOT NULL
-          AND ($2::timestamptz IS NULL OR timestamp > $2)
-        ORDER BY timestamp ASC
+        SELECT ge.action_id, ge.opportunity_id, ge.timestamp, ge.audience, ge.recipient_id,
+               ge.channel, ge.estimated_reach, ge.actual_reach, ge.treatment, ge.propensity,
+               ge.observed_fans, ge.observed_incremental_fans, ge.durable_fans_30d,
+               ge.converted, ge.converted_fan_id, ge.predicted_fans, ge.predicted_signal_installs,
+               ge.context, ge.strategy, ge.evidence_quality,
+               ge.sample_size, ge.contamination, ge.measurement_delay_days,
+               ge.episode_id, ge.resolved_at
+        FROM viryaos_growth_evidence ge
+        -- LEFT JOIN experiment_assignments to exclude unresolved (unknown)
+        -- executions from the causal learner. This is an explicit defense
+        -- at the learning boundary — do NOT rely on the implicit chain
+        -- (unknown → no measurement → resolved_at NULL → not loaded).
+        --
+        -- Treatment-class semantics:
+        --   executed  → realized treatment (eligible as treated)
+        --   failed    → realized non-treatment (eligible as non-treated)
+        --   withheld  → no treatment (eligible as non-treated)
+        --   control   → control arm (eligible as control)
+        --   unknown   → unresolved; EXCLUDE from all causal estimation
+        --
+        -- Do NOT use a generic != unknown filter as the treatment inclusion
+        -- rule. The treatment/non-treatment distinction is handled downstream
+        -- by the causal model's arm + evidence_quality logic, not by this
+        -- filter. This filter only excludes `unknown` — the dangerous case
+        -- where we cannot establish whether the treatment happened.
+        --
+        -- LEFT JOIN (not INNER): evidence without an assignment (legacy,
+        -- non-experiment) is still loaded. Only rows that HAVE an
+        -- assignment with execution_status='unknown' are excluded.
+        -- No fan-out: viryaos_experiment_assignments has a unique
+        -- constraint on (workspace_id, action_id) — one evidence row
+        -- joins to at most one assignment row.
+        LEFT JOIN viryaos_experiment_assignments ea
+          ON ea.workspace_id = ge.workspace_id AND ea.action_id = ge.action_id
+        WHERE ge.workspace_id = $1
+          AND ge.resolved_at IS NOT NULL
+          AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
+          AND ($2::timestamptz IS NULL OR ge.timestamp > $2)
+        ORDER BY ge.timestamp ASC
         "#,
     )
     .bind(workspace_id.into_uuid())

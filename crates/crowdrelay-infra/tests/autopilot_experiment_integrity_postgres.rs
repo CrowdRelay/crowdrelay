@@ -42,7 +42,10 @@
 //!      the entire chain: assignment → action → evidence → episode →
 //!      trace → ledger → learner interpretation.
 
-use crowdrelay_application::autopilot::AutopilotDecisionRepository;
+use crowdrelay_application::autopilot::{
+    AutopilotDecisionRepository, AutopilotRuntimeRepository, ClaimExecution, ExecutorReportStatus,
+    RecordExecutionReport,
+};
 use crowdrelay_brain::{
     DispatchContext, DispatchPrediction, ExecutionStatus, ExperimentAssignment, ExperimentStatus,
     ExperimentUnitKind, TreatmentAssignment,
@@ -2645,5 +2648,1010 @@ async fn t24_outbox_reconciliation_resolves_unknown_to_failed_for_permanent() {
     assert_eq!(
         result, "FAILED",
         "permanent rejection must reconcile UNKNOWN → FAILED"
+    );
+}
+
+// ── T25a–T25h: Atomic receipt resolution — UNKNOWN at receipt time ──
+//
+// These tests prove that `record_execution_report` resolves BOTH the
+// action status and the experiment assignment execution_status atomically
+// in the same transaction as receipt persistence. The reconciliation
+// worker becomes a safety net for missing receipts, not part of the
+// normal receipt-success path.
+
+/// Helper: insert an action with an executor-required payload
+/// (`fan.lifecycle.message.request`) and link an experiment assignment
+/// to it. The action starts in `succeeded` status (the normal dispatch
+/// state — `actions_execution.rs` marks it succeeded when dispatching).
+async fn insert_executor_action_with_assignment(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    trace_id: uuid::Uuid,
+    unit_id: &str,
+    execution_status: &str,
+) -> uuid::Uuid {
+    let decision_id = uuid::Uuid::now_v7();
+    let action_id = uuid::Uuid::now_v7();
+    let fan_id = uuid::Uuid::now_v7();
+
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, trace_id)
+           VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
+                   'auto_execute',9000,'auto_execute','test',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)"#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("decision-{decision_id}"))
+    .bind(fan_id)
+    .bind(trace_id)
+    .execute(pool)
+    .await
+    .expect("insert decision");
+
+    let payload = serde_json::json!({
+        "kind": "request_fan_lifecycle_message",
+        "fan_id": fan_id,
+        "template_key": "test"
+    });
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, approved_at, available_at,
+            finished_at, trace_id)
+           VALUES ($1,$2,$3,'growth_metrics','fan.lifecycle.message.request','fan',
+                   $4,$5,$6,'succeeded',now(),now(),now(),$7)"#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(fan_id)
+    .bind(format!("action-{action_id}"))
+    .bind(&payload)
+    .bind(trace_id)
+    .execute(pool)
+    .await
+    .expect("insert action");
+
+    // Insert an experiment assignment linked to this action.
+    let assignment_id = uuid::Uuid::now_v7();
+    let experiment_uuid = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (workspace_id, assignment_id, experiment_uuid, unit_id, unit_kind,
+            arm, propensity, prediction, context, strategy,
+            eligibility_criteria, selection_context, interference_policy,
+            interference_score, is_interference_controllable,
+            experiment_status, execution_status, action_id, trace_id)
+           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+                   '{}'::jsonb,'{}'::jsonb,'discovery',
+                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                   'active',$5,$6,$7)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(assignment_id)
+    .bind(experiment_uuid)
+    .bind(unit_id)
+    .bind(execution_status)
+    .bind(action_id)
+    .bind(trace_id)
+    .execute(pool)
+    .await
+    .expect("insert assignment");
+
+    action_id
+}
+
+/// Helper: insert an executor instance + capability for the test workspace.
+async fn insert_executor_instance(pool: &sqlx::PgPool, workspace_id: WorkspaceId) {
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        r#"INSERT INTO viryaos_executor_instances
+           (workspace_id, executor_id, version, manifest_sha, observed_at, expires_at)
+           VALUES ($1,'test-executor','test','test-manifest',$2,$3)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(60))
+    .execute(pool)
+    .await
+    .expect("insert executor instance");
+    sqlx::query(
+        r#"INSERT INTO viryaos_executor_capabilities
+           (workspace_id, executor_id, capability, capability_version, observed_at, expires_at)
+           VALUES ($1,'test-executor','fan.lifecycle.message','1',$2,$3)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .bind(now + time::Duration::minutes(60))
+    .execute(pool)
+    .await
+    .expect("insert executor capability");
+}
+
+/// T25a: unknown + success receipt → action succeeded + assignment executed.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25a_unknown_plus_success_receipt_resolves_both() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25a",
+        "unknown",
+    )
+    .await;
+
+    // Transition action to unknown (simulating gap detection).
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition to unknown");
+
+    // Claim the execution.
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    // Record a succeeded receipt.
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("t25a-success-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: Some(claim_token),
+                provider_reference: Some("msg-123".to_owned()),
+                error_kind: None,
+                metadata: serde_json::json!({}),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("record success receipt");
+
+    // Verify: action resolved to succeeded.
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(
+        action_status, "succeeded",
+        "unknown action must resolve to succeeded after success receipt"
+    );
+
+    // Verify: assignment resolved to executed.
+    let exec_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment status");
+    assert_eq!(
+        exec_status, "executed",
+        "unknown assignment must resolve to executed after success receipt"
+    );
+}
+
+/// T25b: unknown + failure receipt → action failed + assignment failed.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25b_unknown_plus_failure_receipt_resolves_both() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25b",
+        "unknown",
+    )
+    .await;
+
+    // Transition action to unknown.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition to unknown");
+
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("t25b-fail-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Failed,
+                claim_token: Some(claim_token),
+                provider_reference: None,
+                error_kind: Some("transport_failure".to_owned()),
+                metadata: serde_json::json!({}),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("record failure receipt");
+
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(action_status, "failed");
+
+    let exec_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment status");
+    assert_eq!(exec_status, "failed");
+}
+
+/// T25c: duplicate success receipt is idempotent.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25c_duplicate_success_receipt_is_idempotent() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25c",
+        "dispatched",
+    )
+    .await;
+
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    let receipt_key = format!("t25c-success-{action_id}");
+    let cmd = RecordExecutionReport {
+        action_id: action_id.into(),
+        receipt_key: receipt_key.clone(),
+        executor_id: "test-executor".to_owned(),
+        status: ExecutorReportStatus::Succeeded,
+        claim_token: Some(claim_token),
+        provider_reference: Some("msg-123".to_owned()),
+        error_kind: None,
+        metadata: serde_json::json!({}),
+        occurred_at: f.now,
+    };
+
+    // First receipt.
+    let first = f
+        .repository
+        .record_execution_report(f.workspace_id, cmd.clone())
+        .await
+        .expect("first receipt");
+    assert!(!first.replayed);
+
+    // Duplicate receipt — same receipt_key.
+    let second = f
+        .repository
+        .record_execution_report(f.workspace_id, cmd)
+        .await
+        .expect("duplicate receipt");
+    assert!(second.replayed, "duplicate receipt must be marked replayed");
+
+    // Verify: no state regression.
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(action_status, "succeeded");
+
+    let exec_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment status");
+    assert_eq!(exec_status, "executed");
+
+    // Verify: only one receipt row.
+    let receipt_count: i64 =
+        sqlx::query_scalar("SELECT count(*)::bigint FROM viryaos_autopilot_execution_reports WHERE workspace_id = $1 AND action_id = $2")
+            .bind(f.workspace_id.into_uuid())
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("receipt count");
+    assert_eq!(
+        receipt_count, 1,
+        "duplicate receipt must not create a second row"
+    );
+}
+
+/// T25d: duplicate failure receipt is idempotent.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25d_duplicate_failure_receipt_is_idempotent() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25d",
+        "dispatched",
+    )
+    .await;
+
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    let receipt_key = format!("t25d-fail-{action_id}");
+    let cmd = RecordExecutionReport {
+        action_id: action_id.into(),
+        receipt_key: receipt_key.clone(),
+        executor_id: "test-executor".to_owned(),
+        status: ExecutorReportStatus::Failed,
+        claim_token: Some(claim_token),
+        provider_reference: None,
+        error_kind: Some("transport_failure".to_owned()),
+        metadata: serde_json::json!({}),
+        occurred_at: f.now,
+    };
+
+    let first = f
+        .repository
+        .record_execution_report(f.workspace_id, cmd.clone())
+        .await
+        .expect("first receipt");
+    assert!(!first.replayed);
+
+    let second = f
+        .repository
+        .record_execution_report(f.workspace_id, cmd)
+        .await
+        .expect("duplicate receipt");
+    assert!(second.replayed);
+
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(action_status, "failed");
+
+    let exec_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment status");
+    assert_eq!(exec_status, "failed");
+}
+
+/// T25e: late success after unknown resolves correctly.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25e_late_success_after_unknown_resolves_correctly() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25e",
+        "unknown",
+    )
+    .await;
+
+    // Simulate gap detection: action → unknown, assignment → unknown.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition action to unknown");
+
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    // Late success receipt arrives.
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("t25e-late-success-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: Some(claim_token),
+                provider_reference: Some("msg-late".to_owned()),
+                error_kind: None,
+                metadata: serde_json::json!({}),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("late success receipt");
+
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(
+        action_status, "succeeded",
+        "late success must resolve unknown → succeeded"
+    );
+
+    let exec_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment status");
+    assert_eq!(
+        exec_status, "executed",
+        "late success must resolve unknown → executed"
+    );
+}
+
+/// T25f: late failure after unknown resolves correctly.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25f_late_failure_after_unknown_resolves_correctly() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25f",
+        "unknown",
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+         WHERE id = $1 AND status = 'succeeded'",
+    )
+    .bind(action_id)
+    .execute(&f.pool)
+    .await
+    .expect("transition action to unknown");
+
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("t25f-late-fail-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Failed,
+                claim_token: Some(claim_token),
+                provider_reference: None,
+                error_kind: Some("late_transport_timeout".to_owned()),
+                metadata: serde_json::json!({}),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("late failure receipt");
+
+    let action_status: String =
+        sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await
+            .expect("action status");
+    assert_eq!(
+        action_status, "failed",
+        "late failure must resolve unknown → failed"
+    );
+
+    let exec_status: String = sqlx::query_scalar(
+        "SELECT execution_status FROM viryaos_experiment_assignments WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("assignment status");
+    assert_eq!(
+        exec_status, "failed",
+        "late failure must resolve unknown → failed"
+    );
+}
+
+/// T25g: resolved terminal state cannot regress (succeeded + late failure → no change).
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25g_resolved_terminal_cannot_regress() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+    let trace_id = uuid::Uuid::now_v7();
+    let action_id = insert_executor_action_with_assignment(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "r/t25g",
+        "dispatched",
+    )
+    .await;
+
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
+
+    // First: success receipt → action succeeded, assignment executed.
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("t25g-success-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Succeeded,
+                claim_token: Some(claim_token),
+                provider_reference: Some("msg-1".to_owned()),
+                error_kind: None,
+                metadata: serde_json::json!({}),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("success receipt");
+
+    // Verify state after success.
+    let (action_status, exec_status): (String, String) = sqlx::query_as(
+        "SELECT a.status, ea.execution_status \
+         FROM viryaos_autopilot_actions a \
+         JOIN viryaos_experiment_assignments ea ON ea.action_id = a.id \
+         WHERE a.id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("state after success");
+    assert_eq!(action_status, "succeeded");
+    assert_eq!(exec_status, "executed");
+
+    // Second: late failure receipt (different receipt_key, same executor).
+    // The provider_already_succeeded check must prevent regression.
+    f.repository
+        .record_execution_report(
+            f.workspace_id,
+            RecordExecutionReport {
+                action_id: action_id.into(),
+                receipt_key: format!("t25g-late-fail-{action_id}"),
+                executor_id: "test-executor".to_owned(),
+                status: ExecutorReportStatus::Failed,
+                claim_token: Some(claim_token),
+                provider_reference: None,
+                error_kind: Some("late_timeout".to_owned()),
+                metadata: serde_json::json!({}),
+                occurred_at: f.now + time::Duration::minutes(5),
+            },
+        )
+        .await
+        .expect("late failure receipt");
+
+    // Verify: state must NOT regress.
+    let (action_status_after, exec_status_after): (String, String) = sqlx::query_as(
+        "SELECT a.status, ea.execution_status \
+         FROM viryaos_autopilot_actions a \
+         JOIN viryaos_experiment_assignments ea ON ea.action_id = a.id \
+         WHERE a.id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("state after late failure");
+    assert_eq!(
+        action_status_after, "succeeded",
+        "action must not regress from succeeded to failed"
+    );
+    assert_eq!(
+        exec_status_after, "executed",
+        "assignment must not regress from executed to failed"
+    );
+}
+
+/// T25h: no split-brain state after commit (action and assignment agree).
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25h_no_split_brain_after_commit() {
+    let f = setup().await.expect("fixture");
+    insert_executor_instance(&f.pool, f.workspace_id).await;
+
+    // Test both success and failure paths — in both cases, action and
+    // assignment must agree after commit.
+    for (unit_id, status, expected_action, expected_assignment) in [
+        (
+            "r/t25h-success",
+            ExecutorReportStatus::Succeeded,
+            "succeeded",
+            "executed",
+        ),
+        (
+            "r/t25h-failure",
+            ExecutorReportStatus::Failed,
+            "failed",
+            "failed",
+        ),
+    ] {
+        let trace_id = uuid::Uuid::now_v7();
+        let action_id = insert_executor_action_with_assignment(
+            &f.pool,
+            f.workspace_id,
+            trace_id,
+            unit_id,
+            "unknown",
+        )
+        .await;
+
+        // Transition action to unknown.
+        sqlx::query(
+            "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL, updated_at = now() \
+             WHERE id = $1 AND status = 'succeeded'",
+        )
+        .bind(action_id)
+        .execute(&f.pool)
+        .await
+        .expect("transition to unknown");
+
+        let claim = f
+            .repository
+            .claim_execution(
+                f.workspace_id,
+                ClaimExecution {
+                    action_id: action_id.into(),
+                    executor_id: "test-executor".to_owned(),
+                    occurred_at: f.now,
+                },
+            )
+            .await
+            .expect("claim");
+        let claim_token = claim.claim_token.expect("claim token");
+
+        f.repository
+            .record_execution_report(
+                f.workspace_id,
+                RecordExecutionReport {
+                    action_id: action_id.into(),
+                    receipt_key: format!("t25h-{unit_id}-{action_id}"),
+                    executor_id: "test-executor".to_owned(),
+                    status,
+                    claim_token: Some(claim_token),
+                    provider_reference: if matches!(status, ExecutorReportStatus::Succeeded) {
+                        Some("msg".to_owned())
+                    } else {
+                        None
+                    },
+                    error_kind: if matches!(status, ExecutorReportStatus::Failed) {
+                        Some("error".to_owned())
+                    } else {
+                        None
+                    },
+                    metadata: serde_json::json!({}),
+                    occurred_at: f.now,
+                },
+            )
+            .await
+            .expect("receipt");
+
+        // Verify: action and assignment agree.
+        let (action_status, exec_status): (String, String) = sqlx::query_as(
+            "SELECT a.status, ea.execution_status \
+             FROM viryaos_autopilot_actions a \
+             JOIN viryaos_experiment_assignments ea ON ea.action_id = a.id \
+             WHERE a.id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await
+        .expect("state query");
+        assert_eq!(
+            action_status, expected_action,
+            "action status must be {expected_action} for {unit_id}"
+        );
+        assert_eq!(
+            exec_status, expected_assignment,
+            "assignment status must be {expected_assignment} for {unit_id}"
+        );
+        // No split-brain: action and assignment must both be terminal.
+        assert!(
+            action_status != "unknown",
+            "action must not remain unknown after terminal receipt"
+        );
+        assert!(
+            exec_status != "unknown" && exec_status != "dispatched",
+            "assignment must not remain unknown/dispatched after terminal receipt"
+        );
+    }
+}
+
+// ── T25i: Learning boundary — UNKNOWN excluded from causal learner ──
+//
+// Proves that the explicit LEFT JOIN guard in load_growth_evidence
+// excludes execution_status='unknown' evidence from the causal learner,
+// even if resolved_at is set (simulating a bug/admin override).
+
+/// Helper: insert a growth evidence row directly.
+async fn insert_growth_evidence_row(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    resolved: bool,
+) {
+    sqlx::query(
+        r#"INSERT INTO viryaos_growth_evidence
+           (workspace_id, action_id, opportunity_id, timestamp, audience,
+            recipient_id, channel, estimated_reach, treatment, propensity,
+            observed_fans, observed_incremental_fans, durable_fans_30d,
+            converted, predicted_fans, predicted_signal_installs, context,
+            strategy, evidence_quality, resolved_at)
+           VALUES ($1,$2,$3,now(),'test','test_recipient','reddit_post',1,
+                   'treatment',0.5,10.0,5.0,3.0,false,5.0,1.0,
+                   '{}'::jsonb,'discovery','observational',$4)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(format!("opp-{action_id}"))
+    .bind(if resolved {
+        Some(OffsetDateTime::now_utc())
+    } else {
+        None
+    })
+    .execute(pool)
+    .await
+    .expect("insert growth evidence");
+}
+
+/// Helper: insert an experiment assignment with a specific execution_status.
+async fn insert_assignment_for_evidence_test(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    unit_id: &str,
+    execution_status: &str,
+) {
+    let assignment_id = uuid::Uuid::now_v7();
+    let experiment_uuid = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (workspace_id, assignment_id, experiment_uuid, unit_id, unit_kind,
+            arm, propensity, prediction, context, strategy,
+            eligibility_criteria, selection_context, interference_policy,
+            interference_score, is_interference_controllable,
+            experiment_status, execution_status, action_id)
+           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+                   '{}'::jsonb,'{}'::jsonb,'discovery',
+                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                   'active',$5,$6)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(assignment_id)
+    .bind(experiment_uuid)
+    .bind(unit_id)
+    .bind(execution_status)
+    .bind(action_id)
+    .execute(pool)
+    .await
+    .expect("insert assignment");
+}
+
+/// T25i: UNKNOWN evidence excluded from causal learner even with resolved_at set.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t25i_unknown_excluded_from_causal_learner() {
+    let f = setup().await.expect("fixture");
+
+    // 1. Create an action + assignment with execution_status=unknown.
+    let trace_unknown = uuid::Uuid::now_v7();
+    let action_unknown = insert_decision_and_action(&f.pool, f.workspace_id, trace_unknown).await;
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_unknown,
+        "r/t25i-unknown",
+        "unknown",
+    )
+    .await;
+    // Deliberately set resolved_at despite the invalid state (simulating
+    // a bug/admin override that sets resolved_at despite unknown status).
+    insert_growth_evidence_row(&f.pool, f.workspace_id, action_unknown, true).await;
+
+    // 2. Create an action + assignment with execution_status=executed.
+    let trace_executed = uuid::Uuid::now_v7();
+    let action_executed = insert_decision_and_action(&f.pool, f.workspace_id, trace_executed).await;
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_executed,
+        "r/t25i-executed",
+        "executed",
+    )
+    .await;
+    insert_growth_evidence_row(&f.pool, f.workspace_id, action_executed, true).await;
+
+    // 3. Create an action + assignment with execution_status=failed.
+    let trace_failed = uuid::Uuid::now_v7();
+    let action_failed = insert_decision_and_action(&f.pool, f.workspace_id, trace_failed).await;
+    insert_assignment_for_evidence_test(
+        &f.pool,
+        f.workspace_id,
+        action_failed,
+        "r/t25i-failed",
+        "failed",
+    )
+    .await;
+    insert_growth_evidence_row(&f.pool, f.workspace_id, action_failed, true).await;
+
+    // 4. Create an action with NO assignment (non-experiment evidence).
+    let trace_no_assign = uuid::Uuid::now_v7();
+    let action_no_assign =
+        insert_decision_and_action(&f.pool, f.workspace_id, trace_no_assign).await;
+    insert_growth_evidence_row(&f.pool, f.workspace_id, action_no_assign, true).await;
+
+    // 5. Load the causal-learning dataset.
+    let evidence = f
+        .repository
+        .load_growth_evidence(f.workspace_id, None)
+        .await
+        .expect("load growth evidence");
+
+    // 6. Assert: unknown evidence is excluded.
+    let unknown_loaded = evidence.iter().any(|e| e.action_id == Some(action_unknown));
+    assert!(
+        !unknown_loaded,
+        "unknown execution_status evidence must be excluded from the causal learner"
+    );
+
+    // 7. Assert: executed evidence is included.
+    let executed_loaded = evidence
+        .iter()
+        .any(|e| e.action_id == Some(action_executed));
+    assert!(
+        executed_loaded,
+        "executed execution_status evidence must be included in the causal learner"
+    );
+
+    // 8. Assert: failed evidence is included (valid non-treatment evidence).
+    let failed_loaded = evidence.iter().any(|e| e.action_id == Some(action_failed));
+    assert!(
+        failed_loaded,
+        "failed execution_status evidence must be included (valid non-treatment for per-protocol)"
+    );
+
+    // 9. Assert: non-experiment evidence (no assignment) is included.
+    let no_assign_loaded = evidence
+        .iter()
+        .any(|e| e.action_id == Some(action_no_assign));
+    assert!(
+        no_assign_loaded,
+        "non-experiment evidence (no assignment) must be included — LEFT JOIN, not INNER"
+    );
+
+    // 10. Assert: no fan-out — each action_id appears at most once.
+    let mut action_ids: Vec<_> = evidence.iter().filter_map(|e| e.action_id).collect();
+    let total = action_ids.len();
+    action_ids.sort();
+    action_ids.dedup();
+    assert_eq!(
+        action_ids.len(),
+        total,
+        "no fan-out: one evidence record must produce at most one learning row"
     );
 }
