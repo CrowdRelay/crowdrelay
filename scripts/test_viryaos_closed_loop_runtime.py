@@ -110,7 +110,10 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         failed_arm = runtime[runtime.index('ExecutorReportStatus::Failed =>'):runtime.index('ExecutorReportStatus::Succeeded =>')]
         self.assertIn('provider_already_succeeded', failed_arm)
         self.assertIn("report.status='succeeded'", failed_arm)
-        self.assertIn('if provider_already_succeeded', failed_arm)
+        # The canonical resolver (resolve_outcome) drives the decision.
+        # A late failure after a prior success → Resolution::NoChange.
+        self.assertIn('prior_success_exists: provider_already_succeeded', failed_arm)
+        self.assertIn('Resolution::NoChange', failed_arm)
         self.assertIn('NOT EXISTS (', control)
         self.assertIn("success.status=\'succeeded\'", control)
         self.assertIn("success.status=\'succeeded\'", chief)
