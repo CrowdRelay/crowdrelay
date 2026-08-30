@@ -7,11 +7,11 @@
 -- 3. A function to attempt reconciliation of an UNKNOWN action.
 --
 -- The reconciliation strategy depends on the action kind:
--- - For community.engage.request: check if community_posts has a 'posted' row.
+-- - For community.engage: check if community_posts has a 'posted' row.
 --   If yes → SUCCEEDED. If 'failed' → FAILED. If still 'posting' → stay UNKNOWN.
 -- - For other action kinds: check if the action status in autopilot_actions
 --   has been updated. If the action is 'succeeded' → SUCCEEDED. If 'failed' → FAILED.
---   If still 'in_progress' → stay UNKNOWN (will retry on next sweep).
+--   If still 'processing' → stay UNKNOWN (will retry on next sweep).
 
 -- Mark stale RUNNING actions as UNKNOWN.
 -- Called by the worker reconciliation sweep.
@@ -87,7 +87,7 @@ BEGIN
         new_state := 'FAILED';
     ELSIF action_status = 'cancelled' THEN
         new_state := 'CANCELLED';
-    ELSIF action_kind = 'community.engage.request' THEN
+    ELSIF action_kind = 'community.engage' THEN
         -- Strategy 2: For community engagement, check community_posts.
         SELECT status INTO community_status
         FROM community_posts

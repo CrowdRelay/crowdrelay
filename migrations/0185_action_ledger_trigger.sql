@@ -4,11 +4,10 @@
 -- The trigger maps the autopilot action status to the ledger state:
 --   awaiting_approval → AUTHORIZED
 --   queued            → QUEUED
---   in_progress        → RUNNING
+--   processing        → RUNNING
 --   succeeded          → SUCCEEDED
 --   failed             → FAILED
 --   cancelled          → CANCELLED
---   parked             → PLANNED
 --
 -- The trigger enforces the monotonic transition rules: illegal backwards
 -- transitions are rejected (the trigger raises an exception).
@@ -25,11 +24,10 @@ BEGIN
     new_ledger_state := CASE NEW.status
         WHEN 'awaiting_approval' THEN 'AUTHORIZED'
         WHEN 'queued' THEN 'QUEUED'
-        WHEN 'in_progress' THEN 'RUNNING'
+        WHEN 'processing' THEN 'RUNNING'
         WHEN 'succeeded' THEN 'SUCCEEDED'
         WHEN 'failed' THEN 'FAILED'
         WHEN 'cancelled' THEN 'CANCELLED'
-        WHEN 'parked' THEN 'PLANNED'
         ELSE NULL
     END;
 

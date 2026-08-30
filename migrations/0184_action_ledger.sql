@@ -106,11 +106,10 @@ SELECT
     CASE a.status
         WHEN 'awaiting_approval' THEN 'AUTHORIZED'
         WHEN 'queued' THEN 'QUEUED'
-        WHEN 'in_progress' THEN 'RUNNING'
+        WHEN 'processing' THEN 'RUNNING'
         WHEN 'succeeded' THEN 'SUCCEEDED'
         WHEN 'failed' THEN 'FAILED'
         WHEN 'cancelled' THEN 'CANCELLED'
-        WHEN 'parked' THEN 'PLANNED'
         ELSE 'PLANNED'
     END,
     a.trace_id,
