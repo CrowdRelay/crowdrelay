@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use crowdrelay_brain::{
-    AttributionResult, CausalModel, DispatchPrediction, ExperimentAssignment, ExplorationMemory,
-    FanOutcome, FanProvenanceEvent, GrowthIntelligenceSnapshot,
+    AttributionResult, CausalModel, DispatchPrediction, ExperimentAssignment, ExperimentDesign,
+    ExperimentUnitKind, ExplorationMemory, FanOutcome, FanProvenanceEvent,
+    GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotMeasurementId, PlayId, WorkspaceId,
@@ -341,6 +342,56 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         assignment: &ExperimentAssignment,
         strategy: Option<&str>,
     ) -> Result<(), RepositoryError>;
+
+    /// Get-or-creates a persisted experiment design.
+    ///
+    /// P0-1: The experiment identity must survive evaluator retries. The
+    /// same `(workspace, intervention_key, logical_cycle_key)` always
+    /// converges on the same `experiment_uuid`. On first call, a new design
+    /// is inserted. On retry/concurrent call, the existing design is
+    /// returned. The DB unique index on
+    /// `(workspace_id, intervention_key, logical_cycle_key)` is the
+    /// convergence guarantee.
+    ///
+    /// The returned design carries the stable `experiment_uuid` that all
+    /// assignments for this logical cycle must use.
+    #[allow(clippy::too_many_arguments)]
+    async fn get_or_create_experiment_design(
+        &self,
+        workspace_id: WorkspaceId,
+        intervention_key: &str,
+        logical_cycle_key: &str,
+        unit_kind: ExperimentUnitKind,
+        eligible_units: Vec<String>,
+        holdout_probability: f64,
+        strategy: &str,
+        min_eligible_units: u32,
+        min_expected_control: u32,
+        min_expected_treatment: u32,
+        now: time::OffsetDateTime,
+    ) -> Result<ExperimentDesign, RepositoryError>;
+
+    /// Atomically persists a treatment action AND its experiment assignment
+    /// in a single database transaction.
+    ///
+    /// P0-2: The system must never reach a state where an action exists but
+    /// its experiment assignment is missing. This method commits the
+    /// decision + action + idempotency + outbox + experiment assignment as
+    /// one atomic state transition. If any step fails, the entire
+    /// transaction rolls back.
+    ///
+    /// The `assignment` is constructed with `action_id: None` by the caller;
+    /// this method fills in the real `action_id` from the inserted action
+    /// before recording the assignment.
+    async fn persist_treatment_with_assignment(
+        &self,
+        workspace_id: WorkspaceId,
+        candidate: &DecisionCandidate,
+        assignment: &ExperimentAssignment,
+        prediction: &DispatchPrediction,
+        strategy: Option<&str>,
+        holdout_probability: f64,
+    ) -> Result<CandidatePersistence, RepositoryError>;
 
     /// Evaluates contamination over the full measurement window.
     ///

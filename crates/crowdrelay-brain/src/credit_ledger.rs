@@ -423,4 +423,102 @@ mod tests {
         assert!(result.credits.is_empty());
         assert!((result.unattributed - 10.0).abs() < 0.001);
     }
+
+    // ── T6: genuine residual with 0.6 confidence ──
+
+    #[test]
+    fn genuine_residual_with_06_confidence() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // Single action with 0.6 confidence — gets 60% credit.
+        // GENUINE RESIDUAL: 6 fans attributed, 4 fans unattributed.
+        let actions = [make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 0.6, 0.0)];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 1);
+        assert!(
+            (result.credits[0].credited_incremental_y14 - 6.0).abs() < 0.001,
+            "credited = {}",
+            result.credits[0].credited_incremental_y14
+        );
+        assert!(
+            (result.unattributed - 4.0).abs() < 0.001,
+            "unattributed = {}",
+            result.unattributed
+        );
+    }
+
+    #[test]
+    fn genuine_residual_with_two_actions_weighted() {
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        // Two actions: A=0.7 confidence, B=0.5 confidence.
+        // mean_confidence = 0.6 → total_attribution_mass = 0.6.
+        // 6 fans attributed, 4 fans unattributed.
+        // Split by weight: A has temporal=1.0, B has temporal=0.5.
+        // w_A = 1.0 * 0.7 = 0.7, w_B = 0.5 * 0.5 = 0.25
+        // share_A = 0.7 / 0.95 * 0.6 * 10 ≈ 4.42
+        // share_B = 0.25 / 0.95 * 0.6 * 10 ≈ 1.58
+        // total_attributed = 4.42 + 1.58 = 6.0
+        // unattributed = 10 - 6 = 4.0
+        let actions = [
+            make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 0.7, 0.0),
+            make_action(uuid::Uuid::now_v7(), true, 0.5, 1.0, 0.5, 0.0),
+        ];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 2);
+        let total_credited: f64 = result
+            .credits
+            .iter()
+            .map(|c| c.credited_incremental_y14)
+            .sum();
+        assert!(
+            (total_credited - 6.0).abs() < 0.01,
+            "total credited = {total_credited}"
+        );
+        assert!(
+            (result.unattributed - 4.0).abs() < 0.01,
+            "unattributed = {}",
+            result.unattributed
+        );
+    }
+
+    // ── T8: causal estimator only consumes valid causal evidence ──
+
+    #[test]
+    fn proportional_allocator_never_sets_causal_evidence() {
+        // The ProportionalCreditAllocator always returns
+        // is_causal_evidence = false. The attribution worker sets this
+        // flag to true only when the experiment assignment's
+        // final_evidence_quality = 'randomized_holdout' and
+        // final_contamination < 0.1. The allocator itself never makes
+        // that determination.
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        let actions = [
+            make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, 0.0),
+            make_action(uuid::Uuid::now_v7(), true, 0.5, 1.0, 0.8, 0.0),
+        ];
+        let result = allocator.allocate(&outcome, &actions);
+        for credit in &result.credits {
+            assert!(
+                !credit.is_causal_evidence,
+                "credit for action {} has is_causal_evidence=true",
+                credit.action_id
+            );
+        }
+    }
+
+    #[test]
+    fn observational_evidence_never_becomes_causal() {
+        // Even with full confidence and perfect exposure, observational
+        // evidence (no randomized holdout) never produces causal evidence.
+        // The evidence_quality field on the action exposure is
+        // Observational — the allocator must respect that.
+        let allocator = ProportionalCreditAllocator;
+        let outcome = make_outcome(10.0);
+        let actions = [make_action(uuid::Uuid::now_v7(), true, 1.0, 1.0, 1.0, 0.0)];
+        let result = allocator.allocate(&outcome, &actions);
+        assert_eq!(result.credits.len(), 1);
+        assert!(!result.credits[0].is_causal_evidence);
+    }
 }

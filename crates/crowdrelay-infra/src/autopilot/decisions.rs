@@ -378,6 +378,57 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn get_or_create_experiment_design(
+        &self,
+        workspace_id: WorkspaceId,
+        intervention_key: &str,
+        logical_cycle_key: &str,
+        unit_kind: crowdrelay_brain::ExperimentUnitKind,
+        eligible_units: Vec<String>,
+        holdout_probability: f64,
+        strategy: &str,
+        min_eligible_units: u32,
+        min_expected_control: u32,
+        min_expected_treatment: u32,
+        now: time::OffsetDateTime,
+    ) -> Result<crowdrelay_brain::ExperimentDesign, RepositoryError> {
+        super::operations::experiment_assignments::get_or_create_experiment_design(
+            self,
+            workspace_id,
+            intervention_key,
+            logical_cycle_key,
+            unit_kind,
+            eligible_units,
+            holdout_probability,
+            strategy,
+            min_eligible_units,
+            min_expected_control,
+            min_expected_treatment,
+            now,
+        )
+        .await
+    }
+
+    async fn persist_treatment_with_assignment(
+        &self,
+        workspace_id: WorkspaceId,
+        candidate: &DecisionCandidate,
+        assignment: &crowdrelay_brain::ExperimentAssignment,
+        prediction: &crowdrelay_brain::DispatchPrediction,
+        strategy: Option<&str>,
+        holdout_probability: f64,
+    ) -> Result<CandidatePersistence, RepositoryError> {
+        self.persist_treatment_with_assignment_impl(
+            workspace_id,
+            candidate,
+            assignment,
+            prediction,
+            strategy,
+            holdout_probability,
+        )
+        .await
+    }
+
     async fn evaluate_contamination(
         &self,
         workspace_id: WorkspaceId,

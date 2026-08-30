@@ -238,6 +238,50 @@ impl ExperimentKind {
     }
 }
 
+/// The operational status of an experiment design.
+///
+/// P0-4: A randomized holdout with too few eligible units produces
+/// structurally valid but statistically useless evidence. Before starting
+/// an experiment, the brain checks whether the eligible population is large
+/// enough to produce meaningful treatment/control arms. When it is not, the
+/// design is marked `InsufficientPower` and the candidates execute
+/// observationally — no holdout, no fake causal claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentStatus {
+    /// The experiment has enough eligible units for a meaningful
+    /// randomized holdout. Treatment/control assignment proceeds normally.
+    Active,
+    /// The eligible population is too small. Candidates execute as normal
+    /// actions with observational evidence quality — no holdout, no
+    /// randomized causal claim. The North Star action is not sacrificed.
+    InsufficientPower,
+    /// The measurement window has closed and the experiment is resolved.
+    /// Set by the measurement worker after outcomes are observed.
+    Completed,
+}
+
+impl ExperimentStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::InsufficientPower => "insufficient_power",
+            Self::Completed => "completed",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "insufficient_power" => Some(Self::InsufficientPower),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
 /// A first-class experiment assignment — the unit being randomized, the
 /// arm, and the metadata needed for causal inference.
 ///
@@ -319,6 +363,13 @@ pub struct ExperimentAssignment {
     /// estimand explicit for future policy evaluation.
     #[serde(default)]
     pub selection_context: serde_json::Value,
+    /// The operational status of the experiment at assignment time.
+    /// Copied from the `ExperimentDesign` so the assignment row carries
+    /// the status without joining back to the design table. When
+    /// `InsufficientPower`, the assignment is observational — no holdout
+    /// was applied, even though the arm is `Treatment`.
+    #[serde(default = "default_experiment_status")]
+    pub experiment_status: ExperimentStatus,
 }
 
 impl ExperimentAssignment {
@@ -372,6 +423,7 @@ impl ExperimentAssignment {
             is_interference_controllable: design.interference_policy.is_interference_controllable(),
             eligibility_criteria: design.eligibility_criteria.clone(),
             selection_context: design.selection_context.clone(),
+            experiment_status: design.experiment_status,
         }
     }
 }
@@ -402,7 +454,9 @@ impl ExperimentAssignment {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExperimentDesign {
     /// The experiment UUID — shared by all assignments in this experiment.
-    /// Fresh per (cycle, intervention). All eligible units share it.
+    /// Persisted in `viryaos_experiment_designs` so evaluator retries
+    /// converge on the same UUID. The same (workspace, intervention,
+    /// logical_cycle_key) always resolves to the same experiment_uuid.
     pub experiment_uuid: uuid::Uuid,
     /// The assignment round — always 1 for a new experiment. Each cycle
     /// creates a new experiment, so rounds do not increment across cycles.
@@ -412,6 +466,12 @@ pub struct ExperimentDesign {
     /// richer `InterventionDefinition` so treatment-version changes create
     /// distinct experiments.
     pub intervention_key: String,
+    /// The logical cycle key — the cooldown window bucket that identifies
+    /// one logical experiment cycle. Same key = same experiment. Derived
+    /// from `now.unix_timestamp() div window_seconds`, the same bucketing
+    /// used in `decision_key`. This makes retry convergence deterministic:
+    /// a retry within the same cooldown window reuses the same design.
+    pub logical_cycle_key: String,
     /// The kind of experimental unit being randomized.
     pub unit_kind: ExperimentUnitKind,
     /// The eligible unit population — all units that could be assigned.
@@ -439,6 +499,23 @@ pub struct ExperimentDesign {
     /// what was the best alternative, etc. Makes the selection-biased
     /// estimand explicit for future policy evaluation.
     pub selection_context: serde_json::Value,
+    /// The operational status — whether this experiment has enough power
+    /// to produce a meaningful randomized holdout. When `InsufficientPower`,
+    /// candidates execute observationally without a holdout.
+    #[serde(default = "default_experiment_status")]
+    pub experiment_status: ExperimentStatus,
+    /// The expected number of treatment units if the holdout proceeds.
+    /// `ceil(eligible * (1 - holdout_probability))`. None when not computed.
+    #[serde(default)]
+    pub expected_treatment_count: Option<u32>,
+    /// The expected number of control units if the holdout proceeds.
+    /// `floor(eligible * holdout_probability)`. None when not computed.
+    #[serde(default)]
+    pub expected_control_count: Option<u32>,
+}
+
+fn default_experiment_status() -> ExperimentStatus {
+    ExperimentStatus::Active
 }
 
 impl ExperimentDesign {
@@ -447,11 +524,14 @@ impl ExperimentDesign {
     /// The `experiment_uuid` is fresh (caller generates it). The
     /// `assignment_round` is 1 (each cycle is a new experiment). The
     /// `interference_policy` is derived from the unit kind and intervention
-    /// key.
+    /// key. The `logical_cycle_key` is the cooldown window bucket that
+    /// identifies this logical cycle — same key = same experiment.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         experiment_uuid: uuid::Uuid,
         intervention_key: &str,
+        logical_cycle_key: &str,
         unit_kind: ExperimentUnitKind,
         eligible_units: Vec<String>,
         assigned_at: OffsetDateTime,
@@ -479,6 +559,7 @@ impl ExperimentDesign {
             experiment_uuid,
             assignment_round: 1,
             intervention_key: intervention_key.to_owned(),
+            logical_cycle_key: logical_cycle_key.to_owned(),
             unit_kind,
             eligible_units,
             estimand,
@@ -487,7 +568,49 @@ impl ExperimentDesign {
             holdout_probability,
             eligibility_criteria,
             selection_context,
+            experiment_status: ExperimentStatus::Active,
+            expected_treatment_count: None,
+            expected_control_count: None,
         }
+    }
+
+    /// Checks whether the eligible population is large enough to produce a
+    /// meaningful randomized holdout.
+    ///
+    /// P0-4: A 10% holdout on 1–3 eligible units frequently produces zero
+    /// controls. This method computes the expected arm counts and compares
+    /// them against configurable minimums. When insufficient, the design
+    /// is marked `InsufficientPower` and candidates execute observationally.
+    ///
+    /// The expected counts are:
+    /// - `expected_treatment = ceil(eligible * (1 - holdout_probability))`
+    /// - `expected_control = floor(eligible * holdout_probability)`
+    ///
+    /// Returns the computed status and mutates `expected_treatment_count`
+    /// and `expected_control_count` on the design.
+    #[must_use]
+    pub fn check_power(
+        &mut self,
+        min_eligible_units: u32,
+        min_expected_control: u32,
+        min_expected_treatment: u32,
+    ) -> ExperimentStatus {
+        let eligible = self.eligible_units.len() as u32;
+        let expected_treatment =
+            ((eligible as f64 * (1.0 - self.holdout_probability)).ceil()) as u32;
+        let expected_control = (eligible as f64 * self.holdout_probability).floor() as u32;
+        self.expected_treatment_count = Some(expected_treatment);
+        self.expected_control_count = Some(expected_control);
+        let status = if eligible < min_eligible_units
+            || expected_control < min_expected_control
+            || expected_treatment < min_expected_treatment
+        {
+            ExperimentStatus::InsufficientPower
+        } else {
+            ExperimentStatus::Active
+        };
+        self.experiment_status = status;
+        status
     }
 }
 
@@ -644,6 +767,7 @@ mod tests {
         let design = ExperimentDesign::new(
             uuid,
             "community.engage",
+            "cycle-42",
             ExperimentUnitKind::TargetCommunity,
             vec!["r/djent".to_owned(), "r/metalcore".to_owned()],
             OffsetDateTime::now_utc(),
@@ -653,12 +777,14 @@ mod tests {
         assert_eq!(design.experiment_uuid, uuid);
         assert_eq!(design.assignment_round, 1);
         assert_eq!(design.intervention_key, "community.engage");
+        assert_eq!(design.logical_cycle_key, "cycle-42");
         assert_eq!(design.eligible_units.len(), 2);
         assert_eq!(
             design.interference_policy,
             InterferencePolicy::PotentiallyIsolatable
         );
         assert!((design.holdout_probability - 0.05).abs() < 1e-10);
+        assert_eq!(design.experiment_status, ExperimentStatus::Active);
     }
 
     #[test]
@@ -667,6 +793,7 @@ mod tests {
         let design = ExperimentDesign::new(
             uuid,
             "community.engage",
+            "cycle-42",
             ExperimentUnitKind::TargetCommunity,
             vec!["r/djent".to_owned(), "r/metalcore".to_owned()],
             OffsetDateTime::now_utc(),
@@ -711,6 +838,7 @@ mod tests {
         let design = ExperimentDesign::new(
             uuid,
             "community.engage",
+            "cycle-42",
             ExperimentUnitKind::TargetCommunity,
             vec!["r/djent".to_owned()],
             OffsetDateTime::now_utc(),
@@ -735,5 +863,114 @@ mod tests {
             None,
         );
         assert_ne!(a1.assignment_id, a2.assignment_id);
+    }
+
+    // ── T3: insufficient sample / power guard ──
+
+    #[test]
+    fn check_power_insufficient_with_small_population() {
+        let uuid = uuid::Uuid::now_v7();
+        let mut design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned(), "r/metalcore".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.10,
+            "discovery",
+        );
+        // N=2, holdout=10% → expected_control = floor(0.2) = 0.
+        // With min_control=2, this is insufficient.
+        let status = design.check_power(10, 2, 2);
+        assert_eq!(status, ExperimentStatus::InsufficientPower);
+        assert_eq!(
+            design.experiment_status,
+            ExperimentStatus::InsufficientPower
+        );
+        assert_eq!(design.expected_control_count, Some(0));
+        assert_eq!(design.expected_treatment_count, Some(2));
+    }
+
+    #[test]
+    fn check_power_sufficient_with_large_population() {
+        let uuid = uuid::Uuid::now_v7();
+        let eligible: Vec<String> = (0..20).map(|i| format!("r/community{i}")).collect();
+        let mut design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            eligible,
+            OffsetDateTime::now_utc(),
+            0.10,
+            "discovery",
+        );
+        // N=20, holdout=10% → expected_control = floor(2.0) = 2,
+        // expected_treatment = ceil(18.0) = 18. With min_control=2,
+        // min_treatment=2, min_eligible=10, this is sufficient.
+        let status = design.check_power(10, 2, 2);
+        assert_eq!(status, ExperimentStatus::Active);
+        assert_eq!(design.expected_control_count, Some(2));
+        assert_eq!(design.expected_treatment_count, Some(18));
+    }
+
+    #[test]
+    fn check_power_insufficient_when_control_arm_too_small() {
+        let uuid = uuid::Uuid::now_v7();
+        let eligible: Vec<String> = (0..12).map(|i| format!("r/community{i}")).collect();
+        let mut design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            eligible,
+            OffsetDateTime::now_utc(),
+            0.05,
+            "discovery",
+        );
+        // N=12, holdout=5% → expected_control = floor(0.6) = 0.
+        // Even though eligible >= 10, control arm is too small.
+        let status = design.check_power(10, 2, 2);
+        assert_eq!(status, ExperimentStatus::InsufficientPower);
+    }
+
+    // ── T4: treatment/unit/outcome mismatch ──
+
+    #[test]
+    fn workspace_treatment_is_never_randomized_holdout() {
+        // A workspace-wide treatment cannot be isolated — the intervention
+        // spills across all units. The experiment kind must be
+        // MatchedQuasiExperiment, not RandomizedHoldout.
+        let policy = InterferencePolicy::from_unit_and_template(
+            ExperimentUnitKind::Workspace,
+            "community.engage",
+        );
+        assert_eq!(policy, InterferencePolicy::NotIsolatable);
+        assert!(!policy.is_interference_controllable());
+    }
+
+    #[test]
+    fn target_community_with_community_engage_is_potentially_isolatable() {
+        // A community-scoped intervention on a specific community CAN
+        // be isolated — the treatment targets one community, and the
+        // control community remains untreated.
+        let policy = InterferencePolicy::from_unit_and_template(
+            ExperimentUnitKind::TargetCommunity,
+            "community-engager",
+        );
+        assert_eq!(policy, InterferencePolicy::PotentiallyIsolatable);
+        assert!(policy.is_interference_controllable());
+    }
+
+    #[test]
+    fn experiment_status_round_trips() {
+        for status in [
+            ExperimentStatus::Active,
+            ExperimentStatus::InsufficientPower,
+            ExperimentStatus::Completed,
+        ] {
+            assert_eq!(ExperimentStatus::parse(status.as_str()), Some(status));
+        }
     }
 }

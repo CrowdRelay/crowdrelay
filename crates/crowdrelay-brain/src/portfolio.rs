@@ -861,4 +861,55 @@ mod tests {
         // cost_budget=0 means disabled → max_dispatches=2 is the limit.
         assert_eq!(result.selected.len(), 2);
     }
+
+    // ── T7: EFE cannot hide better DecisionValue ──
+    //
+    // The portfolio optimizer ranks by DecisionValue.total() (expected
+    // incremental Y30 fans), NOT by EFE. EFE decides candidate generation
+    // (which opportunities enter the pool); DecisionValue decides portfolio
+    // selection (which candidates win). This test locks the invariant:
+    // a candidate with materially higher DecisionValue must be selected
+    // over one with lower DecisionValue, regardless of EFE ordering.
+
+    #[test]
+    fn efe_cannot_hide_better_decision_value() {
+        // Candidate A: low EFE (better exploration) but low DecisionValue.
+        // Candidate B: high EFE (worse exploration) but high DecisionValue.
+        // The portfolio optimizer must select B first because it ranks
+        // by DecisionValue.total(), not EFE.
+        //
+        // We simulate this by giving B a higher expected_fans (which is
+        // the primary component of DecisionValue.total()). The EFE score
+        // is not passed to the portfolio optimizer at all — it only sees
+        // PortfolioCandidate which carries DecisionValue, not EFE.
+        let optimizer = PortfolioOptimizer::default();
+        let result = optimizer.select(vec![
+            make_candidate("a", "x", 2.0, "aud1"),  // low DecisionValue
+            make_candidate("b", "y", 10.0, "aud2"), // high DecisionValue
+        ]);
+        assert!(!result.do_nothing);
+        // B must be selected first — higher DecisionValue wins.
+        assert_eq!(result.selected[0].opportunity_id.template_id, "b");
+        // Both should be selected (different audiences, no overlap).
+        assert_eq!(result.selected.len(), 2);
+    }
+
+    #[test]
+    fn efe_does_not_affect_portfolio_ranking() {
+        // Even when the candidate with lower DecisionValue appears first
+        // in the input vector (simulating lower EFE = earlier pool entry),
+        // the portfolio optimizer must still rank by DecisionValue.
+        let optimizer = PortfolioOptimizer::default();
+        let candidates = vec![
+            make_candidate("low_value", "x", 1.0, "aud1"),
+            make_candidate("high_value", "y", 20.0, "aud2"),
+            make_candidate("mid_value", "z", 10.0, "aud3"),
+        ];
+        let result = optimizer.select(candidates);
+        // Selection order must be by DecisionValue descending:
+        // high_value (20) > mid_value (10) > low_value (1).
+        assert_eq!(result.selected[0].opportunity_id.template_id, "high_value");
+        assert_eq!(result.selected[1].opportunity_id.template_id, "mid_value");
+        assert_eq!(result.selected[2].opportunity_id.template_id, "low_value");
+    }
 }

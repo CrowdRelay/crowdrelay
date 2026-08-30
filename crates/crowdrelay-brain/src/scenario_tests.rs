@@ -688,6 +688,7 @@ fn make_exp_design(units: &[&str]) -> ExperimentDesign {
     ExperimentDesign::new(
         uuid,
         "community.engage",
+        "cycle-test",
         ExperimentUnitKind::TargetCommunity,
         units.iter().map(|s| s.to_string()).collect(),
         time::OffsetDateTime::now_utc(),
@@ -816,6 +817,7 @@ fn o_cross_experiment_isolation() {
     let design_community = ExperimentDesign::new(
         uuid::Uuid::now_v7(),
         "community.engage",
+        "cycle-o",
         ExperimentUnitKind::TargetCommunity,
         vec!["r/djent".to_owned()],
         time::OffsetDateTime::now_utc(),
@@ -825,6 +827,7 @@ fn o_cross_experiment_isolation() {
     let design_social = ExperimentDesign::new(
         uuid::Uuid::now_v7(),
         "social.post",
+        "cycle-o",
         ExperimentUnitKind::TargetCommunity,
         vec!["r/djent".to_owned()],
         time::OffsetDateTime::now_utc(),
@@ -895,6 +898,7 @@ fn p_workspace_outcome_cannot_masquerade_as_community() {
     let ws_design = ExperimentDesign::new(
         uuid::Uuid::now_v7(),
         "community-engager",
+        "cycle-p",
         ExperimentUnitKind::Workspace,
         vec!["decision:growth-intelligence:v1:community-engager:1".to_owned()],
         time::OffsetDateTime::now_utc(),
@@ -947,6 +951,7 @@ fn p_workspace_outcome_cannot_masquerade_as_community() {
     let kebab_design = ExperimentDesign::new(
         uuid::Uuid::now_v7(),
         "community-engager",
+        "cycle-kebab",
         ExperimentUnitKind::TargetCommunity,
         vec!["r/djent".to_owned()],
         time::OffsetDateTime::now_utc(),
@@ -962,6 +967,7 @@ fn p_workspace_outcome_cannot_masquerade_as_community() {
     let global_design = ExperimentDesign::new(
         uuid::Uuid::now_v7(),
         "global-blast",
+        "cycle-global",
         ExperimentUnitKind::TargetCommunity,
         vec!["r/djent".to_owned()],
         time::OffsetDateTime::now_utc(),

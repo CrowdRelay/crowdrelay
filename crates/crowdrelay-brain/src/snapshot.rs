@@ -86,6 +86,18 @@ pub struct GrowthIntelligencePolicy {
     /// out — they don't directly acquire fans, so there's no treatment to
     /// withhold.
     pub randomized_holdout_probability: f64,
+    /// Minimum number of eligible units required to start a randomized
+    /// holdout experiment. Below this, candidates execute observationally
+    /// — no holdout, no fake causal claim. Default 10.
+    #[serde(default = "default_min_eligible_units_for_experiment")]
+    pub min_eligible_units_for_experiment: u32,
+    /// Minimum expected control arm size. A 10% holdout on 3 units gives
+    /// 0 controls — this guard prevents that. Default 2.
+    #[serde(default = "default_min_expected_control_units")]
+    pub min_expected_control_units: u32,
+    /// Minimum expected treatment arm size. Default 2.
+    #[serde(default = "default_min_expected_treatment_units")]
+    pub min_expected_treatment_units: u32,
     /// Per-template operator-configured resource costs. These are NOT
     /// measured costs — they are tunable knobs for the portfolio optimizer.
     /// The architecture can learn/calibrate them later.
@@ -93,6 +105,18 @@ pub struct GrowthIntelligencePolicy {
     /// Missing keys default to 1.0.
     #[serde(default = "default_template_costs")]
     pub template_costs: HashMap<String, f64>,
+}
+
+fn default_min_eligible_units_for_experiment() -> u32 {
+    10
+}
+
+fn default_min_expected_control_units() -> u32 {
+    2
+}
+
+fn default_min_expected_treatment_units() -> u32 {
+    2
 }
 
 fn default_template_costs() -> HashMap<String, f64> {
@@ -119,6 +143,9 @@ impl Default for GrowthIntelligencePolicy {
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,
             randomized_holdout_probability: 0.0,
+            min_eligible_units_for_experiment: default_min_eligible_units_for_experiment(),
+            min_expected_control_units: default_min_expected_control_units(),
+            min_expected_treatment_units: default_min_expected_treatment_units(),
             template_costs: default_template_costs(),
         }
     }

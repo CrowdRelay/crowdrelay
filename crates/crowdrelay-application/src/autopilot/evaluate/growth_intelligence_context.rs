@@ -19,8 +19,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // Load the strategy posterior from brain state. The brain
         // learns which growth strategies work best in each world
         // state (growth trend × event proximity) via UCB
-        // exploration. When data is thin, the fixed rank-based
-        // multiplier is used as fallback.
+        // exploration. The strategy posterior influences candidate
+        // eligibility and exploration allocation only — it never
+        // modifies predicted fan value, treatment effect, or
+        // DecisionValue.
         let strategy_posterior = self
             .repository
             .load_brain_state(self.workspace_id, "strategy_posterior")
@@ -84,13 +86,9 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             let ctx = build_dispatch_context(snapshot, now);
             let novelty =
                 exploration_memory.novelty(&snapshot.template_id, &context_hash(&ctx));
-            if let Some((
-                candidate,
-                prediction,
-                efe_score,
-                strategy_rank,
-                treatment_stats,
-            )) = growth_intelligence_candidate(
+            // P0-3: community-engager now returns one candidate per
+            // target community. Other templates return 0 or 1.
+            let candidates = growth_intelligence_candidate(
                 snapshot,
                 policy,
                 self.workspace_id,
@@ -99,15 +97,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 strategy,
                 novelty,
                 &strategy_posterior,
-            )? {
-                scored_candidates.push((
-                    candidate,
-                    prediction,
-                    efe_score,
-                    strategy_rank,
-                    treatment_stats,
-                ));
-            }
+            )?;
+            scored_candidates.extend(candidates);
         }
         // Sort by EFE score (lower EFE = better) for candidate POOL
         // ORDERING only. This determines which candidates enter the
@@ -153,18 +144,18 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // arms of the same experiment, not separate experiments that
         // happen to share a label.
         //
-        // One ExperimentDesign per (cycle, intervention). All eligible
-        // units for that intervention share the same experiment_uuid.
-        // Each cycle creates a new experiment (fresh UUID) — we do NOT
-        // create one perpetual experiment per intervention, because that
-        // would conflate different contexts, strategies, audiences, and
-        // model versions. Cross-experiment learning happens via the
-        // hierarchical learner (calibration, treatment-effect posteriors).
+        // P0-1: The design is persisted via get_or_create_experiment_design.
+        // The same (workspace, intervention, logical_cycle_key) always
+        // converges on the same experiment_uuid. Retries and concurrent
+        // evaluators reuse the same design — no more fresh UUIDs per run.
         //
-        // The experiment_uuid is the randomization seed. The roll for
-        // each unit is hash(experiment_uuid + unit_id + round), which
-        // varies per experiment (per cycle per intervention) without
-        // arbitrary time bucketing.
+        // P0-3: community-engager uses TargetCommunity units. Each community
+        // is a distinct experimental unit with its own assignment. Other
+        // templates use Workspace units (quasi-experimental only).
+        //
+        // P0-4: Before assignment, the design is checked for statistical
+        // power. If the eligible population is too small, the experiment
+        // is marked InsufficientPower and candidates execute observationally.
         let mut dispatched_count = 0usize;
         // Group selected candidates by intervention (template_id).
         // Each group becomes one ExperimentDesign with its own UUID.
@@ -220,32 +211,78 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 ));
             }
         }
-        // For each intervention group, create one ExperimentDesign and
-        // assign arms to all units within it.
+        // For each intervention group, get-or-create the persisted
+        // ExperimentDesign and assign arms to all units within it.
         for (template_id, group_candidates) in &experiment_groups {
-            let experiment_uuid = uuid::Uuid::now_v7();
-            let eligible_units: Vec<String> = group_candidates
-                .iter()
-                .map(|(c, _)| c.decision_key.clone())
-                .collect();
-            // Growth intelligence dispatches are workspace-level agent
-            // runs (RequestAgentRun). The unit is the workspace, not a
-            // specific community — the agent may target communities
-            // internally, but the dispatch decision is workspace-wide.
-            // This means interference is NotIsolatable and the experiment
-            // kind is MatchedQuasiExperiment. Provenance-based community
-            // measurement is still used when available (see measurement.rs),
-            // but the evidence quality is downgraded to quasi-experimental.
-            let design = crowdrelay_brain::ExperimentDesign::new(
-                experiment_uuid,
-                template_id,
-                crowdrelay_brain::ExperimentUnitKind::Workspace,
-                eligible_units,
-                now,
-                holdout_probability,
-                strategy.as_str(),
-            );
+            // P0-3: community-engager uses TargetCommunity units.
+            // Each community is a distinct experimental unit. Other
+            // direct-action templates use Workspace units.
+            let unit_kind = if template_id == "community-engager" {
+                crowdrelay_brain::ExperimentUnitKind::TargetCommunity
+            } else {
+                crowdrelay_brain::ExperimentUnitKind::Workspace
+            };
+            // P0-3: for community-engager, the eligible units are the
+            // target communities (subreddits). For workspace-wide
+            // templates, the eligible unit is the workspace itself.
+            let eligible_units: Vec<String> = if template_id == "community-engager" {
+                group_candidates
+                    .iter()
+                    .map(|(c, _)| unit_id_from_decision_key(&c.decision_key))
+                    .collect()
+            } else {
+                group_candidates.iter().map(|(c, _)| c.decision_key.clone()).collect()
+            };
+            // P0-1: compute the logical_cycle_key from the cooldown
+            // window bucket. This is the same bucketing used in
+            // decision_key, so retry within the same cooldown window
+            // converges on the same experiment.
+            let key_window_hours = key_window_for_template(&gi_policy, template_id);
+            let logical_cycle_key = cooldown_window(now, key_window_hours).to_string();
+            // P0-1: get-or-create the persisted experiment design.
+            // The DB unique index on (workspace, intervention,
+            // logical_cycle_key) is the convergence guarantee.
+            let mut design = self
+                .repository
+                .get_or_create_experiment_design(
+                    self.workspace_id,
+                    template_id,
+                    &logical_cycle_key,
+                    unit_kind,
+                    eligible_units.clone(),
+                    holdout_probability,
+                    strategy.as_str(),
+                    gi_policy.min_eligible_units_for_experiment,
+                    gi_policy.min_expected_control_units,
+                    gi_policy.min_expected_treatment_units,
+                    now,
+                )
+                .await?;
+            // P0-4: The power check is performed inside
+            // get_or_create_experiment_design and persisted to the DB.
+            // The design's experiment_status already reflects the result.
+            let is_insufficient_power =
+                design.experiment_status == crowdrelay_brain::ExperimentStatus::InsufficientPower;
+            // When power is insufficient, holdout_probability is
+            // effectively 0 — all candidates are treatment, evidence
+            // is observational. The North Star action is not sacrificed.
+            // We also zero the design's holdout_probability so that
+            // ExperimentAssignment::from_design computes propensity = 1.0
+            // (all treatment), not 1.0 - original_holdout.
+            if is_insufficient_power {
+                design.holdout_probability = 0.0;
+            }
+            let effective_holdout = if is_insufficient_power {
+                0.0
+            } else {
+                holdout_probability
+            };
             for (candidate, prediction) in group_candidates {
+                let unit_id = if template_id == "community-engager" {
+                    unit_id_from_decision_key(&candidate.decision_key)
+                } else {
+                    candidate.decision_key.clone()
+                };
                 // Per-unit deterministic roll using the experiment_uuid
                 // as the randomization seed. The same unit gets the
                 // same assignment within one experiment (deterministic
@@ -254,39 +291,68 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 // fate).
                 let roll = deterministic_roll(&format!(
                     "{}:{}:{}:{}",
-                    experiment_uuid, candidate.decision_key, design.assignment_round, template_id
+                    design.experiment_uuid, unit_id, design.assignment_round, template_id
                 ));
-                let is_control = holdout_probability > 0.0 && roll < holdout_probability;
+                let is_control = effective_holdout > 0.0 && roll < effective_holdout;
                 if is_control {
                     // Control arm: record an ExperimentAssignment with
                     // arm=Control. No action is dispatched — the worker
                     // never runs. The measurement system will measure
-                    // the workspace's fan growth in the 14-day window
+                    // the unit's fan growth in the 14-day window
                     // via workspace-level DiD (or community-level
                     // provenance if available), which is the control
                     // group's counterfactual outcome.
                     let assignment = crowdrelay_brain::ExperimentAssignment::from_design(
                         &design,
-                        &candidate.decision_key,
-                        &candidate.decision_key,
+                        &unit_id,
+                        &unit_id,
                         crowdrelay_brain::TreatmentAssignment::Control,
                         prediction,
                         None,
                     );
-                    let _ = self
-                        .repository
+                    // P0-2: control assignment errors are propagated,
+                    // not discarded. A failed control assignment means
+                    // the experiment bookkeeping is broken — the cycle
+                    // fails rather than silently dropping the assignment.
+                    self.repository
                         .record_experiment_assignment(
                             self.workspace_id,
                             &assignment,
                             Some(strategy.as_str()),
                         )
-                        .await;
+                        .await?;
                     continue;
                 }
-                // Treatment arm: dispatch the action and record the
-                // treatment-arm ExperimentAssignment.
-                let persisted = self.persist(candidate, limits, report).await?;
-                if let Some(action_id) = persisted {
+                // Treatment arm: P0-2 — atomically persist the action
+                // AND the experiment assignment in one transaction.
+                // ACTION EXISTS ↔ ASSIGNMENT EXISTS ↔ EXECUTION INTENT.
+                // No state where the action succeeded but the causal
+                // bookkeeping vanished.
+                let treatment_assignment =
+                    crowdrelay_brain::ExperimentAssignment::from_design(
+                        &design,
+                        &unit_id,
+                        &unit_id,
+                        crowdrelay_brain::TreatmentAssignment::Treatment,
+                        prediction,
+                        None, // action_id filled in by the atomic persist
+                    );
+                let persisted = self
+                    .repository
+                    .persist_treatment_with_assignment(
+                        self.workspace_id,
+                        candidate,
+                        &treatment_assignment,
+                        prediction,
+                        Some(strategy.as_str()),
+                        effective_holdout,
+                    )
+                    .await?;
+                if let Some(action_id) = persisted.action_id {
+                    // Record the growth evidence row separately — it
+                    // is measurement infrastructure, not causal
+                    // bookkeeping. The prediction was already recorded
+                    // atomically inside the transaction.
                     let _ = self
                         .repository
                         .record_dispatch_prediction(
@@ -294,24 +360,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             action_id,
                             prediction,
                             Some(strategy.as_str()),
-                            holdout_probability,
-                        )
-                        .await;
-                    let treatment_assignment =
-                        crowdrelay_brain::ExperimentAssignment::from_design(
-                            &design,
-                            &candidate.decision_key,
-                            &candidate.decision_key,
-                            crowdrelay_brain::TreatmentAssignment::Treatment,
-                            prediction,
-                            Some(action_id),
-                        );
-                    let _ = self
-                        .repository
-                        .record_experiment_assignment(
-                            self.workspace_id,
-                            &treatment_assignment,
-                            Some(strategy.as_str()),
+                            effective_holdout,
                         )
                         .await;
                 }
@@ -346,5 +395,40 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 .await;
         }
         Ok(())
+    }
+}
+
+/// Extracts the community unit_id from a community-engager decision_key.
+///
+/// The decision_key format is:
+/// `decision:growth-intelligence:v{version}:community-engager:{target_id}:{cooldown_bucket}`
+///
+/// The unit_id is the subreddit derived from the target_id. Since the
+/// target_id is a UUID and the subreddit is the human-readable identifier,
+/// we use the target_id as the unit_id for experiment purposes. The
+/// subreddit is recovered from the candidate's input_snapshot when needed
+/// for measurement.
+fn unit_id_from_decision_key(decision_key: &str) -> String {
+    // Split by ':' and extract the target_id (5th segment, 0-indexed 4).
+    let parts: Vec<&str> = decision_key.split(':').collect();
+    match parts.get(4) {
+        Some(s) => (*s).to_owned(),
+        None => decision_key.to_owned(),
+    }
+}
+
+/// Returns the cooldown window hours for a given template, used to compute
+/// the logical_cycle_key. This must match the key_window_hours used in
+/// the candidate's decision_key so the experiment identity aligns with
+/// the idempotency identity.
+fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str) -> u32 {
+    match template_id {
+        "reddit-scanner" => policy.reddit_scanner_cooldown_hours,
+        "press-pitch" => policy.press_pitch_cooldown_hours,
+        "social-post" => policy.social_post_cooldown_hours,
+        "community-engager" => policy.community_engager_cooldown_hours,
+        "signal-inviter" => policy.signal_inviter_cooldown_hours,
+        "growth-strategist" => policy.growth_strategist_cooldown_hours,
+        _ => 24, // sensible default for unknown templates
     }
 }
