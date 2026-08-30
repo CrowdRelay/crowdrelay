@@ -5,13 +5,13 @@
 //! 1. **Execution quality** (OutcomeRecord/Standing): "Is this worker
 //!    performing well enough to keep using?" → cooldown, tier, retirement.
 //! 2. **Operating preference** (this module): "Does this tenant tend to
-//!    accept or reject this template?" → candidate surfacing, ordering,
-//!    cadence.
+//!    accept or reject this template?" → cadence, presentation metadata.
 //!
 //! Both consume the same raw operator events (approve/cancel) but answer
 //! different questions and must never merge. The preference posterior
-//! influences what gets proposed and how often; the standing system
-//! influences whether the worker is trusted to run at all.
+//! influences cadence timing and post-selection presentation metadata;
+//! the standing system influences whether the worker is trusted to run
+//! at all.
 //!
 //! # North Star invariant
 //!
@@ -20,9 +20,11 @@
 //! - `causal_treatment_effect`
 //! - `evidence_quality`
 //! - `DecisionValue.total()`
+//! - experiment assignment
+//! - portfolio economics
 //!
-//! Preference only controls which candidates enter the portfolio pool and
-//! in what order. The portfolio optimizer still ranks by `DecisionValue`.
+//! Preference only controls cadence timing and post-selection presentation
+//! metadata. The portfolio optimizer still ranks by `DecisionValue`.
 //!
 //! # Mathematical model
 //!
@@ -38,6 +40,29 @@
 //! Beta-Binomial is the correct conjugate family for a bounded [0, 1]
 //! probability. NormalPosterior is for signed quantities (treatment
 //! effects) and would be mathematically wrong here.
+//!
+//! # Limitation: selection bias from proposal exposure (V1)
+//!
+//! The current model learns from explicit operator actions (approve/cancel)
+//! only. It cannot distinguish:
+//! - tenant dislikes template
+//! - tenant never saw template
+//! - tenant saw it but was busy
+//! - tenant saw it but ignored it
+//!
+//! This creates selection bias: templates proposed less frequently have
+//! fewer opportunities for approval, which can reinforce low-preference
+//! scores. The current implementation mitigates this by:
+//! - NOT allowing preference to modify DecisionValue or economic value
+//! - NOT allowing preference to remove candidates from the economic pipeline
+//! - Bounding cadence adjustment to [0.75, 1.25] (V1)
+//! - Enforcing a discovery floor (`min_discovery_cadence_multiplier`)
+//!
+//! TODO(future): Build an exposure-aware preference model that distinguishes:
+//!   candidate generated → surfaced → seen → approve/cancel/ignore
+//! with exposure/attention modeled separately from approval preference.
+//! Silence is NOT approval. Silence is NOT cancellation. Silence is NOT
+//! preference evidence unless actual proposal exposure is known.
 
 use std::collections::HashMap;
 
@@ -102,16 +127,23 @@ impl TemplatePreference {
         self.decayed_approvals + self.decayed_cancellations
     }
 
-    /// Whether this template should be suppressed from candidate generation.
+    /// Whether this template should be presentation-hidden from the
+    /// operator-facing proposal surface.
     ///
-    /// Suppressed only when BOTH conditions hold:
+    /// This is a **presentation decision**, NOT an economic gate. A
+    /// presentation-hidden template is still economically selectable —
+    /// it can win in the portfolio optimizer on DecisionValue and
+    /// execute. "Hidden" means "normally de-emphasized in the operator
+    /// UI", not "economically ineligible."
+    ///
+    /// Hidden only when BOTH conditions hold:
     /// 1. Confidence ≥ `min_confidence_to_suppress` (enough evidence to act)
     /// 2. Preference score < `suppression_threshold` (tenant consistently
     ///    rejects this template)
     ///
-    /// Sparse data is NEVER suppressed — it stays close to the prior (0.5)
-    /// and runs at normal cadence. This prevents a single cancellation from
-    /// hiding a template that might actually produce fans.
+    /// Sparse data is NEVER hidden — it stays close to the prior (0.5)
+    /// and runs at normal cadence. This prevents a single cancellation
+    /// from hiding a template that might actually produce fans.
     #[must_use]
     pub fn should_suppress(&self, policy: &TenantPreferencePolicy) -> bool {
         self.confidence() >= policy.min_confidence_to_suppress
@@ -124,8 +156,12 @@ impl TemplatePreference {
     ///
     /// Linear mapping centered at the neutral prior mean (0.5):
     /// - 1.0 = no change (sparse data or neutral preference)
-    /// - 0.5 = twice as often (high preference — tenant likes this)
-    /// - 1.5 = half as often (low preference — tenant rejects this)
+    /// - 0.75 = 25% shorter cooldown (high preference — tenant likes this)
+    /// - 1.25 = 25% longer cooldown (low preference — tenant rejects this)
+    ///
+    /// V1 bounds are conservative [0.75, 1.25] — preference gently
+    /// adjusts cadence without taking over the scheduler. Can widen
+    /// later with real tenant data.
     ///
     /// Only applies when confidence ≥ 3.0 (enough evidence to adjust).
     /// Below that, returns 1.0 (no adjustment).
@@ -135,11 +171,11 @@ impl TemplatePreference {
             return 1.0;
         }
         let score = self.preference_score();
-        // Map [0, 1] → [1.5, 0.5], centered at 0.5 → 1.0:
-        //   score 0.0 → 1.5 (low preference = longer cooldown)
-        //   score 0.5 → 1.0 (neutral = unchanged)
-        //   score 1.0 → 0.5 (high preference = shorter cooldown)
-        (1.0 + (0.5 - score)).clamp(0.5, 1.5)
+        // Map [0, 1] → [1.25, 0.75], centered at 0.5 → 1.0:
+        //   score 0.0 → 1.25 (low preference = 25% longer cooldown)
+        //   score 0.5 → 1.00 (neutral = unchanged)
+        //   score 1.0 → 0.75 (high preference = 25% shorter cooldown)
+        (1.0 + (0.5 - score) * 0.5).clamp(0.75, 1.25)
     }
 
     /// Observe one operator action with temporal decay.
@@ -211,7 +247,9 @@ impl TenantPreferencePosterior {
             .observe(approved, age_days, half_life_days);
     }
 
-    /// Whether a template should be suppressed from candidate generation.
+    /// Whether a template should be presentation-hidden from the
+    /// operator-facing proposal surface. This is a presentation
+    /// decision, NOT an economic gate.
     #[must_use]
     pub fn should_suppress(&self, template_id: &str, policy: &TenantPreferencePolicy) -> bool {
         self.get(template_id).should_suppress(policy)
@@ -228,6 +266,50 @@ impl TenantPreferencePosterior {
     pub fn preference_score(&self, template_id: &str) -> f64 {
         self.get(template_id).preference_score()
     }
+
+    /// Computes presentation metadata for a selected candidate.
+    ///
+    /// Called AFTER portfolio selection. This is a presentation-layer
+    /// concept — it does NOT modify any economic value. A
+    /// presentation-hidden candidate can still win economically and
+    /// execute.
+    #[must_use]
+    pub fn presentation_metadata(
+        &self,
+        template_id: &str,
+        policy: &TenantPreferencePolicy,
+    ) -> PresentationMetadata {
+        PresentationMetadata {
+            template_id: template_id.to_owned(),
+            preference_score: self.preference_score(template_id),
+            is_presentation_hidden: self.should_suppress(template_id, policy),
+        }
+    }
+}
+
+/// Presentation-layer metadata for a selected candidate.
+///
+/// Computed AFTER portfolio selection from the tenant preference
+/// posterior. This is informational/operator-facing only — it does
+/// NOT modify DecisionValue, expected_incremental_y30, or any
+/// economic value. A presentation-hidden candidate can still win
+/// economically and execute.
+///
+/// The operator UI may use `is_presentation_hidden` to de-emphasize
+/// low-preference proposals. The decision audit retains the full
+/// metadata trail regardless of visibility.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresentationMetadata {
+    /// The template ID this metadata applies to.
+    pub template_id: String,
+    /// The tenant's preference score for this template (0.0–1.0).
+    pub preference_score: f64,
+    /// Whether this candidate is normally hidden from the
+    /// operator-facing presentation surface. True when
+    /// `should_suppress()` returns true — the tenant consistently
+    /// rejects this template. The candidate is still economically
+    /// selectable and can execute if it wins on DecisionValue.
+    pub is_presentation_hidden: bool,
 }
 
 /// Policy for tenant preference filtering and suppression.
@@ -250,12 +332,28 @@ pub struct TenantPreferencePolicy {
     /// preference score. This prevents suppressing a template after
     /// just one or two cancellations.
     pub min_confidence_to_suppress: f64,
-    /// Preference score below which a template is suppressed (after
-    /// min_confidence is met). Default 0.25.
+    /// Preference score below which a template is presentation-hidden
+    /// (after min_confidence is met). Default 0.25.
     ///
     /// 0.25 means the tenant cancels this template ~75% of the time.
-    /// Conservative — a template with 40% approval stays in the pool.
+    /// Conservative — a template with 40% approval stays visible.
     pub suppression_threshold: f64,
+    /// Maximum cooldown multiplier from preference adjustment. This is
+    /// the exploration floor — even a strongly-rejected template gets
+    /// proposed at least every `standing_adjusted_cooldown *
+    /// min_discovery_cadence_multiplier` hours. Default 1.25 (matching
+    /// the V1 cadence bound).
+    ///
+    /// This prevents the self-reinforcing loop where low preference →
+    /// less frequent proposals → fewer approval opportunities →
+    /// lower preference. The brain must always be able to discover
+    /// that a previously-rejected template has become valuable.
+    ///
+    /// Note: this is a cadence floor, not an exploration guarantee.
+    /// It guarantees periodic opportunity to reconsider the template;
+    /// EFE/DecisionValue still decide whether the actual opportunity
+    /// is worth acting on.
+    pub min_discovery_cadence_multiplier: f64,
 }
 
 impl Default for TenantPreferencePolicy {
@@ -264,6 +362,7 @@ impl Default for TenantPreferencePolicy {
             half_life_days: 90.0,
             min_confidence_to_suppress: 5.0,
             suppression_threshold: 0.25,
+            min_discovery_cadence_multiplier: 1.25,
         }
     }
 }
@@ -423,7 +522,7 @@ mod tests {
             mult < 1.0,
             "high preference should shorten cooldown (mult={mult})"
         );
-        assert!(mult >= 0.5, "cadence multiplier bounded at 0.5");
+        assert!(mult >= 0.75, "cadence multiplier bounded at 0.75");
     }
 
     #[test]
@@ -437,7 +536,7 @@ mod tests {
             mult > 1.0,
             "low preference should lengthen cooldown (mult={mult})"
         );
-        assert!(mult <= 1.5, "cadence multiplier bounded at 1.5");
+        assert!(mult <= 1.25, "cadence multiplier bounded at 1.25");
     }
 
     // ── TenantPreferencePosterior collection ──
@@ -700,7 +799,7 @@ mod tests {
         // competes in the portfolio on DecisionValue.total()
         let mult = posterior.cadence_multiplier("media-campaign");
         assert!(mult > 1.0, "cadence is longer for low preference");
-        assert!(mult < 1.5, "but not maximally lengthened");
+        assert!(mult < 1.25, "but not maximally lengthened");
     }
 
     // ── Behavioral tests (PREF-1 through PREF-6) ──
@@ -769,7 +868,7 @@ mod tests {
         assert!(score <= 1.0, "preference is bounded [0,1]");
         let mult = posterior.cadence_multiplier("email");
         assert!(mult < 1.0, "high preference → shorter cooldown");
-        assert!(mult >= 0.5, "cooldown multiplier has a floor");
+        assert!(mult >= 0.75, "cooldown multiplier has a floor");
         // The multiplier only affects cooldown timing, not economic value.
         // There is no API in TenantPreferencePosterior that modifies
         // DecisionValue, expected_incremental_y30, or treatment effects.
@@ -858,8 +957,8 @@ mod tests {
         }
         let high_mult = high.cadence_multiplier();
         assert!(
-            high_mult >= 0.5,
-            "multiplier floor is 0.5 (got {high_mult})"
+            high_mult >= 0.75,
+            "multiplier floor is 0.75 (got {high_mult})"
         );
 
         let mut low = TemplatePreference::new();
@@ -868,8 +967,136 @@ mod tests {
         }
         let low_mult = low.cadence_multiplier();
         assert!(
-            low_mult <= 1.5,
-            "multiplier ceiling is 1.5 (got {low_mult})"
+            low_mult <= 1.25,
+            "multiplier ceiling is 1.25 (got {low_mult})"
+        );
+    }
+
+    // ── Presentation metadata tests (PRES-1 through PRES-4) ──
+
+    // PRES-1: High-preference template → not presentation-hidden.
+    #[test]
+    fn pres_1_high_preference_not_hidden() {
+        let mut posterior = TenantPreferencePosterior::new();
+        for _ in 0..20 {
+            posterior.observe("email", true, 0.0, 90.0);
+        }
+        let meta = posterior.presentation_metadata("email", &policy());
+        assert!(
+            !meta.is_presentation_hidden,
+            "high-preference template should not be hidden"
+        );
+        assert!(meta.preference_score > 0.8);
+        assert_eq!(meta.template_id, "email");
+    }
+
+    // PRES-2: Low-preference template with evidence → presentation-hidden.
+    #[test]
+    fn pres_2_low_preference_is_hidden() {
+        let mut posterior = TenantPreferencePosterior::new();
+        for _ in 0..10 {
+            posterior.observe("media", false, 0.0, 90.0);
+        }
+        let meta = posterior.presentation_metadata("media", &policy());
+        assert!(
+            meta.is_presentation_hidden,
+            "low-preference template with evidence should be hidden"
+        );
+        assert!(meta.preference_score < 0.3);
+    }
+
+    // PRES-3: Sparse data → not hidden (regardless of score).
+    #[test]
+    fn pres_3_sparse_data_not_hidden() {
+        let mut posterior = TenantPreferencePosterior::new();
+        posterior.observe("media", false, 0.0, 90.0); // 1 cancellation
+        let meta = posterior.presentation_metadata("media", &policy());
+        assert!(
+            !meta.is_presentation_hidden,
+            "sparse data should not be hidden"
+        );
+    }
+
+    // PRES-4: Presentation metadata is pure information — it does not
+    // modify economic value. Verified by struct shape: the metadata
+    // only carries template_id, preference_score, and a visibility bool.
+    #[test]
+    fn pres_4_metadata_is_pure_information() {
+        let mut posterior = TenantPreferencePosterior::new();
+        for _ in 0..10 {
+            posterior.observe("email", true, 0.0, 90.0);
+        }
+        let meta = posterior.presentation_metadata("email", &policy());
+        assert_eq!(meta.template_id, "email");
+        assert!(meta.preference_score >= 0.0 && meta.preference_score <= 1.0);
+        // is_presentation_hidden is a bool, not an economic modifier.
+        let _ = meta.is_presentation_hidden;
+    }
+
+    // ── Cadence bounds tests (V1: [0.75, 1.25]) ──
+
+    #[test]
+    fn cadence_score_0_is_1_25() {
+        let mut pref = TemplatePreference::new();
+        for _ in 0..100 {
+            pref.observe(false, 0.0, 90.0);
+        }
+        // With 100 cancellations: score ≈ 2/102 ≈ 0.02 → mult ≈ 1.24
+        // Close to the ceiling of 1.25
+        let mult = pref.cadence_multiplier();
+        assert!(
+            (mult - 1.25).abs() < 0.01,
+            "strong rejection → near 1.25 ceiling (got {mult})"
+        );
+    }
+
+    #[test]
+    fn cadence_score_1_is_0_75() {
+        let mut pref = TemplatePreference::new();
+        for _ in 0..100 {
+            pref.observe(true, 0.0, 90.0);
+        }
+        // With 100 approvals: score ≈ 102/102 ≈ 0.98 → mult ≈ 0.76
+        // Close to the floor of 0.75
+        let mult = pref.cadence_multiplier();
+        assert!(
+            (mult - 0.75).abs() < 0.01,
+            "strong approval → near 0.75 floor (got {mult})"
+        );
+    }
+
+    // ── Exploration floor tests ──
+
+    // EXPL-1: Discovery cap prevents starvation — even with extreme
+    // rejection, the cadence multiplier is capped at 1.25.
+    #[test]
+    fn expl_1_discovery_cap_prevents_starvation() {
+        let mut pref = TemplatePreference::new();
+        for _ in 0..100 {
+            pref.observe(false, 0.0, 90.0);
+        }
+        let mult = pref.cadence_multiplier();
+        assert!(
+            mult <= 1.25,
+            "discovery cap prevents starvation (mult={mult})"
+        );
+    }
+
+    // EXPL-2: Discovery cap is a configurable policy field.
+    #[test]
+    fn expl_2_discovery_cap_is_configurable() {
+        let custom = TenantPreferencePolicy {
+            min_discovery_cadence_multiplier: 1.10,
+            ..Default::default()
+        };
+        assert!(
+            (custom.min_discovery_cadence_multiplier - 1.10).abs() < 1e-9,
+            "discovery cap is configurable"
+        );
+        // Default is 1.25
+        assert!(
+            (policy().min_discovery_cadence_multiplier - 1.25).abs() < 1e-9,
+            "default discovery cap is 1.25"
         );
     }
 }

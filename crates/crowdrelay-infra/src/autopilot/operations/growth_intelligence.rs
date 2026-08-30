@@ -342,7 +342,8 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     //   TenantPreference → "Does this tenant prefer this template?" → surfacing
     //
     // The preference posterior MUST NOT modify DecisionValue or any economic
-    // value. It only influences which candidates are surfaced and how often.
+    // value. It only influences cadence timing and post-selection presentation
+    // metadata.
     let tenant_preference: TenantPreferencePosterior = {
         let mut posterior = TenantPreferencePosterior::new();
         // Reuse the operator_feedback_rows already loaded above, but compute

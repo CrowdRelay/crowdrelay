@@ -295,7 +295,14 @@ pub fn evaluate_growth_intelligence(
     let pref_mult = snapshot
         .tenant_preference
         .cadence_multiplier(&snapshot.template_id);
-    let apply_pref = |cd: u32| ((f64::from(cd) * pref_mult).round() as u32).max(1);
+    let discovery_cap_mult = policy
+        .tenant_preference_policy
+        .min_discovery_cadence_multiplier;
+    let apply_pref = |cd: u32| {
+        let pref_adjusted = ((f64::from(cd) * pref_mult).round() as u32).max(1);
+        let discovery_cap = ((f64::from(cd) * discovery_cap_mult).round() as u32).max(1);
+        pref_adjusted.min(discovery_cap).max(1)
+    };
     let reddit_scanner_cd = apply_pref(effective_agent_cooldown(
         policy.reddit_scanner_cooldown_hours,
         snapshot.standing,
@@ -712,12 +719,17 @@ fn community_engager_candidates(
     let pref_mult = snapshot
         .tenant_preference
         .cadence_multiplier(&snapshot.template_id);
+    let discovery_cap_mult = domain_policy
+        .tenant_preference_policy
+        .min_discovery_cadence_multiplier;
     let community_engager_cd = {
         let base = effective_agent_cooldown(
             domain_policy.community_engager_cooldown_hours,
             snapshot.standing,
         );
-        ((f64::from(base) * pref_mult).round() as u32).max(1)
+        let pref_adjusted = ((f64::from(base) * pref_mult).round() as u32).max(1);
+        let discovery_cap = ((f64::from(base) * discovery_cap_mult).round() as u32).max(1);
+        pref_adjusted.min(discovery_cap).max(1)
     };
     let effective_hours = snapshot.hours_since_last_effective_run.unwrap_or(u32::MAX);
     let any_hours = snapshot.hours_since_last_run.unwrap_or(u32::MAX);

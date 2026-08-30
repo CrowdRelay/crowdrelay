@@ -109,7 +109,7 @@ pub use strategy_learning::{
     StateConditionedStrategyPosterior, StrategyLearner, StrategyOutcome, StrategyPosterior,
 };
 pub use tenant_preference::{
-    TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
+    PresentationMetadata, TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
 };
 pub use world_model::{
     EventProximity, GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel,
