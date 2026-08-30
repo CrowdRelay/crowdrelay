@@ -69,6 +69,13 @@ BEGIN
             OR (current_ledger_state = 'UNKNOWN' AND new_ledger_state IN ('RECONCILING', 'SUCCEEDED', 'FAILED'))
             -- RECONCILING → SUCCEEDED | FAILED | UNKNOWN
             OR (current_ledger_state = 'RECONCILING' AND new_ledger_state IN ('SUCCEEDED', 'FAILED', 'UNKNOWN'))
+            -- SUCCEEDED → FAILED | UNKNOWN
+            -- (correction of premature success: actions_execution.rs marks
+            -- the action 'succeeded' when dispatching to the executor, before
+            -- the external intervention is confirmed. The community executor
+            -- may later correct this to 'failed' or 'unknown' when the post
+            -- definitively fails or confirmation is lost.)
+            OR (current_ledger_state = 'SUCCEEDED' AND new_ledger_state IN ('FAILED', 'UNKNOWN'))
         ) THEN
             RAISE EXCEPTION 'Action ledger: illegal transition from % to % for action %',
                 current_ledger_state, new_ledger_state, NEW.id

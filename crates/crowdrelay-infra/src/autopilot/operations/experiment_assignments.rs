@@ -432,18 +432,21 @@ pub(in crate::autopilot) async fn update_execution_status(
     assignment_id: &str,
     new_status: crowdrelay_brain::ExecutionStatus,
 ) -> Result<(), RepositoryError> {
-    // Only dispatched → executed, dispatched → failed, and
-    // dispatched → unknown are allowed. The WHERE clause enforces this
-    // at the DB level — no application-level race condition possible.
-    // Unknown is non-terminal: it can later resolve to executed or failed.
+    // Allowed transitions:
+    //   dispatched → executed | failed | unknown
+    //   unknown    → executed | failed  (reconciliation)
+    // The WHERE clause enforces this at the DB level — no application-
+    // level race condition possible.
     sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
         SET execution_status = $3
         WHERE workspace_id = $1
           AND id = $2
-          AND execution_status = 'dispatched'
-          AND $3 IN ('executed', 'failed', 'unknown')
+          AND (
+            (execution_status = 'dispatched' AND $3 IN ('executed', 'failed', 'unknown'))
+            OR (execution_status = 'unknown' AND $3 IN ('executed', 'failed'))
+          )
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -476,14 +479,19 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
     action_id: uuid::Uuid,
     new_status: crowdrelay_brain::ExecutionStatus,
 ) -> Result<(), RepositoryError> {
+    // Allowed transitions:
+    //   dispatched → executed | failed | unknown
+    //   unknown    → executed | failed  (reconciliation)
     sqlx::query(
         r#"
         UPDATE viryaos_experiment_assignments
         SET execution_status = $3
         WHERE workspace_id = $1
           AND action_id = $2
-          AND execution_status = 'dispatched'
-          AND $3 IN ('executed', 'failed', 'unknown')
+          AND (
+            (execution_status = 'dispatched' AND $3 IN ('executed', 'failed', 'unknown'))
+            OR (execution_status = 'unknown' AND $3 IN ('executed', 'failed'))
+          )
         "#,
     )
     .bind(workspace_id.into_uuid())

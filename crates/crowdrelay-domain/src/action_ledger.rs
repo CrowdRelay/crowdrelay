@@ -22,11 +22,19 @@
 //! RUNNING     → SUCCEEDED | FAILED | UNKNOWN
 //! UNKNOWN     → RECONCILING | SUCCEEDED | FAILED
 //! RECONCILING → SUCCEEDED | FAILED | UNKNOWN
-//! SUCCEEDED   → (terminal)
+//! SUCCEEDED   → FAILED | UNKNOWN  (correction of premature success)
 //! FAILED      → (terminal)
 //! CANCELLED   → (terminal)
 //! REVOKED     → (terminal)
 //! ```
+//!
+//! # SUCCEEDED correction
+//!
+//! `actions_execution.rs` marks the action `succeeded` when dispatching to
+//! the executor — before the external intervention is confirmed. The
+//! community executor may later correct this to `failed` (definitive
+//! execution failure) or `unknown` (confirmation lost). This is the only
+//! non-terminal use of `SUCCEEDED`; it is not a normal transition.
 //!
 //! # UNKNOWN semantics
 //!
@@ -115,12 +123,13 @@ impl ActionState {
     }
 
     /// Returns true if this state is terminal (no further transitions).
+    ///
+    /// Note: `SUCCEEDED` is NOT terminal in the community executor path —
+    /// the executor may correct a premature success to `FAILED` or `UNKNOWN`.
+    /// It is terminal in all other paths.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Revoked
-        )
+        matches!(self, Self::Failed | Self::Cancelled | Self::Revoked)
     }
 
     /// Returns true if this state allows further transitions.
@@ -167,6 +176,13 @@ impl ActionState {
             | (Self::Reconciling, Self::Failed)
             | (Self::Reconciling, Self::Unknown) => true,
 
+            // SUCCEEDED → FAILED | UNKNOWN
+            // (correction of premature success: actions_execution.rs marks
+            // the action 'succeeded' when dispatching to the executor, before
+            // the external intervention is confirmed. The community executor
+            // may later correct this to 'failed' or 'unknown'.)
+            (Self::Succeeded, Self::Failed) | (Self::Succeeded, Self::Unknown) => true,
+
             // Terminal states have no outgoing transitions.
             _ => false,
         }
@@ -203,8 +219,10 @@ mod tests {
 
     #[test]
     fn terminal_states_have_no_outgoing_transitions() {
+        // SUCCEEDED is NOT terminal — it can be corrected to FAILED or UNKNOWN
+        // by the community executor when a premature success marking needs
+        // correction. Only Failed, Cancelled, and Revoked are truly terminal.
         for state in [
-            ActionState::Succeeded,
             ActionState::Failed,
             ActionState::Cancelled,
             ActionState::Revoked,
@@ -227,6 +245,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn succeeded_can_correct_to_failed_or_unknown() {
+        // SUCCEEDED is not terminal in the community executor path —
+        // the executor may correct a premature success to FAILED or UNKNOWN.
+        assert!(ActionState::Succeeded.can_transition_to(ActionState::Failed));
+        assert!(ActionState::Succeeded.can_transition_to(ActionState::Unknown));
+        // But not to other states.
+        assert!(!ActionState::Succeeded.can_transition_to(ActionState::Running));
+        assert!(!ActionState::Succeeded.can_transition_to(ActionState::Reconciling));
+        assert!(!ActionState::Succeeded.can_transition_to(ActionState::Cancelled));
     }
 
     #[test]

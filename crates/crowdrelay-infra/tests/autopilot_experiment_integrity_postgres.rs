@@ -1,4 +1,5 @@
-//! Experiment integrity tests — P0-1, P0-2 behavioral tests T1, T2, T5.
+//! Experiment integrity tests — P0-1, P0-2 behavioral tests T1-T9,
+//! execution integrity tests T10-T14.
 //!
 //! These tests verify the experiment design persistence and atomic
 //! assignment+execution guarantees against a real Postgres database.
@@ -16,6 +17,16 @@
 //! T8: execution_status is persisted correctly for all arms.
 //! T9: update_execution_status is monotonic — only dispatched → executed
 //!     and dispatched → failed are allowed.
+//! T10: Evidence projection rebuildability — growth_episodes can be
+//!      rebuilt from growth_evidence with semantic equality and idempotence.
+//! T11: Stale posting transitions to 'unknown', not 'failed' —
+//!      confirmation loss is NOT intervention failure.
+//! T12: Real failure transitions to 'failed' — definitive execution
+//!      failure is counted as a failed treatment.
+//! T13: Trace ID continuity across the action lifecycle — the same
+//!      trace_id appears in all lifecycle records.
+//! T14: Cross-layer invariant — execution certainty and causal treatment
+//!      classification cannot contradict one another.
 
 use crowdrelay_application::autopilot::AutopilotDecisionRepository;
 use crowdrelay_brain::{
