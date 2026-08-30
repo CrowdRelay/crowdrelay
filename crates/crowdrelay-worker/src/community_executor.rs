@@ -371,23 +371,29 @@ impl CommunityExecutorWorker {
         // Transition them to `posting` atomically.
         let rows = sqlx::query_as::<_, ClaimedAction>(
             r#"
-            UPDATE community_posts
-            SET status = 'posting',
-                attempts = attempts + 1,
-                updated_at = now()
-            WHERE id IN (
-                SELECT id FROM community_posts
-                WHERE workspace_id = $1
-                  AND (
-                      status = 'pending'
-                      OR (status = 'rate_limited' AND rate_limited_until IS NOT NULL
-                          AND rate_limited_until < now())
-                  )
-                ORDER BY created_at
-                LIMIT 5
-                FOR UPDATE SKIP LOCKED
+            WITH claimed AS (
+                UPDATE community_posts
+                SET status = 'posting',
+                    attempts = attempts + 1,
+                    updated_at = now()
+                WHERE id IN (
+                    SELECT id FROM community_posts
+                    WHERE workspace_id = $1
+                      AND (
+                          status = 'pending'
+                          OR (status = 'rate_limited' AND rate_limited_until IS NOT NULL
+                              AND rate_limited_until < now())
+                      )
+                    ORDER BY created_at
+                    LIMIT 5
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, action_id, subreddit, title, body, smart_link
             )
-            RETURNING id, action_id, subreddit, title, body, smart_link
+            SELECT c.id, c.action_id, c.subreddit, c.title, c.body, c.smart_link,
+                   a.trace_id
+            FROM claimed c
+            LEFT JOIN viryaos_autopilot_actions a ON a.id = c.action_id
             "#,
         )
         .bind(ws)
@@ -1007,6 +1013,8 @@ struct ClaimedAction {
     title: String,
     body: String,
     smart_link: Option<String>,
+    #[allow(dead_code)]
+    trace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
