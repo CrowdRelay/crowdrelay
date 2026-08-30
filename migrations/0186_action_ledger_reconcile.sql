@@ -81,12 +81,13 @@ BEGIN
     WHERE id = target_action_id;
 
     -- Strategy 1: Check if the action status has been updated.
+    -- Note: 'cancelled' is NOT handled here — if the action was cancelled,
+    -- the trigger on viryaos_autopilot_actions already transitioned the
+    -- ledger to CANCELLED. Reconciliation only resolves UNKNOWN states.
     IF action_status = 'succeeded' THEN
         new_state := 'SUCCEEDED';
     ELSIF action_status = 'failed' THEN
         new_state := 'FAILED';
-    ELSIF action_status = 'cancelled' THEN
-        new_state := 'CANCELLED';
     ELSIF action_kind = 'community.engage' THEN
         -- Strategy 2: For community engagement, check community_posts.
         SELECT status INTO community_status

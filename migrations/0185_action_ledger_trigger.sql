@@ -57,9 +57,23 @@ BEGIN
             updated_at = now()
         WHERE action_id = NEW.id;
     ELSE
-        -- State transition — check monotonicity.
-        -- Terminal states reject all transitions.
-        IF current_ledger_state IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'REVOKED') THEN
+        -- State transition — enforce the monotonic state machine.
+        -- The allowed transitions mirror ActionState::can_transition_to
+        -- in crates/crowdrelay-domain/src/action_ledger.rs.
+        IF NOT (
+            -- PLANNED → AUTHORIZED | CANCELLED | REVOKED
+            (current_ledger_state = 'PLANNED' AND new_ledger_state IN ('AUTHORIZED', 'CANCELLED', 'REVOKED'))
+            -- AUTHORIZED → QUEUED | CANCELLED | REVOKED
+            OR (current_ledger_state = 'AUTHORIZED' AND new_ledger_state IN ('QUEUED', 'CANCELLED', 'REVOKED'))
+            -- QUEUED → RUNNING | CANCELLED | FAILED
+            OR (current_ledger_state = 'QUEUED' AND new_ledger_state IN ('RUNNING', 'CANCELLED', 'FAILED'))
+            -- RUNNING → SUCCEEDED | FAILED | UNKNOWN
+            OR (current_ledger_state = 'RUNNING' AND new_ledger_state IN ('SUCCEEDED', 'FAILED', 'UNKNOWN'))
+            -- UNKNOWN → RECONCILING | SUCCEEDED | FAILED
+            OR (current_ledger_state = 'UNKNOWN' AND new_ledger_state IN ('RECONCILING', 'SUCCEEDED', 'FAILED'))
+            -- RECONCILING → SUCCEEDED | FAILED | UNKNOWN
+            OR (current_ledger_state = 'RECONCILING' AND new_ledger_state IN ('SUCCEEDED', 'FAILED', 'UNKNOWN'))
+        ) THEN
             RAISE EXCEPTION 'Action ledger: illegal transition from % to % for action %',
                 current_ledger_state, new_ledger_state, NEW.id
                 USING ERRCODE = 'check_violation';

@@ -5,6 +5,14 @@
 //! projection — the full transition history is auditable through the trace
 //! timeline.
 //!
+//! # Enforcement
+//!
+//! The state machine is enforced by the SQL trigger in migration 0185
+//! (`viryaos_action_ledger_sync`). This Rust module is the domain-level
+//! documentation and test surface for the same rules. The trigger and
+//! `can_transition_to` must stay in sync — if you add a transition here,
+//! add it to the trigger too.
+//!
 //! # State transitions
 //!
 //! ```text

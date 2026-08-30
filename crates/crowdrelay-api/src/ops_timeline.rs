@@ -296,7 +296,7 @@ async fn load_trace_timeline(
                 'audit'::text AS source,
                 action::text AS kind,
                 NULL::text AS state,
-                action_id::text AS action_id,
+                target_id::text AS action_id,
                 NULL::text AS decision_id,
                 'FACT'::text AS certainty
             FROM audit_events
@@ -308,7 +308,7 @@ async fn load_trace_timeline(
             SELECT
                 created_at AS occurred_at,
                 'agent'::text AS source,
-                outcome_kind::text AS kind,
+                kind::text AS kind,
                 NULL::text AS state,
                 NULL::text AS action_id,
                 NULL::text AS decision_id,
