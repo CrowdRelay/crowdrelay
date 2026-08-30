@@ -16,7 +16,7 @@
 -- Mark stale RUNNING actions as UNKNOWN.
 -- Called by the worker reconciliation sweep.
 CREATE OR REPLACE FUNCTION viryaos_action_ledger_mark_stale_unknown(
-    workspace_id uuid,
+    p_workspace_id uuid,
     stale_threshold interval DEFAULT INTERVAL '10 minutes'
 )
 RETURNS TABLE (action_id uuid, workspace_id uuid)
@@ -30,7 +30,7 @@ BEGIN
         updated_at = now(),
         transition_count = transition_count + 1,
         previous_state = 'RUNNING'
-    WHERE viryaos_action_ledger.workspace_id = workspace_id
+    WHERE viryaos_action_ledger.workspace_id = p_workspace_id
       AND state = 'RUNNING'
       AND state_entered_at < now() - stale_threshold
     RETURNING action_id, workspace_id;

@@ -59,6 +59,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::ops::operation_timeline),
         )
         .route(
+            "/v1/control-plane/ops/trace/{trace_id}",
+            get(crate::ops::trace_timeline),
+        )
+        .route(
+            "/v1/control-plane/ops/actions",
+            get(crate::ops::list_actions),
+        )
+        .route(
+            "/v1/control-plane/ops/actions/{action_id}",
+            get(crate::ops::get_action),
+        )
+        .route(
             "/v1/control-plane/ecosystem/overview",
             get(crate::ecosystem::overview),
         )
