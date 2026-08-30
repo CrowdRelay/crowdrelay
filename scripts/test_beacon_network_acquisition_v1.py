@@ -91,7 +91,7 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
                 self.assertIn(f'{event}\tUNAVAILABLE\t{capability}\t0', production_manifest)
                 self.assertIn(event, executor_manifest)
 
-        self.assertIn('"beacon.release.mail"', (ROOT / "crates/crowdrelay-api/src/beacon_signal/releases/admin.rs").read_text())
+        self.assertIn('"beacon.release.mail"', (ROOT / "crates/crowdrelay-infra/src/beacon_signal/admin.rs").read_text())
         self.assertIn('"beacon.network.discovery"', ADMIN)
         self.assertIn('"beacon.network.invite"', ADMIN)
 

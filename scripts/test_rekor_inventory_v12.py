@@ -91,13 +91,16 @@ class RekorInventoryV12Tests(unittest.TestCase):
         self.assertIn("private Docker API endpoint", installer)
 
     def test_inventory_ready_is_atomic(self):
-        text = read_rust_module(ROOT, "crates/crowdrelay-api/src/commerce.rs")
+        # SQL writes were extracted from the API layer behind repository ports.
+        text = (ROOT / "crates/crowdrelay-infra/src/commerce_inventory.rs").read_text()
         update_position = text.index("SET status = 'ready'")
         flags_position = text.index("inventory activated from staff panel")
         commit_position = text.index("transaction.commit()", flags_position)
         self.assertLess(update_position, flags_position)
         self.assertLess(flags_position, commit_position)
-        self.assertIn('blocker == "feature_flags_inconsistent"', text)
+        # The blocker check remains in the API read model.
+        api_text = read_rust_module(ROOT, "crates/crowdrelay-api/src/commerce.rs")
+        self.assertIn('blocker == "feature_flags_inconsistent"', api_text)
 
     def test_n8n_not_referenced_by_rollout_scripts(self):
         for relative in [

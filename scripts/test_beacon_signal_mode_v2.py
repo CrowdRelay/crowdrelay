@@ -22,6 +22,8 @@ ROUTING = (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
 META = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
 OPENAPI = (ROOT / "openapi/openapi.yaml").read_text()
 WORKER = (ROOT / "crates/crowdrelay-worker/src/push_delivery/repository.rs").read_text()
+# SQL writes were extracted from the API layer behind repository ports (S3.2-S3.6).
+INFRA_SIGNAL = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/signal.rs").read_text()
 
 
 class BeaconSignalModeV2Contract(unittest.TestCase):
@@ -72,15 +74,15 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
         self.assertIn("Virya Signal — Beacon invitation", INVITE_COPY)
 
     def test_event_lifecycle_and_campaign_projection_are_monotonic(self) -> None:
-        self.assertIn("fn next_engagement_status", LIFECYCLE)
-        self.assertIn('current == "completed"', LIFECYCLE)
-        self.assertIn('current == "declined"', LIFECYCLE)
-        self.assertIn("let (campaign_status, campaign_disposition) = match next_status", MEMBER)
-        self.assertIn("viryaos_beacon_campaigns.status='partner' THEN 'partner'", MEMBER)
-        self.assertIn("status NOT IN ('suppressed','closed')", MEMBER)
-        self.assertIn("viryaos_beacon_campaigns.status='declined' THEN 'declined'", MEMBER)
-        self.assertNotIn("let campaign_status = match payload.action", MEMBER)
-        self.assertIn("crowdrelay.beacon.signal_engagement_recorded", MEMBER)
+        self.assertIn("let next_status = match current.as_deref()", INFRA_SIGNAL)
+        self.assertIn('Some("completed")', INFRA_SIGNAL)
+        self.assertIn('Some("declined")', INFRA_SIGNAL)
+        self.assertIn("let (campaign_status, campaign_disposition) = match next_status", INFRA_SIGNAL)
+        self.assertIn("viryaos_beacon_campaigns.status='partner' THEN 'partner'", INFRA_SIGNAL)
+        self.assertIn("status NOT IN ('suppressed','closed')", INFRA_SIGNAL)
+        self.assertIn("viryaos_beacon_campaigns.status='declined' THEN 'declined'", INFRA_SIGNAL)
+        self.assertNotIn("let campaign_status = match payload.action", INFRA_SIGNAL)
+        self.assertIn("crowdrelay.beacon.signal_engagement_recorded", INFRA_SIGNAL)
 
     def test_press_room_requests_assets_and_coverage_are_complete(self) -> None:
         for symbol in (
@@ -94,7 +96,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
             self.assertIn(symbol, API)
         self.assertIn("valid_https_url", MEMBER)
         self.assertIn("valid_press_url", ADMIN)
-        self.assertIn("crowdrelay.beacon.coverage_submitted", MEMBER)
+        self.assertIn("crowdrelay.beacon.coverage_submitted", INFRA_SIGNAL)
         self.assertIn("crowdrelay.beacon.press_request_resolved", ADMIN)
         self.assertIn("viryaos_beacon_press_assets", MEMBER)
         self.assertIn("PressRoomEventView", MEMBER)
@@ -113,7 +115,7 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
             "ON CONFLICT (workspace_id,source_kind,source_id,endpoint_id) DO NOTHING",
             "?event_id=' || ranked.event_id::text",
         ):
-            self.assertIn(guard, API)
+            self.assertIn(guard, INFRA_SIGNAL)
         self.assertIn("DEFAULT_WAVE_SIZE: i64 = 20", API)
         self.assertIn("MAX_WAVE_SIZE: i64 = 100", API)
         self.assertNotIn("join_all", API)
@@ -142,11 +144,11 @@ class BeaconSignalModeV2Contract(unittest.TestCase):
 
     def test_leave_is_channel_scoped_unless_global_dnc_is_explicit(self) -> None:
         self.assertIn("do_not_contact: bool", LIFECYCLE)
-        self.assertIn("UPDATE viryaos_beacon_signal_sessions", MEMBER)
-        self.assertIn("audience_kind='beacon'", MEMBER)
-        self.assertIn("if payload.do_not_contact", MEMBER)
-        self.assertIn("accepts_outreach=false,do_not_contact=true", MEMBER)
-        self.assertIn("crowdrelay.beacon.signal_left", MEMBER)
+        self.assertIn("UPDATE viryaos_beacon_signal_sessions", INFRA_SIGNAL)
+        self.assertIn("audience_kind='beacon'", INFRA_SIGNAL)
+        self.assertIn("if command.do_not_contact", INFRA_SIGNAL)
+        self.assertIn("accepts_outreach=false,do_not_contact=true", INFRA_SIGNAL)
+        self.assertIn("crowdrelay.beacon.signal_left", INFRA_SIGNAL)
 
 
 if __name__ == "__main__":

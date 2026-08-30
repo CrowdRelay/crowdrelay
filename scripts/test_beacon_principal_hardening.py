@@ -10,12 +10,13 @@ class BeaconPrincipalHardening(unittest.TestCase):
     def test_release_transition_policy_allows_closed_sent_delivery_only(self):
         domain = read('crates/crowdrelay-domain/src/beacon_release.rs')
         admin = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
+        infra_admin = read('crates/crowdrelay-infra/src/beacon_signal/admin.rs')
         self.assertIn('Closed => matches!((self, next), (Sent, Delivered))', domain)
         self.assertIn('(Sent, Delivered)', domain)
         app = read('crates/crowdrelay-application/src/beacon_release.rs')
         self.assertIn('validate_beacon_release_recipient_transition', app)
-        self.assertIn('crowdrelay_application::validate_beacon_release_recipient_transition', admin)
-        self.assertIn("campaign.status IN ('open','closed')", admin)
+        self.assertIn('crowdrelay_application::validate_beacon_release_recipient_transition', infra_admin)
+        self.assertIn("campaign.status IN ('open','closed')", infra_admin)
 
     def test_expired_release_claims_reconcile_inventory(self):
         steps = read('crates/crowdrelay-worker/src/retention/steps.rs')
@@ -73,7 +74,7 @@ class BeaconPrincipalHardening(unittest.TestCase):
     def test_delivered_release_activation_is_due_then_rechecks_consent_at_send_time(self):
         migration = read('migrations/0062_beacon_release_activation_followup.sql')
         worker = read('crates/crowdrelay-worker/src/reminders.rs')
-        admin = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
+        infra_admin = read('crates/crowdrelay-infra/src/beacon_signal/admin.rs')
         self.assertIn('activation_due_at timestamptz', migration)
         self.assertIn('activation_suppressed_at timestamptz', migration)
         self.assertIn('status=\'delivered\'', worker)
@@ -83,10 +84,10 @@ class BeaconPrincipalHardening(unittest.TestCase):
         self.assertIn('FOR UPDATE OF recipient SKIP LOCKED', worker)
         self.assertIn('activation_queued_at=now()', worker)
         self.assertIn('activation_suppressed_at=now()', worker)
-        self.assertIn('time::Duration::days(2)', admin)
+        self.assertIn('time::Duration::days(2)', infra_admin)
 
     def test_release_launch_bulk_materializes_outbox(self):
-        source = read('crates/crowdrelay-api/src/beacon_signal/releases/admin.rs')
+        source = read('crates/crowdrelay-infra/src/beacon_signal/admin.rs')
         self.assertIn('FROM unnest(', source)
         self.assertIn('AS mail(beacon_id,display_name,contact_email,subject,body_text,request_id)', source)
         self.assertNotIn('for (beacon_id, display_name, contact_email, locale) in &eligible {\n        let delivery = release_delivery_copy(locale, display_name, &campaign.2, campaign.3);\n        if let Err(error) = sqlx::query(', source)

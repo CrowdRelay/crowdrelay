@@ -17,6 +17,8 @@ PUSH = (ROOT / "crates/crowdrelay-api/src/push.rs").read_text()
 WORKER = (ROOT / "crates/crowdrelay-worker/src/push_delivery/repository.rs").read_text()
 ROUTING = (ROOT / "crates/crowdrelay-api/src/routing.rs").read_text()
 META = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
+# SQL writes were extracted from the API layer behind repository ports (S3.2-S3.6).
+INFRA_SIGNAL = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/signal.rs").read_text()
 
 
 class BeaconSignalModeV1Contract(unittest.TestCase):
@@ -38,9 +40,9 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
     def test_invites_are_eligible_single_use_and_sessions_revocable(self) -> None:
         for guard in ("beacon.active", "beacon.verified", "accepts_outreach", "do_not_contact"):
             self.assertIn(guard, API)
-        self.assertIn("profile.invite_token_hash = $2", API)
-        self.assertIn("FOR UPDATE OF profile", API)
-        self.assertIn("invite_token_hash=NULL", API)
+        self.assertIn("profile.invite_token_hash = $2", INFRA_SIGNAL)
+        self.assertIn("FOR UPDATE OF profile", INFRA_SIGNAL)
+        self.assertIn("invite_token_hash=NULL", INFRA_SIGNAL)
         self.assertIn("session.revoked_at IS NULL", API)
         self.assertIn("session.expires_at > now()", API)
         self.assertIn("Sha256::digest", HELPERS)
@@ -50,12 +52,12 @@ class BeaconSignalModeV1Contract(unittest.TestCase):
     def test_nearby_wave_is_distance_ranked_bounded_and_idempotent(self) -> None:
         self.assertIn("MAX_WAVE_SIZE: i64 = 100", API)
         self.assertIn("DEFAULT_WAVE_SIZE: i64 = 20", API)
-        self.assertIn("WHERE distance_km <= radius_km", API)
-        self.assertIn("6371 * 2 * ASIN", API)
-        self.assertRegex(API, r"ORDER BY\s+starts_at,\s*relevance_basis_points DESC")
-        self.assertIn("LIMIT $2", API)
-        self.assertRegex(API, r"ON CONFLICT \(workspace_id,\s*beacon_id,\s*event_id\) DO NOTHING")
-        self.assertRegex(API, r"ON CONFLICT \(workspace_id,\s*source_kind,\s*source_id,\s*endpoint_id\) DO NOTHING")
+        self.assertIn("WHERE distance_km <= radius_km", INFRA_SIGNAL)
+        self.assertIn("6371 * 2 * ASIN", INFRA_SIGNAL)
+        self.assertRegex(INFRA_SIGNAL, r"ORDER BY\s+starts_at,\s*relevance_basis_points DESC")
+        self.assertIn("LIMIT $2", INFRA_SIGNAL)
+        self.assertRegex(INFRA_SIGNAL, r"ON CONFLICT \(workspace_id,\s*beacon_id,\s*event_id\) DO NOTHING")
+        self.assertRegex(INFRA_SIGNAL, r"ON CONFLICT \(workspace_id,\s*source_kind,\s*source_id,\s*endpoint_id\) DO NOTHING")
 
     def test_press_room_and_requests_are_first_class(self) -> None:
         self.assertIn('epk_url: format!("{root}/epk")', API)

@@ -22,6 +22,10 @@ OPENAPI = (ROOT / "openapi/openapi.yaml").read_text()
 META = (ROOT / "crates/crowdrelay-api/src/meta.rs").read_text()
 RETENTION = (ROOT / "crates/crowdrelay-worker/src/retention.rs").read_text()
 RETENTION_STEPS = (ROOT / "crates/crowdrelay-worker/src/retention/steps.rs").read_text()
+# SQL writes were extracted from the API layer behind repository ports (S3.2-S3.6).
+# The infra adapter now owns every INSERT/UPDATE/DELETE the tests guard.
+INFRA_ADMIN = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/admin.rs").read_text()
+INFRA_MOD = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/mod.rs").read_text()
 
 
 class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
@@ -36,8 +40,8 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertNotIn("CREATE TABLE beacon_inventory", MIGRATION)
 
     def test_launch_is_full_pool_fail_closed_and_reserves_real_stock(self) -> None:
-        launch = ADMIN.split("pub async fn admin_launch_release_campaign", 1)[1].split(
-            "pub async fn admin_close_release_campaign", 1
+        launch = INFRA_ADMIN.split("async fn launch_release_campaign", 1)[1].split(
+            "async fn close_release_campaign", 1
         )[0]
         for guard in (
             "profile.status='active'",
@@ -54,10 +58,10 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertNotIn("join_all", launch)
 
     def test_release_mail_is_server_owned_and_shipping_pii_never_enters_outbox(self) -> None:
-        self.assertIn("Dziękujemy Latarniku", RELEASES)
-        self.assertIn("Paczkomat", RELEASES)
-        self.assertIn("784947481", RELEASES)
-        launch = ADMIN.split("crowdrelay.beacon.release_delivery_confirmation_requested", 1)[1].split(
+        self.assertIn("Dziękujemy Latarniku", INFRA_MOD)
+        self.assertIn("Paczkomat", INFRA_MOD)
+        self.assertIn("784947481", INFRA_MOD)
+        launch = INFRA_ADMIN.split("crowdrelay.beacon.release_delivery_confirmation_requested", 1)[1].split(
             ".execute(&mut *tx)", 1
         )[0]
         for field in ("subject", "text", "contact_email", "member_url"):
@@ -80,9 +84,9 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertNotIn("inventory_ledger", confirm)
         self.assertNotIn("promotional_issue", confirm)
 
-        update = ADMIN.split("pub async fn admin_update_release_recipient", 1)[1]
-        sent = update.split('if payload.status == "sent"', 1)[1].split(
-            '} else if payload.status == "cancelled"', 1
+        update = INFRA_ADMIN.split("async fn update_release_recipient", 1)[1]
+        sent = update.split('if command.status == "sent"', 1)[1].split(
+            '} else if command.status == "cancelled"', 1
         )[0]
         self.assertIn("inventory_ledger", sent)
         self.assertIn("-1,'promotional_issue'", sent)
@@ -96,8 +100,8 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
         self.assertNotIn("inventory_ledger", decline)
         self.assertNotIn("promotional_issue", decline)
 
-        update = ADMIN.split("pub async fn admin_update_release_recipient", 1)[1]
-        cancelled = update.split('} else if payload.status == "cancelled"', 1)[1].split(
+        update = INFRA_ADMIN.split("async fn update_release_recipient", 1)[1]
+        cancelled = update.split('} else if command.status == "cancelled"', 1)[1].split(
             "let (timestamp_column, purge)", 1
         )[0]
         self.assertIn("inventory_reservation_items", cancelled)
@@ -121,10 +125,10 @@ class BeaconPhysicalReleasesV1Contract(unittest.TestCase):
             "close_beacon_release_campaign",
             "update_beacon_release_recipient",
         ):
-            self.assertIn(action, ADMIN)
+            self.assertIn(action, INFRA_ADMIN)
         self.assertIn("idempotency_key(&headers)", ADMIN)
-        self.assertIn("record_operator_action", ADMIN)
-        self.assertNotRegex(ADMIN, r"DELETE\s+FROM\s+operator_actions")
+        self.assertIn("record_operator_action", INFRA_ADMIN)
+        self.assertNotRegex(INFRA_ADMIN, r"DELETE\s+FROM\s+operator_actions")
 
     def test_shipping_pii_has_a_real_bounded_retention_executor(self) -> None:
         confirm = MEMBER.split("pub async fn confirm_release_delivery", 1)[1].split(

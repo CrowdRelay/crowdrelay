@@ -16,6 +16,8 @@ NETWORK_INTERNAL = (ROOT / "crates/crowdrelay-api/src/beacon_signal/network/inte
 COPY = (ROOT / "crates/crowdrelay-api/src/beacon_signal/invite_copy.rs").read_text()
 OPENAPI = (ROOT / "openapi/openapi.yaml").read_text()
 OPERATOR = (ROOT / "scripts/latarnik_operator.py").read_text()
+# SQL writes were extracted from the API layer behind repository ports (S3.2-S3.6).
+INFRA_SIGNAL = (ROOT / "crates/crowdrelay-infra/src/beacon_signal/signal.rs").read_text()
 
 
 class BeaconNativeSessionV1Contract(unittest.TestCase):
@@ -34,15 +36,16 @@ class BeaconNativeSessionV1Contract(unittest.TestCase):
         self.assertIn("client_kind: Option<String>", BEACON)
         self.assertIn('unwrap_or("web")', exchange)
         self.assertIn('matches!(client_kind, "web" | "android" | "ios")', exchange)
-        self.assertIn("profile.pending_invite_job_id", exchange)
-        self.assertIn("pending_invite_job_id=NULL", exchange)
-        self.assertIn("source_invite_job_id", exchange)
         self.assertIn("client_kind: client_kind.to_owned()", exchange)
-        self.assertLess(exchange.index("source_invite_job_id"), exchange.index("pending_invite_job_id=NULL"))
+        infra_exchange = INFRA_SIGNAL.split("async fn exchange_invite", 1)[1]
+        self.assertIn("profile.pending_invite_job_id", infra_exchange)
+        self.assertIn("pending_invite_job_id=NULL", infra_exchange)
+        self.assertIn("source_invite_job_id", infra_exchange)
+        self.assertLess(infra_exchange.index("source_invite_job_id"), infra_exchange.index("pending_invite_job_id=NULL"))
 
     def test_direct_and_non_campaign_invites_do_not_inherit_old_job_attribution(self) -> None:
-        create = BEACON.split("pub async fn create_invite", 1)[1].split("pub async fn exchange_invite", 1)[0]
-        self.assertIn("pending_invite_job_id = NULL", create)
+        infra_create = INFRA_SIGNAL.split("async fn create_invite", 1)[1].split("async fn exchange_invite", 1)[0]
+        self.assertIn("pending_invite_job_id = NULL", infra_create)
         self.assertIn("None,", LIFECYCLE_ADMIN.split("mint_invite_batch_tx", 1)[1])
         claim = NETWORK_INTERNAL.split("mint_invite_batch_tx", 1)[1]
         self.assertIn("Some(job_id)", claim)

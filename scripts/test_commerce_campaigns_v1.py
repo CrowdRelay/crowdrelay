@@ -13,6 +13,8 @@ ROUTER = ((ROOT / "crates/crowdrelay-api/src/lib.rs").read_text(encoding="utf-8"
 FLAGS = read_rust_module(ROOT, "crates/crowdrelay-api/src/ecosystem.rs")
 WORKER = read_rust_module(ROOT, "crates/crowdrelay-worker/src/draws.rs")
 OPENAPI = (ROOT / "openapi/openapi.yaml").read_text(encoding="utf-8")
+# SQL writes were extracted from the API layer behind repository ports (S3.2-S3.6).
+INFRA_COMMERCE = (ROOT / "crates/crowdrelay-infra/src/commerce_inventory.rs").read_text(encoding="utf-8")
 
 PROTECTED_TABLES = {
     "fans",
@@ -93,9 +95,9 @@ class CommerceCampaignsV1(unittest.TestCase):
         ):
             self.assertIn(path, ROUTER)
             self.assertIn(path.removeprefix("/v1") + ":", OPENAPI)
-        start = COMMERCE.index("async fn mark_inventory_ready_inner")
-        end = COMMERCE.index("\nasync fn reserve_inventory_inner", start)
-        block = COMMERCE[start:end]
+        start = INFRA_COMMERCE.index("async fn mark_inventory_ready")
+        end = INFRA_COMMERCE.index("\n#[derive(Debug, sqlx::FromRow)]", start)
+        block = INFRA_COMMERCE[start:end]
         self.assertIn("missing_count > 0", block)
         self.assertIn("invalid_availability > 0", block)
         self.assertIn("status = 'ready'", block)
@@ -104,9 +106,9 @@ class CommerceCampaignsV1(unittest.TestCase):
         self.assertLess(block.index("INSERT INTO ecosystem_feature_flags"), block.index("transaction.commit()"))
 
     def test_stocktake_records_explicit_zero_without_zero_delta_ledger_rows(self):
-        start = COMMERCE.index("async fn inventory_stocktake_inner")
-        end = COMMERCE.index("\nasync fn load_stocktake_items_tx", start)
-        block = COMMERCE[start:end]
+        start = INFRA_COMMERCE.index("async fn stocktake")
+        end = INFRA_COMMERCE.index("\n    async fn mark_inventory_ready", start)
+        block = INFRA_COMMERCE[start:end]
         self.assertIn("if delta != 0", block)
         self.assertIn("INSERT INTO inventory_stocktake_items", block)
         self.assertIn("i64::from(item.on_hand) < availability.reserved", block)
