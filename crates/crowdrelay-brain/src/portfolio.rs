@@ -130,6 +130,13 @@ pub struct PortfolioCandidate {
     /// and exploration provenance only. EFE decides what is worth
     /// learning about; DecisionValue decides what is worth doing.
     pub generation_signal: Option<EfeSignal>,
+    /// P0-2: Whether this candidate is a treatment assignment in an active
+    /// experiment. Experimental candidates can use the
+    /// `experimental_dispatch_budget` (additional slots beyond
+    /// `max_dispatches`) when the value of information justifies the spend.
+    /// Control assignments consume zero experimental slots.
+    #[serde(default)]
+    pub is_experimental: bool,
 
     // ── Canonical value ──
     /// The intrinsic decision value — one source of truth for all value
@@ -278,6 +285,14 @@ pub struct PortfolioConfig {
     /// The minimum marginal value required to add a candidate to the portfolio.
     /// Below this, the brain prefers DO NOTHING.
     pub min_marginal_value: f64,
+    /// P0-2: Additional treatment dispatch slots for active experiments.
+    /// These slots are ONLY consumed by candidates with
+    /// `is_experimental=true`. Control assignments consume zero
+    /// experimental slots. The budget is NOT spent blindly — experimental
+    /// candidates must still clear `min_marginal_value` and the optimizer's
+    /// safety/value gates. Default 0 (disabled).
+    #[serde(default)]
+    pub experimental_dispatch_budget: u32,
 }
 
 impl Default for PortfolioConfig {
@@ -288,6 +303,7 @@ impl Default for PortfolioConfig {
             audience_overlap_penalty: 0.3,
             fatigue_decay: 0.9,
             min_marginal_value: 0.1,
+            experimental_dispatch_budget: 0,
         }
     }
 }
@@ -344,7 +360,13 @@ impl PortfolioOptimizer {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut total_expected_fans = 0.0;
-        while selected.len() < self.config.max_dispatches as usize && !remaining.is_empty() {
+        let mut experimental_slots_used: u32 = 0;
+        // P0-2: The total slot limit is max_dispatches + experimental_dispatch_budget.
+        // Experimental slots are only available to candidates with is_experimental=true.
+        // Control assignments consume zero experimental slots (they are not dispatched).
+        let total_slot_limit =
+            (self.config.max_dispatches + self.config.experimental_dispatch_budget) as usize;
+        while selected.len() < total_slot_limit && !remaining.is_empty() {
             // Find the candidate with the highest marginal value.
             let mut best_idx = None;
             let mut best_marginal = f64::NEG_INFINITY;
@@ -355,6 +377,17 @@ impl PortfolioOptimizer {
                         > self.config.cost_budget
                 {
                     continue;
+                }
+                // P0-2: If normal budget is exhausted, only experimental
+                // candidates can use the remaining experimental slots.
+                let normal_budget_exhausted = selected.len() >= self.config.max_dispatches as usize;
+                if normal_budget_exhausted {
+                    if !candidate.is_experimental {
+                        continue; // Non-experimental candidate, no slots left.
+                    }
+                    if experimental_slots_used >= self.config.experimental_dispatch_budget {
+                        continue; // Experimental budget also exhausted.
+                    }
                 }
                 let audience_count = audience_counts
                     .get(&candidate.audience_key)
@@ -420,6 +453,12 @@ impl PortfolioOptimizer {
             // iteration anyway.
             if let Some(idx) = best_idx {
                 let candidate = remaining.swap_remove(idx);
+                // P0-2: Track experimental slot usage.
+                if candidate.is_experimental
+                    && selected.len() >= self.config.max_dispatches as usize
+                {
+                    experimental_slots_used += 1;
+                }
                 total_cost += candidate.decision_value.resource_cost.units;
                 *audience_counts
                     .entry(candidate.audience_key.clone())
@@ -451,7 +490,7 @@ impl PortfolioOptimizer {
                 break;
             }
         }
-        // Reject any remaining candidates (max_dispatches was reached).
+        // Reject any remaining candidates (all budgets were reached).
         for candidate in remaining {
             rejected.push(PortfolioRejection {
                 opportunity_key: candidate.opportunity_id.to_string(),
@@ -585,6 +624,7 @@ mod tests {
             audience_key: audience.to_owned(),
             source_context: "GrowthIntelligence".to_owned(),
             action_key: format!("action:{template}:{target}"),
+            is_experimental: false,
             decision_value,
         }
     }
@@ -809,6 +849,7 @@ mod tests {
             audience_overlap_penalty: 0.0, // disable overlap to isolate fatigue
             fatigue_decay: 0.5,            // 50% reduction per additional dispatch
             min_marginal_value: 1.0,
+            ..Default::default()
         };
         let optimizer = PortfolioOptimizer::new(config);
         // Three candidates to the same audience, all with 10 fans.
@@ -833,6 +874,7 @@ mod tests {
             audience_overlap_penalty: 0.3,
             fatigue_decay: 0.8,
             min_marginal_value: 0.5,
+            ..Default::default()
         };
         let optimizer = PortfolioOptimizer::new(config);
         let result = optimizer.select(vec![
@@ -911,5 +953,163 @@ mod tests {
         assert_eq!(result.selected[0].opportunity_id.template_id, "high_value");
         assert_eq!(result.selected[1].opportunity_id.template_id, "mid_value");
         assert_eq!(result.selected[2].opportunity_id.template_id, "low_value");
+    }
+
+    // ── P0-2: Experimental exploration budget tests (X1-X6) ──
+
+    fn make_experimental_candidate(
+        template: &str,
+        target: &str,
+        expected_fans: f64,
+        audience: &str,
+    ) -> PortfolioCandidate {
+        let mut c = make_candidate(template, target, expected_fans, audience);
+        c.is_experimental = true;
+        c
+    }
+
+    /// X1: Normal budget exhausted, experiment budget available →
+    /// experimental treatment dispatched.
+    #[test]
+    fn x1_experimental_slot_used_when_normal_budget_exhausted() {
+        let config = PortfolioConfig {
+            max_dispatches: 2,
+            experimental_dispatch_budget: 1,
+            min_marginal_value: 0.01,
+            ..Default::default()
+        };
+        let optimizer = PortfolioOptimizer::new(config);
+        // 2 normal candidates + 1 experimental candidate.
+        let result = optimizer.select(vec![
+            make_candidate("a", "x", 10.0, "aud1"),
+            make_candidate("b", "y", 8.0, "aud2"),
+            make_experimental_candidate("exp", "z", 5.0, "aud3"),
+        ]);
+        // All 3 should be selected: 2 normal + 1 experimental.
+        assert_eq!(result.selected.len(), 3);
+        assert!(result.selected.iter().any(|c| c.is_experimental));
+    }
+
+    /// X2: Experimental budget exhausted → no additional experimental
+    /// dispatches.
+    #[test]
+    fn x2_experimental_budget_exhausted_rejects_extra() {
+        let config = PortfolioConfig {
+            max_dispatches: 1,
+            experimental_dispatch_budget: 1,
+            min_marginal_value: 0.01,
+            ..Default::default()
+        };
+        let optimizer = PortfolioOptimizer::new(config);
+        // 1 normal + 2 experimental, but only 1 experimental slot.
+        let result = optimizer.select(vec![
+            make_candidate("a", "x", 10.0, "aud1"),
+            make_experimental_candidate("exp1", "y", 5.0, "aud2"),
+            make_experimental_candidate("exp2", "z", 4.0, "aud3"),
+        ]);
+        // Only 2 selected: 1 normal + 1 experimental.
+        assert_eq!(result.selected.len(), 2);
+        // The second experimental candidate should be rejected.
+        assert!(
+            result
+                .rejected
+                .iter()
+                .any(|r| r.opportunity_key.contains("exp2"))
+        );
+    }
+
+    /// X3: Low-value experiment → experimental budget NOT spent merely to
+    /// increase N. The candidate must still clear min_marginal_value.
+    #[test]
+    fn x3_low_value_experiment_not_dispatched() {
+        let config = PortfolioConfig {
+            max_dispatches: 1,
+            experimental_dispatch_budget: 3,
+            min_marginal_value: 5.0,
+            ..Default::default()
+        };
+        let optimizer = PortfolioOptimizer::new(config);
+        // Normal candidate with high value, experimental with negligible value.
+        let result = optimizer.select(vec![
+            make_candidate("a", "x", 10.0, "aud1"),
+            make_experimental_candidate("exp", "y", 0.02, "aud2"),
+        ]);
+        // Only the normal candidate is selected.
+        assert_eq!(result.selected.len(), 1);
+        assert!(!result.selected[0].is_experimental);
+    }
+
+    /// X4: Control assignment → zero experimental treatment slots consumed.
+    /// (This is tested at the application layer — the optimizer only sees
+    /// treatment candidates. Control assignments never enter the pool.)
+    /// Here we verify that non-experimental candidates don't consume
+    /// experimental slots.
+    #[test]
+    fn x4_non_experimental_does_not_consume_experimental_slots() {
+        let config = PortfolioConfig {
+            max_dispatches: 2,
+            experimental_dispatch_budget: 1,
+            min_marginal_value: 0.01,
+            ..Default::default()
+        };
+        let optimizer = PortfolioOptimizer::new(config);
+        // 3 non-experimental candidates, 1 experimental.
+        let result = optimizer.select(vec![
+            make_candidate("a", "x", 10.0, "aud1"),
+            make_candidate("b", "y", 8.0, "aud2"),
+            make_candidate("c", "z", 6.0, "aud3"),
+            make_experimental_candidate("exp", "w", 5.0, "aud4"),
+        ]);
+        // 2 normal + 1 experimental = 3 total.
+        assert_eq!(result.selected.len(), 3);
+        // The 3rd non-experimental candidate should be rejected (normal
+        // budget exhausted, and it's not experimental).
+        assert!(
+            result
+                .rejected
+                .iter()
+                .any(|r| r.opportunity_key.starts_with("c:"))
+        );
+    }
+
+    /// X5: Sufficient eligible + budget → minimum capacity reachable.
+    #[test]
+    fn x5_sufficient_budget_reaches_capacity() {
+        let config = PortfolioConfig {
+            max_dispatches: 3,
+            experimental_dispatch_budget: 2,
+            min_marginal_value: 0.01,
+            ..Default::default()
+        };
+        let optimizer = PortfolioOptimizer::new(config);
+        let result = optimizer.select(vec![
+            make_experimental_candidate("exp1", "a", 10.0, "aud1"),
+            make_experimental_candidate("exp2", "b", 8.0, "aud2"),
+            make_experimental_candidate("exp3", "c", 6.0, "aud3"),
+            make_experimental_candidate("exp4", "d", 4.0, "aud4"),
+            make_experimental_candidate("exp5", "e", 2.0, "aud5"),
+        ]);
+        // All 5 should be selected: 3 normal slots + 2 experimental slots.
+        assert_eq!(result.selected.len(), 5);
+    }
+
+    /// X6: Safety / operator ceiling wins. When cost_budget is exceeded,
+    /// experimental candidates don't bypass it.
+    #[test]
+    fn x6_cost_budget_constraint_not_bypassed_by_experimental() {
+        let config = PortfolioConfig {
+            max_dispatches: 10,
+            experimental_dispatch_budget: 5,
+            cost_budget: 5.0,
+            min_marginal_value: 0.01,
+            ..Default::default()
+        };
+        let optimizer = PortfolioOptimizer::new(config);
+        let mut expensive_exp = make_experimental_candidate("exp", "x", 10.0, "aud1");
+        expensive_exp.decision_value.resource_cost = ResourceCost::configured(10.0);
+        let result = optimizer.select(vec![expensive_exp]);
+        // The experimental candidate exceeds the cost budget → rejected.
+        assert!(result.do_nothing);
+        assert!(result.selected.is_empty());
     }
 }

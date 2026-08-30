@@ -127,121 +127,93 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .count_pending_measurements(self.workspace_id)
             .await
             .unwrap_or(0);
-        let selection = portfolio::select_portfolio(
-            &scored_candidates,
-            &gi_policy,
-            pending_measurement_count,
-        );
-        let selected_keys = portfolio::selected_keys(&selection);
-        // Extract the holdout probability from the policy.
-        // Guardrails: clamped to [0.0, 0.10] — 0% = off, max 10%.
+        // ── P0-1: Experiment population ≠ portfolio selection ──
+        //
+        // FULL SEPARATION: The experiment is created from the ELIGIBLE
+        // population BEFORE portfolio selection, not from the SELECTED
+        // candidates after. The experiment universe is ALL eligible
+        // candidates. The portfolio decides how many treatment units
+        // actually get dispatched, not which units exist in the experiment.
+        //
+        // Flow:
+        //   candidates → group by intervention → create experiment (ALL eligible)
+        //   → assign arms (treatment/control) → portfolio selects from
+        //   TREATMENT-assigned candidates only → dispatch selected treatment
+        //   → record non-selected treatment as withheld (action_id=None)
+        //
+        // This eliminates selection bias: the estimand is "effect among
+        // all eligible candidates", not "effect among already-selected
+        // winners."
         let holdout_probability = gi_policy.randomized_holdout_probability.clamp(0.0, 0.10);
-        // ── Experiment Design Engine ──
-        //
-        // EXPERIMENT DESIGN ≠ CANDIDATE DISPATCH. The design is created
-        // FIRST, then units are assigned to treatment/control arms within
-        // that design. This ensures treatment and control are genuinely
-        // arms of the same experiment, not separate experiments that
-        // happen to share a label.
-        //
-        // P0-1: The design is persisted via get_or_create_experiment_design.
-        // The same (workspace, intervention, logical_cycle_key) always
-        // converges on the same experiment_uuid. Retries and concurrent
-        // evaluators reuse the same design — no more fresh UUIDs per run.
-        //
-        // P0-3: community-engager uses TargetCommunity units. Each community
-        // is a distinct experimental unit with its own assignment. Other
-        // templates use Workspace units (quasi-experimental only).
-        //
-        // P0-4: Before assignment, the design is checked for statistical
-        // power. If the eligible population is too small, the experiment
-        // is marked InsufficientPower and candidates execute observationally.
-        let mut dispatched_count = 0usize;
-        // Group selected candidates by intervention (template_id).
-        // Each group becomes one ExperimentDesign with its own UUID.
-        // Use an IndexMap-like approach: preserve insertion order so
-        // the first-seen template gets dispatched first.
-        let mut experiment_groups: Vec<(
-            String,                               // template_id (intervention key)
-            Vec<(DecisionCandidate, DispatchPrediction)>, // candidates in this group
-        )> = Vec::new();
-        for (candidate, prediction, _efe, _rank, _stats) in &scored_candidates {
-            if selection.do_nothing || !selected_keys.contains(&candidate.decision_key) {
-                continue;
-            }
+        // Group ALL direct-action candidates by intervention (template_id).
+        // Non-direct-action candidates (scanner, strategist) bypass
+        // experiments and go directly to the portfolio.
+        type ExperimentGroup = (String, Vec<(usize, DecisionCandidate, DispatchPrediction)>);
+        let mut experiment_groups: Vec<ExperimentGroup> = Vec::new();
+        let mut non_experiment_indices: Vec<usize> = Vec::new();
+        for (i, (candidate, prediction, _efe, _rank, _stats)) in
+            scored_candidates.iter().enumerate()
+        {
             let template_id = match &candidate.action {
                 AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
                     template_id.as_str()
                 }
                 _ => "",
             };
-            // Only direct-action workers participate in experiments.
-            // Scanner/strategist are never held out — they are
-            // workspace-wide intelligence gathering, not community-
-            // targeted treatments.
             let is_direct_action = !template_id.is_empty()
                 && !matches!(template_id, "reddit-scanner" | "growth-strategist");
             if !is_direct_action {
-                // Dispatch directly without experiment assignment.
-                // These are intelligence-gathering workers, not
-                // community-targeted treatments.
-                let persisted = self.persist(candidate, limits, report).await?;
-                if let Some(action_id) = persisted {
-                    let _ = self
-                        .repository
-                        .record_dispatch_prediction(
-                            self.workspace_id,
-                            action_id,
-                            prediction,
-                            Some(strategy.as_str()),
-                            0.0,
-                        )
-                        .await;
-                }
-                dispatched_count += 1;
+                non_experiment_indices.push(i);
                 continue;
             }
-            // Add to the experiment group for this intervention.
             if let Some(group) = experiment_groups.iter_mut().find(|(t, _)| t == template_id) {
-                group.1.push((candidate.clone(), prediction.clone()));
+                group.1.push((i, candidate.clone(), prediction.clone()));
             } else {
                 experiment_groups.push((
                     template_id.to_owned(),
-                    vec![(candidate.clone(), prediction.clone())],
+                    vec![(i, candidate.clone(), prediction.clone())],
                 ));
             }
         }
-        // For each intervention group, get-or-create the persisted
-        // ExperimentDesign and assign arms to all units within it.
+        // For each intervention group, create the experiment design and
+        // assign arms to ALL eligible units. Control units are removed
+        // from the portfolio pool. Treatment units are marked
+        // is_experimental for the portfolio optimizer.
+        //
+        // Maps decision_key → (arm, design, unit_id) for later use
+        // during dispatch and withheld-treatment recording.
+        #[derive(Clone)]
+        enum ArmAssignment {
+            Control,
+            Treatment,
+        }
+        let mut arm_map: std::collections::HashMap<
+            String,
+            (ArmAssignment, crowdrelay_brain::ExperimentDesign, String, f64),
+        > = std::collections::HashMap::new();
+        // Track which scored_candidates indices are control (to be
+        // removed from the portfolio pool).
+        let mut control_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         for (template_id, group_candidates) in &experiment_groups {
-            // P0-3: community-engager uses TargetCommunity units.
-            // Each community is a distinct experimental unit. Other
-            // direct-action templates use Workspace units.
             let unit_kind = if template_id == "community-engager" {
                 crowdrelay_brain::ExperimentUnitKind::TargetCommunity
             } else {
                 crowdrelay_brain::ExperimentUnitKind::Workspace
             };
-            // P0-3: for community-engager, the eligible units are the
-            // target communities (subreddits). For workspace-wide
-            // templates, the eligible unit is the workspace itself.
             let eligible_units: Vec<String> = if template_id == "community-engager" {
                 group_candidates
                     .iter()
-                    .map(|(c, _)| unit_id_from_decision_key(&c.decision_key))
+                    .map(|(_, c, _)| unit_id_from_decision_key(&c.decision_key))
                     .collect()
             } else {
-                group_candidates.iter().map(|(c, _)| c.decision_key.clone()).collect()
+                group_candidates
+                    .iter()
+                    .map(|(_, c, _)| c.decision_key.clone())
+                    .collect()
             };
-            // P0-1: compute the logical_cycle_key from the cooldown
-            // window bucket. This is the same bucketing used in
-            // decision_key, so retry within the same cooldown window
-            // converges on the same experiment.
             let key_window_hours = key_window_for_template(&gi_policy, template_id);
             let logical_cycle_key = cooldown_window(now, key_window_hours).to_string();
-            // P0-1: get-or-create the persisted experiment design.
-            // The DB unique index on (workspace, intervention,
-            // logical_cycle_key) is the convergence guarantee.
             let mut design = self
                 .repository
                 .get_or_create_experiment_design(
@@ -258,17 +230,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     now,
                 )
                 .await?;
-            // P0-4: The power check is performed inside
-            // get_or_create_experiment_design and persisted to the DB.
-            // The design's experiment_status already reflects the result.
             let is_insufficient_power =
                 design.experiment_status == crowdrelay_brain::ExperimentStatus::InsufficientPower;
-            // When power is insufficient, holdout_probability is
-            // effectively 0 — all candidates are treatment, evidence
-            // is observational. The North Star action is not sacrificed.
-            // We also zero the design's holdout_probability so that
-            // ExperimentAssignment::from_design computes propensity = 1.0
-            // (all treatment), not 1.0 - original_holdout.
             if is_insufficient_power {
                 design.holdout_probability = 0.0;
             }
@@ -277,31 +240,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             } else {
                 holdout_probability
             };
-            for (candidate, prediction) in group_candidates {
+            for (idx, candidate, prediction) in group_candidates {
                 let unit_id = if template_id == "community-engager" {
                     unit_id_from_decision_key(&candidate.decision_key)
                 } else {
                     candidate.decision_key.clone()
                 };
-                // Per-unit deterministic roll using the experiment_uuid
-                // as the randomization seed. The same unit gets the
-                // same assignment within one experiment (deterministic
-                // after persistence), but different experiments produce
-                // different rolls (real randomization, not permanent
-                // fate).
                 let roll = deterministic_roll(&format!(
                     "{}:{}:{}:{}",
                     design.experiment_uuid, unit_id, design.assignment_round, template_id
                 ));
                 let is_control = effective_holdout > 0.0 && roll < effective_holdout;
                 if is_control {
-                    // Control arm: record an ExperimentAssignment with
-                    // arm=Control. No action is dispatched — the worker
-                    // never runs. The measurement system will measure
-                    // the unit's fan growth in the 14-day window
-                    // via workspace-level DiD (or community-level
-                    // provenance if available), which is the control
-                    // group's counterfactual outcome.
+                    // Control arm: record assignment, no action dispatched.
                     let assignment = crowdrelay_brain::ExperimentAssignment::from_design(
                         &design,
                         &unit_id,
@@ -310,10 +261,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         prediction,
                         None,
                     );
-                    // P0-2: control assignment errors are propagated,
-                    // not discarded. A failed control assignment means
-                    // the experiment bookkeeping is broken — the cycle
-                    // fails rather than silently dropping the assignment.
                     self.repository
                         .record_experiment_assignment(
                             self.workspace_id,
@@ -321,50 +268,187 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             Some(strategy.as_str()),
                         )
                         .await?;
-                    continue;
-                }
-                // Treatment arm: P0-2 — atomically persist the action
-                // AND the experiment assignment in one transaction.
-                // ACTION EXISTS ↔ ASSIGNMENT EXISTS ↔ EXECUTION INTENT.
-                // No state where the action succeeded but the causal
-                // bookkeeping vanished.
-                let treatment_assignment =
-                    crowdrelay_brain::ExperimentAssignment::from_design(
-                        &design,
-                        &unit_id,
-                        &unit_id,
-                        crowdrelay_brain::TreatmentAssignment::Treatment,
-                        prediction,
-                        None, // action_id filled in by the atomic persist
+                    control_indices.insert(*idx);
+                    arm_map.insert(
+                        candidate.decision_key.clone(),
+                        (ArmAssignment::Control, design.clone(), unit_id, effective_holdout),
                     );
-                let persisted = self
+                } else {
+                    // Treatment arm: mark for portfolio. The assignment
+                    // will be persisted AFTER the portfolio selects
+                    // this candidate for dispatch. If the portfolio
+                    // does NOT select it, a withheld-treatment
+                    // assignment is recorded with action_id=None.
+                    arm_map.insert(
+                        candidate.decision_key.clone(),
+                        (ArmAssignment::Treatment, design.clone(), unit_id, effective_holdout),
+                    );
+                }
+            }
+        }
+        // Build the portfolio pool: non-experiment candidates + treatment-
+        // assigned candidates (control candidates are excluded).
+        let portfolio_candidates: Vec<ScoredCandidate> = scored_candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !control_indices.contains(i))
+            .map(|(_, c)| c.clone())
+            .collect();
+        // Build the set of treatment-assigned decision_keys for marking
+        // candidates as is_experimental in the portfolio.
+        let experimental_keys: std::collections::HashSet<String> = arm_map
+            .iter()
+            .filter(|(_, (arm, _, _, _))| matches!(arm, ArmAssignment::Treatment))
+            .map(|(k, _)| k.clone())
+            .collect();
+        // Run the portfolio optimizer on the treatment + non-experiment
+        // candidates only. Control candidates are NOT in the pool.
+        let selection = portfolio::select_portfolio(
+            &portfolio_candidates,
+            &gi_policy,
+            pending_measurement_count,
+            self.workspace_id,
+            &experimental_keys,
+        );
+        let selected_keys = portfolio::selected_keys(&selection);
+        // ── Dispatch phase ──
+        let mut dispatched_count = 0usize;
+        // Dispatch non-experiment candidates (scanner, strategist).
+        for i in &non_experiment_indices {
+            let Some((candidate, prediction, _efe, _rank, _stats)) = scored_candidates.get(*i)
+            else {
+                continue;
+            };
+            if selection.do_nothing || !selected_keys.contains(&candidate.decision_key) {
+                continue;
+            }
+            let persisted = self.persist(candidate, limits, report).await?;
+            if let Some(action_id) = persisted {
+                let _ = self
                     .repository
-                    .persist_treatment_with_assignment(
+                    .record_dispatch_prediction(
                         self.workspace_id,
-                        candidate,
-                        &treatment_assignment,
+                        action_id,
                         prediction,
                         Some(strategy.as_str()),
-                        effective_holdout,
+                        0.0,
                     )
-                    .await?;
-                if let Some(action_id) = persisted.action_id {
-                    // Record the growth evidence row separately — it
-                    // is measurement infrastructure, not causal
-                    // bookkeeping. The prediction was already recorded
-                    // atomically inside the transaction.
-                    let _ = self
+                    .await;
+            }
+            dispatched_count += 1;
+        }
+        // Dispatch treatment-assigned candidates that were selected by
+        // the portfolio. Record withheld-treatment assignments for
+        // treatment candidates NOT selected.
+        for (template_id, group_candidates) in &experiment_groups {
+            for (_idx, candidate, prediction) in group_candidates {
+                let Some((arm, design, unit_id, effective_holdout)) =
+                    arm_map.get(&candidate.decision_key)
+                else {
+                    continue;
+                };
+                match arm {
+                    ArmAssignment::Control => {
+                        // Already recorded above. Skip.
+                        continue;
+                    }
+                    ArmAssignment::Treatment => {}
+                }
+                let is_selected =
+                    !selection.do_nothing && selected_keys.contains(&candidate.decision_key);
+                if is_selected {
+                    // Treatment selected by portfolio → dispatch.
+                    let treatment_assignment =
+                        crowdrelay_brain::ExperimentAssignment::from_design(
+                            design,
+                            unit_id,
+                            unit_id,
+                            crowdrelay_brain::TreatmentAssignment::Treatment,
+                            prediction,
+                            None,
+                        );
+                    let persisted = self
                         .repository
-                        .record_dispatch_prediction(
+                        .persist_treatment_with_assignment(
                             self.workspace_id,
-                            action_id,
+                            candidate,
+                            &treatment_assignment,
                             prediction,
                             Some(strategy.as_str()),
-                            effective_holdout,
+                            *effective_holdout,
+                        )
+                        .await?;
+                    if let Some(action_id) = persisted.action_id {
+                        let _ = self
+                            .repository
+                            .record_dispatch_prediction(
+                                self.workspace_id,
+                                action_id,
+                                prediction,
+                                Some(strategy.as_str()),
+                                *effective_holdout,
+                            )
+                            .await;
+                        // P1-f: Emit Exposure provenance event for
+                        // community-engager actions. The exposure is
+                        // anonymous (fan_id=None) — we know the post was
+                        // published but not who saw it. Attribution
+                        // method is "action_completion" with confidence
+                        // 1.0. This is the first link in the provenance
+                        // chain: Exposure → Interaction → Conversion →
+                        // Durability. The measurement system will emit
+                        // temporal-association Conversion events later.
+                        if template_id == "community-engager" {
+                            let community = unit_id.clone();
+                            let exposure = crowdrelay_brain::FanProvenanceEvent {
+                                fan_id: None,
+                                event_kind: crowdrelay_brain::ProvenanceEventKind::Exposure,
+                                channel: "reddit".to_owned(),
+                                source_target: Some(community.clone()),
+                                community: Some(community),
+                                campaign_id: None,
+                                action_id: Some(action_id),
+                                attribution_method: "action_completion".to_owned(),
+                                attribution_confidence: 1.0,
+                                occurred_at: now,
+                            };
+                            let _ = self
+                                .repository
+                                .record_fan_provenance_event(
+                                    self.workspace_id,
+                                    &exposure,
+                                )
+                                .await;
+                        }
+                    }
+                    dispatched_count += 1;
+                } else {
+                    // Treatment NOT selected by portfolio → record
+                    // withheld-treatment assignment with action_id=None.
+                    // This unit was randomized to treatment but not
+                    // dispatched due to budget constraints. It is
+                    // distinct from Control (withheld by randomization)
+                    // and from Treatment (dispatched). The measurement
+                    // system measures its outcome like control, but the
+                    // estimand interpretation differs.
+                    let withheld_assignment =
+                        crowdrelay_brain::ExperimentAssignment::from_design(
+                            design,
+                            unit_id,
+                            unit_id,
+                            crowdrelay_brain::TreatmentAssignment::Treatment,
+                            prediction,
+                            None, // action_id=None — not dispatched
+                        );
+                    let _ = self
+                        .repository
+                        .record_experiment_assignment(
+                            self.workspace_id,
+                            &withheld_assignment,
+                            Some(strategy.as_str()),
                         )
                         .await;
                 }
-                dispatched_count += 1;
             }
         }
         // Only mark insights as consumed when the brain actually

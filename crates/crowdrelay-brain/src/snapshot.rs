@@ -86,11 +86,24 @@ pub struct GrowthIntelligencePolicy {
     /// out — they don't directly acquire fans, so there's no treatment to
     /// withhold.
     pub randomized_holdout_probability: f64,
-    /// Minimum number of eligible units required to start a randomized
-    /// holdout experiment. Below this, candidates execute observationally
-    /// — no holdout, no fake causal claim. Default 10.
+    /// P0-2: Minimum experiment capacity — the minimum number of eligible
+    /// units required to start a randomized holdout experiment. Below this,
+    /// candidates execute observationally — no holdout, no fake causal
+    /// claim. This is a capacity guard, NOT a formal statistical power
+    /// calculation. Default 10.
     #[serde(default = "default_min_eligible_units_for_experiment")]
     pub min_eligible_units_for_experiment: u32,
+    /// P0-2: Additional treatment dispatch slots for active experiments.
+    /// These slots allow the brain to deliberately buy
+    /// information-producing treatment opportunities beyond the normal
+    /// `max_dispatches` budget. The normal action budget remains the
+    /// primary operational budget; this is a learning budget. Slots are
+    /// consumed ONLY by treatment assignments in active experiments
+    /// (control assignments consume zero slots). The budget is NOT spent
+    /// blindly — experimental candidates must still clear safety/value
+    /// gates. Default 3.
+    #[serde(default = "default_experimental_dispatch_budget")]
+    pub experimental_dispatch_budget: u32,
     /// Minimum expected control arm size. A 10% holdout on 3 units gives
     /// 0 controls — this guard prevents that. Default 2.
     #[serde(default = "default_min_expected_control_units")]
@@ -109,6 +122,10 @@ pub struct GrowthIntelligencePolicy {
 
 fn default_min_eligible_units_for_experiment() -> u32 {
     10
+}
+
+fn default_experimental_dispatch_budget() -> u32 {
+    3
 }
 
 fn default_min_expected_control_units() -> u32 {
@@ -144,6 +161,7 @@ impl Default for GrowthIntelligencePolicy {
             failed_run_retry_hours: 1,
             randomized_holdout_probability: 0.0,
             min_eligible_units_for_experiment: default_min_eligible_units_for_experiment(),
+            experimental_dispatch_budget: default_experimental_dispatch_budget(),
             min_expected_control_units: default_min_expected_control_units(),
             min_expected_treatment_units: default_min_expected_treatment_units(),
             template_costs: default_template_costs(),

@@ -678,7 +678,7 @@ fn community_engager_candidates(
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     domain_policy: &GrowthIntelligencePolicy,
-    workspace_id: WorkspaceId,
+    _workspace_id: WorkspaceId,
     now: OffsetDateTime,
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
@@ -804,7 +804,7 @@ fn community_engager_candidates(
         candidates.push((
             DecisionCandidate {
                 context: policy.context,
-                subject: ActionSubject::Workspace(workspace_id),
+                subject: ActionSubject::TargetCommunity(target.target_id),
                 decision_kind: "request_agent_run",
                 confidence: Confidence::MAX,
                 disposition,

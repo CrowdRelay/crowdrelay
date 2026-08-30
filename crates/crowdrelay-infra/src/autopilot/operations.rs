@@ -41,6 +41,7 @@ mod growth_debt;
 pub(in crate::autopilot) mod growth_intelligence;
 mod ingress;
 mod next_best_action;
+pub(in crate::autopilot) mod provenance;
 mod push_segments;
 pub(in crate::autopilot) mod reach;
 mod release_links;

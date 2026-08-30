@@ -13,11 +13,46 @@ use std::collections::HashSet;
 
 use crowdrelay_brain::{
     DecisionMode, DecisionValue, EfeSignal, GrowthIntelligencePolicy, OpportunityAction,
-    OpportunityId, PortfolioCandidate, PortfolioOptimizer, PortfolioSelection, ResourceCost,
-    WaitCandidateValue, context_hash,
+    OpportunityId, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioSelection,
+    ResourceCost, WaitCandidateValue, context_hash,
 };
+use crowdrelay_domain::WorkspaceId;
 
 use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
+use crate::autopilot::model::DecisionCandidate;
+
+/// P1-e: Extracts the audience identity from a candidate's decision_key.
+///
+/// The audience_key must be target-only (not template+target) so that two
+/// different templates hitting the same community are detected as audience
+/// overlap. The action differs; the audience doesn't.
+///
+/// - community-engager: `community:{target_id}` (extracted from decision_key
+///   segment 4)
+/// - workspace-wide templates: `workspace:{workspace_id}` (they all hit the
+///   same audience — the workspace)
+/// - other templates: `target:{decision_key}` (fallback — each decision_key
+///   is a unique target)
+fn audience_key_for(candidate: &DecisionCandidate, workspace_id: WorkspaceId) -> String {
+    let parts: Vec<&str> = candidate.decision_key.split(':').collect();
+    // community-engager: decision:growth-intelligence:v{N}:community-engager:{target_id}:{bucket}
+    if parts.len() >= 5
+        && parts.get(3) == Some(&"community-engager")
+        && let Some(target_id) = parts.get(4)
+    {
+        return format!("community:{target_id}");
+    }
+    // Workspace-wide templates (reddit-scanner, press-pitch, social-post)
+    // all hit the same audience — the workspace itself.
+    if matches!(
+        parts.get(3),
+        Some(&"reddit-scanner") | Some(&"press-pitch") | Some(&"social-post")
+    ) {
+        return format!("workspace:{}", workspace_id.into_uuid());
+    }
+    // Fallback: each decision_key is a unique target.
+    format!("target:{}", candidate.decision_key)
+}
 
 /// Returns the operator-configured resource cost for a template, as a
 /// `ResourceCost` with `CostSource::Configured`. Falls back to 1.0 when
@@ -50,19 +85,16 @@ pub(super) fn select_portfolio(
     scored: &[ScoredCandidate],
     policy: &GrowthIntelligencePolicy,
     pending_measurement_count: u32,
+    workspace_id: WorkspaceId,
+    experimental_keys: &std::collections::HashSet<String>,
 ) -> PortfolioSelection {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
         .map(|(c, p, efe, _, stats)| {
-            // Audience key includes both the template AND the target
-            // (decision_key). Previously this was just `template:{}`,
-            // which meant two dispatches to different subreddits with
-            // the same template were treated as the same audience —
-            // causing the portfolio optimizer to reject the second as
-            // "audience overlap" when the audiences are actually
-            // disjoint (e.g. r/MetalMusic and r/progmetal are different
-            // communities).
-            let audience_key = format!("template:{}:{}", p.template_id, c.decision_key);
+            // P1-e: audience_key is target-only, not template+target.
+            // Two different templates hitting the same community share
+            // an audience_key, so the overlap penalty applies correctly.
+            let audience_key = audience_key_for(c, workspace_id);
             // Construct the canonical DecisionValue from treatment-aware
             // stats. This is the single source of truth for all value
             // semantics — the optimizer reads decision_value.total()
@@ -96,6 +128,11 @@ pub(super) fn select_portfolio(
                 audience_key,
                 source_context: c.decision_kind.to_string(),
                 action_key: c.decision_key.clone(),
+                // P0-2: is_experimental is true for treatment-assigned
+                // candidates from active experiments. These candidates
+                // can use the experimental_dispatch_budget (additional
+                // slots beyond max_dispatches) when the VOI justifies it.
+                is_experimental: experimental_keys.contains(&c.decision_key),
                 decision_value,
             }
         })
@@ -127,7 +164,14 @@ pub(super) fn select_portfolio(
     // whose outcomes could inform the decision, WAIT can win.
     let wait =
         WaitCandidateValue::compute(best_y30, pending_measurement_count, avg_treatment_std, 0.0);
-    let optimizer = PortfolioOptimizer::default();
+    // P0-2: Wire the experimental dispatch budget from the policy into the
+    // optimizer config. This allows additional treatment dispatches beyond
+    // max_dispatches when the candidate is part of an active experiment.
+    let config = PortfolioConfig {
+        experimental_dispatch_budget: policy.experimental_dispatch_budget,
+        ..Default::default()
+    };
+    let optimizer = PortfolioOptimizer { config };
     optimizer.select_with_wait(candidates, wait)
 }
 

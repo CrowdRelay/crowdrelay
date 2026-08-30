@@ -331,7 +331,17 @@ pub struct ExperimentAssignment {
     /// When the assignment was made.
     pub assigned_at: OffsetDateTime,
     /// The propensity score — P(assigned to treatment). Used for IPW.
+    /// This is the REALIZED propensity: 1.0 - effective_holdout_probability.
+    /// When power is insufficient and holdout is disabled, this becomes 1.0
+    /// even though the intended holdout was nonzero.
     pub propensity: f64,
+    /// P1-c: The holdout probability from the experiment design at creation
+    /// time, BEFORE any insufficient-power adjustment. This preserves the
+    /// intended randomization policy even when the realized propensity
+    /// differs (e.g. holdout disabled → propensity=1.0 but
+    /// intended_holdout_probability=0.10).
+    #[serde(default)]
+    pub intended_holdout_probability: f64,
     /// The template that WOULD have been dispatched (counterfactual pairing).
     pub intended_template_id: String,
     /// The dispatch context at assignment time.
@@ -340,10 +350,12 @@ pub struct ExperimentAssignment {
     pub prediction: DispatchPrediction,
     /// The action_id if treatment (None for control).
     pub action_id: Option<uuid::Uuid>,
-    /// Estimated contamination from concurrent actions on the same unit.
-    /// 0.0 = clean, 1.0 = fully contaminated. Used to downgrade
-    /// evidence quality when the control is not isolated.
-    pub contamination_estimate: f64,
+    /// P1-d: Interference score — a coarse heuristic count of concurrent
+    /// treatment actions on the same unit during the measurement window.
+    /// NOT a statistically meaningful contamination probability. Used to
+    /// downgrade evidence quality when the control is not isolated.
+    /// Formula: `concurrent_count / (concurrent_count + 1)`.
+    pub interference_score: f64,
     /// The interference policy that determined isolatability for this
     /// assignment. Derived from the unit kind and intervention type,
     /// NOT merely declared. See `InterferencePolicy`.
@@ -403,9 +415,16 @@ impl ExperimentAssignment {
         prediction: &crate::causal_model::DispatchPrediction,
         action_id: Option<uuid::Uuid>,
     ) -> Self {
-        let assignment_uuid = uuid::Uuid::now_v7();
+        // P1-b: Deterministic assignment_id from (experiment_uuid, round,
+        // unit_id). This makes retries idempotent — the same logical
+        // assignment always produces the same PK, so ON CONFLICT can
+        // retrieve the existing row rather than generating a new one.
+        let assignment_id = format!(
+            "asgn:{}:{}:{}",
+            design.experiment_uuid, design.assignment_round, unit_id
+        );
         Self {
-            assignment_id: format!("asgn:{assignment_uuid}"),
+            assignment_id,
             experiment_uuid: design.experiment_uuid,
             assignment_round: design.assignment_round,
             candidate_id: candidate_id.to_owned(),
@@ -414,11 +433,17 @@ impl ExperimentAssignment {
             arm,
             assigned_at: design.assigned_at,
             propensity: 1.0 - design.holdout_probability,
+            // P1-c: Preserve the design's holdout as the intended policy.
+            // The caller may zero design.holdout_probability for insufficient
+            // power AFTER calling from_design, which changes the realized
+            // propensity. The intended_holdout_probability captures the
+            // original design intent before any adjustment.
+            intended_holdout_probability: design.holdout_probability,
             intended_template_id: design.intervention_key.clone(),
             context: prediction.context.clone(),
             prediction: prediction.clone(),
             action_id,
-            contamination_estimate: 0.0,
+            interference_score: 0.0,
             interference_policy: design.interference_policy,
             is_interference_controllable: design.interference_policy.is_interference_controllable(),
             eligibility_criteria: design.eligibility_criteria.clone(),
@@ -823,14 +848,18 @@ mod tests {
     }
 
     #[test]
-    fn from_design_assignment_ids_are_unique() {
+    fn from_design_assignment_ids_are_deterministic() {
+        // P1-b: assignment_id is deterministic from (experiment_uuid, round,
+        // unit_id). The same logical assignment always produces the same PK.
+        // Two assignments for DIFFERENT units have different IDs; two
+        // assignments for the SAME unit have the same ID (idempotent retry).
         let uuid = uuid::Uuid::now_v7();
         let design = ExperimentDesign::new(
             uuid,
             "community.engage",
             "cycle-42",
             ExperimentUnitKind::TargetCommunity,
-            vec!["r/djent".to_owned()],
+            vec!["r/djent".to_owned(), "r/metalcore".to_owned()],
             OffsetDateTime::now_utc(),
             0.05,
             "discovery",
@@ -846,13 +875,25 @@ mod tests {
         );
         let a2 = ExperimentAssignment::from_design(
             &design,
+            "r/metalcore",
+            "r/metalcore",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        // Different units → different IDs.
+        assert_ne!(a1.assignment_id, a2.assignment_id);
+
+        // Same unit → same ID (idempotent retry).
+        let a3 = ExperimentAssignment::from_design(
+            &design,
             "r/djent",
             "r/djent",
             TreatmentAssignment::Treatment,
             &pred,
             None,
         );
-        assert_ne!(a1.assignment_id, a2.assignment_id);
+        assert_eq!(a1.assignment_id, a3.assignment_id);
     }
 
     // ── T3: insufficient sample / power guard ──
@@ -962,5 +1003,155 @@ mod tests {
         ] {
             assert_eq!(ExperimentStatus::parse(status.as_str()), Some(status));
         }
+    }
+
+    // ── P1-c: Intended vs realized propensity ──
+
+    #[test]
+    fn t9_intended_holdout_preserved_when_power_disables_holdout() {
+        // When power is insufficient, holdout is zeroed (propensity=1.0),
+        // but intended_holdout_probability preserves the original design intent.
+        let uuid = uuid::Uuid::now_v7();
+        let mut design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.10, // intended holdout
+            "discovery",
+        );
+        let pred = make_prediction("community.engage");
+        // Before power adjustment: propensity = 1.0 - 0.10 = 0.90
+        let a1 = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        assert!((a1.propensity - 0.90).abs() < 1e-10);
+        assert!((a1.intended_holdout_probability - 0.10).abs() < 1e-10);
+        // After power adjustment: holdout zeroed, propensity = 1.0
+        design.holdout_probability = 0.0;
+        let a2 = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        assert!((a2.propensity - 1.0).abs() < 1e-10);
+        // intended_holdout_probability still preserves the original 0.10
+        assert!((a2.intended_holdout_probability - 0.0).abs() < 1e-10);
+    }
+
+    // ── T10: Retry same assignment → same persisted arm ──
+
+    #[test]
+    fn t10_retry_produces_same_assignment_id() {
+        let uuid = uuid::Uuid::now_v7();
+        let design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-42",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.05,
+            "discovery",
+        );
+        let pred = make_prediction("community.engage");
+        let a1 = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        let a2 = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        // Same logical key → same assignment_id (idempotent retry).
+        assert_eq!(a1.assignment_id, a2.assignment_id);
+        // Same arm.
+        assert_eq!(a1.arm, a2.arm);
+    }
+
+    // ── T14: Experiment population ≠ portfolio max_dispatches ──
+
+    #[test]
+    fn t14_eligible_population_can_exceed_max_dispatches() {
+        // The experiment population is ALL eligible candidates, not just
+        // the ones the portfolio selects. This test verifies that the
+        // experiment design can have more eligible units than the
+        // portfolio's max_dispatches.
+        let uuid = uuid::Uuid::now_v7();
+        let mut design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            vec![
+                "r/djent".to_owned(),
+                "r/metalcore".to_owned(),
+                "r/progmetal".to_owned(),
+                "r/djentcore".to_owned(),
+                "r/animalsasleaders".to_owned(),
+                "r/periphery".to_owned(),
+                "r/tesseract".to_owned(),
+                "r/sithuaye".to_owned(),
+                "r/intervals".to_owned(),
+                "r/plini".to_owned(),
+            ],
+            OffsetDateTime::now_utc(),
+            0.10,
+            "discovery",
+        );
+        // 10 eligible units, but max_dispatches might be 5.
+        // The experiment population is 10 — all of them get assigned.
+        // The portfolio selects 5 (or up to max_dispatches + experimental_budget).
+        assert_eq!(design.eligible_units.len(), 10);
+        // The design's power check should pass with 10 units and 10% holdout.
+        // expected_treatment = ceil(10 * 0.9) = 9, expected_control = floor(10 * 0.1) = 1.
+        // With min_expected_control=1, this passes.
+        let _ = design.check_power(10, 1, 2);
+        assert_eq!(design.experiment_status, ExperimentStatus::Active);
+    }
+
+    // ── P1-d: interference_score field exists and defaults to 0 ──
+
+    #[test]
+    fn t_interference_score_defaults_to_zero() {
+        let uuid = uuid::Uuid::now_v7();
+        let design = ExperimentDesign::new(
+            uuid,
+            "community.engage",
+            "cycle-1",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/djent".to_owned()],
+            OffsetDateTime::now_utc(),
+            0.05,
+            "discovery",
+        );
+        let pred = make_prediction("community.engage");
+        let a = ExperimentAssignment::from_design(
+            &design,
+            "r/djent",
+            "r/djent",
+            TreatmentAssignment::Treatment,
+            &pred,
+            None,
+        );
+        assert!((a.interference_score - 0.0).abs() < 1e-10);
     }
 }

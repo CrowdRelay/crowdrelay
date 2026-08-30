@@ -300,6 +300,11 @@ pub enum ActionSubject {
     GrowthMetricSeries(GrowthMetricSeriesId),
     BookingTarget(BookingTargetId),
     OutreachTarget(OutreachTargetId),
+    /// P0-3: A community target discovered by the agent (e.g. a subreddit
+    /// from `agent_outreach_targets`). Distinct from `OutreachTarget`
+    /// which is an operator-managed contact in `viryaos_outreach_targets`.
+    /// The UUID is `agent_outreach_targets.id`.
+    TargetCommunity(uuid::Uuid),
     /// Supply is a property of the whole workspace rather than of any one row,
     /// so the sweep that replenishes it has the workspace as its subject.
     Workspace(WorkspaceId),
@@ -337,6 +342,7 @@ impl ActionSubject {
             Self::GrowthMetricSeries(_) => "growth_metric_series",
             Self::BookingTarget(_) => "booking_target",
             Self::OutreachTarget(_) => "outreach_target",
+            Self::TargetCommunity(_) => "target_community",
             Self::Workspace(_) => "workspace",
         }
     }
@@ -380,6 +386,7 @@ impl ActionSubject {
             Self::GrowthMetricSeries(id) => id.into_uuid(),
             Self::BookingTarget(id) => id.into_uuid(),
             Self::OutreachTarget(id) => id.into_uuid(),
+            Self::TargetCommunity(id) => id,
             Self::Workspace(id) => id.into_uuid(),
         }
     }
@@ -1833,4 +1840,34 @@ pub struct ClaimedAutopilotAction {
     pub id: AutopilotActionId,
     pub payload: AutopilotActionPayload,
     pub attempt_number: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T12: TargetCommunity action subject has correct kind and uuid.
+    #[test]
+    fn t12_target_community_subject() {
+        let target_id = uuid::Uuid::now_v7();
+        let subject = ActionSubject::TargetCommunity(target_id);
+        assert_eq!(subject.kind(), "target_community");
+        assert_eq!(subject.uuid(), target_id);
+        assert!(!subject.is_contactable_person());
+    }
+
+    /// T13: TargetCommunity and Workspace have different audience keys.
+    /// The audience_key_for function in portfolio.rs extracts the
+    /// target_id from community-engager decision_keys, producing
+    /// "community:{target_id}". Workspace-wide templates produce
+    /// "workspace:{workspace_id}". Two different templates targeting
+    /// the same community share the same audience_key.
+    #[test]
+    fn t13_target_community_audience_is_target_not_template() {
+        let target_id = uuid::Uuid::now_v7();
+        let subject = ActionSubject::TargetCommunity(target_id);
+        // The subject's UUID is the target_id, not the workspace_id.
+        // This means the experiment unit is the community, not the workspace.
+        assert_ne!(subject.kind(), "workspace");
+    }
 }

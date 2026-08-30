@@ -387,16 +387,17 @@ macro_rules! decision_persist {
                 r#"
                 INSERT INTO viryaos_experiment_assignments
                     (id, workspace_id, unit_id, unit_kind, arm, assigned_at,
-                     propensity, intended_template_id, context, prediction,
-                     action_id, strategy, experiment_kind,
+                     propensity, intended_holdout_probability, intended_template_id,
+                     context, prediction, action_id, strategy, experiment_kind,
                      contamination_estimate, is_interference_controllable,
                      experiment_uuid, assignment_round,
                      eligibility_criteria, selection_context,
                      interference_policy, assignment_time_contamination,
                      experiment_status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                        $16, $17, $18, $19, $20, $21, $22)
-                ON CONFLICT (id) DO NOTHING
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19, $20, $21, $22, $23)
+                ON CONFLICT (workspace_id, experiment_uuid, assignment_round, unit_id)
+                DO NOTHING
                 "#,
             )
             .bind(&assignment.assignment_id)
@@ -406,20 +407,21 @@ macro_rules! decision_persist {
             .bind(assignment.arm.as_str())
             .bind(assignment.assigned_at)
             .bind(assignment.propensity)
+            .bind(assignment.intended_holdout_probability)
             .bind(&assignment.intended_template_id)
             .bind(&context_json)
             .bind(&prediction_json)
             .bind(Some(real_action_id))
             .bind(strategy)
             .bind(kind.as_str())
-            .bind(assignment.contamination_estimate)
+            .bind(assignment.interference_score)
             .bind(assignment.is_interference_controllable)
             .bind(assignment.experiment_uuid)
             .bind(assignment.assignment_round as i32)
             .bind(&assignment.eligibility_criteria)
             .bind(&assignment.selection_context)
             .bind(assignment.interference_policy.as_str())
-            .bind(assignment.contamination_estimate)
+            .bind(assignment.interference_score)
             .bind(assignment.experiment_status.as_str())
             .execute(&mut *transaction)
             .await

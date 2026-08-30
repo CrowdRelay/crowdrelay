@@ -87,6 +87,7 @@ fn make_candidate(
         audience_key: audience.to_owned(),
         source_context: "test".to_owned(),
         action_key: format!("action:{template}:{target}"),
+        is_experimental: false,
         decision_value: dv,
     }
 }
@@ -103,6 +104,7 @@ fn make_candidate_with_dv(
         audience_key: audience.to_owned(),
         source_context: "test".to_owned(),
         action_key: format!("action:{template}:{target}"),
+        is_experimental: false,
         decision_value: dv,
     }
 }
@@ -1015,8 +1017,8 @@ fn q_contamination_discovered_later() {
         Some(uuid::Uuid::now_v7()),
     );
 
-    // At assignment time, contamination_estimate is 0 (clean).
-    assert!((assignment.contamination_estimate - 0.0).abs() < 1e-10);
+    // At assignment time, interference_score is 0 (clean).
+    assert!((assignment.interference_score - 0.0).abs() < 1e-10);
 
     // The interference policy is PotentiallyIsolatable (community.engage
     // on TargetCommunity). The final contamination scan (done by the
