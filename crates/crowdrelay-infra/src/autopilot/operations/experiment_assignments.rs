@@ -254,15 +254,16 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
             tracing::error!(value = %persisted_interference_str, "failed to parse persisted interference_policy");
             RepositoryError::Unexpected
         })?;
-    let persisted_eligible_units: Vec<String> =
-        serde_json::from_value(persisted_eligible).map_err(|e| {
+    let persisted_eligible_units: Vec<String> = serde_json::from_value(persisted_eligible)
+        .map_err(|e| {
             tracing::error!(error = %e, "failed to deserialize persisted eligible_units");
             RepositoryError::Unexpected
         })?;
-    let experiment_status = crowdrelay_brain::ExperimentStatus::parse(&status_str).ok_or_else(|| {
-        tracing::error!(value = %status_str, "failed to parse persisted experiment_status");
-        RepositoryError::Unexpected
-    })?;
+    let experiment_status =
+        crowdrelay_brain::ExperimentStatus::parse(&status_str).ok_or_else(|| {
+            tracing::error!(value = %status_str, "failed to parse persisted experiment_status");
+            RepositoryError::Unexpected
+        })?;
 
     Ok(crowdrelay_brain::ExperimentDesign {
         experiment_uuid,
