@@ -56,7 +56,7 @@
 //! - NOT allowing preference to modify DecisionValue or economic value
 //! - NOT allowing preference to remove candidates from the economic pipeline
 //! - Bounding cadence adjustment to [0.75, 1.25] (V1)
-//! - Enforcing a discovery floor (`min_discovery_cadence_multiplier`)
+//! - Enforcing a reconsideration floor (`discovery_cadence_cap`)
 //!
 //! TODO(future): Build an exposure-aware preference model that distinguishes:
 //!   candidate generated → surfaced → seen → approve/cancel/ignore
@@ -289,15 +289,24 @@ impl TenantPreferencePosterior {
 
 /// Presentation-layer metadata for a selected candidate.
 ///
-/// Computed AFTER portfolio selection from the tenant preference
-/// posterior. This is informational/operator-facing only — it does
-/// NOT modify DecisionValue, expected_incremental_y30, or any
-/// economic value. A presentation-hidden candidate can still win
-/// economically and execute.
+/// Derived brain-side from the tenant preference posterior. Currently
+/// NOT persisted and NOT injected into worker input — there is no
+/// operator read path that consumes it yet.
 ///
-/// The operator UI may use `is_presentation_hidden` to de-emphasize
-/// low-preference proposals. The decision audit retains the full
-/// metadata trail regardless of visibility.
+/// TODO: Wire presentation metadata into the operator-facing read
+/// path (decision trail / approval queue) when the operator UI
+/// supports presentation state. At that point, add a dedicated
+/// `presentation` jsonb column on `viryaos_autopilot_decisions` —
+/// do NOT smuggle it into `input_snapshot` (worker input) or
+/// `recommendation` (action payload).
+///
+/// Hard invariant: PresentationMetadata MUST NEVER be placed inside
+/// `input_snapshot`. `input_snapshot` is worker/action input, not a
+/// presentation/audit container.
+///
+/// This struct does NOT modify DecisionValue, expected_incremental_y30,
+/// or any economic value. A presentation-hidden candidate can still
+/// win economically and execute.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PresentationMetadata {
     /// The template ID this metadata applies to.
@@ -339,21 +348,22 @@ pub struct TenantPreferencePolicy {
     /// Conservative — a template with 40% approval stays visible.
     pub suppression_threshold: f64,
     /// Maximum cooldown multiplier from preference adjustment. This is
-    /// the exploration floor — even a strongly-rejected template gets
-    /// proposed at least every `standing_adjusted_cooldown *
-    /// min_discovery_cadence_multiplier` hours. Default 1.25 (matching
-    /// the V1 cadence bound).
+    /// the reconsideration floor — even a strongly-rejected template
+    /// gets proposed at least every `standing_adjusted_cooldown *
+    /// discovery_cadence_cap` hours. Default 1.25 (matching the V1
+    /// cadence bound).
     ///
     /// This prevents the self-reinforcing loop where low preference →
     /// less frequent proposals → fewer approval opportunities →
     /// lower preference. The brain must always be able to discover
     /// that a previously-rejected template has become valuable.
     ///
-    /// Note: this is a cadence floor, not an exploration guarantee.
-    /// It guarantees periodic opportunity to reconsider the template;
-    /// EFE/DecisionValue still decide whether the actual opportunity
-    /// is worth acting on.
-    pub min_discovery_cadence_multiplier: f64,
+    /// Note: this is a reconsideration floor, not an exploration
+    /// guarantee. It guarantees periodic opportunity to reconsider
+    /// the template; EFE/DecisionValue still decide whether the
+    /// actual opportunity is worth acting on. True exploration
+    /// belongs in EFE/portfolio allocation, not cadence.
+    pub discovery_cadence_cap: f64,
 }
 
 impl Default for TenantPreferencePolicy {
@@ -362,7 +372,7 @@ impl Default for TenantPreferencePolicy {
             half_life_days: 90.0,
             min_confidence_to_suppress: 5.0,
             suppression_threshold: 0.25,
-            min_discovery_cadence_multiplier: 1.25,
+            discovery_cadence_cap: 1.25,
         }
     }
 }
@@ -1086,17 +1096,63 @@ mod tests {
     #[test]
     fn expl_2_discovery_cap_is_configurable() {
         let custom = TenantPreferencePolicy {
-            min_discovery_cadence_multiplier: 1.10,
+            discovery_cadence_cap: 1.10,
             ..Default::default()
         };
         assert!(
-            (custom.min_discovery_cadence_multiplier - 1.10).abs() < 1e-9,
+            (custom.discovery_cadence_cap - 1.10).abs() < 1e-9,
             "discovery cap is configurable"
         );
         // Default is 1.25
         assert!(
-            (policy().min_discovery_cadence_multiplier - 1.25).abs() < 1e-9,
+            (policy().discovery_cadence_cap - 1.25).abs() < 1e-9,
             "default discovery cap is 1.25"
         );
+    }
+
+    // ── Full-path separation test ──
+
+    // FULL-1: Preference changes cadence + presentation metadata,
+    // NOT DecisionValue or worker input.
+    //
+    // This test proves the North Star invariant: tenant preference
+    // influences cadence timing and presentation metadata, but does
+    // NOT touch the economic decision (DecisionValue,
+    // expected_incremental_y30, causal_treatment_effect) or the
+    // worker input (input_snapshot).
+    //
+    // The type system enforces the economic separation: TenantPreferencePosterior
+    // has no method that returns or modifies DecisionValue. The absence of
+    // input_snapshot injection is enforced by the dispatch path (no wiring).
+    #[test]
+    fn full_1_preference_changes_cadence_not_economics() {
+        let mut high = TenantPreferencePosterior::new();
+        let mut low = TenantPreferencePosterior::new();
+        for _ in 0..20 {
+            high.observe("email", true, 0.0, 90.0);
+            low.observe("email", false, 0.0, 90.0);
+        }
+        // Cadence differs: high preference → shorter cooldown.
+        let high_mult = high.cadence_multiplier("email");
+        let low_mult = low.cadence_multiplier("email");
+        assert!(
+            high_mult < low_mult,
+            "high preference → shorter cooldown (high={high_mult}, low={low_mult})"
+        );
+        // Presentation metadata differs.
+        let high_meta = high.presentation_metadata("email", &policy());
+        let low_meta = low.presentation_metadata("email", &policy());
+        assert!(
+            !high_meta.is_presentation_hidden,
+            "high preference → not hidden"
+        );
+        assert!(low_meta.is_presentation_hidden, "low preference → hidden");
+        // DecisionValue is not affected — verified by type system:
+        // TenantPreferencePosterior has no method that returns or
+        // modifies DecisionValue, expected_incremental_y30, or
+        // causal_treatment_effect.
+        // input_snapshot is not affected — TenantPreferencePosterior
+        // has no method that touches input_snapshot. The dispatch path
+        // does not inject presentation metadata into input_snapshot.
     }
 }

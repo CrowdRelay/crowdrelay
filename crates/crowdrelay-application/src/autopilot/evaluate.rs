@@ -3,8 +3,7 @@
 use uuid::Uuid;
 
 use crowdrelay_brain::{
-    DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, TenantPreferencePolicy,
-    context_hash,
+    DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
 use crowdrelay_domain::{
     FanId, WorkspaceId,

@@ -39,8 +39,8 @@ pub struct GrowthIntelligenceSnapshot {
     pub standing: Standing,
     pub world_model: WorldModel,
     /// Tenant operating preference posterior — how this tenant tends to
-    /// accept/reject each template. Influences candidate surfacing,
-    /// ordering, and cadence. MUST NOT modify DecisionValue or any
+    /// accept/reject each template. Influences cadence and post-selection
+    /// presentation metadata. MUST NOT modify DecisionValue or any
     /// economic value.
     pub tenant_preference: TenantPreferencePosterior,
 }
@@ -125,8 +125,9 @@ pub struct GrowthIntelligencePolicy {
     #[serde(default = "default_template_costs")]
     pub template_costs: HashMap<String, f64>,
     /// Tenant operating preference policy — controls how the brain learns
-    /// and applies per-tenant template preferences. Influences candidate
-    /// surfacing, ordering, and cadence. MUST NOT modify DecisionValue.
+    /// and applies per-tenant template preferences. Influences cadence
+    /// and post-selection presentation metadata. MUST NOT modify
+    /// DecisionValue.
     #[serde(default)]
     pub tenant_preference_policy: TenantPreferencePolicy,
 }

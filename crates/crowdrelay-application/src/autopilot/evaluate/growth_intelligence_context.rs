@@ -118,7 +118,9 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // influence the economic candidate pipeline. The portfolio
         // optimizer ranks by DecisionValue.total() — preference only
         // affects cadence (cooldown multipliers in the snapshot
-        // evaluation) and presentation (operator-facing surfacing).
+        // evaluation). Presentation metadata is derived brain-side
+        // but currently NOT persisted (TODO: wire to operator read
+        // path when the UI supports it).
         //
         // Hard invariant: a low-preference candidate with high
         // DecisionValue MUST remain economically selectable. Preference
@@ -325,23 +327,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             &experimental_keys,
         );
         let selected_keys = portfolio::selected_keys(&selection);
-        // ── Presentation metadata (post-selection) ──
-        //
-        // Computed AFTER portfolio selection. This is a presentation-
-        // layer concept — it does NOT modify DecisionValue or any
-        // economic value. A low-preference candidate that wins
-        // economically is still dispatched; the metadata tells the
-        // operator UI to de-emphasize it.
-        //
-        // All snapshots share the same tenant preference (per-workspace).
-        let tenant_pref = snapshots
-            .first()
-            .map(|s| s.tenant_preference.clone())
-            .unwrap_or_default();
-        let pref_policy = match &policy.config {
-            AutopilotPolicyConfig::GrowthIntelligence(gi) => gi.tenant_preference_policy.clone(),
-            _ => TenantPreferencePolicy::default(),
-        };
         // ── Dispatch phase ──
         let mut dispatched_count = 0usize;
         // Dispatch non-experiment candidates (scanner, strategist).
@@ -353,22 +338,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             if selection.do_nothing || !selected_keys.contains(&candidate.decision_key) {
                 continue;
             }
-            // Inject presentation metadata into input_snapshot for audit.
-            let template_id = match &candidate.action {
-                AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
-                    template_id.as_str()
-                }
-                _ => "",
-            };
-            let mut candidate = candidate.clone();
-            if let Some(obj) = candidate.input_snapshot.as_object_mut() {
-                let meta = tenant_pref.presentation_metadata(template_id, &pref_policy);
-                obj.insert(
-                    "presentation".to_owned(),
-                    serde_json::to_value(&meta).unwrap_or_default(),
-                );
-            }
-            let persisted = self.persist(&candidate, limits, report).await?;
+            let persisted = self.persist(candidate, limits, report).await?;
             if let Some(action_id) = persisted {
                 let _ = self
                     .repository
@@ -413,20 +383,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             prediction,
                             None,
                         );
-                    // Inject presentation metadata into input_snapshot for audit.
-                    let mut candidate = candidate.clone();
-                    if let Some(obj) = candidate.input_snapshot.as_object_mut() {
-                        let meta = tenant_pref.presentation_metadata(template_id, &pref_policy);
-                        obj.insert(
-                            "presentation".to_owned(),
-                            serde_json::to_value(&meta).unwrap_or_default(),
-                        );
-                    }
                     let persisted = self
                         .repository
                         .persist_treatment_with_assignment(
                             self.workspace_id,
-                            &candidate,
+                            candidate,
                             &treatment_assignment,
                             prediction,
                             Some(strategy.as_str()),

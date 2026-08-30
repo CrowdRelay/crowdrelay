@@ -339,11 +339,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // This is a SEPARATE belief from Standing. Both consume the same raw
     // operator events but answer different questions:
     //   Standing        → "Is this worker performing well?" → cooldown/tier
-    //   TenantPreference → "Does this tenant prefer this template?" → surfacing
+    //   TenantPreference → "Does this tenant prefer this template?" → cadence
     //
     // The preference posterior MUST NOT modify DecisionValue or any economic
-    // value. It only influences cadence timing and post-selection presentation
-    // metadata.
+    // value. It only influences cadence timing. Presentation metadata is
+    // derived brain-side but currently NOT persisted (TODO: wire to operator
+    // read path when the UI supports it).
     let tenant_preference: TenantPreferencePosterior = {
         let mut posterior = TenantPreferencePosterior::new();
         // Reuse the operator_feedback_rows already loaded above, but compute
