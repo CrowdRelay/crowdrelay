@@ -85,7 +85,7 @@ jobs:
           chmod 644 ~/.ssh/known_hosts
           cat > ~/.ssh/config <<SSH
           Host virya-crowdrelay
-              HostName \${CROWDRELAY_DEPLOY_HOST_IP}
+              HostName ${CROWDRELAY_DEPLOY_HOST_IP}
               User ubuntu
               IdentityFile ~/.ssh/deploy_key
               IdentitiesOnly yes
