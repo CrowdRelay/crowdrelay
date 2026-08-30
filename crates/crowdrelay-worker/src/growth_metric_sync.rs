@@ -1,8 +1,8 @@
-//! Reactive growth metric sync: YouTube subscriber counts.
+//! Reactive growth metric sync: YouTube, Spotify, and Reddit (social).
 //!
 //! Design: reactive, not polling. The worker uses Postgres LISTEN/NOTIFY to
 //! wake only when:
-//!   1. A new youtube connection is created (trigger fires NOTIFY on the
+//!   1. A new connection is created (trigger fires NOTIFY on the
 //!      `growth_metric_sync` channel), or
 //!   2. The next scheduled sync time arrives (computed from the latest
 //!      recorded point's timestamp — sleep_until, not a ticker).
@@ -15,6 +15,11 @@
 //!     interval (or has no points yet — first sight).
 //!   - For YouTube: calls the Data API v3 channels endpoint with the stored
 //!     API key. No OAuth token needed for public channel statistics.
+//!   - For Spotify: uses client credentials flow to get an access token, then
+//!     calls the Web API artists endpoint for follower counts.
+//!   - For Reddit: calls the public about.json endpoint for subreddit
+//!     subscriber counts. No auth needed. Recorded under platform='social'
+//!     in the growth metric series (Reddit feeds the "social" coverage bucket).
 //!   - Records the point into viryaos_growth_metric_series, declaring the
 //!     series on first sight (same pattern as the Bandsintown tracker).
 //!
@@ -48,6 +53,13 @@ const MAX_CONNECTIONS_PER_CYCLE: usize = 10;
 
 const USER_AGENT: &str = "CrowdRelay/1.0 (growth metric sync)";
 
+/// Platforms the growth metric sync worker handles. The fanbase_connection
+/// platform is the connectable surface; the metric series platform is the
+/// coverage bucket. Reddit connections record under 'social' because the
+/// MetricPlatform enum has no 'reddit' variant — Reddit feeds the social
+/// coverage bucket.
+const SYNCED_PLATFORMS: &[&str] = &["youtube", "spotify", "reddit"];
+
 #[derive(Debug, Error)]
 pub enum GrowthMetricSyncError {
     #[error("database error: {0}")]
@@ -58,6 +70,8 @@ pub enum GrowthMetricSyncError {
     ProviderApi(String),
     #[error("no youtube API key configured")]
     NoYoutubeApiKey,
+    #[error("no spotify credentials configured")]
+    NoSpotifyCredentials,
     #[error("http client build failed: {0}")]
     ClientBuild(reqwest::Error),
 }
@@ -67,19 +81,29 @@ pub struct GrowthMetricSyncWorker {
     pool: PgPool,
     http_client: reqwest::Client,
     youtube_api_key: Option<String>,
+    spotify_client_id: Option<String>,
+    spotify_client_secret: Option<String>,
     operation_timeout: Duration,
 }
 
 impl GrowthMetricSyncWorker {
-    /// Creates a new worker. Returns `Ok(None)` if YouTube is not configured
-    /// (no API key) — the caller should not spawn the worker in that case.
+    /// Creates a new worker. Returns `Ok(None)` if no platform is configured
+    /// (no YouTube API key and no Spotify credentials) — the caller should
+    /// not spawn the worker in that case. Reddit needs no credentials, so
+    /// the worker is enabled as long as any other platform is configured.
     pub fn new(
         pool: PgPool,
         youtube_api_key: Option<String>,
+        spotify_client_id: Option<String>,
+        spotify_client_secret: Option<String>,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
-        if youtube_api_key.is_none() {
-            tracing::info!("growth metric sync disabled: no YouTube API key");
+        if youtube_api_key.is_none()
+            && (spotify_client_id.is_none() || spotify_client_secret.is_none())
+        {
+            tracing::info!(
+                "growth metric sync disabled: no YouTube API key or Spotify credentials"
+            );
             return Ok(None);
         }
         let http_client = reqwest::Client::builder()
@@ -92,6 +116,8 @@ impl GrowthMetricSyncWorker {
             pool,
             http_client,
             youtube_api_key,
+            spotify_client_id,
+            spotify_client_secret,
             operation_timeout,
         }))
     }
@@ -190,7 +216,7 @@ impl GrowthMetricSyncWorker {
                 fc.id, fc.workspace_id, fc.platform, fc.provider_account_id
             FROM fanbase_connections fc
             WHERE fc.status = 'connected'
-              AND fc.platform = 'youtube'
+              AND fc.platform = ANY($1)
               AND fc.provider_account_id IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1
@@ -199,12 +225,13 @@ impl GrowthMetricSyncWorker {
                   WHERE s.workspace_id = fc.workspace_id
                     AND s.subject_kind = 'fanbase_connection'
                     AND s.subject_id = fc.id
-                    AND p.captured_at > now() - ($1::bigint * interval '1 second')
+                    AND p.captured_at > now() - ($2::bigint * interval '1 second')
               )
             ORDER BY fc.created_at
-            LIMIT $2
+            LIMIT $3
             "#,
         )
+        .bind(SYNCED_PLATFORMS)
         .bind(SYNC_INTERVAL.as_secs() as i64)
         .bind(MAX_CONNECTIONS_PER_CYCLE as i64)
         .fetch_all(&self.pool)
@@ -243,10 +270,11 @@ impl GrowthMetricSyncWorker {
                 LIMIT 1
             ) p ON true
             WHERE fc.status = 'connected'
-              AND fc.platform = 'youtube'
+              AND fc.platform = ANY($1)
               AND fc.provider_account_id IS NOT NULL
             "#,
         )
+        .bind(SYNCED_PLATFORMS)
         .fetch_optional(&self.pool)
         .await
         .ok()
@@ -259,7 +287,7 @@ impl GrowthMetricSyncWorker {
                 SELECT 1
                 FROM fanbase_connections fc
                 WHERE fc.status = 'connected'
-                  AND fc.platform = 'youtube'
+                  AND fc.platform = ANY($1)
                   AND fc.provider_account_id IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1
@@ -272,6 +300,7 @@ impl GrowthMetricSyncWorker {
             )
             "#,
         )
+        .bind(SYNCED_PLATFORMS)
         .fetch_one(&self.pool)
         .await
         .unwrap_or(false);
@@ -293,6 +322,8 @@ impl GrowthMetricSyncWorker {
     async fn sync_connection(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
         match conn.platform.as_str() {
             "youtube" => self.sync_youtube(conn).await,
+            "spotify" => self.sync_spotify(conn).await,
+            "reddit" => self.sync_reddit(conn).await,
             _ => Ok(()),
         }
     }
@@ -346,6 +377,113 @@ impl GrowthMetricSyncWorker {
         );
         Ok(())
     }
+
+    /// Spotify: fetch artist follower count via Web API (client credentials).
+    async fn sync_spotify(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let client_id = self
+            .spotify_client_id
+            .as_ref()
+            .ok_or(GrowthMetricSyncError::NoSpotifyCredentials)?;
+        let client_secret = self
+            .spotify_client_secret
+            .as_ref()
+            .ok_or(GrowthMetricSyncError::NoSpotifyCredentials)?;
+        let artist_id = &conn.provider_account_id;
+
+        // Client credentials flow: get an access token.
+        let token_response = self
+            .http_client
+            .post("https://accounts.spotify.com/api/token")
+            .form(&[("grant_type", "client_credentials")])
+            .basic_auth(client_id, Some(client_secret))
+            .send()
+            .await?;
+        if !token_response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "Spotify token endpoint returned HTTP {}",
+                token_response.status()
+            )));
+        }
+        let token: SpotifyTokenResponse = token_response.json().await?;
+
+        // Fetch artist info.
+        let artist_url = format!("https://api.spotify.com/v1/artists/{artist_id}");
+        let response = self
+            .http_client
+            .get(&artist_url)
+            .bearer_auth(&token.access_token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "Spotify API returned HTTP {}",
+                response.status()
+            )));
+        }
+        let artist: SpotifyArtistResponse = response.json().await?;
+        let follower_count = artist.followers.total;
+
+        let display_name = &artist.name;
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "spotify",
+            "followers",
+            &format!("Spotify followers — {display_name}"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            artist_id = %artist_id,
+            artist = %display_name,
+            followers = follower_count,
+            "spotify follower count recorded"
+        );
+        Ok(())
+    }
+
+    /// Reddit: fetch subreddit subscriber count via public JSON (no auth).
+    /// Recorded under platform='social' because the MetricPlatform enum has
+    /// no 'reddit' variant — Reddit feeds the social coverage bucket.
+    async fn sync_reddit(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let subreddit = &conn.provider_account_id;
+
+        let url = format!("https://www.reddit.com/r/{subreddit}/about.json");
+        let response = self.http_client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "Reddit API returned HTTP {} for r/{subreddit}",
+                response.status()
+            )));
+        }
+        let body: RedditAboutResponse = response.json().await?;
+        let subscriber_count = body.data.subscribers;
+
+        let display_name = body.data.display_name.as_deref().unwrap_or(subreddit);
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "social",
+            "subscribers",
+            &format!("Reddit subscribers — r/{display_name}"),
+            subscriber_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            subreddit = %subreddit,
+            subscribers = subscriber_count,
+            "reddit subreddit subscriber count recorded"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -364,6 +502,8 @@ struct DueConnection {
     provider_account_id: String,
 }
 
+// --- YouTube response types ---
+
 #[derive(Debug, Deserialize)]
 struct YoutubeChannelsResponse {
     items: Vec<YoutubeChannelItem>,
@@ -380,6 +520,37 @@ struct YoutubeChannelStatistics {
     /// a number in others. Accept both.
     #[serde(rename = "subscriberCount")]
     subscriber_count: Option<serde_json::Value>,
+}
+
+// --- Spotify response types ---
+
+#[derive(Debug, Deserialize)]
+struct SpotifyTokenResponse {
+    access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyArtistResponse {
+    name: String,
+    followers: SpotifyFollowers,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyFollowers {
+    total: i64,
+}
+
+// --- Reddit response types ---
+
+#[derive(Debug, Deserialize)]
+struct RedditAboutResponse {
+    data: RedditAboutData,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditAboutData {
+    subscribers: i64,
+    display_name: Option<String>,
 }
 
 /// Accepts a count only where it is a whole, non-negative number. YouTube
@@ -472,5 +643,36 @@ mod tests {
         let json = br#"{"items":[]}"#;
         let response: YoutubeChannelsResponse = serde_json::from_slice(json).unwrap();
         assert!(response.items.is_empty());
+    }
+
+    #[test]
+    fn spotify_artist_response_parses_followers() {
+        let json = br#"{"name":"Virya","followers":{"total":12345},"id":"6bbW0jOKAWJWm3h6CTWaAS"}"#;
+        let artist: SpotifyArtistResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(artist.name, "Virya");
+        assert_eq!(artist.followers.total, 12345);
+    }
+
+    #[test]
+    fn spotify_token_response_parses_access_token() {
+        let json = br#"{"access_token":"BQxyz123","token_type":"Bearer","expires_in":3600}"#;
+        let token: SpotifyTokenResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(token.access_token, "BQxyz123");
+    }
+
+    #[test]
+    fn reddit_about_response_parses_subscribers() {
+        let json = br#"{"kind":"t5","data":{"subscribers":1983452,"display_name":"Metal"}}"#;
+        let response: RedditAboutResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.data.subscribers, 1983452);
+        assert_eq!(response.data.display_name.as_deref(), Some("Metal"));
+    }
+
+    #[test]
+    fn reddit_about_response_without_display_name() {
+        let json = br#"{"kind":"t5","data":{"subscribers":42}}"#;
+        let response: RedditAboutResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.data.subscribers, 42);
+        assert!(response.data.display_name.is_none());
     }
 }

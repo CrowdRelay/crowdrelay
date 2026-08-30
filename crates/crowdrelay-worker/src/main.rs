@@ -402,15 +402,23 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         None
     };
     // Growth metric sync: reactive worker that LISTENs on Postgres NOTIFY
-    // for new YouTube connections and syncs subscriber counts into
-    // viryaos_growth_metric_series. No polling — wakes only on NOTIFY
-    // or when the next scheduled sync time arrives.
+    // for new YouTube/Spotify/Reddit connections and syncs subscriber/follower
+    // counts into viryaos_growth_metric_series. No polling — wakes only on
+    // NOTIFY or when the next scheduled sync time arrives.
     let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let spotify_client_id = std::env::var("CROWDRELAY_SPOTIFY_CLIENT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let spotify_client_secret = std::env::var("CROWDRELAY_SPOTIFY_CLIENT_SECRET")
         .ok()
         .filter(|v| !v.trim().is_empty());
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
+        spotify_client_id,
+        spotify_client_secret,
         config.database.operation_timeout,
     )
     .context("invalid growth metric sync worker configuration")?;
