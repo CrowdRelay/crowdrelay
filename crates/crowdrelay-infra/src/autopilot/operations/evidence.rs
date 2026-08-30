@@ -285,8 +285,10 @@ pub(in crate::autopilot) async fn record_evidence_event(
         r#"
         INSERT INTO viryaos_evidence_events
             (workspace_id, action_id, opportunity_id, episode_id,
-             event_type, payload, occurred_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+             event_type, payload, occurred_at, trace_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7,
+            (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $2)
+        )
         "#,
     )
     .bind(workspace_id.into_uuid())

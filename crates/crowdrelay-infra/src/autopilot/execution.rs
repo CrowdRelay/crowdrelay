@@ -402,8 +402,11 @@ pub(super) async fn schedule_effect_measurement(
             r#"
             INSERT INTO viryaos_autopilot_measurements (
                 id, workspace_id, action_id, measurement_kind, subject_id,
-                action_finished_at, baseline_value, due_at, available_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+                action_finished_at, baseline_value, due_at, available_at,
+                trace_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
+                (SELECT trace_id FROM viryaos_autopilot_actions WHERE id = $3)
+            )
             ON CONFLICT (workspace_id, action_id, measurement_kind) DO NOTHING
             "#,
         )

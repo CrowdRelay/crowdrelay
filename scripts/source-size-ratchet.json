@@ -33,6 +33,6 @@
     "crates/crowdrelay-brain/src/bayesian.rs": 1339,
     "crates/crowdrelay-brain/src/scenario_tests.rs": 1202,
     "crates/crowdrelay-infra/src/autopilot/measurement.rs": 1210,
-    "crates/crowdrelay-brain/src/experiment.rs": 1448
+    "crates/crowdrelay-brain/src/experiment.rs": 1494
   }
 }
