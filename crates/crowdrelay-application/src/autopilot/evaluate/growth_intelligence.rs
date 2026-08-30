@@ -285,19 +285,40 @@ pub fn evaluate_growth_intelligence(
     // Adaptive cadence: the effective cooldown is adjusted by the worker's
     // measured standing. Effective workers get shorter cooldowns (dispatched
     // more often), ineffective ones get longer cooldowns (dispatched less).
-    let reddit_scanner_cd =
-        effective_agent_cooldown(policy.reddit_scanner_cooldown_hours, snapshot.standing);
-    let press_pitch_cd =
-        effective_agent_cooldown(policy.press_pitch_cooldown_hours, snapshot.standing);
-    let social_post_cd =
-        effective_agent_cooldown(policy.social_post_cooldown_hours, snapshot.standing);
+    //
+    // Tenant preference cadence multiplier: templates the tenant prefers
+    // get shorter cooldowns (proposed more often); templates the tenant
+    // rejects get longer cooldowns (proposed less often). This is a
+    // MULTIPLIER on top of the standing-adjusted cooldown — it does NOT
+    // modify DecisionValue or any economic value. Sparse data (confidence
+    // < 3.0) returns 1.0 (no adjustment).
+    let pref_mult = snapshot
+        .tenant_preference
+        .cadence_multiplier(&snapshot.template_id);
+    let apply_pref = |cd: u32| ((f64::from(cd) * pref_mult).round() as u32).max(1);
+    let reddit_scanner_cd = apply_pref(effective_agent_cooldown(
+        policy.reddit_scanner_cooldown_hours,
+        snapshot.standing,
+    ));
+    let press_pitch_cd = apply_pref(effective_agent_cooldown(
+        policy.press_pitch_cooldown_hours,
+        snapshot.standing,
+    ));
+    let social_post_cd = apply_pref(effective_agent_cooldown(
+        policy.social_post_cooldown_hours,
+        snapshot.standing,
+    ));
     // community-engager cooldown is used by community_engager_candidates,
     // not by this function. This function handles direct-action templates
     // only (social-post, signal-inviter, growth-strategist, booking-finder).
-    let signal_inviter_cd =
-        effective_agent_cooldown(policy.signal_inviter_cooldown_hours, snapshot.standing);
-    let growth_strategist_cd =
-        effective_agent_cooldown(policy.growth_strategist_cooldown_hours, snapshot.standing);
+    let signal_inviter_cd = apply_pref(effective_agent_cooldown(
+        policy.signal_inviter_cooldown_hours,
+        snapshot.standing,
+    ));
+    let growth_strategist_cd = apply_pref(effective_agent_cooldown(
+        policy.growth_strategist_cooldown_hours,
+        snapshot.standing,
+    ));
 
     // Layered cooldown: the effective cooldown only counts runs that produced
     // items (outreach targets, social posts, etc.). A failed/empty run does
@@ -686,10 +707,18 @@ fn community_engager_candidates(
     _strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
 ) -> Result<Vec<ScoredCandidate>, serde_json::Error> {
     // Check cooldown — if the template is not due, no candidates.
-    let community_engager_cd = effective_agent_cooldown(
-        domain_policy.community_engager_cooldown_hours,
-        snapshot.standing,
-    );
+    // Apply tenant preference cadence multiplier (see
+    // evaluate_growth_intelligence for details).
+    let pref_mult = snapshot
+        .tenant_preference
+        .cadence_multiplier(&snapshot.template_id);
+    let community_engager_cd = {
+        let base = effective_agent_cooldown(
+            domain_policy.community_engager_cooldown_hours,
+            snapshot.standing,
+        );
+        ((f64::from(base) * pref_mult).round() as u32).max(1)
+    };
     let effective_hours = snapshot.hours_since_last_effective_run.unwrap_or(u32::MAX);
     let any_hours = snapshot.hours_since_last_run.unwrap_or(u32::MAX);
     let retry_ready = any_hours >= domain_policy.failed_run_retry_hours;

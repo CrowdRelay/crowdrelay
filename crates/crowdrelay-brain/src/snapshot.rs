@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crowdrelay_domain::learning::Standing;
 use serde::{Deserialize, Serialize};
 
+use crate::tenant_preference::{TenantPreferencePolicy, TenantPreferencePosterior};
 use crate::world_model::WorldModel;
 
 /// A recent unconsumed insight from an agent outcome.
@@ -37,6 +38,11 @@ pub struct GrowthIntelligenceSnapshot {
     pub community_engagement_history: Vec<CommunityEngagementSummary>,
     pub standing: Standing,
     pub world_model: WorldModel,
+    /// Tenant operating preference posterior — how this tenant tends to
+    /// accept/reject each template. Influences candidate surfacing,
+    /// ordering, and cadence. MUST NOT modify DecisionValue or any
+    /// economic value.
+    pub tenant_preference: TenantPreferencePosterior,
 }
 
 /// A single unengaged outreach target.
@@ -118,6 +124,11 @@ pub struct GrowthIntelligencePolicy {
     /// Missing keys default to 1.0.
     #[serde(default = "default_template_costs")]
     pub template_costs: HashMap<String, f64>,
+    /// Tenant operating preference policy — controls how the brain learns
+    /// and applies per-tenant template preferences. Influences candidate
+    /// surfacing, ordering, and cadence. MUST NOT modify DecisionValue.
+    #[serde(default)]
+    pub tenant_preference_policy: TenantPreferencePolicy,
 }
 
 fn default_min_eligible_units_for_experiment() -> u32 {
@@ -165,6 +176,7 @@ impl Default for GrowthIntelligencePolicy {
             min_expected_control_units: default_min_expected_control_units(),
             min_expected_treatment_units: default_min_expected_treatment_units(),
             template_costs: default_template_costs(),
+            tenant_preference_policy: TenantPreferencePolicy::default(),
         }
     }
 }

@@ -111,6 +111,62 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // The optimizer must never combine EFE with DecisionValue.total().
         scored_candidates
             .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        // ── Tenant operating preference filter ──
+        //
+        // Apply the tenant preference posterior to filter and reorder
+        // candidates BEFORE they enter the portfolio. This influences
+        // which candidates are SURFACED and in what ORDER — it does NOT
+        // modify DecisionValue or any economic value.
+        //
+        // Two effects:
+        // 1. SUPPRESS: Remove candidates for templates the tenant
+        //    consistently rejects (preference score < threshold with
+        //    sufficient evidence). This reduces proposal noise.
+        // 2. REORDER: Move preferred templates earlier in the pool so
+        //    they are surfaced first when budget limits kick in.
+        //
+        // The portfolio optimizer still ranks by DecisionValue.total().
+        // A suppressed template never enters the pool; a preferred
+        // template enters earlier but still competes on economic value.
+        //
+        // All snapshots share the same tenant preference (it's per-
+        // workspace, not per-template), so we use the first snapshot's
+        // posterior. The policy comes from the GI policy config.
+        let tenant_pref = snapshots
+            .first()
+            .map(|s| s.tenant_preference.clone())
+            .unwrap_or_default();
+        let gi_policy_for_pref = match &policy.config {
+            AutopilotPolicyConfig::GrowthIntelligence(gi) => gi.clone(),
+            _ => GrowthIntelligencePolicy::default(),
+        };
+        let pref_policy = &gi_policy_for_pref.tenant_preference_policy;
+        // Suppress consistently-rejected templates.
+        let before_count = scored_candidates.len();
+        scored_candidates.retain(|(_, p, _, _, _)| {
+            !tenant_pref.should_suppress(&p.template_id, pref_policy)
+        });
+        let suppressed_count = before_count - scored_candidates.len();
+        if suppressed_count > 0 {
+            // Tenant preference filtered out consistently-rejected templates.
+            // This reduces proposal noise without modifying DecisionValue.
+        }
+        // Reorder: preferred templates first (stable sort preserves
+        // EFE order within the same preference tier). This is a
+        // secondary sort key — EFE is still the primary ordering.
+        scored_candidates.sort_by(|a, b| {
+            let pref_a = tenant_pref.preference_score(&a.1.template_id);
+            let pref_b = tenant_pref.preference_score(&b.1.template_id);
+            // Higher preference = earlier (descending)
+            pref_b
+                .partial_cmp(&pref_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                // Then by EFE (lower = better, preserved from above)
+                .then_with(|| {
+                    a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
         // Extract the GI policy for resource costs and holdout config.
         // When the autopilot isn't in GrowthIntelligence mode, use the
         // default GI policy (which has sensible default costs).

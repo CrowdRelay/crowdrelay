@@ -30,7 +30,8 @@
 use super::*;
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
-    GrowthTrend, RecentInsight, UnengagedTarget, WorldModel, agent_standing_policy,
+    GrowthTrend, RecentInsight, TenantPreferencePosterior, UnengagedTarget, WorldModel,
+    agent_standing_policy,
 };
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
 
@@ -329,6 +330,53 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             .collect()
     };
 
+    // ── Tenant operating preference ──
+    // Build a TenantPreferencePosterior from the same raw operator actions,
+    // but interpreted as "does this tenant prefer this template?" rather than
+    // "is this execution acceptable?". Uses exponentially decayed evidence
+    // (90-day half-life default) so preferences can shift over time.
+    //
+    // This is a SEPARATE belief from Standing. Both consume the same raw
+    // operator events but answer different questions:
+    //   Standing        → "Is this worker performing well?" → cooldown/tier
+    //   TenantPreference → "Does this tenant prefer this template?" → surfacing
+    //
+    // The preference posterior MUST NOT modify DecisionValue or any economic
+    // value. It only influences which candidates are surfaced and how often.
+    let tenant_preference: TenantPreferencePosterior = {
+        let mut posterior = TenantPreferencePosterior::new();
+        // Reuse the operator_feedback_rows already loaded above, but compute
+        // age-based decay instead of fast/slow classification. We need the
+        // operator action timestamp for age computation — query it fresh
+        // since the existing rows only carry hours_to_decision, not age.
+        let preference_rows: Vec<(String, bool, f64)> = sqlx::query_as(
+            r#"
+            SELECT COALESCE(action.payload->>'template_id', 'unknown') AS template_id,
+                   (oa.action = 'approve_autopilot_action') AS approved,
+                   EXTRACT(EPOCH FROM (now() - oa.created_at)) / 86400.0 AS age_days
+            FROM operator_actions oa
+            JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
+            WHERE action.workspace_id = $1
+              AND action.action_kind = 'agent.run.request'
+              AND oa.target_type = 'autopilot_action'
+              AND oa.action IN ('approve_autopilot_action', 'cancel_autopilot_action')
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx)?;
+        // The half-life matches TenantPreferencePolicy::default().half_life_days
+        // (90 days). The infra layer doesn't receive the GrowthIntelligencePolicy
+        // (it's loaded in the application layer), so we use the default here.
+        // Future: wire the policy through if per-workspace customization is needed.
+        let half_life = 90.0_f64;
+        for (template_id, approved, age_days) in &preference_rows {
+            posterior.observe(template_id, *approved, *age_days, half_life);
+        }
+        posterior
+    };
+
     // ── World Model data ──
     // The brain's belief about the world: fan counts, signal installs,
     // community reach, outreach pipeline, and growth target progress.
@@ -560,6 +608,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 .copied()
                 .unwrap_or(Standing::Untested { measured: 0 }),
             world_model: world_model.clone(),
+            tenant_preference: tenant_preference.clone(),
         });
     }
 

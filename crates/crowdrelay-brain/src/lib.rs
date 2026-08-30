@@ -58,6 +58,7 @@ pub mod snapshot;
 pub mod standing;
 pub mod strategy;
 pub mod strategy_learning;
+pub mod tenant_preference;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
@@ -106,6 +107,9 @@ pub use strategy::GrowthStrategy;
 pub use strategy_learning::{
     CONFIDENCE_SATURATION_EVALUATIONS, MIN_EVALUATIONS_FOR_RECOMMENDATION,
     StateConditionedStrategyPosterior, StrategyLearner, StrategyOutcome, StrategyPosterior,
+};
+pub use tenant_preference::{
+    TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
 };
 pub use world_model::{
     EventProximity, GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel,
