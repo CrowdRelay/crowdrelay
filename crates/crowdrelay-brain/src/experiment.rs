@@ -15,9 +15,11 @@
 //! # Experiment Identity (EXPERIMENT ID ≠ ACTION ID)
 //!
 //! Each experiment has a unique `experiment_uuid` that links all assignments
-//! in the same experiment round. The `assignment_id` (stored as `id` in the
-//! DB) is unique per assignment row. Multiple experiments can involve the
-//! same unit over time via `assignment_round`.
+//! in the same experiment. The `assignment_id` (stored as `id` in the
+//! DB) is unique per assignment row. Each logical cycle creates a new
+//! experiment with a fresh `experiment_uuid`; `assignment_round` is
+//! currently always 1 and exists as a future extension point for true
+//! multi-round experiments.
 //!
 //! One assignment per `(experiment_uuid, assignment_round, unit_id)` — the
 //! arm is a property of the assignment, not a separate row. This avoids
@@ -299,8 +301,10 @@ impl ExperimentStatus {
 /// ```text
 /// Control → control (terminal)
 /// Treatment + not selected by portfolio → withheld (terminal)
-/// Treatment + selected + action created → executed
-/// Treatment + action later fails → failed
+/// Treatment + durable execution intent committed → dispatched
+/// Treatment + external intervention confirmed → executed (terminal)
+///    OR
+/// Treatment + execution definitively failed → failed (terminal)
 /// ```
 ///
 /// `from_design()` sets the INITIAL status based on arm + action_id.
@@ -312,7 +316,8 @@ impl ExperimentStatus {
 /// Status transitions are monotonic:
 /// - `control` is terminal — never transitions
 /// - `withheld` is terminal — never transitions (the unit was never dispatched)
-/// - `executed` → `failed` is the only allowed forward transition
+/// - `dispatched` → `executed` or `dispatched` → `failed` are the only
+///   allowed forward transitions
 /// - Retry must never regress a finalized status
 ///
 /// # Hard invariant
@@ -328,13 +333,21 @@ pub enum ExecutionStatus {
     /// Treatment arm, but portfolio did not select this candidate
     /// for dispatch. Terminal — the unit was never dispatched.
     Withheld,
-    /// Treatment arm, action created and dispatched. The action
-    /// may later succeed or fail — `executed` means "crossed the
-    /// dispatch boundary", not "successfully delivered".
+    /// Treatment arm, durable execution intent committed. The action
+    /// row and outbox event exist and are durable. This does NOT mean
+    /// the executor has consumed the intent or that the external
+    /// intervention has occurred. Non-terminal — transitions to
+    /// `Executed` or `Failed`.
+    Dispatched,
+    /// Treatment arm, external intervention actually occurred.
+    /// For community.engage, this is confirmed when
+    /// `community_posts.status = 'posted'`. Set by the community
+    /// executor via `update_execution_status_by_action_id()`.
+    /// Terminal — no further transitions.
     Executed,
-    /// Treatment arm, action was dispatched but later failed.
-    /// Set by `update_execution_status()` when the action lifecycle
-    /// transitions to failed.
+    /// Treatment arm, execution was attempted but definitively failed.
+    /// Set by `update_execution_status()` when the executor reports
+    /// failure. Terminal — no further transitions.
     Failed,
 }
 
@@ -344,6 +357,7 @@ impl ExecutionStatus {
         match self {
             Self::Control => "control",
             Self::Withheld => "withheld",
+            Self::Dispatched => "dispatched",
             Self::Executed => "executed",
             Self::Failed => "failed",
         }
@@ -354,6 +368,7 @@ impl ExecutionStatus {
         match value {
             "control" => Some(Self::Control),
             "withheld" => Some(Self::Withheld),
+            "dispatched" => Some(Self::Dispatched),
             "executed" => Some(Self::Executed),
             "failed" => Some(Self::Failed),
             _ => None,
@@ -363,19 +378,26 @@ impl ExecutionStatus {
     /// Whether this status is terminal — no further transitions possible.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Control | Self::Withheld | Self::Failed)
+        matches!(
+            self,
+            Self::Control | Self::Withheld | Self::Executed | Self::Failed
+        )
     }
 
     /// Whether transitioning from `self` to `new` is allowed.
-    /// Only `executed → failed` is a valid forward transition.
+    /// Only `dispatched → executed` and `dispatched → failed` are
+    /// valid forward transitions.
     #[must_use]
     pub const fn can_transition_to(self, new: Self) -> bool {
-        matches!((self, new), (Self::Executed, Self::Failed))
+        matches!(
+            (self, new),
+            (Self::Dispatched, Self::Executed) | (Self::Dispatched, Self::Failed)
+        )
     }
 }
 
 fn default_execution_status() -> ExecutionStatus {
-    ExecutionStatus::Executed
+    ExecutionStatus::Dispatched
 }
 
 /// A first-class experiment assignment — the unit being randomized, the
@@ -390,7 +412,9 @@ fn default_execution_status() -> ExecutionStatus {
 ///
 /// - `assignment_id` (stored as `id` in DB): unique per assignment row.
 /// - `experiment_uuid`: links all assignments in the same experiment.
-/// - `assignment_round`: distinguishes repeated experiments on the same unit.
+/// - `assignment_round`: currently always 1 — each cycle creates a new
+///   experiment with a fresh `experiment_uuid`. The field exists as a
+///   future extension point for true multi-round experiments.
 ///
 /// One assignment per `(experiment_uuid, assignment_round, unit_id)` — the
 /// arm is a property of the assignment.
@@ -398,8 +422,18 @@ fn default_execution_status() -> ExecutionStatus {
 /// # Estimand
 ///
 /// The experiment estimates the ITT (intent-to-treat) effect of
-/// assignment among eligible candidates — NOT "effect of dispatching
-/// the selected action."
+/// assignment among eligible candidates generated by the current
+/// policy/context — NOT among all theoretically possible candidates.
+/// The population is policy-conditioned: changes to the candidate
+/// generator, scanner configuration, or eligibility policy change
+/// the population.
+///
+/// The causal chain:
+/// ```text
+/// world → candidate generation (current policy/context) → eligible candidates
+/// → randomized assignment (Z) → portfolio selection → realized execution (T)
+/// → outcome (Y)
+/// ```
 ///
 /// - `arm` (Z) = what was randomized. ITT analysis uses this.
 /// - `execution_status` (T) = what actually happened. Per-protocol
@@ -408,8 +442,8 @@ fn default_execution_status() -> ExecutionStatus {
 ///
 /// `execution_status` is a lifecycle fact, not a static property.
 /// It is set initially at assignment creation and may transition
-/// (executed → failed) as the execution lifecycle progresses.
-/// See `ExecutionStatus` for the transition rules.
+/// (dispatched → executed, dispatched → failed) as the execution
+/// lifecycle progresses. See `ExecutionStatus` for the transition rules.
 ///
 /// The `eligibility_criteria` records what made this candidate
 /// eligible (direct action, template_id). The `selection_context`
@@ -423,9 +457,10 @@ pub struct ExperimentAssignment {
     /// The experiment UUID — links all assignments in the same experiment.
     /// Multiple rounds of the same experiment share this UUID.
     pub experiment_uuid: uuid::Uuid,
-    /// The assignment round — increments across cycles for the same
-    /// experiment. This enables per-round randomization without
-    /// permanent hash bucketing.
+    /// The assignment round — currently always 1. Each cycle creates a
+    /// new experiment with a fresh `experiment_uuid`, so rounds do not
+    /// increment across cycles. The field exists as a future extension
+    /// point for true multi-round experiments.
     pub assignment_round: u32,
     /// The candidate that triggered this assignment.
     pub candidate_id: String,
@@ -542,11 +577,13 @@ impl ExperimentAssignment {
             design.experiment_uuid, design.assignment_round, unit_id
         );
         // Compute the INITIAL execution_status from arm + action_id.
-        // This is the only time execution_status is derived from
-        // action_id — subsequent transitions use update_execution_status().
+        // Treatment + Some(action_id) → Dispatched (durable intent committed).
+        // The community executor later transitions Dispatched → Executed
+        // when the external intervention is confirmed (e.g.
+        // community_posts.status = 'posted').
         let execution_status = match (arm, action_id) {
             (TreatmentAssignment::Control, _) => ExecutionStatus::Control,
-            (TreatmentAssignment::Treatment, Some(_)) => ExecutionStatus::Executed,
+            (TreatmentAssignment::Treatment, Some(_)) => ExecutionStatus::Dispatched,
             (TreatmentAssignment::Treatment, None) => ExecutionStatus::Withheld,
         };
         Self {
@@ -620,7 +657,9 @@ pub struct ExperimentDesign {
     /// logical_cycle_key) always resolves to the same experiment_uuid.
     pub experiment_uuid: uuid::Uuid,
     /// The assignment round — always 1 for a new experiment. Each cycle
-    /// creates a new experiment, so rounds do not increment across cycles.
+    /// creates a new experiment with a fresh `experiment_uuid`, so rounds
+    /// do not increment across cycles. The field exists as a future
+    /// extension point for true multi-round experiments.
     pub assignment_round: u32,
     /// The intervention key (template_id). Different interventions in the
     /// same cycle are different experiments. Long-term this may become a
@@ -1330,8 +1369,9 @@ mod tests {
         );
         assert_eq!(control.execution_status, ExecutionStatus::Control);
 
-        // Treatment + action_id=Some → executed
-        let executed = ExperimentAssignment::from_design(
+        // Treatment + action_id=Some → dispatched (durable intent committed,
+        // not yet confirmed as externally executed)
+        let dispatched = ExperimentAssignment::from_design(
             &design,
             "unit-1",
             "cand-1",
@@ -1339,7 +1379,7 @@ mod tests {
             &pred,
             Some(uuid::Uuid::now_v7()),
         );
-        assert_eq!(executed.execution_status, ExecutionStatus::Executed);
+        assert_eq!(dispatched.execution_status, ExecutionStatus::Dispatched);
 
         // Treatment + action_id=None → withheld (terminal)
         let withheld = ExperimentAssignment::from_design(
@@ -1407,28 +1447,33 @@ mod tests {
     }
 
     // EST-5: retry does not regress finalized execution_status.
-    // The update_execution_status SQL only allows executed → failed.
-    // All other transitions are no-ops. This test verifies the
-    // monotonicity logic at the type level.
+    // The update_execution_status SQL only allows dispatched → executed
+    // and dispatched → failed. All other transitions are no-ops. This
+    // test verifies the monotonicity logic at the type level.
     #[test]
     fn est_5_execution_status_monotonic() {
         // Control is terminal — no transition possible.
         assert!(ExecutionStatus::Control.is_terminal());
         // Withheld is terminal — no transition possible.
         assert!(ExecutionStatus::Withheld.is_terminal());
-        // Executed can transition to Failed.
-        assert!(!ExecutionStatus::Executed.is_terminal());
+        // Dispatched is non-terminal — can transition to Executed or Failed.
+        assert!(!ExecutionStatus::Dispatched.is_terminal());
+        // Executed is terminal — external intervention confirmed.
+        assert!(ExecutionStatus::Executed.is_terminal());
         // Failed is terminal — no transition possible.
         assert!(ExecutionStatus::Failed.is_terminal());
 
-        // The only allowed forward transition:
-        assert!(ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Failed));
+        // The only allowed forward transitions from Dispatched:
+        assert!(ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Executed));
+        assert!(ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Failed));
         // No backward transitions:
         assert!(!ExecutionStatus::Failed.can_transition_to(ExecutionStatus::Executed));
-        assert!(!ExecutionStatus::Withheld.can_transition_to(ExecutionStatus::Executed));
+        assert!(!ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Failed));
+        assert!(!ExecutionStatus::Withheld.can_transition_to(ExecutionStatus::Dispatched));
         assert!(!ExecutionStatus::Control.can_transition_to(ExecutionStatus::Withheld));
         // No self-transitions (idempotent no-ops at DB level, but not
         // "allowed forward transitions" at the type level):
+        assert!(!ExecutionStatus::Dispatched.can_transition_to(ExecutionStatus::Dispatched));
         assert!(!ExecutionStatus::Executed.can_transition_to(ExecutionStatus::Executed));
         assert!(!ExecutionStatus::Failed.can_transition_to(ExecutionStatus::Failed));
     }
@@ -1438,6 +1483,7 @@ mod tests {
         for status in [
             ExecutionStatus::Control,
             ExecutionStatus::Withheld,
+            ExecutionStatus::Dispatched,
             ExecutionStatus::Executed,
             ExecutionStatus::Failed,
         ] {

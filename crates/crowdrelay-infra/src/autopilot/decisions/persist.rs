@@ -385,11 +385,13 @@ macro_rules! decision_persist {
             let kind = assignment.kind();
             // The assignment was constructed with action_id=None (withheld),
             // but this path creates a real action — so execution_status
-            // must be Executed, not Withheld.
+            // must be Dispatched (durable intent committed), not Withheld.
+            // It transitions to Executed only when the external intervention
+            // is confirmed by the executor.
             let execution_status = if assignment.arm
                 == crowdrelay_brain::TreatmentAssignment::Treatment
             {
-                crowdrelay_brain::ExecutionStatus::Executed
+                crowdrelay_brain::ExecutionStatus::Dispatched
             } else {
                 assignment.execution_status
             };
