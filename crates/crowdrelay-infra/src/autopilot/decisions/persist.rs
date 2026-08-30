@@ -28,6 +28,7 @@ async fn persist_decision_and_action_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     candidate: &DecisionCandidate,
+    trace_id: Option<Uuid>,
 ) -> Result<DecisionActionOutcome, RepositoryError> {
     // ── Quota check ──
     if matches!(
@@ -76,9 +77,9 @@ async fn persist_decision_and_action_tx(
         INSERT INTO viryaos_autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation
+            input_snapshot, policy_snapshot, recommendation, trace_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (workspace_id, decision_key) DO NOTHING
         RETURNING id
         "#,
@@ -96,6 +97,7 @@ async fn persist_decision_and_action_tx(
     .bind(&candidate.input_snapshot)
     .bind(&candidate.policy_snapshot)
     .bind(&action_json)
+    .bind(trace_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
@@ -120,13 +122,15 @@ async fn persist_decision_and_action_tx(
             id, workspace_id, decision_id, context, action_kind,
             subject_kind, subject_id, idempotency_key, payload, status,
             action_class,
-            approved_at, approved_by, approval_expires_at
+            approved_at, approved_by, approval_expires_at,
+            trace_id
         )
         VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
             CASE WHEN $10 = 'queued' THEN now() ELSE NULL END,
             CASE WHEN $10 = 'queued' THEN 'policy:bounded_auto' ELSE NULL END,
-            CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END
+            CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END,
+            $12
         )
         ON CONFLICT DO NOTHING
         RETURNING id
@@ -145,6 +149,7 @@ async fn persist_decision_and_action_tx(
     // Recorded now rather than derived at read time: this is the class
     // the action was authorised under, which is what an audit needs.
     .bind(candidate.action.action_class().as_str())
+    .bind(trace_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
@@ -153,7 +158,7 @@ async fn persist_decision_and_action_tx(
     if inserted.is_some() && status == "awaiting_approval" {
         sqlx::query(
             r#"
-            INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts)
+            INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts, trace_id, action_id)
             VALUES (
                 $1, 'crowdrelay.autopilot.approval_requested', 1,
                 jsonb_build_object(
@@ -164,9 +169,12 @@ async fn persist_decision_and_action_tx(
                     'subject_id', $6::uuid,
                     'reason', $7::text,
                     'confidence_basis_points', $8::integer,
-                    'approval_expires_at', now() + INTERVAL '72 hours'
+                    'approval_expires_at', now() + INTERVAL '72 hours',
+                    'trace_id', $9::uuid
                 ),
-                12
+                12,
+                $9,
+                $2
             )
             "#,
         )
@@ -178,6 +186,7 @@ async fn persist_decision_and_action_tx(
         .bind(candidate.subject.uuid())
         .bind(candidate.reason)
         .bind(i32::from(candidate.confidence.basis_points()))
+        .bind(trace_id)
         .execute(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
@@ -205,6 +214,9 @@ async fn persist_decision_and_action_tx(
 /// The invariant is enforced structurally — there is no code path that
 /// records a prediction without also recording the matching evidence
 /// in the same transaction.
+///
+/// Returns the `GrowthEvidence` so the caller can record the best-effort
+/// audit trail (event log + episode upsert) after the transaction commits.
 async fn record_prediction_and_evidence_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
@@ -213,7 +225,7 @@ async fn record_prediction_and_evidence_tx(
     _candidate: &DecisionCandidate,
     strategy: Option<&str>,
     holdout_probability: f64,
-) -> Result<(), RepositoryError> {
+) -> Result<crowdrelay_brain::GrowthEvidence, RepositoryError> {
     // ── Dispatch prediction ──
     let pred_context_json = serde_json::to_value(&prediction.context)
         .unwrap_or(serde_json::json!({}));
@@ -292,7 +304,7 @@ async fn record_prediction_and_evidence_tx(
         &evidence,
     )
     .await?;
-    Ok(())
+    Ok(evidence)
 }
 
 macro_rules! decision_persist {
@@ -301,11 +313,12 @@ macro_rules! decision_persist {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let outcome =
-                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate)
+                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace_id)
                     .await?;
             let result = match outcome {
                 DecisionActionOutcome::Throttled => CandidatePersistence {
@@ -354,6 +367,7 @@ macro_rules! decision_persist {
     /// The assignment is constructed by the caller with `action_id: None`.
     /// This method fills in the real `action_id` from the inserted action
     /// before recording the assignment, so the linkage is durable.
+    #[allow(clippy::too_many_arguments)]
     async fn persist_treatment_with_assignment_impl(
         &self,
         workspace_id: WorkspaceId,
@@ -362,12 +376,13 @@ macro_rules! decision_persist {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         _holdout_probability: f64,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             // ── Shared primitive: quota + decision + action + outbox ──
             let outcome =
-                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate)
+                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace_id)
                     .await?;
             let (decision_created, real_action_id, inserted) = match outcome {
                 DecisionActionOutcome::Throttled => {
@@ -472,7 +487,7 @@ macro_rules! decision_persist {
             // the learning loop — outcome fields are NULL and filled in
             // when measurements arrive. Event/episode materialization is
             // best-effort post-commit (audit trail, not source of truth).
-            record_prediction_and_evidence_tx(
+            let evidence = record_prediction_and_evidence_tx(
                 &mut transaction,
                 workspace_id,
                 real_action_id,
@@ -483,6 +498,14 @@ macro_rules! decision_persist {
             )
             .await?;
             transaction.commit().await.map_err(map_sqlx)?;
+            // Best-effort audit trail (event log + episode upsert).
+            // These are NOT source of truth — the evidence row is.
+            super::operations::evidence::record_evidence_audit_trail(
+                self,
+                workspace_id,
+                &evidence,
+            )
+            .await;
             Ok(CandidatePersistence {
                 decision_created,
                 action_created: inserted,
@@ -504,12 +527,13 @@ macro_rules! decision_persist {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             // ── Shared primitive: quota + decision + action + outbox ──
             let outcome =
-                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate)
+                persist_decision_and_action_tx(&mut transaction, workspace_id, candidate, trace_id)
                     .await?;
             let result = match outcome {
                 DecisionActionOutcome::Throttled => CandidatePersistence {
@@ -534,7 +558,7 @@ macro_rules! decision_persist {
                     inserted,
                 } => {
                     // ── Prediction + evidence (same tx) ──
-                    record_prediction_and_evidence_tx(
+                    let evidence = record_prediction_and_evidence_tx(
                         &mut transaction,
                         workspace_id,
                         action_id,
@@ -544,12 +568,21 @@ macro_rules! decision_persist {
                         holdout_probability,
                     )
                     .await?;
-                    CandidatePersistence {
+                    let persistence = CandidatePersistence {
                         decision_created,
                         action_created: inserted,
                         quota_throttled: false,
                         action_id: Some(action_id),
-                    }
+                    };
+                    // Commit first, then best-effort audit trail.
+                    transaction.commit().await.map_err(map_sqlx)?;
+                    super::operations::evidence::record_evidence_audit_trail(
+                        self,
+                        workspace_id,
+                        &evidence,
+                    )
+                    .await;
+                    return Ok(persistence);
                 }
             };
             transaction.commit().await.map_err(map_sqlx)?;

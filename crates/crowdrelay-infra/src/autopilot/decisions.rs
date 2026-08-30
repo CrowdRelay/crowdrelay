@@ -344,25 +344,6 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::load_causal_model(self, workspace_id).await
     }
 
-    async fn record_dispatch_prediction(
-        &self,
-        workspace_id: WorkspaceId,
-        action_id: uuid::Uuid,
-        prediction: &crowdrelay_brain::DispatchPrediction,
-        strategy: Option<&str>,
-        holdout_probability: f64,
-    ) -> Result<(), RepositoryError> {
-        super::operations::record_dispatch_prediction(
-            self,
-            workspace_id,
-            action_id,
-            prediction,
-            strategy,
-            holdout_probability,
-        )
-        .await
-    }
-
     async fn record_experiment_assignment(
         &self,
         workspace_id: WorkspaceId,
@@ -447,6 +428,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.persist_treatment_with_assignment_impl(
             workspace_id,
@@ -455,6 +437,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             prediction,
             strategy,
             holdout_probability,
+            trace_id,
         )
         .await
     }
@@ -602,14 +585,6 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::reach::load_reach_metrics(self, workspace_id, since, until).await
     }
 
-    async fn record_growth_evidence(
-        &self,
-        workspace_id: WorkspaceId,
-        evidence: &crowdrelay_brain::GrowthEvidence,
-    ) -> Result<(), RepositoryError> {
-        super::operations::evidence::record_growth_evidence(self, workspace_id, evidence).await
-    }
-
     async fn load_growth_evidence(
         &self,
         workspace_id: WorkspaceId,
@@ -752,8 +727,10 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError> {
-        self.persist_candidate_impl(workspace_id, candidate).await
+        self.persist_candidate_impl(workspace_id, candidate, trace_id)
+            .await
     }
 
     async fn persist_candidate_with_evidence(
@@ -763,6 +740,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         prediction: &crowdrelay_brain::DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError> {
         self.persist_candidate_with_evidence_impl(
             workspace_id,
@@ -770,6 +748,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             prediction,
             strategy,
             holdout_probability,
+            trace_id,
         )
         .await
     }

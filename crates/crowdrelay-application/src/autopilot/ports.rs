@@ -40,6 +40,7 @@ use crowdrelay_domain::{
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
 
@@ -314,24 +315,6 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<CausalModel, RepositoryError>;
 
-    /// Records a dispatch prediction. Called when the brain dispatches a
-    /// worker — stores the prediction so it can be compared with the
-    /// measured outcome later. The `strategy` parameter records the actual
-    /// growth strategy that was active, so the strategy posterior learns
-    /// from the real strategy — not a heuristic inference. The
-    /// `holdout_probability` parameter, when > 0, indicates that a
-    /// randomized holdout is active — the evidence is labeled
-    /// `RandomizedHoldout` with propensity = 1 - holdout_probability
-    /// (the probability of treatment assignment).
-    async fn record_dispatch_prediction(
-        &self,
-        workspace_id: WorkspaceId,
-        action_id: uuid::Uuid,
-        prediction: &DispatchPrediction,
-        strategy: Option<&str>,
-        holdout_probability: f64,
-    ) -> Result<(), RepositoryError>;
-
     /// Records a first-class experiment assignment. The experimental unit
     /// is explicitly defined (audience, community, campaign, etc.) — not
     /// always workspace-wide. When `is_interference_controllable` is false,
@@ -345,10 +328,10 @@ pub trait AutopilotDecisionRepository: Send + Sync {
 
     /// Transitions the execution_status of an experiment assignment.
     ///
-    /// Monotonic: only `executed → failed` is allowed. All other
-    /// transitions are silently no-ops (the DB WHERE clause prevents
-    /// them). This is the one transition point from the executor/result
-    /// path.
+    /// Monotonic: only `dispatched → executed` and `dispatched → failed`
+    /// are allowed. All other transitions are silently no-ops (the DB
+    /// WHERE clause prevents them). This is the one transition point
+    /// from the executor/result path.
     ///
     /// Retry-safe: setting the same status is a no-op (idempotent).
     async fn update_execution_status(
@@ -415,6 +398,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     /// The `assignment` is constructed with `action_id: None` by the caller;
     /// this method fills in the real `action_id` from the inserted action
     /// before recording the assignment.
+    #[allow(clippy::too_many_arguments)]
     async fn persist_treatment_with_assignment(
         &self,
         workspace_id: WorkspaceId,
@@ -423,6 +407,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         prediction: &DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError>;
 
     /// Evaluates contamination over the full measurement window.
@@ -545,16 +530,6 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         since: OffsetDateTime,
         until: Option<OffsetDateTime>,
     ) -> Result<crowdrelay_brain::ReachMetrics, RepositoryError>;
-
-    /// Records a growth evidence row at dispatch time. The evidence row
-    /// captures the prediction, context, treatment assignment, and reach
-    /// fields. Outcome fields are left NULL — they are filled in when
-    /// measurements arrive.
-    async fn record_growth_evidence(
-        &self,
-        workspace_id: WorkspaceId,
-        evidence: &crowdrelay_brain::GrowthEvidence,
-    ) -> Result<(), RepositoryError>;
 
     /// Loads resolved growth evidence for the brain's learning loop.
     /// Returns only evidence rows that have a resolved outcome
@@ -720,6 +695,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         &self,
         workspace_id: WorkspaceId,
         candidate: &DecisionCandidate,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError>;
 
     /// Persists a candidate with dispatch prediction and initial growth
@@ -737,6 +713,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         prediction: &DispatchPrediction,
         strategy: Option<&str>,
         holdout_probability: f64,
+        trace_id: Option<Uuid>,
     ) -> Result<CandidatePersistence, RepositoryError>;
 }
 

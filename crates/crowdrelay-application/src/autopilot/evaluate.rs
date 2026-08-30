@@ -801,7 +801,7 @@ where
         };
         let persisted = self
             .repository
-            .persist_candidate(self.workspace_id, candidate)
+            .persist_candidate(self.workspace_id, candidate, Some(Uuid::now_v7()))
             .await?;
         if persisted.decision_created {
             report.decisions = report.decisions.saturating_add(1);
