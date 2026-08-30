@@ -538,10 +538,7 @@ impl CommunityExecutorWorker {
             .header("X-Workspace-Id", ws.to_string())
             .header(
                 "X-Trace-Id",
-                action
-                    .trace_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default(),
+                action.trace_id.map(|id| id.to_string()).unwrap_or_default(),
             )
             .json(&payload)
             .timeout(AGENTS_SUBMIT_TIMEOUT)
