@@ -289,6 +289,14 @@ if actual != expected:
 ALIAS_MOVED=true
 printf 'ALIAS_MOVE=PASS active=%s container=%s\n' "$ACTIVE_ALIAS" "$NEW_API"
 
+# Reload the edge Caddy so it re-resolves crowdrelay-api-active to the
+# new container's IP. Caddy caches DNS lookups at config load time; the
+# health check alone won't trigger re-resolution while the old container
+# is still serving (blue-green keeps it alive until step 6).
+docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || \
+  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || true
+printf 'CADDY_RELOAD=PASS\n'
+
 # Also update the area management proxy Caddyfile if it references a
 # color-specific alias. The area proxy should use the stable alias too.
 AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
