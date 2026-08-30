@@ -110,12 +110,13 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         failed_arm = runtime[runtime.index('ExecutorReportStatus::Failed =>'):runtime.index('ExecutorReportStatus::Succeeded =>')]
         # The two-input resolver loads the current action state within the
         # transaction and passes it to resolve_outcome(evidence, current_state).
-        # legal_transition(Succeeded, Failed) → NoChange enforces monotonicity.
+        # legal_transition(Succeeded, Failed) → Conflict surfaces the contradiction.
         self.assertIn('SELECT status FROM viryaos_autopilot_actions', failed_arm)
         self.assertIn('FOR UPDATE', failed_arm)
         self.assertIn('resolve_outcome(', failed_arm)
         self.assertIn('ResolutionEvidence::TerminalReceipt { succeeded: false }', failed_arm)
         self.assertIn('Resolution::NoChange', failed_arm)
+        self.assertIn('Resolution::Conflict', failed_arm)
         self.assertIn('NOT EXISTS (', control)
         self.assertIn("success.status=\'succeeded\'", control)
         self.assertIn("success.status=\'succeeded\'", chief)

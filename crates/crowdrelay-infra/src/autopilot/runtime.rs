@@ -438,9 +438,9 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         //
                         // Load the current action state within this transaction so the
                         // resolver can enforce monotonicity. The resolver's
-                        // legal_transition(Succeeded, Failed) → NoChange guard
-                        // replaces the old prior_success_exists flag — the current
-                        // state IS the monotonicity guard.
+                        // legal_transition(Succeeded, Failed) → Conflict surfaces
+                        // the contradiction instead of silently downgrading. The
+                        // current state IS the monotonicity guard.
                         let current_status: Option<String> = sqlx::query_scalar(
                             "SELECT status FROM viryaos_autopilot_actions \
                              WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
