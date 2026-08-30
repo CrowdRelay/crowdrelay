@@ -1,15 +1,26 @@
 //! Low-frequency operational health watchdog for CrowdRelay's own control plane.
 //!
-//! Detection, cooldown and recovery state are first-party and durable. External
-//! tools only deliver the provider-neutral status event emitted by this worker.
+//! Detection, cooldown and recovery state are first-party and durable. Alert
+//! state is tracked in `viryaos_ops_alert_state` and exposed via the ops API
+//! and control plane UI — but no longer emitted to the outbox. The previous
+//! outbox events were forwarded to Discord and produced alert spam that was
+//! not actionable from there. FakAP remains the external health probe for
+//! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors a single condition: `executor.offline` — the API is
-//! up but no executor has heartbeated recently, so nothing can actually
-//! execute. This is a silent failure that FakAP (external health probe) cannot
-//! detect. All other conditions (outbox stalls, webhook dead, proof stalls,
-//! autopilot failure bursts, reconciliation findings) were removed because
-//! they are either internal plumbing noise not actionable from Discord, or
-//! duplicated by FakAP's external monitoring.
+//! The watchdog monitors two conditions:
+//! - `executor.offline` — the API is up but no executor has heartbeated
+//!   recently, so nothing can actually execute. This is a silent failure
+//!   that FakAP (external health probe) cannot detect.
+//! - `execution.unknown_outcome` — autopilot actions are stuck in the
+//!   `unknown` execution state: their provider receipts were lost or
+//!   their outcomes cannot be established, and the receipt reconciliation
+//!   sweep could not resolve them. Operator action (check the provider,
+//!   re-file a receipt) is the only resolution path.
+//!
+//! All other conditions (outbox stalls, webhook dead, proof stalls,
+//! autopilot failure bursts) were removed because they are either internal
+//! plumbing noise not actionable from Discord, or duplicated by FakAP's
+//! external monitoring.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -22,7 +33,6 @@ use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
 };
-use uuid::Uuid;
 
 const ALERT_REPEAT_AFTER: time::Duration = time::Duration::hours(6);
 
@@ -68,8 +78,8 @@ impl OpsWatchdogWorker {
                 }
                 _ = ticks.tick() => {
                     match timeout(self.operation_timeout, self.run_once()).await {
-                        Ok(Ok(emitted)) if emitted > 0 => {
-                            tracing::warn!(events = emitted, "CrowdRelay ops watchdog emitted status changes");
+                        Ok(Ok(transitions)) if transitions > 0 => {
+                            tracing::debug!(transitions, "CrowdRelay ops watchdog updated alert states");
                         }
                         Ok(Ok(_)) => {}
                         Ok(Err(error)) => tracing::warn!(error = %error, "CrowdRelay ops watchdog cycle failed"),
@@ -93,7 +103,7 @@ impl OpsWatchdogWorker {
         let repeat_before = now
             .checked_sub(ALERT_REPEAT_AFTER)
             .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        let mut emitted = 0usize;
+        let mut transitions = 0usize;
 
         for condition in conditions {
             let previous = states.get(condition.key);
@@ -113,32 +123,16 @@ impl OpsWatchdogWorker {
                 )
                 .await?;
                 if repeat_due {
-                    emit_status_change(
-                        &mut transaction,
-                        self.workspace_id,
-                        &condition,
-                        "open",
-                        now,
-                    )
-                    .await?;
-                    emitted = emitted.saturating_add(1);
+                    transitions = transitions.saturating_add(1);
                 }
             } else if previous.is_some_and(|state| state.active) {
                 mark_recovered(&mut transaction, self.workspace_id, condition.key, now).await?;
-                emit_status_change(
-                    &mut transaction,
-                    self.workspace_id,
-                    &condition,
-                    "recovered",
-                    now,
-                )
-                .await?;
-                emitted = emitted.saturating_add(1);
+                transitions = transitions.saturating_add(1);
             }
         }
 
         transaction.commit().await?;
-        Ok(emitted)
+        Ok(transitions)
     }
 }
 
@@ -146,6 +140,7 @@ impl OpsWatchdogWorker {
 struct OpsSnapshot {
     executor_registered: i64,
     executor_active: i64,
+    unknown_actions: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +167,9 @@ async fn load_snapshot(
         r#"
         SELECT
             count(*)::bigint AS executor_registered,
-            count(*) FILTER (WHERE expires_at>now())::bigint AS executor_active
+            count(*) FILTER (WHERE expires_at>now())::bigint AS executor_active,
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             WHERE a.workspace_id=$1 AND a.status='unknown')::bigint AS unknown_actions
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -182,16 +179,27 @@ async fn load_snapshot(
 }
 
 fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
-    vec![Condition {
-        key: "executor.offline",
-        severity: "critical",
-        summary: "ViryaOS executor registry has no live executor",
-        active: snapshot.executor_registered > 0 && snapshot.executor_active == 0,
-        details: json!({
-            "registered": snapshot.executor_registered,
-            "active": snapshot.executor_active,
-        }),
-    }]
+    vec![
+        Condition {
+            key: "executor.offline",
+            severity: "critical",
+            summary: "ViryaOS executor registry has no live executor",
+            active: snapshot.executor_registered > 0 && snapshot.executor_active == 0,
+            details: json!({
+                "registered": snapshot.executor_registered,
+                "active": snapshot.executor_active,
+            }),
+        },
+        Condition {
+            key: "execution.unknown_outcome",
+            severity: "warning",
+            summary: "Autopilot actions stuck in unknown execution outcome",
+            active: snapshot.unknown_actions > 0,
+            details: json!({
+                "unknown_actions": snapshot.unknown_actions,
+            }),
+        },
+    ]
 }
 
 async fn load_states(
@@ -278,51 +286,6 @@ async fn mark_recovered(
     Ok(())
 }
 
-async fn emit_status_change(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    condition: &Condition,
-    state: &'static str,
-    now: OffsetDateTime,
-) -> Result<(), sqlx::Error> {
-    let request_id = format!(
-        "ops-watchdog:{}:{}:{}",
-        condition.key,
-        state,
-        Uuid::now_v7()
-    );
-    sqlx::query(
-        r#"
-        INSERT INTO outbox_events (
-            workspace_id, event_type, event_version, payload, request_id, max_attempts
-        ) VALUES (
-            $1, 'crowdrelay.ops.status_changed', 1,
-            jsonb_build_object(
-                'alert_key', $2::text,
-                'state', $3::text,
-                'severity', $4::text,
-                'summary', $5::text,
-                'details', $6::jsonb,
-                'observed_at', $7::timestamptz,
-                'source', 'crowdrelay-worker'
-            ),
-            $8, 12
-        )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(condition.key)
-    .bind(state)
-    .bind(condition.severity)
-    .bind(condition.summary)
-    .bind(&condition.details)
-    .bind(now)
-    .bind(request_id)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{OpsSnapshot, conditions};
@@ -331,6 +294,7 @@ mod tests {
         OpsSnapshot {
             executor_registered: 1,
             executor_active: 1,
+            unknown_actions: 0,
         }
     }
 
@@ -353,5 +317,18 @@ mod tests {
             .map(|condition| condition.key)
             .collect::<Vec<_>>();
         assert!(active.contains(&"executor.offline"));
+    }
+
+    #[test]
+    fn unknown_action_outcomes_are_detected() {
+        let mut snapshot = healthy();
+        snapshot.unknown_actions = 2;
+        let active = conditions(&snapshot)
+            .into_iter()
+            .filter(|condition| condition.active)
+            .map(|condition| condition.key)
+            .collect::<Vec<_>>();
+        assert!(active.contains(&"execution.unknown_outcome"));
+        assert!(!active.contains(&"executor.offline"));
     }
 }

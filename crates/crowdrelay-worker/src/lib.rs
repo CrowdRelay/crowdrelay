@@ -34,6 +34,7 @@ pub mod growth_metric_sync;
 pub mod ops_watchdog;
 pub mod outbox;
 pub mod push_delivery;
+pub mod receipt_reconciliation;
 pub mod reminders;
 pub mod replay;
 pub mod retention;

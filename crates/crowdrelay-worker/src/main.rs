@@ -38,6 +38,7 @@ use crowdrelay_worker::{
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     push_delivery::PushDeliveryWorker,
+    receipt_reconciliation::ReceiptReconciliationWorker,
     reminders::EventReminderScheduler,
     replay::{ReplayOptions, parse_replay_options, run_replay},
     retention::{RetentionWorker, RetentionWorkerConfig},
@@ -53,6 +54,9 @@ use uuid::Uuid;
 
 const DATABASE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OPS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Receipt reconciliation cadence. Slower than the watchdog: each cycle
+/// only needs to notice gaps older than hours, not minutes.
+const RECEIPT_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Reddit public search tolerates slow, sparse polling.
 const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// The graph changes at human speed; an hour of decay lag is invisible.
@@ -311,6 +315,17 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         OPS_WATCHDOG_INTERVAL,
         config.database.operation_timeout,
     );
+    // Receipt reconciliation: flags dispatched actions whose executor
+    // receipts never arrived (transitions them to `unknown`) and resolves
+    // existing `unknown` actions from late receipts or the community
+    // executor's own post rows. Without it, a lost receipt strands the
+    // action as a fake `succeeded` with no learning evidence.
+    let receipt_reconciliation = ReceiptReconciliationWorker::new(
+        database.clone(),
+        workspace_id,
+        RECEIPT_RECONCILIATION_INTERVAL,
+        config.database.operation_timeout,
+    );
     let agent_outcome_worker = if config.agent_outcomes_enabled {
         Some(AgentOutcomeWorker::new(
             database.clone(),
@@ -408,6 +423,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let team_email_shutdown = shutdown_receiver.clone();
     let push_delivery_shutdown = shutdown_receiver.clone();
     let ops_watchdog_shutdown = shutdown_receiver.clone();
+    let receipt_reconciliation_shutdown = shutdown_receiver.clone();
     let discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
@@ -477,6 +493,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     runtime_tasks.spawn(async move {
         ops_watchdog.run(ops_watchdog_shutdown).await;
         "CrowdRelay ops watchdog"
+    });
+    runtime_tasks.spawn(async move {
+        receipt_reconciliation
+            .run(receipt_reconciliation_shutdown)
+            .await;
+        "receipt reconciliation"
     });
     runtime_tasks.spawn(async move {
         audience_graph_sweeper.run(audience_graph_shutdown).await;

@@ -11,9 +11,13 @@ class OpsWatchdogContract(unittest.TestCase):
         migration = (ROOT / "migrations/0046_viryaos_ops_watchdog.sql").read_text()
         main = (ROOT / "crates/crowdrelay-worker/src/main.rs").read_text()
         self.assertIn("viryaos_ops_alert_state", migration)
-        self.assertIn("crowdrelay.ops.status_changed", worker)
+        # The watchdog tracks alert state in the DB but no longer emits
+        # outbox events — Discord spam was removed because it was not
+        # actionable from there. Alert state is exposed via the ops API.
+        self.assertIn("viryaos_ops_alert_state", worker)
         self.assertIn("ALERT_REPEAT_AFTER", worker)
-        self.assertIn('"recovered"', worker)
+        self.assertNotIn("crowdrelay.ops.status_changed", worker)
+        self.assertNotIn("outbox_events", worker)
         self.assertIn("OpsWatchdogWorker::new", main)
         self.assertNotIn("retry_dead_outbox", worker)
         self.assertNotIn("retry_dead_delivery", worker)

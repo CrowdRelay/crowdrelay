@@ -756,7 +756,11 @@ async fn ensure_marketing_eligible(
     }
 }
 
-pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
+/// Whether this payload is executed by an external executor that must file
+/// a terminal execution receipt. Public for the worker's receipt
+/// reconciliation sweep, which flags dispatched actions whose receipts
+/// never arrived.
+pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
     match payload {
         // CanonicalLinkSetup is a pure first-party DB write (smart_links), so
         // it must not be gated behind an executor capability. is_first_party

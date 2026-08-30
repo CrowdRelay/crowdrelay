@@ -95,6 +95,11 @@ const SUBREDDIT_COOLDOWN_DAYS: i32 = 7;
 /// A `posting` row older than this is considered a crashed attempt.
 const POSTING_STALE_THRESHOLD: Duration = Duration::from_secs(300);
 
+/// Error-message prefix the stale-posting recovery stamps on crash-marked
+/// rows. The receipt reconciliation sweep treats this prefix as "outcome
+/// not establishable from CrowdRelay" and leaves the action `unknown`.
+pub(crate) const CRASH_POSTING_ERROR_PREFIX: &str = "worker crashed during posting";
+
 /// Rate limit backoff: how long to wait before retrying a rate-limited post.
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(600);
 
@@ -340,12 +345,15 @@ impl CommunityExecutorWorker {
             r#"
             UPDATE community_posts
             SET status = 'failed',
-                error_message = 'worker crashed during posting — check Reddit manually',
+                error_message = $2,
                 updated_at = now()
             WHERE id = ANY($1)
             "#,
         )
         .bind(&post_ids)
+        .bind(format!(
+            "{CRASH_POSTING_ERROR_PREFIX} — check Reddit manually"
+        ))
         .execute(&self.pool)
         .await?;
 
