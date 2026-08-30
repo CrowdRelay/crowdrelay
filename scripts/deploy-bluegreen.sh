@@ -25,7 +25,7 @@ umask 077
 #   CROWDRELAY_PUBLIC_BASE_URL — public URL for health verification
 #   CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS — health-check timeout
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd -P 2>/dev/null || echo /opt/crowdrelay)"
 TARGET="${1:-}"
 REPO_DIR="${2:-$ROOT_DIR}"
 EDGE_CADDYFILE="/opt/crowdrelay/ops/edge/Caddyfile"

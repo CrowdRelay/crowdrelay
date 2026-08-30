@@ -452,7 +452,9 @@ if [[ "$SKIP_N8N" != true ]]; then
   # n8n workflows are deployed via direct DB updates.
   # The orchestrator verifies n8n is healthy but does not push workflow
   # changes — those are handled separately by the n8n push scripts.
-  n8n_code="$(ssh -T "$LEDGERGUARD_REMOTE" 'curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 10 https://n8n.virya.music/healthz 2>/dev/null || echo "000"' 2>&1)"
+  # n8n.virya.music is a public URL — curl directly instead of SSHing
+  # to a private LAN host that GitHub Actions runners cannot reach.
+  n8n_code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 https://n8n.virya.music/healthz 2>/dev/null || echo "000")"
   [[ "$n8n_code" == "200" ]] || printf 'N8N_HEALTH=WARN code=%s\n' "$n8n_code" >&2
   printf 'N8N_HEALTH=PASS code=%s\n' "$n8n_code"
 fi
