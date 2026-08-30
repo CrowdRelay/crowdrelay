@@ -410,10 +410,6 @@ struct ExistingStocktake {
 #[derive(Debug, sqlx::FromRow)]
 struct VariantAvailability {
     id: Uuid,
-    #[allow(dead_code)]
-    product_name: String,
-    #[allow(dead_code)]
-    sku: String,
     sell_without_stock: bool,
     on_hand: i64,
     reserved: i64,
@@ -447,8 +443,6 @@ async fn lock_variant_availability_tx(
         r#"
         SELECT
             variant.id,
-            product.name AS product_name,
-            variant.sku,
             variant.sell_without_stock,
             COALESCE((
                 SELECT SUM(ledger.delta)::bigint
@@ -468,9 +462,6 @@ async fn lock_variant_availability_tx(
                   AND (reservation.expires_at IS NULL OR reservation.expires_at > now())
             ), 0)::bigint AS reserved
         FROM merch_variants AS variant
-        JOIN merch_products AS product
-          ON product.workspace_id = variant.workspace_id
-         AND product.id = variant.product_id
         WHERE variant.workspace_id = $1 AND variant.sku = $2 AND variant.active
         FOR UPDATE OF variant
         "#,

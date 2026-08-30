@@ -163,25 +163,16 @@ class ChannelBestActionContract(unittest.TestCase):
 
 
 class TicketSaleWatchContract(unittest.TestCase):
-    """Ticket-sale watch detector must exist and be wired into growth debt."""
+    """Ticket-sale watch detection via SQL growth_debt loader.
+
+    The domain module was removed — detection is done entirely in SQL
+    by the growth_debt loader in infra. These tests verify the SQL
+    integration is still wired correctly.
+    """
 
     def setUp(self) -> None:
-        self.domain = read(ROOT / "crates/crowdrelay-domain/src/ticket_sale_watch.rs")
         self.growth_debt = read(ROOT / "crates/crowdrelay-domain/src/growth_debt.rs")
         self.infra = read(INFRA / "autopilot/operations/growth_debt.rs")
-        self.lib = read(ROOT / "crates/crowdrelay-domain/src/lib.rs")
-
-    def test_domain_module_exists(self) -> None:
-        self.assertIn("pub mod ticket_sale_watch", self.lib)
-
-    def test_detector_has_empty_denominator_invariant(self) -> None:
-        self.assertIn("InsufficientHistory", self.domain)
-        self.assertIn("minimum_history_points", self.domain)
-
-    def test_detector_has_pace_comparison(self) -> None:
-        self.assertIn("behind_pace_basis_points", self.domain)
-        self.assertIn("evaluate_ticket_sale_pace", self.domain)
-        self.assertIn("ratio_basis_points", self.domain)
 
     def test_growth_debt_kind_registered(self) -> None:
         self.assertIn("TicketSalesBehindPace", self.growth_debt)

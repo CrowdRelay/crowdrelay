@@ -16,8 +16,6 @@ use serde::Deserialize;
 use sqlx::FromRow;
 use time::OffsetDateTime;
 
-use uuid;
-
 use super::{PostgresAutopilotRepository, map_sqlx};
 use crowdrelay_application::RepositoryError;
 
@@ -86,43 +84,6 @@ pub(in crate::autopilot) async fn load_reach_metrics(
     .await
     .map_err(map_sqlx)?;
     Ok(row.into())
-}
-
-/// Records a fan conversion linked to a reach event.
-///
-/// This is the write path for the `viryaos_reach_conversions` table. It's
-/// called when a fan conversion is attributed to a specific reach event
-/// (e.g. a Reddit post that produced a fan). For broadcasts, multiple
-/// conversions can be linked to the same reach event.
-///
-/// The `incremental` flag is set by the attribution model, not at conversion
-/// time. The `durable_30d` flag is set later by the durability measurement
-/// loop.
-#[allow(dead_code)] // Wired in the next sprint — the reach conversion recording path
-pub(in crate::autopilot) async fn record_reach_conversion(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    reach_event_id: uuid::Uuid,
-    fan_id: Option<uuid::Uuid>,
-    incremental: bool,
-) -> Result<(), RepositoryError> {
-    sqlx::query(
-        r#"
-        INSERT INTO viryaos_reach_conversions
-            (workspace_id, reach_event_id, fan_id, incremental)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (reach_event_id, fan_id) WHERE fan_id IS NOT NULL
-        DO NOTHING
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(reach_event_id)
-    .bind(fan_id)
-    .bind(incremental)
-    .execute(&repo.pool)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(())
 }
 
 // ─── Internal types ──────────────────────────────────────────────────────
