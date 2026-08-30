@@ -1,8 +1,8 @@
-//! Reactive growth metric sync: YouTube + Meta (FB/IG) follower counts.
+//! Reactive growth metric sync: YouTube subscriber counts.
 //!
 //! Design: reactive, not polling. The worker uses Postgres LISTEN/NOTIFY to
 //! wake only when:
-//!   1. A new youtube/meta connection is created (trigger fires NOTIFY on the
+//!   1. A new youtube connection is created (trigger fires NOTIFY on the
 //!      `growth_metric_sync` channel), or
 //!   2. The next scheduled sync time arrives (computed from the latest
 //!      recorded point's timestamp — sleep_until, not a ticker).
@@ -15,9 +15,6 @@
 //!     interval (or has no points yet — first sight).
 //!   - For YouTube: calls the Data API v3 channels endpoint with the stored
 //!     API key. No OAuth token needed for public channel statistics.
-//!   - For Meta: loads the OAuth access token from fanbase_connections,
-//!     refreshes if expired, and calls the Graph API for the page/IG account
-//!     follower count.
 //!   - Records the point into viryaos_growth_metric_series, declaring the
 //!     series on first sight (same pattern as the Bandsintown tracker).
 //!
@@ -27,10 +24,6 @@
 
 use std::time::Duration;
 
-use crowdrelay_infra::{
-    fanbase_oauth::{FanbaseOauthConfig, FanbaseOauthError, FanbaseOauthRepository},
-    sensitive_response::SensitiveResponseKey,
-};
 use serde::Deserialize;
 use sqlx::{FromRow, PgPool, postgres::PgListener};
 use thiserror::Error;
@@ -61,8 +54,6 @@ pub enum GrowthMetricSyncError {
     Database(#[from] sqlx::Error),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("oauth error: {0}")]
-    Oauth(#[from] FanbaseOauthError),
     #[error("provider API error: {0}")]
     ProviderApi(String),
     #[error("no youtube API key configured")]
@@ -76,28 +67,19 @@ pub struct GrowthMetricSyncWorker {
     pool: PgPool,
     http_client: reqwest::Client,
     youtube_api_key: Option<String>,
-    /// Meta OAuth config (client_id, client_secret, etc.) for token refresh.
-    meta_oauth_config: Option<FanbaseOauthConfig>,
-    oauth_repo: FanbaseOauthRepository,
-    encryption_key: SensitiveResponseKey,
     operation_timeout: Duration,
 }
 
 impl GrowthMetricSyncWorker {
-    /// Creates a new worker. Returns `Ok(None)` if neither YouTube nor Meta
-    /// is configured (no API key and no Meta OAuth config) — the caller should
-    /// not spawn the worker in that case.
+    /// Creates a new worker. Returns `Ok(None)` if YouTube is not configured
+    /// (no API key) — the caller should not spawn the worker in that case.
     pub fn new(
         pool: PgPool,
         youtube_api_key: Option<String>,
-        meta_oauth_config: Option<FanbaseOauthConfig>,
-        encryption_key: SensitiveResponseKey,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
-        if youtube_api_key.is_none() && meta_oauth_config.is_none() {
-            tracing::info!(
-                "growth metric sync disabled: no YouTube API key and no Meta OAuth config"
-            );
+        if youtube_api_key.is_none() {
+            tracing::info!("growth metric sync disabled: no YouTube API key");
             return Ok(None);
         }
         let http_client = reqwest::Client::builder()
@@ -106,14 +88,10 @@ impl GrowthMetricSyncWorker {
             .user_agent(USER_AGENT)
             .build()
             .map_err(GrowthMetricSyncError::ClientBuild)?;
-        let oauth_repo = FanbaseOauthRepository::new(pool.clone());
         Ok(Some(Self {
             pool,
             http_client,
             youtube_api_key,
-            meta_oauth_config,
-            oauth_repo,
-            encryption_key,
             operation_timeout,
         }))
     }
@@ -206,21 +184,13 @@ impl GrowthMetricSyncWorker {
     /// Finds connections whose latest metric point is older than SYNC_INTERVAL
     /// (or has no points yet). Returns at most MAX_CONNECTIONS_PER_CYCLE.
     async fn find_due_connections(&self) -> Result<Vec<DueConnection>, GrowthMetricSyncError> {
-        let platforms: &[&str] = match (&self.youtube_api_key, &self.meta_oauth_config) {
-            (Some(_), Some(_)) => &["youtube", "meta"],
-            (Some(_), None) => &["youtube"],
-            (None, Some(_)) => &["meta"],
-            (None, None) => return Ok(Vec::new()),
-        };
-
         let rows = sqlx::query_as::<_, DueConnectionRow>(
             r#"
             SELECT
-                fc.id, fc.workspace_id, fc.platform, fc.provider_account_id,
-                fc.account_name
+                fc.id, fc.workspace_id, fc.platform, fc.provider_account_id
             FROM fanbase_connections fc
             WHERE fc.status = 'connected'
-              AND fc.platform = ANY($1)
+              AND fc.platform = 'youtube'
               AND fc.provider_account_id IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1
@@ -229,13 +199,12 @@ impl GrowthMetricSyncWorker {
                   WHERE s.workspace_id = fc.workspace_id
                     AND s.subject_kind = 'fanbase_connection'
                     AND s.subject_id = fc.id
-                    AND p.captured_at > now() - ($2::bigint * interval '1 second')
+                    AND p.captured_at > now() - ($1::bigint * interval '1 second')
               )
             ORDER BY fc.created_at
-            LIMIT $3
+            LIMIT $2
             "#,
         )
-        .bind(platforms)
         .bind(SYNC_INTERVAL.as_secs() as i64)
         .bind(MAX_CONNECTIONS_PER_CYCLE as i64)
         .fetch_all(&self.pool)
@@ -248,7 +217,6 @@ impl GrowthMetricSyncWorker {
                 workspace_id: row.workspace_id,
                 platform: row.platform,
                 provider_account_id: row.provider_account_id,
-                account_name: row.account_name,
             })
             .collect())
     }
@@ -256,13 +224,6 @@ impl GrowthMetricSyncWorker {
     /// Computes the earliest next-due time across all connections. Returns
     /// None if no connections exist (sleep until NOTIFY).
     async fn next_due_time(&self) -> Option<Instant> {
-        let platforms: &[&str] = match (&self.youtube_api_key, &self.meta_oauth_config) {
-            (Some(_), Some(_)) => &["youtube", "meta"],
-            (Some(_), None) => &["youtube"],
-            (None, Some(_)) => &["meta"],
-            (None, None) => return None,
-        };
-
         // Find the oldest "last sync" time across all connections. The next
         // due time is that + SYNC_INTERVAL. If no points exist yet, the
         // connection is due now.
@@ -282,11 +243,10 @@ impl GrowthMetricSyncWorker {
                 LIMIT 1
             ) p ON true
             WHERE fc.status = 'connected'
-              AND fc.platform = ANY($1)
+              AND fc.platform = 'youtube'
               AND fc.provider_account_id IS NOT NULL
             "#,
         )
-        .bind(platforms)
         .fetch_optional(&self.pool)
         .await
         .ok()
@@ -299,7 +259,7 @@ impl GrowthMetricSyncWorker {
                 SELECT 1
                 FROM fanbase_connections fc
                 WHERE fc.status = 'connected'
-                  AND fc.platform = ANY($1)
+                  AND fc.platform = 'youtube'
                   AND fc.provider_account_id IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1
@@ -312,7 +272,6 @@ impl GrowthMetricSyncWorker {
             )
             "#,
         )
-        .bind(platforms)
         .fetch_one(&self.pool)
         .await
         .unwrap_or(false);
@@ -334,7 +293,6 @@ impl GrowthMetricSyncWorker {
     async fn sync_connection(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
         match conn.platform.as_str() {
             "youtube" => self.sync_youtube(conn).await,
-            "meta" => self.sync_meta(conn).await,
             _ => Ok(()),
         }
     }
@@ -367,11 +325,7 @@ impl GrowthMetricSyncWorker {
                 "YouTube API returned no subscriber count".to_owned(),
             ))?;
 
-        let display_name = conn
-            .account_name
-            .as_deref()
-            .unwrap_or("YouTube channel")
-            .to_owned();
+        let display_name = "YouTube channel";
         record_metric_point(
             &self.pool,
             conn.workspace_id,
@@ -392,66 +346,6 @@ impl GrowthMetricSyncWorker {
         );
         Ok(())
     }
-
-    /// Meta: fetch follower count via Graph API (OAuth token required).
-    async fn sync_meta(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
-        let _meta_config = self
-            .meta_oauth_config
-            .as_ref()
-            .ok_or_else(|| GrowthMetricSyncError::ProviderApi("no Meta OAuth config".to_owned()))?;
-
-        let tokens = self
-            .oauth_repo
-            .load_tokens(conn.workspace_id, conn.id, &self.encryption_key)
-            .await?;
-
-        let access_token = tokens.access_token;
-
-        let account_id = &conn.provider_account_id;
-        // Graph API: GET /{page-id}?fields=followers_count&access_token=...
-        let url = format!(
-            "https://graph.facebook.com/v21.0/{account_id}?fields=followers_count,name&access_token={access_token}"
-        );
-        let response = self.http_client.get(&url).send().await?;
-        if !response.status().is_success() {
-            return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "Meta Graph API returned HTTP {}",
-                response.status()
-            )));
-        }
-        let body: MetaPageResponse = response.json().await?;
-        let followers = body
-            .followers_count
-            .ok_or(GrowthMetricSyncError::ProviderApi(
-                "Meta Graph API returned no followers_count".to_owned(),
-            ))?;
-
-        let display_name = body
-            .name
-            .or(conn.account_name.clone())
-            .unwrap_or_else(|| "Meta page".to_owned());
-
-        // Record as 'social' platform (Meta surfaces report through one adapter).
-        record_metric_point(
-            &self.pool,
-            conn.workspace_id,
-            conn.id,
-            "social",
-            "meta_followers",
-            &format!("Meta followers — {display_name}"),
-            followers,
-            OffsetDateTime::now_utc(),
-        )
-        .await?;
-
-        tracing::info!(
-            connection_id = %conn.id,
-            account_id = %account_id,
-            followers,
-            "meta follower count recorded"
-        );
-        Ok(())
-    }
 }
 
 #[derive(Debug, FromRow)]
@@ -460,7 +354,6 @@ struct DueConnectionRow {
     workspace_id: Uuid,
     platform: String,
     provider_account_id: String,
-    account_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -469,7 +362,6 @@ struct DueConnection {
     workspace_id: Uuid,
     platform: String,
     provider_account_id: String,
-    account_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,12 +380,6 @@ struct YoutubeChannelStatistics {
     /// a number in others. Accept both.
     #[serde(rename = "subscriberCount")]
     subscriber_count: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetaPageResponse {
-    followers_count: Option<i64>,
-    name: Option<String>,
 }
 
 /// Accepts a count only where it is a whole, non-negative number. YouTube
@@ -586,20 +472,5 @@ mod tests {
         let json = br#"{"items":[]}"#;
         let response: YoutubeChannelsResponse = serde_json::from_slice(json).unwrap();
         assert!(response.items.is_empty());
-    }
-
-    #[test]
-    fn meta_response_parses_followers_count() {
-        let json = br#"{"followers_count":1284,"name":"VIRYA"}"#;
-        let response: MetaPageResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(response.followers_count, Some(1284));
-        assert_eq!(response.name.as_deref(), Some("VIRYA"));
-    }
-
-    #[test]
-    fn meta_response_without_followers_is_handled() {
-        let json = br#"{"name":"VIRYA"}"#;
-        let response: MetaPageResponse = serde_json::from_slice(json).unwrap();
-        assert!(response.followers_count.is_none());
     }
 }

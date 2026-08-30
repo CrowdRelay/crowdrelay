@@ -196,7 +196,7 @@ impl InterferencePolicy {
                 {
                     Self::NotIsolatable
                 } else {
-                    // social.post, scanner.*, strategist.* etc.
+                    // scanner.*, strategist.* etc.
                     Self::MaybeNotIsolatable
                 }
             }
@@ -713,18 +713,8 @@ mod tests {
     }
 
     #[test]
-    fn interference_policy_social_post_is_maybe_not_isolatable() {
-        let policy = InterferencePolicy::from_unit_and_template(
-            ExperimentUnitKind::TargetCommunity,
-            "social.post",
-        );
-        assert_eq!(policy, InterferencePolicy::MaybeNotIsolatable);
-        assert!(!policy.is_interference_controllable());
-    }
-
-    #[test]
     fn interference_policy_workspace_is_never_isolatable() {
-        for template in &["community.engage", "social.post", "global.release"] {
+        for template in &["community.engage", "global.release"] {
             let policy =
                 InterferencePolicy::from_unit_and_template(ExperimentUnitKind::Workspace, template);
             assert_eq!(policy, InterferencePolicy::NotIsolatable);

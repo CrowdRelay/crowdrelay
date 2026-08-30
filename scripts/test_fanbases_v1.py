@@ -27,7 +27,6 @@ class FanbasesContract(unittest.TestCase):
     def test_source_kinds_carry_capabilities(self):
         source = DOMAIN.read_text()
         self.assertIn("fn pii_capable", source)
-        self.assertIn("fn oauth_native", source)
         # Community platforms are graph signals, never address sources.
         self.assertIn(
             "Self::BandsintownFollowers | Self::RedditCommunity",

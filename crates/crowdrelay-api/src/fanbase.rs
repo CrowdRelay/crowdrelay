@@ -306,7 +306,7 @@ pub async fn register_manual_community_post(
     let Ok(Json(body)) = payload else {
         return Problem::bad_request(request_id_value).into_response();
     };
-    match crowdrelay_infra::fanbase_oauth::register_manual_reddit_post(
+    match crowdrelay_infra::fanbase::register_manual_reddit_post(
         &state.database,
         workspace(&state),
         community_post_id,

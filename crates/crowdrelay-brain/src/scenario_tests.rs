@@ -824,9 +824,9 @@ fn o_cross_experiment_isolation() {
         0.05,
         "discovery",
     );
-    let design_social = ExperimentDesign::new(
+    let design_scanner = ExperimentDesign::new(
         uuid::Uuid::now_v7(),
-        "social.post",
+        "scanner.discover",
         "cycle-o",
         ExperimentUnitKind::TargetCommunity,
         vec!["r/djent".to_owned()],
@@ -844,8 +844,8 @@ fn o_cross_experiment_isolation() {
         &pred,
         Some(uuid::Uuid::now_v7()),
     );
-    let social_assignment = ExperimentAssignment::from_design(
-        &design_social,
+    let scanner_assignment = ExperimentAssignment::from_design(
+        &design_scanner,
         "r/djent",
         "r/djent",
         TreatmentAssignment::Treatment,
@@ -856,24 +856,24 @@ fn o_cross_experiment_isolation() {
     // Different experiment_uuids — isolated experiments.
     assert_ne!(
         community_assignment.experiment_uuid,
-        social_assignment.experiment_uuid
+        scanner_assignment.experiment_uuid
     );
 
     // Different interference policies — community.engage is potentially
-    // isolatable, social.post is maybe not isolatable.
+    // isolatable, scanner.discover is maybe not isolatable.
     assert_eq!(
         community_assignment.interference_policy,
         InterferencePolicy::PotentiallyIsolatable
     );
     assert_eq!(
-        social_assignment.interference_policy,
+        scanner_assignment.interference_policy,
         InterferencePolicy::MaybeNotIsolatable
     );
 
     // Different intended_template_ids — different interventions.
     assert_ne!(
         community_assignment.intended_template_id,
-        social_assignment.intended_template_id
+        scanner_assignment.intended_template_id
     );
 }
 

@@ -392,16 +392,6 @@ pub(super) async fn schedule_effect_measurement(
                 now + time::Duration::days(7),
             ));
         }
-        // Social posts: measure engagement (likes, shares, comments) after
-        // 7 days. Same baseline-zero logic as community engagement.
-        AutopilotActionPayload::RequestSocialPost { task_id, .. } => {
-            plans.push((
-                AutopilotMeasurementKind::AgentRunCommunityEngagement7d,
-                *task_id,
-                0.0,
-                now + time::Duration::days(7),
-            ));
-        }
     }
 
     for (kind, subject_id, baseline_value, due_at) in plans {
@@ -563,9 +553,6 @@ pub(super) async fn record_execution_outcome(
         }
         AutopilotActionPayload::RequestCommunityEngagement { .. } => {
             ("community_engagement_requested", 1.0, None)
-        }
-        AutopilotActionPayload::RequestSocialPost { .. } => {
-            ("social_post_requested", 1.0, None)
         }
         AutopilotActionPayload::RequestSignalPush { .. } => {
             ("signal_push_requested", 1.0, None)
@@ -796,7 +783,6 @@ pub(super) const fn payload_requires_executor(payload: &AutopilotActionPayload) 
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
                 | AutopilotActionPayload::RequestAgentContent { .. }
                 | AutopilotActionPayload::RequestCommunityEngagement { .. }
-                | AutopilotActionPayload::RequestSocialPost { .. }
         ),
     }
 }
@@ -839,7 +825,6 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
         AutopilotActionPayload::RequestAgentContent { .. } => "agent.content",
         AutopilotActionPayload::RequestCommunityEngagement { .. } => "community.engage",
-        AutopilotActionPayload::RequestSocialPost { .. } => "social.post",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.
         _ => return None,

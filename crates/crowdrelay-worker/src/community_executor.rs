@@ -1,17 +1,17 @@
 //! Community engagement executor: posts approved community.engage.request
-//! actions to Reddit via OAuth.
+//! actions to Reddit via the agents service browser session.
 //!
 //! The autopilot marks `RequestCommunityEngagement` actions as `succeeded`
 //! after emitting the outbox event (the outbox delivers to external webhook
 //! endpoints). This worker is the *internal executor* that actually posts
 //! to Reddit — it polls for succeeded actions that don't yet have a
-//! `community_posts` row, loads the workspace's Reddit OAuth token, and
-//! submits the post via the Reddit API.
+//! `community_posts` row, submits the post through the agents service's
+//! logged-in browser session, and records the result.
 //!
 //! ## Anti-spam guardrails
 //! - One post per subreddit per 7 days (enforced via SQL check before posting)
 //! - Max 3 posts per 24 hours per workspace (enforced via SQL count)
-//! - If no Reddit connection exists, the post is marked `failed` (not retried)
+//! - If no agents service is configured, the post is marked `failed` (not retried)
 //! - Rate-limited responses (HTTP 429) get `rate_limited` status with backoff
 //!
 //! ## Idempotency and crash recovery
@@ -36,15 +36,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
-use crowdrelay_infra::{
-    fanbase_oauth::{FanbaseOauthConfig, FanbaseOauthRepository, StoredTokens},
-    reddit_proxy::read_reddit_proxy_from_db,
-    sensitive_response::SensitiveResponseKey,
-};
+use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::Deserialize;
 use sqlx::PgPool;
 use thiserror::Error;
-use time::OffsetDateTime;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
@@ -92,10 +87,6 @@ const MAX_POSTS_PER_24H: i64 = 3;
 /// Cooldown: no more than one post per subreddit per 7 days.
 const SUBREDDIT_COOLDOWN_DAYS: i32 = 7;
 
-/// Token refresh threshold: if the token expires within this window, refresh
-/// it before making the API call.
-const TOKEN_REFRESH_THRESHOLD: Duration = Duration::from_secs(300);
-
 /// A `posting` row older than this is considered a crashed attempt.
 const POSTING_STALE_THRESHOLD: Duration = Duration::from_secs(300);
 
@@ -128,12 +119,10 @@ pub enum CommunityExecutorError {
     Database(#[from] sqlx::Error),
     #[error("reddit API error: {0}")]
     RedditApi(String),
-    #[error("oauth error: {0}")]
-    Oauth(#[from] crowdrelay_infra::fanbase_oauth::FanbaseOauthError),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("no reddit connection for workspace")]
-    NoRedditConnection,
+    #[error("no agents service configured for Reddit posting")]
+    NoAgentsService,
     #[error("rate limited by Reddit")]
     RateLimited,
     #[error("http client build failed: {0}")]
@@ -144,25 +133,16 @@ pub enum CommunityExecutorError {
 pub struct CommunityExecutorWorker {
     pool: PgPool,
     workspace_id: WorkspaceId,
-    oauth_repo: FanbaseOauthRepository,
-    reddit_config: FanbaseOauthConfig,
-    encryption_key: SensitiveResponseKey,
     http_client: Arc<RwLock<reqwest::Client>>,
     poll_interval: Duration,
     operation_timeout: Duration,
     public_origin: String,
-    /// Reddit "script" app credentials (password grant). When set, the
-    /// executor authenticates with username/password instead of the web-app
-    /// OAuth flow. This is the fallback when no OAuth connection exists in
-    /// the DB or when token refresh fails.
-    script_username: Option<String>,
-    script_password: Option<String>,
     /// When true, the executor creates `community_posts` rows but does not
     /// post to Reddit. Posts are marked `awaiting_manual_post` — the operator
     /// posts manually and registers the URL via the API. Metrics polling
     /// still works via Reddit's public JSON endpoint.
     manual_mode: bool,
-    /// Base URL of the agents service (for Reddit cookie fetching).
+    /// Base URL of the agents service (for Reddit browser sessions).
     agent_service_url: String,
     /// Auth key for the agents service.
     agent_service_auth_key: Option<String>,
@@ -173,9 +153,9 @@ pub struct CommunityExecutorWorker {
 
 impl CommunityExecutorWorker {
     /// Creates a new executor. Returns an error if the HTTP client cannot be
-    /// built (e.g. TLS backend failure). The caller should skip spawning the
-    /// worker if the Reddit OAuth config is not set up (check
-    /// `reddit_config_from_env` first).
+    /// built (e.g. TLS backend failure). When `manual_mode` is false, the
+    /// caller should ensure `agent_service_auth_key` is set for browser-based
+    /// posting.
     ///
     /// # Errors
     /// Returns [`CommunityExecutorError::ClientBuild`] if the `reqwest` client
@@ -184,40 +164,23 @@ impl CommunityExecutorWorker {
     pub fn new(
         pool: PgPool,
         workspace_id: WorkspaceId,
-        reddit_config: FanbaseOauthConfig,
-        encryption_key: SensitiveResponseKey,
         operation_timeout: Duration,
         manual_mode: bool,
         proxy_url: Option<String>,
         agent_service_url: String,
         agent_service_auth_key: Option<String>,
     ) -> Result<Self, CommunityExecutorError> {
-        let oauth_repo = FanbaseOauthRepository::new(pool.clone());
         let http_client = build_http_client(proxy_url.as_deref(), operation_timeout)?;
         let http_client = Arc::new(RwLock::new(http_client));
         let public_origin = std::env::var("CROWDRELAY_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| DEFAULT_PUBLIC_ORIGIN.to_owned());
-        // Script-app credentials (optional). When set, the executor can
-        // authenticate via password grant instead of the web-app OAuth flow.
-        // This is the path for Reddit "script" type apps.
-        let script_username = std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_USERNAME")
-            .ok()
-            .filter(|v| !v.is_empty());
-        let script_password = std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_PASSWORD")
-            .ok()
-            .filter(|v| !v.is_empty());
         Ok(Self {
             pool,
             workspace_id,
-            oauth_repo,
-            reddit_config,
-            encryption_key,
             http_client,
             poll_interval: POLL_INTERVAL,
             operation_timeout,
             public_origin,
-            script_username,
-            script_password,
             manual_mode,
             agent_service_url,
             agent_service_auth_key,
@@ -297,13 +260,13 @@ impl CommunityExecutorWorker {
                         tracing::warn!(error = %e, "failed to mark rate_limited");
                     }
                 }
-                Err(CommunityExecutorError::NoRedditConnection) => {
-                    // No Reddit connection — permanent failure, don't retry.
+                Err(CommunityExecutorError::NoAgentsService) => {
+                    // No agents service — permanent failure, don't retry.
                     if let Err(e) = self
-                        .mark_failed(action.id, "no reddit connection for workspace")
+                        .mark_failed(action.id, "no agents service configured for Reddit posting")
                         .await
                     {
-                        tracing::warn!(error = %e, "failed to mark no-connection");
+                        tracing::warn!(error = %e, "failed to mark no-agents-service");
                     }
                 }
                 Err(error) => {
@@ -436,7 +399,7 @@ impl CommunityExecutorWorker {
     }
 
     /// Processes a single claimed action: checks anti-spam guardrails,
-    /// loads the Reddit OAuth token, posts to Reddit, and records the result.
+    /// posts to Reddit via the agents service browser, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), CommunityExecutorError> {
         // Anti-spam: check subreddit cooldown.
         if self.subreddit_on_cooldown(&action.subreddit).await? {
@@ -479,31 +442,18 @@ impl CommunityExecutorWorker {
             return Ok(());
         }
 
+        // Browser-only: the agents service posts through a real logged-in
+        // browser session — the only Reddit access path that works reliably.
+        // No OAuth fallback: if the agents service is unavailable, the post
+        // fails and the operator can re-approve.
+        if self.agent_service_auth_key.is_none() {
+            return Err(CommunityExecutorError::NoAgentsService);
+        }
+
         // Build the post body, appending the smart link as a full URL if present.
         let post_body = self.build_post_body(&action.body, action.smart_link.as_deref());
 
-        // Submit to Reddit. Browser-first: the agents service posts through
-        // a real logged-in browser session — the only Reddit access path
-        // that still works (public .json and OAuth are both blocked). The
-        // legacy OAuth/password-grant chain runs only when the agents path
-        // is unavailable, so existing setups do not regress.
-        let reddit_result = if self.agent_service_auth_key.is_some() {
-            match self.submit_via_agent_browser(action, &post_body).await {
-                Ok(result) => result,
-                Err(CommunityExecutorError::RateLimited) => {
-                    return Err(CommunityExecutorError::RateLimited);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "browser submit via agents failed, trying legacy Reddit OAuth path"
-                    );
-                    self.submit_via_legacy_oauth(action, &post_body).await?
-                }
-            }
-        } else {
-            self.submit_via_legacy_oauth(action, &post_body).await?
-        };
+        let reddit_result = self.submit_via_agent_browser(action, &post_body).await?;
 
         // Record success.
         sqlx::query(
@@ -580,31 +530,6 @@ impl CommunityExecutorWorker {
         response.json().await.map_err(CommunityExecutorError::Http)
     }
 
-    /// Legacy submit chain: web-app OAuth token (refreshed if needed) with a
-    /// password-grant fallback. Kept for deployments where the agents
-    /// browser path is unavailable and a Reddit OAuth setup still works.
-    async fn submit_via_legacy_oauth(
-        &self,
-        action: &ClaimedAction,
-        post_body: &str,
-    ) -> Result<RedditSubmitResult, CommunityExecutorError> {
-        let tokens = match self.find_reddit_connection().await {
-            Ok(connection_id) => self.load_valid_tokens(connection_id).await?,
-            Err(CommunityExecutorError::NoRedditConnection) => {
-                tracing::info!("no Reddit OAuth connection, trying password grant");
-                self.password_grant_fallback().await?
-            }
-            Err(error) => return Err(error),
-        };
-        self.submit_to_reddit(
-            &tokens.access_token,
-            &action.subreddit,
-            &action.title,
-            post_body,
-        )
-        .await
-    }
-
     /// Checks if this subreddit has been posted to within the cooldown window.
     async fn subreddit_on_cooldown(&self, subreddit: &str) -> Result<bool, CommunityExecutorError> {
         let count: i64 = sqlx::query_scalar(
@@ -640,80 +565,6 @@ impl CommunityExecutorWorker {
         Ok(count >= MAX_POSTS_PER_24H)
     }
 
-    /// Finds the most recent active Reddit connection for the workspace.
-    async fn find_reddit_connection(&self) -> Result<Uuid, CommunityExecutorError> {
-        let id: Option<Uuid> = sqlx::query_scalar(
-            r#"
-            SELECT id FROM fanbase_connections
-            WHERE workspace_id = $1
-              AND platform = 'reddit'
-              AND status = 'connected'
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(self.workspace_id.into_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-        id.ok_or(CommunityExecutorError::NoRedditConnection)
-    }
-
-    /// Loads the OAuth token, refreshing it if it's expired or about to expire.
-    /// Falls back to password grant (script app) if no connection exists or
-    /// the token is expired — Reddit script apps don't issue refresh tokens,
-    /// so we re-authenticate with username/password instead.
-    async fn load_valid_tokens(
-        &self,
-        connection_id: Uuid,
-    ) -> Result<StoredTokens, CommunityExecutorError> {
-        let tokens = self
-            .oauth_repo
-            .load_tokens(
-                self.workspace_id.into_uuid(),
-                connection_id,
-                &self.encryption_key,
-            )
-            .await?;
-
-        // Reddit script apps don't issue refresh tokens. When the access
-        // token is expired or about to expire, re-authenticate via password
-        // grant instead of trying to refresh.
-        let needs_refresh = tokens
-            .expires_at
-            .map(|exp| exp < OffsetDateTime::now_utc() + TOKEN_REFRESH_THRESHOLD)
-            .unwrap_or(true);
-
-        if needs_refresh {
-            tracing::info!(connection_id = %connection_id, "Reddit token expired, re-authenticating via password grant");
-            self.password_grant_fallback().await
-        } else {
-            Ok(tokens)
-        }
-    }
-
-    /// Authenticates with Reddit using the password grant (script app).
-    /// Used as a fallback when no OAuth connection exists or when refresh
-    /// fails. Requires `CROWDRELAY_FANBASE_OAUTH_REDDIT_USERNAME` and
-    /// `CROWDRELAY_FANBASE_OAUTH_REDDIT_PASSWORD` to be set.
-    async fn password_grant_fallback(&self) -> Result<StoredTokens, CommunityExecutorError> {
-        let (username, password) = self
-            .script_username
-            .as_deref()
-            .zip(self.script_password.as_deref())
-            .ok_or(CommunityExecutorError::NoRedditConnection)?;
-        tracing::info!(username = %username, "authenticating Reddit via password grant");
-        self.oauth_repo
-            .password_grant(
-                self.workspace_id.into_uuid(),
-                &self.reddit_config,
-                username,
-                password,
-                &self.encryption_key,
-            )
-            .await
-            .map_err(CommunityExecutorError::from)
-    }
-
     /// Builds the final post body, appending the smart link as a full URL
     /// if present. The smart_link stored in the action payload is a `/l/{slug}`
     /// path; Reddit needs a full URL for it to be clickable.
@@ -729,80 +580,6 @@ impl CommunityExecutorWorker {
             }
             _ => Cow::Borrowed(body),
         }
-    }
-
-    /// Normalizes a subreddit name: trims whitespace, strips `r/` or `/r/`
-    /// prefixes (case-insensitive), and lowercases the result.
-    fn normalize_subreddit(subreddit: &str) -> String {
-        let trimmed = subreddit.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        let without_prefix = lower
-            .strip_prefix("/r/")
-            .or_else(|| lower.strip_prefix("r/"))
-            .unwrap_or(&lower);
-        without_prefix.to_owned()
-    }
-
-    /// Submits a text post to Reddit via the OAuth API.
-    async fn submit_to_reddit(
-        &self,
-        access_token: &str,
-        subreddit: &str,
-        title: &str,
-        body: &str,
-    ) -> Result<RedditSubmitResult, CommunityExecutorError> {
-        let sr = Self::normalize_subreddit(subreddit);
-
-        let client = self
-            .http_client
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let response = client
-            .post("https://oauth.reddit.com/api/submit")
-            .header("Authorization", format!("Bearer {access_token}"))
-            .form(&[
-                ("api_type", "json"),
-                ("kind", "self"),
-                ("sr", sr.as_str()),
-                ("title", title),
-                ("text", body),
-            ])
-            .send()
-            .await?;
-
-        let status = response.status();
-        if status.as_u16() == 429 {
-            return Err(CommunityExecutorError::RateLimited);
-        }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(CommunityExecutorError::RedditApi(format!(
-                "HTTP {status}: {body}"
-            )));
-        }
-
-        let body: RedditApiResponse = response.json().await?;
-
-        // Reddit returns errors inside the JSON body even with HTTP 200.
-        if !body.json.errors.is_empty() {
-            let error_msgs: Vec<String> = body
-                .json
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.0, e.1))
-                .collect();
-            return Err(CommunityExecutorError::RedditApi(error_msgs.join("; ")));
-        }
-
-        let data = body.json.data.ok_or_else(|| {
-            CommunityExecutorError::RedditApi("missing data in response".to_owned())
-        })?;
-
-        Ok(RedditSubmitResult {
-            post_id: data.id,
-            post_url: data.url,
-        })
     }
 
     /// Polls Reddit for post performance metrics on recently posted content.
@@ -946,7 +723,7 @@ impl CommunityExecutorWorker {
         let auth_key = self
             .agent_service_auth_key
             .as_deref()
-            .ok_or_else(|| CommunityExecutorError::NoRedditConnection)?;
+            .ok_or_else(|| CommunityExecutorError::NoAgentsService)?;
         let ws = self.workspace_id.into_uuid();
         let token = crate::discovery::derive_agent_token(auth_key, ws);
         let url = format!("{}/reddit/metrics", self.agent_service_url);
@@ -1197,26 +974,6 @@ struct ClaimedAction {
 }
 
 #[derive(Debug, Deserialize)]
-struct RedditApiResponse {
-    json: RedditJson,
-}
-
-#[derive(Debug, Deserialize)]
-struct RedditJson {
-    // Reddit error arrays are `[["ERROR", "message", null]]` — the third
-    // element can be null, so we use Option<String>.
-    #[serde(default)]
-    errors: Vec<(String, String, Option<String>)>,
-    data: Option<RedditData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RedditData {
-    id: String,
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct RedditSubmitResult {
     post_id: String,
     post_url: String,
@@ -1259,37 +1016,4 @@ struct RedditPostMetrics {
     upvotes: i32,
     num_comments: i32,
     upvote_ratio: Option<f64>,
-}
-
-/// Parses a Reddit OAuth config from env vars. Returns `None` if the
-/// client_id is not set, indicating Reddit integration is not configured.
-#[must_use]
-pub fn reddit_config_from_env() -> Option<FanbaseOauthConfig> {
-    use crowdrelay_domain::fanbase::Platform;
-    let client_id = std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_CLIENT_ID")
-        .ok()
-        .filter(|v| !v.is_empty())?;
-    let client_secret =
-        std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_CLIENT_SECRET").unwrap_or_default();
-    let token_url = std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_TOKEN_URL")
-        .unwrap_or_else(|_| "https://www.reddit.com/api/v1/access_token".to_owned());
-    let authorize_url = std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_AUTHORIZE_URL")
-        .unwrap_or_else(|_| "https://www.reddit.com/api/v1/authorize".to_owned());
-    // Default scopes include "submit" — required for posting to Reddit.
-    // This mirrors Platform::Reddit.default_scopes() in crowdrelay-domain.
-    let scopes_str = std::env::var("CROWDRELAY_FANBASE_OAUTH_REDDIT_SCOPES")
-        .unwrap_or_else(|_| "identity read submit".to_owned());
-    let scopes: Vec<String> = scopes_str
-        .split([',', ' '])
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect();
-    Some(FanbaseOauthConfig {
-        platform: Platform::Reddit,
-        client_id,
-        client_secret,
-        authorize_url,
-        token_url,
-        scopes,
-    })
 }

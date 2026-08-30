@@ -30,7 +30,7 @@ use crowdrelay_worker::{
     audience_graph::AudienceGraphSweeper,
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
-    community_executor::{CommunityExecutorWorker, reddit_config_from_env},
+    community_executor::CommunityExecutorWorker,
     discovery::{DiscoveryConfig, RedditDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
@@ -328,61 +328,33 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         None
     };
     // Community engagement executor: posts approved community.engage.request
-    // actions to Reddit. When Reddit OAuth is configured, posts automatically.
-    // When not configured (Reddit API access unavailable), runs in manual mode:
-    // creates `community_posts` rows marked `awaiting_manual_post` — the
-    // operator posts manually and registers the URL via the API. Metrics
-    // polling works in both modes via Reddit's public JSON endpoint.
-    let community_executor = if let Some(reddit_config) = reddit_config_from_env() {
-        match CommunityExecutorWorker::new(
-            database.clone(),
-            workspace_id,
-            reddit_config,
-            config.response_encryption_key.clone(),
-            config.database.operation_timeout,
-            false,
-            config.reddit_proxy_url.clone(),
-            config.agent_service_url.clone(),
-            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
-        ) {
-            Ok(worker) => Some(worker),
-            Err(error) => {
-                tracing::warn!(error = %error, "community executor disabled: HTTP client build failed");
-                None
-            }
-        }
-    } else {
-        // No Reddit OAuth — spawn in manual mode so the loop still works.
-        // The operator posts manually; metrics are tracked via public JSON.
-        let manual_config = crowdrelay_infra::fanbase_oauth::FanbaseOauthConfig {
-            platform: crowdrelay_domain::fanbase::Platform::Reddit,
-            client_id: String::new(),
-            client_secret: String::new(),
-            authorize_url: String::new(),
-            token_url: String::new(),
-            scopes: Vec::new(),
-        };
-        match CommunityExecutorWorker::new(
-            database.clone(),
-            workspace_id,
-            manual_config,
-            config.response_encryption_key.clone(),
-            config.database.operation_timeout,
-            true,
-            config.reddit_proxy_url.clone(),
-            config.agent_service_url.clone(),
-            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
-        ) {
-            Ok(worker) => {
+    // actions to Reddit via the agents service browser session. When the
+    // agents service auth key is configured, posts automatically. When not
+    // configured, runs in manual mode: creates `community_posts` rows marked
+    // `awaiting_manual_post` — the operator posts manually and registers the
+    // URL via the API. Metrics polling works in both modes.
+    let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok();
+    let manual_mode = agent_service_auth_key.is_none();
+    let community_executor = match CommunityExecutorWorker::new(
+        database.clone(),
+        workspace_id,
+        config.database.operation_timeout,
+        manual_mode,
+        config.reddit_proxy_url.clone(),
+        config.agent_service_url.clone(),
+        agent_service_auth_key,
+    ) {
+        Ok(worker) => {
+            if manual_mode {
                 tracing::info!(
                     "community executor running in MANUAL MODE — posts will be drafted but not posted automatically; operator must post manually and register the URL via the API"
                 );
-                Some(worker)
             }
-            Err(error) => {
-                tracing::warn!(error = %error, "community executor disabled: HTTP client build failed");
-                None
-            }
+            Some(worker)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "community executor disabled: HTTP client build failed");
+            None
         }
     };
     // Deliberately not gated on `autopilot_enabled`: an operator whose agent is
@@ -428,8 +400,8 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         None
     };
     // Growth metric sync: reactive worker that LISTENs on Postgres NOTIFY
-    // for new YouTube/Meta connections and syncs follower/subscriber counts
-    // into viryaos_growth_metric_series. No polling — wakes only on NOTIFY
+    // for new YouTube connections and syncs subscriber counts into
+    // viryaos_growth_metric_series. No polling — wakes only on NOTIFY
     // or when the next scheduled sync time arrives.
     let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
         .ok()
@@ -437,8 +409,6 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
-        None,
-        config.response_encryption_key.clone(),
         config.database.operation_timeout,
     )
     .context("invalid growth metric sync worker configuration")?;
@@ -812,7 +782,7 @@ struct GrowthReadiness {
     /// be sent. Env: CROWDRELAY_PUSH_DELIVERY_ENABLED=true
     push_delivery_enabled: bool,
     /// Reddit posting executor. Without this, community engagement posts are
-    /// drafted but never posted. Env: CROWDRELAY_FANBASE_OAUTH_REDDIT_CLIENT_ID
+    /// drafted but never posted. Env: CROWDRELAY_AGENT_SERVICE_AUTH_KEY
     community_executor_enabled: bool,
     /// Reddit subreddit discovery. Without this, the system can't find new
     /// communities to engage with. Env: CROWDRELAY_DISCOVERY_REDDIT_QUERIES
@@ -868,7 +838,7 @@ impl GrowthReadiness {
         }
         if !self.community_executor_enabled {
             tracing::warn!(
-                "growth readiness: community executor is OFF — set CROWDRELAY_FANBASE_OAUTH_REDDIT_CLIENT_ID for automatic posting, or the executor will run in manual mode (operator posts manually)"
+                "growth readiness: community executor is OFF — set CROWDRELAY_AGENT_SERVICE_AUTH_KEY for automatic posting via the agents service browser, or the executor will run in manual mode (operator posts manually)"
             );
         }
         if !self.reddit_discovery_enabled {

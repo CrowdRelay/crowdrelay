@@ -422,7 +422,8 @@ impl PostgresFanbaseRepository {
 }
 
 // ---------------------------------------------------------------------------
-// Fanbase connections — OAuth-linked platform accounts.
+// Fanbase connections — platform accounts linked via credential_ref (n8n)
+// or provider_account_id (YouTube API key). No OAuth tokens stored in DB.
 //
 // A connection records that a workspace has authorized access to an external
 // platform account. The credential itself lives outside this database (in
@@ -555,4 +556,86 @@ impl PostgresFanbaseRepository {
         .map_err(Self::unexpected)?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Manual Reddit post registration
+//
+// Registers a manually-posted Reddit URL for a community post that was
+// in `awaiting_manual_post` status. Extracts the Reddit post ID from
+// the URL and transitions the row to `posted` so the metrics poller
+// can track it.
+// ---------------------------------------------------------------------------
+
+/// Error type for manual Reddit post registration.
+#[derive(Debug, thiserror::Error)]
+pub enum ManualRedditPostError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("invalid URL: {0}")]
+    InvalidUrl(String),
+    #[error("community post not found or not in awaiting_manual_post status")]
+    NotFound,
+}
+
+/// Registers a manually-posted Reddit URL for a community post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+/// Transitions the post to `posted` status so the metrics poller can track
+/// its performance via Reddit's public JSON endpoint.
+///
+/// # Errors
+/// Returns [`ManualRedditPostError::NotFound`] if the post doesn't exist or
+/// isn't in `awaiting_manual_post` status.
+pub async fn register_manual_reddit_post(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    community_post_id: Uuid,
+    reddit_post_url: &str,
+) -> Result<(), ManualRedditPostError> {
+    let reddit_post_id = extract_reddit_post_id(reddit_post_url).ok_or_else(|| {
+        ManualRedditPostError::InvalidUrl(format!(
+            "could not extract post ID from URL: {reddit_post_url}"
+        ))
+    })?;
+
+    let result = sqlx::query(
+        r#"
+        UPDATE community_posts
+        SET status = 'posted',
+            reddit_post_id = $3,
+            reddit_post_url = $4,
+            posted_at = now(),
+            updated_at = now(),
+            error_message = NULL
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status = 'awaiting_manual_post'
+        "#,
+    )
+    .bind(community_post_id)
+    .bind(workspace_id)
+    .bind(&reddit_post_id)
+    .bind(reddit_post_url)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ManualRedditPostError::NotFound);
+    }
+    Ok(())
+}
+
+/// Extracts the Reddit post ID from a URL like:
+/// `https://www.reddit.com/r/subreddit/comments/abc123/title/` → `abc123`
+fn extract_reddit_post_id(url: &str) -> Option<String> {
+    let parts: Vec<&str> = url.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "comments"
+            && let Some(id) = parts.get(i + 1)
+            && !id.is_empty()
+        {
+            return Some((*id).to_owned());
+        }
+    }
+    None
 }

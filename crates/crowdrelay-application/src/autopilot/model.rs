@@ -680,24 +680,15 @@ pub enum AutopilotActionPayload {
     /// A community engagement post drafted by the `community-engager` worker
     /// and approved by the operator. Execution emits an outbox event for the
     /// configured executor to post to the external platform (e.g. Reddit) via
-    /// fanbase OAuth. The autopilot never calls the platform API directly — it
-    /// follows the same ThirdParty outbox pattern as outreach and booking.
+    /// the agents service browser session. The autopilot never calls the
+    /// platform API directly — it follows the same ThirdParty outbox pattern
+    /// as outreach and booking.
     RequestCommunityEngagement {
         target_id: uuid::Uuid,
         platform: String,
         subreddit: Option<String>,
         title: String,
         body: String,
-        smart_link: Option<String>,
-    },
-    /// A social media post drafted by the `social-post` worker and approved by
-    /// the operator. Execution emits an outbox event for the configured executor
-    /// to post to the external platform (Facebook, Instagram, X/Twitter) via
-    /// fanbase OAuth. Same ThirdParty outbox pattern as community engagement.
-    RequestSocialPost {
-        task_id: uuid::Uuid,
-        platform: String,
-        content: serde_json::Value,
         smart_link: Option<String>,
     },
     /// A Signal push notification drafted by the `signal-inviter` worker and
@@ -754,10 +745,7 @@ impl AutopilotActionPayload {
             // A community post reaches somebody else's platform — Reddit,
             // forums — and once posted it cannot be unsent. The operator
             // approves before it goes, same as any other outward approach.
-            | Self::RequestCommunityEngagement { .. }
-            // A social post reaches an external platform (Facebook, Instagram,
-            // X/Twitter) — same ThirdParty pattern as community engagement.
-            | Self::RequestSocialPost { .. } => ActionClass::ThirdParty,
+            | Self::RequestCommunityEngagement { .. } => ActionClass::ThirdParty,
 
             // Fans who opted in. Free, but a sent message cannot be unsent.
             Self::RequestFanLifecycleMessage { .. }
@@ -876,7 +864,6 @@ impl AutopilotActionPayload {
             Self::RequestAgentContent { .. } => "agent.content.request",
             Self::RequestAgentRun { .. } => "agent.run.request",
             Self::RequestCommunityEngagement { .. } => "community.engage.request",
-            Self::RequestSocialPost { .. } => "social.post.request",
             Self::RequestSignalPush { .. } => "signal.push.request",
         }
     }
@@ -1412,20 +1399,6 @@ impl AutopilotActionPayload {
                     BriefingField { label: "Subreddit".into(), value: subreddit.clone().unwrap_or("—".into()) },
                     BriefingField { label: "Tytuł".into(), value: title.clone() },
                     BriefingField { label: "Treść".into(), value: truncate(body.clone(), 2000) },
-                    BriefingField { label: "Smart link".into(), value: smart_link.clone().unwrap_or("—".into()) },
-                ],
-                deadline_note: String::new(),
-            },
-            Self::RequestSocialPost { platform, content, smart_link, .. } => ActionBriefing {
-                summary: format!("Post społecznościowy: {}", platform),
-                why_it_matters: "To post na zewnętrznej platformie (Facebook, Instagram, X/Twitter). Po opublikowaniu nie można go cofnąć.".into(),
-                steps: vec![
-                    BriefingStep { what_to_do: "Przeczytaj treść posta".into(), why_it_matters: "Sprawdź ton, fakty i zgodność z zasadami platformy".into() },
-                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby opublikować".into(), why_it_matters: "Po akceptacji post zostanie opublikowany na platformie".into() },
-                ],
-                content: vec![
-                    BriefingField { label: "Platforma".into(), value: platform.clone() },
-                    BriefingField { label: "Treść".into(), value: truncate(content.to_string(), 2000) },
                     BriefingField { label: "Smart link".into(), value: smart_link.clone().unwrap_or("—".into()) },
                 ],
                 deadline_note: String::new(),

@@ -64,12 +64,6 @@ impl SourceKind {
     pub const fn pii_capable(self) -> bool {
         !matches!(self, Self::BandsintownFollowers | Self::RedditCommunity)
     }
-
-    /// Does connecting this origin require an OAuth-style account link with
-    /// the platform? Pull/inline origins are operator-supplied instead.
-    pub const fn oauth_native(self) -> bool {
-        matches!(self, Self::MetaLeadAds | Self::GoogleCustomerMatch)
-    }
 }
 
 /// External platforms a fanbase connection can link to. The DB CHECK
@@ -126,19 +120,6 @@ impl Platform {
             Self::Bandsintown => "Bandsintown",
             Self::Spotify => "Spotify",
             Self::Youtube => "YouTube",
-        }
-    }
-
-    /// Default OAuth scopes for this platform's fanbase connection.
-    pub const fn default_scopes(self) -> &'static [&'static str] {
-        match self {
-            Self::Meta => &["ads_management", "ads_read"],
-            Self::GoogleAds => &["https://www.googleapis.com/auth/adwords"],
-            Self::Spotify => &["user-read-email", "playlist-modify-public"],
-            Self::Reddit => &["identity", "read", "submit"],
-            Self::Tiktok => &["user.info.basic", "ad.management"],
-            Self::Bandsintown => &[],
-            Self::Youtube => &["https://www.googleapis.com/auth/youtube.readonly"],
         }
     }
 }
@@ -216,14 +197,6 @@ mod tests {
         // Follower/community counts are signals for the graph, not addresses.
         assert!(!SourceKind::BandsintownFollowers.pii_capable());
         assert!(!SourceKind::RedditCommunity.pii_capable());
-    }
-
-    #[test]
-    fn ad_platforms_are_oauth_native_and_lists_are_not() {
-        assert!(SourceKind::MetaLeadAds.oauth_native());
-        assert!(SourceKind::GoogleCustomerMatch.oauth_native());
-        assert!(!SourceKind::ManualImport.oauth_native());
-        assert!(!SourceKind::CsvInline.oauth_native());
     }
 
     #[test]

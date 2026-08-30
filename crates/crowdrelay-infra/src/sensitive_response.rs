@@ -253,8 +253,8 @@ pub enum SensitiveResponseError {
 }
 
 // ---------------------------------------------------------------------------
-// Standalone encrypt/decrypt for non-response secrets (e.g. fanbase OAuth
-// tokens). Uses the same XChaCha20-Poly1305 primitive and key type, but with
+// Standalone encrypt/decrypt for non-response secrets. Uses the same
+// XChaCha20-Poly1305 primitive and key type, but with
 // caller-supplied associated data instead of the workspace/scope/key tuple.
 // ---------------------------------------------------------------------------
 
