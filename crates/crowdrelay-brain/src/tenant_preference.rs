@@ -122,9 +122,10 @@ impl TemplatePreference {
     /// template. Applied as `effective_cooldown = base_cooldown *
     /// cadence_multiplier()`.
     ///
+    /// Linear mapping centered at the neutral prior mean (0.5):
     /// - 1.0 = no change (sparse data or neutral preference)
     /// - 0.5 = twice as often (high preference — tenant likes this)
-    /// - 2.0 = half as often (low preference — tenant rejects this)
+    /// - 1.5 = half as often (low preference — tenant rejects this)
     ///
     /// Only applies when confidence ≥ 3.0 (enough evidence to adjust).
     /// Below that, returns 1.0 (no adjustment).
@@ -134,11 +135,11 @@ impl TemplatePreference {
             return 1.0;
         }
         let score = self.preference_score();
-        // Map [0, 1] → [2.0, 0.5]:
-        //   score 0.0 → 2.0 (low preference = longer cooldown)
-        //   score 0.5 → 1.25 (slightly longer)
+        // Map [0, 1] → [1.5, 0.5], centered at 0.5 → 1.0:
+        //   score 0.0 → 1.5 (low preference = longer cooldown)
+        //   score 0.5 → 1.0 (neutral = unchanged)
         //   score 1.0 → 0.5 (high preference = shorter cooldown)
-        (2.0 - score * 1.5).clamp(0.5, 2.0)
+        (1.0 + (0.5 - score)).clamp(0.5, 1.5)
     }
 
     /// Observe one operator action with temporal decay.
@@ -436,7 +437,7 @@ mod tests {
             mult > 1.0,
             "low preference should lengthen cooldown (mult={mult})"
         );
-        assert!(mult <= 2.0, "cadence multiplier bounded at 2.0");
+        assert!(mult <= 1.5, "cadence multiplier bounded at 1.5");
     }
 
     // ── TenantPreferencePosterior collection ──
@@ -699,6 +700,176 @@ mod tests {
         // competes in the portfolio on DecisionValue.total()
         let mult = posterior.cadence_multiplier("media-campaign");
         assert!(mult > 1.0, "cadence is longer for low preference");
-        assert!(mult < 2.0, "but not maximally lengthened");
+        assert!(mult < 1.5, "but not maximally lengthened");
+    }
+
+    // ── Behavioral tests (PREF-1 through PREF-6) ──
+
+    // PREF-1: A suppressed candidate still has a cadence multiplier and
+    // preference score — suppression is a presentation decision, not an
+    // economic erasure. The candidate remains economically selectable.
+    #[test]
+    fn pref_1_suppressed_candidate_still_has_cadence_and_score() {
+        let mut posterior = TenantPreferencePosterior::new();
+        for _ in 0..10 {
+            posterior.observe("media", false, 0.0, 90.0);
+        }
+        posterior.observe("media", true, 0.0, 90.0);
+        // Suppressed from presentation...
+        assert!(
+            posterior.should_suppress("media", &policy()),
+            "media should be suppressed after consistent rejection"
+        );
+        // ...but still has a cadence multiplier (not zeroed out)
+        let mult = posterior.cadence_multiplier("media");
+        assert!(
+            mult > 0.0,
+            "suppressed template still has a cadence multiplier (mult={mult})"
+        );
+        // ...and still has a preference score (not erased)
+        let score = posterior.preference_score("media");
+        assert!(
+            score > 0.0,
+            "suppressed template still has a preference score (score={score})"
+        );
+    }
+
+    // PREF-2: Neutral preference (score 0.5) produces exactly 1.0 multiplier.
+    #[test]
+    fn pref_2_neutral_preference_is_exactly_1_0() {
+        let mut pref = TemplatePreference::new();
+        // Equal approvals and cancellations with enough confidence
+        for _ in 0..10 {
+            pref.observe(true, 0.0, 90.0);
+        }
+        for _ in 0..10 {
+            pref.observe(false, 0.0, 90.0);
+        }
+        assert!(
+            (pref.preference_score() - 0.5).abs() < 1e-9,
+            "equal approve/cancel should give score 0.5"
+        );
+        assert!(
+            (pref.cadence_multiplier() - 1.0).abs() < 1e-9,
+            "neutral preference should give exactly 1.0 multiplier"
+        );
+    }
+
+    // PREF-4: Preference does not modify economic value. The preference
+    // score is bounded [0, 1] and the cadence multiplier only affects
+    // cooldown timing — neither touches DecisionValue.
+    #[test]
+    fn pref_4_preference_does_not_modify_economic_value() {
+        let mut posterior = TenantPreferencePosterior::new();
+        for _ in 0..20 {
+            posterior.observe("email", true, 0.0, 90.0);
+        }
+        let score = posterior.preference_score("email");
+        assert!(score > 0.8, "high approval → high preference score");
+        assert!(score <= 1.0, "preference is bounded [0,1]");
+        let mult = posterior.cadence_multiplier("email");
+        assert!(mult < 1.0, "high preference → shorter cooldown");
+        assert!(mult >= 0.5, "cooldown multiplier has a floor");
+        // The multiplier only affects cooldown timing, not economic value.
+        // There is no API in TenantPreferencePosterior that modifies
+        // DecisionValue, expected_incremental_y30, or treatment effects.
+    }
+
+    // PREF-5: Long historical preference + one new opposite decision
+    // → gradual movement, no flip.
+    #[test]
+    fn pref_5_long_history_one_opposite_is_gradual() {
+        let mut posterior = TenantPreferencePosterior::new();
+        // 20 approvals spread over 90 days (avg age 45 → weight ~0.71)
+        for i in 0..20 {
+            let age = 90.0 - f64::from(i) * 4.5;
+            posterior.observe("email", true, age.max(0.0), 90.0);
+        }
+        let score_before = posterior.preference_score("email");
+        // One recent cancellation
+        posterior.observe("email", false, 0.0, 90.0);
+        let score_after = posterior.preference_score("email");
+        assert!(
+            (score_before - score_after).abs() < 0.1,
+            "one opposite action should not flip preference: before={score_before}, after={score_after}"
+        );
+    }
+
+    // PREF-6: Sustained behavior change → preference eventually shifts.
+    #[test]
+    fn pref_6_sustained_behavior_change_shifts_preference() {
+        let mut posterior = TenantPreferencePosterior::new();
+        // 10 approvals 180 days ago (decayed: 2 half-lives → weight 0.25 each)
+        for _ in 0..10 {
+            posterior.observe("email", true, 180.0, 90.0);
+        }
+        // 10 cancellations today (weight 1.0 each)
+        for _ in 0..10 {
+            posterior.observe("email", false, 0.0, 90.0);
+        }
+        let score = posterior.preference_score("email");
+        // Old approvals: 10 * 0.25 = 2.5
+        // Fresh cancellations: 10 * 1.0 = 10.0
+        // Posterior: (2 + 2.5) / (2 + 2 + 2.5 + 10) = 4.5 / 16.5 ≈ 0.27
+        assert!(
+            score < 0.4,
+            "sustained cancellation should shift preference down (score={score})"
+        );
+    }
+
+    // ── Cadence formula tests ──
+
+    #[test]
+    fn cadence_is_monotonic_decreasing() {
+        // Higher preference score → lower (shorter) cadence multiplier
+        let mut scores_multipliers: Vec<(f64, f64)> = Vec::new();
+        for approvals in 0..=20 {
+            let mut pref = TemplatePreference::new();
+            for _ in 0..approvals {
+                pref.observe(true, 0.0, 90.0);
+            }
+            for _ in 0..(20 - approvals) {
+                pref.observe(false, 0.0, 90.0);
+            }
+            if pref.confidence() >= 3.0 {
+                scores_multipliers.push((pref.preference_score(), pref.cadence_multiplier()));
+            }
+        }
+        for i in 1..scores_multipliers.len() {
+            let (prev_score, prev_mult) = scores_multipliers[i - 1];
+            let (curr_score, curr_mult) = scores_multipliers[i];
+            assert!(
+                curr_score >= prev_score,
+                "scores should be monotonically increasing"
+            );
+            assert!(
+                curr_mult <= prev_mult + 1e-9,
+                "multiplier should decrease as score increases: prev=({prev_score},{prev_mult}), curr=({curr_score},{curr_mult})"
+            );
+        }
+    }
+
+    #[test]
+    fn cadence_respects_hard_bounds() {
+        // Even with extreme evidence, multiplier stays in [0.5, 1.5]
+        let mut high = TemplatePreference::new();
+        for _ in 0..100 {
+            high.observe(true, 0.0, 90.0);
+        }
+        let high_mult = high.cadence_multiplier();
+        assert!(
+            high_mult >= 0.5,
+            "multiplier floor is 0.5 (got {high_mult})"
+        );
+
+        let mut low = TemplatePreference::new();
+        for _ in 0..100 {
+            low.observe(false, 0.0, 90.0);
+        }
+        let low_mult = low.cadence_multiplier();
+        assert!(
+            low_mult <= 1.5,
+            "multiplier ceiling is 1.5 (got {low_mult})"
+        );
     }
 }

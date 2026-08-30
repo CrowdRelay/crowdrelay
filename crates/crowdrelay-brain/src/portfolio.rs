@@ -592,6 +592,7 @@ mod tests {
     use crate::causal_model::DispatchContext;
     use crate::opportunity::OpportunityAction;
     use crate::resource_cost::ResourceCost;
+    use std::collections::HashSet;
 
     fn make_candidate(
         template: &str,
@@ -1111,5 +1112,80 @@ mod tests {
         // The experimental candidate exceeds the cost budget → rejected.
         assert!(result.do_nothing);
         assert!(result.selected.is_empty());
+    }
+
+    // ── PREF-3: Portfolio order-independence ──
+    //
+    // The portfolio optimizer must produce the same economic winner
+    // regardless of input candidate ordering. This is critical because
+    // tenant preference and EFE both affect candidate ordering before
+    // the optimizer — if the optimizer were order-dependent, those
+    // signals would implicitly influence economic selection.
+
+    #[test]
+    fn portfolio_selection_is_order_independent() {
+        let optimizer = PortfolioOptimizer::default();
+        let candidates = vec![
+            make_candidate("a", "x", 5.0, "aud1"),
+            make_candidate("b", "y", 10.0, "aud2"),
+            make_candidate("c", "z", 3.0, "aud3"),
+            make_candidate("d", "w", 7.0, "aud1"), // overlaps with "a"
+            make_candidate("e", "v", 5.0, "aud4"), // ties with "a" in total
+        ];
+        let baseline = optimizer.select(candidates.clone());
+        let baseline_ids: HashSet<String> = baseline
+            .selected
+            .iter()
+            .map(|c| c.opportunity_id.template_id.clone())
+            .collect();
+        let baseline_fans = baseline.total_expected_fans;
+
+        // Run 100 deterministic shuffles
+        for seed in 0..100u64 {
+            let mut shuffled = candidates.clone();
+            // Simple LCG shuffle (deterministic, no external deps)
+            let mut state = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            for i in (1..shuffled.len()).rev() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let j = (state >> 33) as usize % (i + 1);
+                shuffled.swap(i, j);
+            }
+            let result = optimizer.select(shuffled);
+            let result_ids: HashSet<String> = result
+                .selected
+                .iter()
+                .map(|c| c.opportunity_id.template_id.clone())
+                .collect();
+            assert_eq!(
+                baseline_ids, result_ids,
+                "shuffle seed {seed} produced different selected set"
+            );
+            assert!(
+                (result.total_expected_fans - baseline_fans).abs() < 0.01,
+                "shuffle seed {seed} produced different total_expected_fans: {} vs {}",
+                result.total_expected_fans,
+                baseline_fans
+            );
+        }
+    }
+
+    #[test]
+    fn portfolio_ties_in_decision_value_are_order_independent() {
+        // Two candidates with identical DecisionValue and different audiences.
+        // Both should be selected regardless of input order.
+        let optimizer = PortfolioOptimizer::default();
+        let a = make_candidate("a", "x", 5.0, "aud1");
+        let b = make_candidate("b", "y", 5.0, "aud2");
+        let r1 = optimizer.select(vec![a.clone(), b.clone()]);
+        let r2 = optimizer.select(vec![b, a]);
+        assert_eq!(r1.selected.len(), r2.selected.len());
+        assert!(
+            (r1.total_expected_fans - r2.total_expected_fans).abs() < 0.01,
+            "tied candidates should produce same total regardless of order"
+        );
     }
 }
