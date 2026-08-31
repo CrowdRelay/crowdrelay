@@ -134,9 +134,7 @@ pub async fn callback(
     };
 
     // The stored state is "uuid:post_redirect_path".
-    let (state_uuid, post_redirect) = stored_state
-        .split_once(':')
-        .unwrap_or((stored_state, "/"));
+    let (state_uuid, post_redirect) = stored_state.split_once(':').unwrap_or((stored_state, "/"));
 
     if state_uuid != params.state {
         return Problem::bad_request(request_id_value).into_response();
