@@ -36,6 +36,7 @@ n8n/*
 # Docs are local-only except for the canonical architecture document.
 docs/*
 !docs/ARCHITECTURE.md
+!docs/GROWTH_INTELLIGENCE_RESEARCH.md
 
 # AppleDouble sidecars, written whenever a macOS copy reaches a host. They
 # leave the production worktree dirty and the deploy preflight refuses it.
