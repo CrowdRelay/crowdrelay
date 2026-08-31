@@ -414,11 +414,19 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let reddit_proxy_url = std::env::var("CROWDRELAY_REDDIT_PROXY_URL")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    let tiktok_client_key = std::env::var("CROWDRELAY_TIKTOK_CLIENT_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let tiktok_client_secret = std::env::var("CROWDRELAY_TIKTOK_CLIENT_SECRET")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
         facebook_page_access_token,
         reddit_proxy_url,
+        tiktok_client_key,
+        tiktok_client_secret,
         config.database.operation_timeout,
     )
     .context("invalid growth metric sync worker configuration")?;

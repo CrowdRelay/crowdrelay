@@ -84,6 +84,7 @@ const SYNCED_PLATFORMS: &[&str] = &[
     "facebook",
     "instagram",
     "soundcloud",
+    "tiktok",
 ];
 
 #[derive(Debug, Error)]
@@ -115,6 +116,9 @@ pub struct GrowthMetricSyncWorker {
     /// Rotating free-proxy pool for Reddit. Lazily populated on first
     /// Reddit sync and refreshed when exhausted or stale.
     reddit_proxy_pool: Arc<Mutex<RedditProxyPool>>,
+    /// TikTok Display API credentials for OAuth token refresh.
+    tiktok_client_key: Option<String>,
+    tiktok_client_secret: Option<String>,
     operation_timeout: Duration,
 }
 
@@ -130,6 +134,8 @@ impl GrowthMetricSyncWorker {
         youtube_api_key: Option<String>,
         facebook_page_access_token: Option<String>,
         reddit_proxy_url: Option<String>,
+        tiktok_client_key: Option<String>,
+        tiktok_client_secret: Option<String>,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
         if youtube_api_key.is_none() && facebook_page_access_token.is_none() {
@@ -156,6 +162,8 @@ impl GrowthMetricSyncWorker {
             facebook_page_access_token,
             reddit_static_proxy: reddit_proxy_url,
             reddit_proxy_pool: Arc::new(Mutex::new(RedditProxyPool::new())),
+            tiktok_client_key,
+            tiktok_client_secret,
             operation_timeout,
         }))
     }
@@ -365,6 +373,7 @@ impl GrowthMetricSyncWorker {
             "facebook" => self.sync_facebook(conn).await,
             "instagram" => self.sync_instagram(conn).await,
             "soundcloud" => self.sync_soundcloud(conn).await,
+            "tiktok" => self.sync_tiktok(conn).await,
             _ => Ok(()),
         }
     }
@@ -647,6 +656,170 @@ impl GrowthMetricSyncWorker {
             artist = %display_name,
             followers = follower_count,
             "soundcloud follower count recorded"
+        );
+        Ok(())
+    }
+
+    /// TikTok: fetch creator follower count via the Display API
+    /// /v2/user/info/ endpoint. Requires OAuth tokens stored in
+    /// fanbase_connections.credential_ref as a JSON blob. Refreshes the
+    /// access token if expired using the stored refresh token.
+    async fn sync_tiktok(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let client_key = self.tiktok_client_key.as_ref().ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi("no TikTok client key configured".to_string())
+        })?;
+        let client_secret = self.tiktok_client_secret.as_ref().ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi("no TikTok client secret configured".to_string())
+        })?;
+
+        // Read the credential_ref JSON blob from the connection.
+        let credential_json: String =
+            sqlx::query_scalar("SELECT credential_ref FROM fanbase_connections WHERE id = $1")
+                .bind(conn.id)
+                .fetch_one(&self.pool)
+                .await?;
+
+        let mut creds: TikTokCredentials = serde_json::from_str(&credential_json).map_err(|e| {
+            GrowthMetricSyncError::ProviderApi(format!("failed to parse TikTok credentials: {e}"))
+        })?;
+
+        // Refresh the access token if it's expired (or about to expire).
+        let now = OffsetDateTime::now_utc();
+        if creds.expires_at <= now + time::Duration::seconds(60) {
+            tracing::info!(
+                connection_id = %conn.id,
+                open_id = %creds.open_id,
+                "TikTok access token expired, refreshing"
+            );
+            let refresh_response = self
+                .http_client
+                .post("https://open.tiktokapis.com/v2/oauth/token/")
+                .form(&[
+                    ("client_key", client_key.as_str()),
+                    ("client_secret", client_secret.as_str()),
+                    ("refresh_token", creds.refresh_token.as_str()),
+                    ("grant_type", "refresh_token"),
+                ])
+                .send()
+                .await?;
+
+            if !refresh_response.status().is_success() {
+                return Err(GrowthMetricSyncError::ProviderApi(format!(
+                    "TikTok token refresh failed: HTTP {}",
+                    refresh_response.status()
+                )));
+            }
+
+            let refresh_data: serde_json::Value = refresh_response.json().await?;
+            let data = refresh_data.get("data").ok_or_else(|| {
+                GrowthMetricSyncError::ProviderApi(
+                    "TikTok refresh response missing data".to_string(),
+                )
+            })?;
+
+            creds.access_token = data
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&creds.access_token)
+                .to_string();
+            creds.refresh_token = data
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&creds.refresh_token)
+                .to_string();
+            let expires_in = data
+                .get("expires_in")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(86400);
+            creds.expires_at = now + time::Duration::seconds(expires_in.saturating_sub(60));
+
+            // Persist the refreshed tokens back to the DB.
+            let updated_json = serde_json::to_string(&creds).map_err(|e| {
+                GrowthMetricSyncError::ProviderApi(format!(
+                    "failed to serialize TikTok credentials: {e}"
+                ))
+            })?;
+            sqlx::query("UPDATE fanbase_connections SET credential_ref = $1, updated_at = now() WHERE id = $2")
+                .bind(&updated_json)
+                .bind(conn.id)
+                .execute(&self.pool)
+                .await?;
+
+            tracing::info!(
+                connection_id = %conn.id,
+                open_id = %creds.open_id,
+                "TikTok access token refreshed"
+            );
+        }
+
+        // Fetch user info with follower_count.
+        let user_info_response = self
+            .http_client
+            .get("https://open.tiktokapis.com/v2/user/info/")
+            .query(&[(
+                "fields",
+                "open_id,display_name,follower_count,following_count,likes_count,video_count",
+            )])
+            .header("Authorization", format!("Bearer {}", creds.access_token))
+            .send()
+            .await?;
+
+        if !user_info_response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "TikTok user info failed: HTTP {}",
+                user_info_response.status()
+            )));
+        }
+
+        let user_info: serde_json::Value = user_info_response.json().await?;
+
+        // Check for API-level error.
+        if let Some(error) = user_info.get("error")
+            && error.get("code").and_then(|v| v.as_str()) != Some("ok")
+        {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "TikTok API error: {}",
+                error
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            )));
+        }
+
+        let user = user_info
+            .get("data")
+            .and_then(|d| d.get("user"))
+            .ok_or_else(|| {
+                GrowthMetricSyncError::ProviderApi("TikTok response missing user data".to_string())
+            })?;
+
+        let follower_count = user
+            .get("follower_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let display_name = user
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("TikTok creator");
+
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "tiktok",
+            "followers",
+            &format!("TikTok followers — {display_name}"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            open_id = %creds.open_id,
+            artist = %display_name,
+            followers = follower_count,
+            "tiktok follower count recorded"
         );
         Ok(())
     }
@@ -1098,6 +1271,20 @@ struct InstagramUserResponse {
     username: Option<String>,
     #[serde(default)]
     followers_count: i64,
+}
+
+// --- TikTok credential types ---
+
+/// OAuth tokens stored in fanbase_connections.credential_ref as JSON.
+/// The sync worker reads this, refreshes the access_token when expired,
+/// and persists the updated tokens back.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct TikTokCredentials {
+    access_token: String,
+    refresh_token: String,
+    open_id: String,
+    #[serde(with = "time::serde::rfc3339")]
+    expires_at: OffsetDateTime,
 }
 
 // --- SoundCloud response types ---

@@ -9,7 +9,7 @@
     "crates/crowdrelay-api/src/lib.rs": 1600,
     "crates/crowdrelay-api/src/ops.rs": 1400,
     "crates/crowdrelay-api/src/proofs.rs": 1954,
-    "crates/crowdrelay-api/src/routing.rs": 931,
+    "crates/crowdrelay-api/src/routing.rs": 939,
     "crates/crowdrelay-application/src/autopilot/evaluate.rs": 1358,
     "crates/crowdrelay-application/src/autopilot/model.rs": 1873,
     "crates/crowdrelay-brain/src/bayesian.rs": 1339,
@@ -34,7 +34,7 @@
     "crates/crowdrelay-worker/src/community_executor.rs": 1322,
     "crates/crowdrelay-worker/src/draws.rs": 1497,
     "crates/crowdrelay-worker/src/event_sync.rs": 1823,
-    "crates/crowdrelay-worker/src/growth_metric_sync.rs": 1441,
+    "crates/crowdrelay-worker/src/growth_metric_sync.rs": 1628,
     "crates/crowdrelay-worker/src/retention.rs": 1419
   },
   "policy": "ratchet-not-hard-cap",

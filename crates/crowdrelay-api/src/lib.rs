@@ -66,6 +66,7 @@ mod autopilot;
 mod beacon_signal;
 mod commerce;
 mod concert_qr;
+mod connections_tiktok;
 mod control_plane;
 mod ecosystem;
 mod event_copy;

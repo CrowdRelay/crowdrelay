@@ -47,6 +47,14 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(fanbase::ingest_fanbase),
         )
         .route(
+            "/v1/admin/connections/tiktok/authorize",
+            get(connections_tiktok::authorize),
+        )
+        .route(
+            "/v1/public/connections/tiktok/callback",
+            get(connections_tiktok::callback),
+        )
+        .route(
             "/v1/beacon/invitations/exchange",
             post(beacon_signal::exchange_invite),
         )

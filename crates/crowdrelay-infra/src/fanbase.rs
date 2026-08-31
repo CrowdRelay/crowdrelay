@@ -556,6 +556,47 @@ impl PostgresFanbaseRepository {
         .map_err(Self::unexpected)?;
         Ok(())
     }
+
+    /// Upserts a TikTok connection with OAuth tokens. Called by the
+    /// TikTok OAuth callback handler after a successful token exchange.
+    /// The `credential_json` blob contains access_token, refresh_token,
+    /// open_id, and expires_at as RFC 3339.
+    pub async fn upsert_tiktok_connection(
+        &self,
+        workspace_id: Uuid,
+        open_id: &str,
+        credential_json: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status, provider_account_id
+            )
+            VALUES ($1, 'tiktok', $2, $3, $4, 'connected', $2)
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                credential_ref = EXCLUDED.credential_ref,
+                status = 'connected',
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(open_id)
+        .bind(credential_json)
+        .bind(label)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        // Notify the growth metric sync worker so it picks up the new
+        // connection immediately.
+        sqlx::query("SELECT pg_notify('growth_metric_sync', 'tiktok-connected')")
+            .execute(&self.pool)
+            .await
+            .map_err(Self::unexpected)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
