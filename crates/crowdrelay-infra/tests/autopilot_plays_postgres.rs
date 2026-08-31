@@ -299,6 +299,17 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     // Now execute it for real. This is the only place the dispatch query, the
     // recipient write and the outbox emission run together, and a mistake in
     // any of them is invisible from Rust.
+    // The action ledger state machine requires AUTHORIZED → QUEUED → RUNNING,
+    // so we set status to 'queued' first, then 'processing'.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions
+         SET status='queued'
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "UPDATE viryaos_autopilot_actions
          SET status='processing', attempt_count=1, started_at=now()
