@@ -118,9 +118,13 @@ if ! grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$EDGE_CADDYFILE"; then
   sed "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g; s|reverse_proxy ${GREEN_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g; s|reverse_proxy ${ACTIVE_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g" "$EDGE_CADDYFILE" > /tmp/caddy-reconcile.tmp
   cat /tmp/caddy-reconcile.tmp > "$EDGE_CADDYFILE"
   rm -f /tmp/caddy-reconcile.tmp
+  # Copy the fixed Caddyfile directly into the container (bypasses any
+  # stale bind mount) and reload. No restart needed — reload is zero-downtime.
+  docker cp "$EDGE_CADDYFILE" "$EDGE_CONTAINER:/etc/caddy/Caddyfile" >/dev/null 2>&1 || \
+    fail "cannot copy Caddyfile into edge Caddy container"
   docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
-    docker restart "$EDGE_CONTAINER" >/dev/null 2>&1
-  sleep 3
+    fail "caddy reload failed after reconciliation — investigate manually"
+  sleep 2
   grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$EDGE_CADDYFILE" || fail "Caddyfile reconciliation failed — cannot find dynamic a ${ACTIVE_ALIAS}"
   printf 'RECONCILE=PASS Caddyfile now uses dynamic a %s\n' "$ACTIVE_ALIAS"
 fi
@@ -129,13 +133,17 @@ fi
 # The ecosystem deploy syncs source code (git merge) which may replace the
 # Caddyfile with a new inode. The Docker bind mount still points at the old
 # inode, so the container serves stale config. Detect and fix this before
-# the deploy proceeds.
+# the deploy proceeds by copying the file directly into the container
+# and reloading — no restart needed.
 if ! cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE"; then
-  printf 'EDGE_RECONCILE=STALE restarting edge Caddy to pick up bind-mounted Caddyfile\n' >&2
-  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || fail "failed to restart edge Caddy"
-  sleep 3
+  printf 'EDGE_RECONCILE=STALE copying Caddyfile into container and reloading\n' >&2
+  docker cp "$EDGE_CADDYFILE" "$EDGE_CONTAINER:/etc/caddy/Caddyfile" >/dev/null 2>&1 || \
+    fail "cannot copy Caddyfile into edge Caddy container"
+  docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
+    fail "caddy reload failed after stale bind mount fix — investigate manually"
+  sleep 2
   cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE" || \
-    fail "edge Caddyfile still stale after restart — manual intervention required"
+    fail "edge Caddyfile still stale after copy+reload — manual intervention required"
   printf 'EDGE_RECONCILE=PASS\n'
 fi
 
@@ -312,8 +320,10 @@ if [[ -f "$AREA_CADDYFILE" ]] && ! grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$AREA_C
   sed "s|http://${BLUE_ALIAS}:8080|http://${ACTIVE_ALIAS}:8080|g; s|http://${GREEN_ALIAS}:8080|http://${ACTIVE_ALIAS}:8080|g; s|http://api:8080|http://${ACTIVE_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp"
   cat "$area_tmp" > "$AREA_CADDYFILE"
   rm -f "$area_tmp"
-  docker compose -f compose.area-management.yaml up -d --force-recreate area-management-proxy >/dev/null 2>&1 || \
-    docker restart "$AREA_PROXY_CONTAINER" >/dev/null 2>&1 || true
+  # Copy the fixed Caddyfile into the container and reload — no restart.
+  docker cp "$AREA_CADDYFILE" "$AREA_PROXY_CONTAINER:/etc/caddy/Caddyfile" >/dev/null 2>&1 || true
+  docker exec "$AREA_PROXY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
+    docker compose -f compose.area-management.yaml up -d --force-recreate area-management-proxy >/dev/null 2>&1 || true
   printf 'AREA_PROXY=PASS upstream=%s\n' "$ACTIVE_ALIAS"
 fi
 
