@@ -188,6 +188,34 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             axum::routing::delete(crate::fanbase::delete_fanbase_connection),
         )
         .route(
+            "/v1/control-plane/connections/discord",
+            post(crate::connections_simple::create_discord_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/telegram",
+            post(crate::connections_simple::create_telegram_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/lastfm",
+            post(crate::connections_simple::create_lastfm_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/deezer",
+            post(crate::connections_simple::create_deezer_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/discogs",
+            post(crate::connections_simple::create_discogs_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/bluesky",
+            post(crate::connections_simple::create_bluesky_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/bandcamp",
+            post(crate::connections_simple::create_bandcamp_connection),
+        )
+        .route(
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",
             post(crate::fanbase::register_manual_community_post),
         )

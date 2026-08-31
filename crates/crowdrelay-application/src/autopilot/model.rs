@@ -1459,6 +1459,13 @@ fn platform_label(platform: &MetricPlatform) -> String {
         MetricPlatform::SoundCloud => "SoundCloud".into(),
         MetricPlatform::Instagram => "Instagram".into(),
         MetricPlatform::Facebook => "Facebook".into(),
+        MetricPlatform::Discord => "Discord".into(),
+        MetricPlatform::Telegram => "Telegram".into(),
+        MetricPlatform::LastFm => "Last.fm".into(),
+        MetricPlatform::Deezer => "Deezer".into(),
+        MetricPlatform::Discogs => "Discogs".into(),
+        MetricPlatform::Bluesky => "Bluesky".into(),
+        MetricPlatform::Bandcamp => "Bandcamp".into(),
     }
 }
 

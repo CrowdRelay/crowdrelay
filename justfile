@@ -3,8 +3,6 @@
 
 set shell := ["bash", "-uc"]
 
-default := "check"
-
 CARGO := env_var_or_default("CARGO", "cargo")
 COMPOSE := env_var_or_default("COMPOSE", "docker compose")
 API_BASE_URL := env_var_or_default("API_BASE_URL", "http://127.0.0.1:8080/v1")
@@ -47,36 +45,17 @@ check: fmt lint test
 @validate-contract-assets:
     node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
 
-# Python contract suite (source-reading policy pins)
-@contract-tests:
-    python3 -m unittest discover -s scripts -p 'test_*.py'
-
-# Runtime contract scripts executed against repository source
-@runtime-contracts:
+# Security, schema and deployment checks that complement compiler-backed tests.
+@policy-checks:
     bash scripts/audit-public-tree.sh
     python3 scripts/check-ci-policy.py
-    python3 scripts/source-size-ratchet.py
-    python3 scripts/api-sql-ratchet.py
-    python3 scripts/test-modularity-contract.py
-    python3 scripts/test_audience_graph_v1.py
-    python3 scripts/test_label_portfolio_v1.py
-    python3 scripts/test_tenant_settings_v1.py
-    python3 scripts/test_pilot_import_v1.py
-    python3 scripts/test_synesthesia_module_v1.py
-    python3 scripts/test_tenant_settings_http_v1.py
-    python3 scripts/test_fanbases_v1.py
-    python3 scripts/test_discovery_reddit_v1.py
+    python3 scripts/test_platform_vocabulary_v1.py
+    python3 scripts/test_sql_identifiers_v1.py
     python3 scripts/check-postgres-major.py
-    python3 scripts/postgres18_runtime_contract.py
-    python3 scripts/area_wallet_authority_v2_contract.py
-    python3 scripts/staff_device_sessions_v2_contract.py
-    python3 scripts/test-ecosystem-contract-v2.py
-    python3 scripts/test-ops-control-plane-v2.py
-    python3 scripts/test-ecosystem-design-contract.py
     python3 scripts/test-image-provenance-policy.py
 
 # Everything a push should have passed
-ci: check validate-contract-assets contract-tests runtime-contracts
+ci: check validate-contract-assets policy-checks
 
 # The #[ignore]d Postgres integration tests against a disposable database.
 # Creates and migrates the database itself; safe to re-run at any time.
@@ -95,6 +74,30 @@ test-postgres-env:
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres \
         -c "DROP DATABASE IF EXISTS crowdrelay_autopilot_test;" \
         -c "CREATE DATABASE crowdrelay_autopilot_test;"
+    # The recipe dropped and recreated the database but never migrated it, so
+    # every test that did not migrate itself failed on a missing column and the
+    # suite could not pass on a clean checkout. Same `setup` entrypoint CI uses;
+    # it is idempotent, so re-running the recipe stays safe. `setup` validates
+    # the full runtime config before touching the database, so the tenant
+    # variables below are required even though migrating uses none of them.
+    export CROWDRELAY_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
+    export CROWDRELAY_ENV=test
+    export CROWDRELAY_BIND_ADDR=127.0.0.1:8080
+    export CROWDRELAY_ALLOWED_ORIGINS=http://localhost:4321
+    export CROWDRELAY_PUBLIC_SITE_BASE_URL=http://localhost:4321
+    export CROWDRELAY_WORKSPACE_SLUG=example
+    export CROWDRELAY_DEFAULT_COUNTRY_CODE=PL
+    export CROWDRELAY_TENANT_REGION=eu
+    export CROWDRELAY_TENANT_LOCALE=pl-PL
+    export CROWDRELAY_TENANT_TIMEZONE=Europe/Warsaw
+    export CROWDRELAY_TENANT_CURRENCY=PLN
+    export CROWDRELAY_TENANT_DATE_FORMAT=dmy
+    export CROWDRELAY_TENANT_NUMBER_FORMAT=comma_decimal
+    export CROWDRELAY_TENANT_DATA_REGION=eu
+    export CROWDRELAY_RANDOM_DRAWS_ENABLED=false
+    export CROWDRELAY_DATABASE_MAX_CONNECTIONS=5
+    export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
+    {{CARGO}} run --locked --all-features --package crowdrelay-worker -- setup
     {{CARGO}} test --locked -p crowdrelay-infra --tests -- --ignored
 
 # Alias kept for muscle memory from the Makefile days

@@ -177,7 +177,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 _ => "",
             };
             let is_direct_action = !template_id.is_empty()
-                && !matches!(template_id, "reddit-scanner" | "growth-strategist");
+                && !matches!(
+                    template_id,
+                    "reddit-scanner" | "telegram-scanner" | "metal-archives-scanner" | "bandcamp-scanner" | "growth-strategist"
+                );
             if !is_direct_action {
                 non_experiment_indices.push(i);
                 continue;
@@ -522,8 +525,12 @@ fn unit_id_from_decision_key(decision_key: &str) -> String {
 fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str) -> u32 {
     match template_id {
         "reddit-scanner" => policy.reddit_scanner_cooldown_hours,
+        "telegram-scanner" => policy.telegram_scanner_cooldown_hours,
+        "metal-archives-scanner" => policy.metal_archives_scanner_cooldown_hours,
+        "bandcamp-scanner" => policy.bandcamp_scanner_cooldown_hours,
         "press-pitch" => policy.press_pitch_cooldown_hours,
         "social-post" => policy.social_post_cooldown_hours,
+        "telegram-poster" => policy.telegram_poster_cooldown_hours,
         "community-engager" => policy.community_engager_cooldown_hours,
         "signal-inviter" => policy.signal_inviter_cooldown_hours,
         "growth-strategist" => policy.growth_strategist_cooldown_hours,

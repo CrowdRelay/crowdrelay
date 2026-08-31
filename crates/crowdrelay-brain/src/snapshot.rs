@@ -69,9 +69,13 @@ pub struct CommunityEngagementSummary {
 #[serde(default)]
 pub struct GrowthIntelligencePolicy {
     pub reddit_scanner_cooldown_hours: u32,
+    pub telegram_scanner_cooldown_hours: u32,
+    pub metal_archives_scanner_cooldown_hours: u32,
+    pub bandcamp_scanner_cooldown_hours: u32,
     pub community_engager_cooldown_hours: u32,
     pub press_pitch_cooldown_hours: u32,
     pub social_post_cooldown_hours: u32,
+    pub telegram_poster_cooldown_hours: u32,
     pub signal_inviter_cooldown_hours: u32,
     pub growth_strategist_cooldown_hours: u32,
     pub press_pitch_event_lead_days: u32,
@@ -163,9 +167,13 @@ impl Default for GrowthIntelligencePolicy {
     fn default() -> Self {
         Self {
             reddit_scanner_cooldown_hours: 168,
+            telegram_scanner_cooldown_hours: 168,
+            metal_archives_scanner_cooldown_hours: 336,
+            bandcamp_scanner_cooldown_hours: 336,
             community_engager_cooldown_hours: 120,
             press_pitch_cooldown_hours: 72,
             social_post_cooldown_hours: 48,
+            telegram_poster_cooldown_hours: 48,
             signal_inviter_cooldown_hours: 48,
             growth_strategist_cooldown_hours: 24,
             press_pitch_event_lead_days: 30,

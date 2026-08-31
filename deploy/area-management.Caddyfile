@@ -40,6 +40,7 @@
         /v1/control-plane/tenant-settings/* \
         /v1/control-plane/fanbases \
         /v1/control-plane/fanbases/* \
+        /v1/control-plane/connections/* \
         /v1/control-plane/webhook-endpoints \
         /v1/control-plane/webhook-endpoints/* \
         /v1/control-plane/audience/overview \

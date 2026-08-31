@@ -33,6 +33,8 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, encrypt_value};
+
+mod simple_platforms;
 use serde::Deserialize;
 use sqlx::{FromRow, PgPool, postgres::PgListener};
 use thiserror::Error;
@@ -74,19 +76,33 @@ const PROXY_POOL_MAX: usize = 10;
 /// How long to keep a proxy in the pool before forcing a refresh.
 const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
 
-/// Platforms the growth metric sync worker handles. The fanbase_connection
-/// platform is the connectable surface; the metric series platform is the
-/// coverage bucket. Reddit connections record under 'social' because the
-/// MetricPlatform enum has no 'reddit' variant — Reddit feeds the social
-/// coverage bucket.
+/// Platforms this worker polls.
+///
+/// Spelled out rather than computed because `scripts/test_platform_vocabulary_contract.py`
+/// reads these literals to check them against the `fanbase_connections` CHECK
+/// constraint. The list is not free-hand, though: `synced_platforms_match_the_domain`
+/// asserts it equals `Platform::ALL` filtered by `polled_by_growth_metric_sync`,
+/// so the enum stays the source of truth and this stays greppable.
+///
+/// The fanbase_connection platform is the connectable surface; the metric
+/// series platform is the coverage bucket. Reddit connections record under
+/// 'social' because the MetricPlatform enum has no 'reddit' variant — Reddit
+/// feeds the social coverage bucket.
 const SYNCED_PLATFORMS: &[&str] = &[
-    "youtube",
-    "spotify",
     "tiktok",
+    "reddit",
+    "spotify",
+    "youtube",
     "facebook",
     "instagram",
     "soundcloud",
-    "reddit",
+    "discord",
+    "telegram",
+    "lastfm",
+    "deezer",
+    "discogs",
+    "bluesky",
+    "bandcamp",
 ];
 
 #[derive(Debug, Error)]
@@ -124,16 +140,25 @@ pub struct GrowthMetricSyncWorker {
     /// Encryption key for decrypting OAuth tokens stored in
     /// `encrypted_access_token` / `encrypted_refresh_token`.
     response_encryption_key: SensitiveResponseKey,
+    /// Last.fm API key for artist.getInfo calls.
+    lastfm_api_key: Option<String>,
+    /// Discogs personal access token for artist stats calls.
+    discogs_token: Option<String>,
     operation_timeout: Duration,
 }
 
 impl GrowthMetricSyncWorker {
-    /// Creates a new worker. Returns `Ok(None)` if no platform is configured
-    /// (no YouTube API key and no Facebook token) — the caller should
-    /// not spawn the worker in that case. Reddit needs no credentials, so
-    /// the worker is enabled as long as any other platform is configured.
-    /// Spotify needs no credentials either — it uses Spotify's public embed
-    /// page to obtain a web player token.
+    /// Creates a new worker.
+    ///
+    /// The worker is always spawned. It used to return `Ok(None)` when no
+    /// process-level API key was set, but four platforms need none —
+    /// `Platform::syncs_without_process_credential` lists them: Discord reads a
+    /// free public API, Telegram carries its bot token on the connection row,
+    /// Reddit goes through the proxy pool and Spotify mints a token from the
+    /// public embed page. Under the old gate an operator could register a
+    /// Discord connection, get a 201, and have it never sync with nothing
+    /// logged. Idle cost is one `PgListener` connection: the loop waits on
+    /// NOTIFY and does no work until a due connection exists.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
@@ -142,15 +167,32 @@ impl GrowthMetricSyncWorker {
         reddit_proxy_url: Option<String>,
         tiktok_client_key: Option<String>,
         tiktok_client_secret: Option<String>,
+        lastfm_api_key: Option<String>,
+        discogs_token: Option<String>,
         response_encryption_key: SensitiveResponseKey,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
-        if youtube_api_key.is_none()
-            && facebook_page_access_token.is_none()
-            && tiktok_client_key.is_none()
-        {
-            tracing::info!("growth metric sync disabled: no platform credentials configured");
-            return Ok(None);
+        // Report which platforms this process can actually reach, so a
+        // connection that will never sync is visible at startup instead of
+        // being diagnosed from an absence of metric points weeks later.
+        let credentialled = [
+            ("youtube", youtube_api_key.is_some()),
+            ("facebook/instagram", facebook_page_access_token.is_some()),
+            ("tiktok", tiktok_client_key.is_some()),
+            ("lastfm", lastfm_api_key.is_some()),
+            ("discogs", discogs_token.is_some()),
+        ];
+        let missing: Vec<&str> = credentialled
+            .iter()
+            .filter(|(_, present)| !present)
+            .map(|(name, _)| *name)
+            .collect();
+        if !missing.is_empty() {
+            tracing::warn!(
+                platforms = %missing.join(","),
+                "growth metric sync: no credentials for these platforms; \
+                 connections to them will fail until the keys are set"
+            );
         }
         // The main HTTP client is used for YouTube and Spotify — no proxy.
         // Reddit gets its own per-request clients with proxies.
@@ -175,6 +217,8 @@ impl GrowthMetricSyncWorker {
             tiktok_client_key,
             tiktok_client_secret,
             response_encryption_key,
+            lastfm_api_key,
+            discogs_token,
             operation_timeout,
         }))
     }
@@ -306,7 +350,14 @@ impl GrowthMetricSyncWorker {
                         WHEN 'instagram' THEN 5
                         WHEN 'soundcloud' THEN 6
                         WHEN 'reddit' THEN 7
-                        ELSE 8
+                        WHEN 'discord' THEN 8
+                        WHEN 'telegram' THEN 9
+                        WHEN 'lastfm' THEN 10
+                        WHEN 'deezer' THEN 11
+                        WHEN 'discogs' THEN 12
+                        WHEN 'bluesky' THEN 13
+                        WHEN 'bandcamp' THEN 14
+                        ELSE 15
                      END,
                      fc.created_at
             LIMIT $3
@@ -409,7 +460,20 @@ impl GrowthMetricSyncWorker {
             "instagram" => self.sync_instagram(conn).await,
             "soundcloud" => self.sync_soundcloud(conn).await,
             "tiktok" => self.sync_tiktok(conn).await,
-            _ => Ok(()),
+            "discord" => self.sync_discord(conn).await,
+            "telegram" => self.sync_telegram(conn).await,
+            "lastfm" => self.sync_lastfm(conn).await,
+            "deezer" => self.sync_deezer(conn).await,
+            "discogs" => self.sync_discogs(conn).await,
+            "bluesky" => self.sync_bluesky(conn).await,
+            "bandcamp" => self.sync_bandcamp(conn).await,
+            // The lease query filters on SYNCED_PLATFORMS, so reaching this arm
+            // means that list and this match disagree. Returning Ok would mark
+            // the connection synced and record nothing — the failure would look
+            // like a platform that simply never moves. Fail loudly instead.
+            other => Err(GrowthMetricSyncError::ProviderApi(format!(
+                "connection platform '{other}' is leased for sync but has no sync arm"
+            ))),
         }
     }
 
@@ -1569,6 +1633,29 @@ async fn record_metric_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crowdrelay_domain::fanbase::Platform as ConnectionPlatform;
+
+    #[test]
+    fn synced_platforms_match_the_domain() {
+        // SYNCED_PLATFORMS is a literal list so the Python vocabulary contract
+        // can read it, but the enum decides what belongs in it. Adding a
+        // connection platform and answering `polled_by_growth_metric_sync`
+        // fails here until the literal list is updated to match — which is the
+        // point: the list is checked, not trusted.
+        let expected: Vec<&str> = ConnectionPlatform::ALL
+            .into_iter()
+            .filter(|platform| platform.polled_by_growth_metric_sync())
+            .map(ConnectionPlatform::as_str)
+            .collect();
+        let mut actual = SYNCED_PLATFORMS.to_vec();
+        let mut expected_sorted = expected.clone();
+        actual.sort_unstable();
+        expected_sorted.sort_unstable();
+        assert_eq!(
+            actual, expected_sorted,
+            "SYNCED_PLATFORMS drifted from Platform::polled_by_growth_metric_sync"
+        );
+    }
 
     #[test]
     fn youtube_response_parses_subscriber_count() {
@@ -1759,5 +1846,120 @@ mod tests {
         let html = r#"<html><script>window.__sc_hydration = [{"hydratable":"sound","data":{"id":1}}];</script></html>"#;
         let user = extract_soundcloud_user_data(html);
         assert!(user.is_none());
+    }
+
+    #[test]
+    fn lastfm_response_parses_listener_and_playcount() {
+        let json = serde_json::json!({
+            "artist": {
+                "name": "Iron Maiden",
+                "stats": {
+                    "listeners": "1548327",
+                    "playcount": "58392104"
+                }
+            }
+        });
+        let listeners = json
+            .get("artist")
+            .and_then(|a| a.get("stats"))
+            .and_then(|s| s.get("listeners"))
+            .and_then(|l| l.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let playcount = json
+            .get("artist")
+            .and_then(|a| a.get("stats"))
+            .and_then(|s| s.get("playcount"))
+            .and_then(|p| p.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        assert_eq!(listeners, 1_548_327);
+        assert_eq!(playcount, 58_392_104);
+    }
+
+    #[test]
+    fn lastfm_response_without_stats_returns_zero() {
+        let json = serde_json::json!({"artist": {"name": "Unknown"}});
+        let listeners = json
+            .get("artist")
+            .and_then(|a| a.get("stats"))
+            .and_then(|s| s.get("listeners"))
+            .and_then(|l| l.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        assert_eq!(listeners, 0);
+    }
+
+    #[test]
+    fn deezer_response_parses_fan_count() {
+        let json = serde_json::json!({"id": 13, "name": "Eminem", "nb_fan": 1234567});
+        let fan_count = json
+            .get("nb_fan")
+            .and_then(serde_json::Value::as_i64)
+            .expect("fan count");
+        assert_eq!(fan_count, 1_234_567);
+    }
+
+    #[test]
+    fn deezer_error_response_is_detected() {
+        let json = serde_json::json!({"error": {"code": 800, "message": "no such artist"}});
+        assert!(json.get("error").is_some());
+    }
+
+    #[test]
+    fn discogs_response_parses_community_stats() {
+        let json = serde_json::json!({
+            "id": 18839,
+            "name": "Iron Maiden",
+            "stats": {"community": {"in_collection": 45678, "in_wantlist": 12345}}
+        });
+        let stats = json.get("stats").and_then(|s| s.get("community"));
+        let in_collection = stats
+            .and_then(|s| s.get("in_collection"))
+            .and_then(serde_json::Value::as_i64)
+            .expect("in_collection");
+        let in_wantlist = stats
+            .and_then(|s| s.get("in_wantlist"))
+            .and_then(serde_json::Value::as_i64)
+            .expect("in_wantlist");
+        assert_eq!(in_collection, 45_678);
+        assert_eq!(in_wantlist, 12_345);
+    }
+
+    #[test]
+    fn bluesky_response_parses_followers_count() {
+        let json = serde_json::json!({"did": "did:plc:abc", "handle": "virya.bsky.social", "followersCount": 98765});
+        let followers = json
+            .get("followersCount")
+            .and_then(serde_json::Value::as_i64)
+            .expect("followers");
+        assert_eq!(followers, 98_765);
+    }
+
+    #[test]
+    fn bandcamp_html_supporter_count_is_parsed() {
+        let html = r#"<div class="community-recent-supporters">
+    <h2 class="heading">Recent Supporters</h2>
+    <ol class="supporters">
+        <li><a href="https://bandcamp.com/gierula" class="supporter">Fan 1</a></li>
+        <li><a href="https://bandcamp.com/tasjonde" class="supporter">Fan 2</a></li>
+        <li><a href="https://bandcamp.com/andbia" class="supporter">Fan 3</a></li>
+    </ol>
+</div>"#;
+        let count: i64 = html
+            .matches(r#"class="supporter""#)
+            .count()
+            .try_into()
+            .unwrap_or(0);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn bandcamp_html_without_supporters_section_is_detected() {
+        let html = r#"<html><body><h1>Page not found</h1></body></html>"#;
+        assert!(
+            !html.contains(r#"class="supporters""#)
+                && !html.contains("community-recent-supporters")
+        );
     }
 }

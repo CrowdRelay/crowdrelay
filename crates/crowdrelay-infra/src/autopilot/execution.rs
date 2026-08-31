@@ -272,7 +272,10 @@ pub(super) async fn schedule_effect_measurement(
             // acquires fans directly. Measuring them on fan growth would
             // credit them for fans acquired by other workers (credit
             // leakage + polluted posteriors).
-            let is_scanner = template_id == "reddit-scanner";
+            let is_scanner = template_id == "reddit-scanner"
+                || template_id == "telegram-scanner"
+                || template_id == "metal-archives-scanner"
+                || template_id == "bandcamp-scanner";
             let is_strategist = template_id == "growth-strategist";
             if !is_scanner && !is_strategist {
                 // Direct-action workers: measure fan growth (the existing

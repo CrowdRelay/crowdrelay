@@ -55,7 +55,10 @@ impl OpportunityAction {
     /// read-only action).
     #[must_use]
     pub fn from_template(template_id: &str) -> Self {
-        if template_id.starts_with("reddit-scanner") {
+        if template_id.starts_with("reddit-scanner")
+            || template_id.starts_with("telegram-scanner")
+            || template_id.starts_with("metal-archives-scanner")
+        {
             Self::Scan
         } else if template_id.starts_with("community-engager") {
             Self::Post

@@ -23,18 +23,25 @@ use uuid::Uuid;
 pub const DEFAULT_MEMBER_SITE_BASE_URL: &str = "https://virya.music";
 pub const DEFAULT_MEMBER_AREA_PATH: &str = "pl/latarnik";
 pub const DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";
+pub const DEFAULT_NORTH_STAR_METRIC: &str = "signal_installs";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 3] = [
+pub const EDITABLE_KEYS: [&str; 6] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
+    KEY_SIGNAL_ENABLED,
+    KEY_SYNESTHESIA_ENABLED,
+    KEY_NORTH_STAR_METRIC,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
 const KEY_MEMBER_AREA_PATH: &str = "member_area_path";
 const KEY_SYNESTHESIA_CAMPAIGN_SLUG: &str = "synesthesia_campaign_slug";
+const KEY_SIGNAL_ENABLED: &str = "signal_enabled";
+const KEY_SYNESTHESIA_ENABLED: &str = "synesthesia_enabled";
+const KEY_NORTH_STAR_METRIC: &str = "north_star_metric";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -43,6 +50,12 @@ pub struct TenantBrandSettings {
     pub member_site_base_url: String,
     pub member_area_path: String,
     pub synesthesia_campaign_slug: String,
+    /// Signal mobile app opt-in. Default true (preserves existing tenants).
+    pub signal_enabled: bool,
+    /// Synesthesia product opt-in. Default false.
+    pub synesthesia_enabled: bool,
+    /// Brain north star metric. Default "signal_installs".
+    pub north_star_metric: String,
 }
 
 impl Default for TenantBrandSettings {
@@ -51,6 +64,9 @@ impl Default for TenantBrandSettings {
             member_site_base_url: DEFAULT_MEMBER_SITE_BASE_URL.to_owned(),
             member_area_path: DEFAULT_MEMBER_AREA_PATH.to_owned(),
             synesthesia_campaign_slug: DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG.to_owned(),
+            signal_enabled: true,
+            synesthesia_enabled: false,
+            north_star_metric: DEFAULT_NORTH_STAR_METRIC.to_owned(),
         }
     }
 }
@@ -109,7 +125,7 @@ impl TenantSettingsRepository {
     }
 
     /// Brand-relevant settings for one workspace, cache-first. A cache miss
-    /// reads at most three rows; an empty result set yields the defaults.
+    /// reads at most six rows; an empty result set yields the defaults.
     pub async fn brand_settings(
         &self,
         workspace_id: Uuid,
@@ -126,13 +142,16 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4)
+              AND key IN ($2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(workspace_id)
         .bind(KEY_MEMBER_SITE_BASE_URL)
         .bind(KEY_MEMBER_AREA_PATH)
         .bind(KEY_SYNESTHESIA_CAMPAIGN_SLUG)
+        .bind(KEY_SIGNAL_ENABLED)
+        .bind(KEY_SYNESTHESIA_ENABLED)
+        .bind(KEY_NORTH_STAR_METRIC)
         .fetch_all(&self.pool)
         .await?;
         let mut settings = TenantBrandSettings::default();
@@ -141,6 +160,9 @@ impl TenantSettingsRepository {
                 KEY_MEMBER_SITE_BASE_URL => settings.member_site_base_url = value,
                 KEY_MEMBER_AREA_PATH => settings.member_area_path = value,
                 KEY_SYNESTHESIA_CAMPAIGN_SLUG => settings.synesthesia_campaign_slug = value,
+                KEY_SIGNAL_ENABLED => settings.signal_enabled = value == "true",
+                KEY_SYNESTHESIA_ENABLED => settings.synesthesia_enabled = value == "true",
+                KEY_NORTH_STAR_METRIC => settings.north_star_metric = value,
                 _ => {}
             }
         }
@@ -214,6 +236,10 @@ mod tests {
             settings.synesthesia_campaign_slug,
             "virya-synesthesia-album-v1"
         );
+        // Product opt-in defaults: Signal on, Synesthesia off.
+        assert!(settings.signal_enabled);
+        assert!(!settings.synesthesia_enabled);
+        assert_eq!(settings.north_star_metric, "signal_installs");
     }
 
     #[test]

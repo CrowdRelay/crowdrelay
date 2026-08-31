@@ -42,11 +42,18 @@ fn audience_key_for(candidate: &DecisionCandidate, workspace_id: WorkspaceId) ->
     {
         return format!("community:{target_id}");
     }
-    // Workspace-wide templates (reddit-scanner, press-pitch, social-post)
-    // all hit the same audience — the workspace itself.
+    // Workspace-wide templates (reddit-scanner, telegram-scanner,
+    // metal-archives-scanner, bandcamp-scanner, press-pitch, social-post,
+    // telegram-poster) all hit the same audience — the workspace itself.
     if matches!(
         parts.get(3),
-        Some(&"reddit-scanner") | Some(&"press-pitch") | Some(&"social-post")
+        Some(&"reddit-scanner")
+            | Some(&"telegram-scanner")
+            | Some(&"metal-archives-scanner")
+            | Some(&"bandcamp-scanner")
+            | Some(&"press-pitch")
+            | Some(&"social-post")
+            | Some(&"telegram-poster")
     ) {
         return format!("workspace:{}", workspace_id.into_uuid());
     }

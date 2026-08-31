@@ -60,6 +60,28 @@ pub async fn get_brand_settings(
                 "synesthesia_campaign_slug".to_owned(),
                 effective.synesthesia_campaign_slug.clone(),
             );
+            settings.insert(
+                "signal_enabled".to_owned(),
+                if effective.signal_enabled {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_owned(),
+            );
+            settings.insert(
+                "synesthesia_enabled".to_owned(),
+                if effective.synesthesia_enabled {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_owned(),
+            );
+            settings.insert(
+                "north_star_metric".to_owned(),
+                effective.north_star_metric.clone(),
+            );
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -102,6 +124,14 @@ fn validate_value(key: &str, value: &str) -> bool {
     {
         return false;
     }
+    // Boolean keys accept only "true" or "false".
+    if key == "signal_enabled" || key == "synesthesia_enabled" {
+        return value == "true" || value == "false";
+    }
+    // North star metric must be a valid enum value.
+    if key == "north_star_metric" {
+        return crowdrelay_domain::growth_metrics::NorthStarMetric::parse(value).is_some();
+    }
     true
 }
 
@@ -131,6 +161,19 @@ pub async fn upsert_setting(
                     let value = match key.as_str() {
                         "member_site_base_url" => effective.member_site_base_url.clone(),
                         "member_area_path" => effective.member_area_path.clone(),
+                        "signal_enabled" => if effective.signal_enabled {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                        .to_owned(),
+                        "synesthesia_enabled" => if effective.synesthesia_enabled {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                        .to_owned(),
+                        "north_star_metric" => effective.north_star_metric.clone(),
                         _ => effective.synesthesia_campaign_slug.clone(),
                     };
                     serde_json::json!({ "key": key, "value": value })

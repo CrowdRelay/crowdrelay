@@ -305,12 +305,28 @@ pub fn evaluate_growth_intelligence(
         policy.reddit_scanner_cooldown_hours,
         snapshot.standing,
     ));
+    let telegram_scanner_cd = apply_pref(effective_agent_cooldown(
+        policy.telegram_scanner_cooldown_hours,
+        snapshot.standing,
+    ));
+    let metal_archives_scanner_cd = apply_pref(effective_agent_cooldown(
+        policy.metal_archives_scanner_cooldown_hours,
+        snapshot.standing,
+    ));
+    let bandcamp_scanner_cd = apply_pref(effective_agent_cooldown(
+        policy.bandcamp_scanner_cooldown_hours,
+        snapshot.standing,
+    ));
     let press_pitch_cd = apply_pref(effective_agent_cooldown(
         policy.press_pitch_cooldown_hours,
         snapshot.standing,
     ));
     let social_post_cd = apply_pref(effective_agent_cooldown(
         policy.social_post_cooldown_hours,
+        snapshot.standing,
+    ));
+    let telegram_poster_cd = apply_pref(effective_agent_cooldown(
+        policy.telegram_poster_cooldown_hours,
         snapshot.standing,
     ));
     // community-engager cooldown is used by community_engager_candidates,
@@ -378,6 +394,116 @@ pub fn evaluate_growth_intelligence(
             tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
             prediction: make_prediction(
                 "reddit-scanner",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
+            treatment_stats,
+        });
+    }
+
+    // Rule 1b: Scan Telegram channels on a 7-day cadence.
+    // Uses tgden.com (free, no API key) to discover metal music channels.
+    if snapshot.template_id == "telegram-scanner"
+        && effective_hours >= telegram_scanner_cd
+        && retry_ready
+    {
+        let mut prompt = "Find Telegram channels and groups relevant to metal music in Poland and Central Europe. Use the tgden.com API (https://tgden.com/api/catalog?q=metal+music&type=channel&limit=20) to search for metal music channels. Report channel usernames, subscriber counts, activity levels, and whether they allow cross-promotion. Focus on channels that metalheads actually follow.".to_owned();
+        if !insights.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&insights);
+        }
+        return Some(IntelligenceRequest {
+            template_id: "telegram-scanner",
+            priority: 3,
+            prompt,
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                telegram_scanner_cd
+            },
+            reason: "Telegram channel scan is due (7-day cadence)",
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "telegram-scanner",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
+            treatment_stats,
+        });
+    }
+
+    // Rule 1c: Scan Metal Archives for bands in target genres/countries
+    // on a 14-day cadence. Uses the unofficial AJAX endpoint
+    // (metal-archives.com/search/ajax-advanced/searching/bands) which
+    // returns JSON with band names, countries, genres, and status.
+    // The brain uses this to discover similar bands and identify their
+    // social media for outreach targeting.
+    if snapshot.template_id == "metal-archives-scanner"
+        && effective_hours >= metal_archives_scanner_cd
+        && retry_ready
+    {
+        let mut prompt = "Search Metal Archives (metal-archives.com) for metal bands in Poland and Central Europe matching the tenant's genre. Use the AJAX endpoint: https://www.metal-archives.com/search/ajax-advanced/searching/bands?bandName=&genre=&country=PL&exactBandMatch=0&sEcho=0&iDisplayStart=0&iDisplayLength=50 — set a custom User-Agent header. Report band names, countries, genres, status (active/split-up), and any social media links found on their MA page. Identify bands whose fans overlap with the tenant's audience.".to_owned();
+        if !insights.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&insights);
+        }
+        return Some(IntelligenceRequest {
+            template_id: "metal-archives-scanner",
+            priority: 3,
+            prompt,
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                metal_archives_scanner_cd
+            },
+            reason: "Metal Archives band scan is due (14-day cadence)",
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "metal-archives-scanner",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
+            treatment_stats,
+        });
+    }
+
+    // Rule 1d: Scan Bandcamp for fans of similar artists' releases.
+    // Scrapes album pages of similar artists to extract the collectors-data
+    // blob — a JSON array of fans who bought the release (fan_id, username,
+    // name). These are potential outreach targets who already pay for
+    // similar music. Bandcamp has no public API, so the LLM uses the HTML
+    // pages directly. 14-day cadence (same as Metal Archives).
+    if snapshot.template_id == "bandcamp-scanner"
+        && effective_hours >= bandcamp_scanner_cd
+        && retry_ready
+    {
+        let mut prompt = "Search Bandcamp for artists similar to the tenant's genre and region. Visit their album pages and extract the collectors-data JSON blob (embedded in a div#collectors-data data-blob attribute) — it contains fan usernames and IDs of people who bought the release. Also check the community page ({artist}.bandcamp.com/community) for recent supporters. Report fan usernames, which artist/album they supported, and any location info. These are high-value outreach targets — they already pay for similar music. Focus on Polish and Central-European metal artists first.".to_owned();
+        if !insights.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&insights);
+        }
+        return Some(IntelligenceRequest {
+            template_id: "bandcamp-scanner",
+            priority: 3,
+            prompt,
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                bandcamp_scanner_cd
+            },
+            reason: "Bandcamp fan scan is due (14-day cadence)",
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "bandcamp-scanner",
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
@@ -460,6 +586,44 @@ pub fn evaluate_growth_intelligence(
         });
     }
 
+    // Rule 3b: Post to the band's Telegram channel on a 2-day cadence.
+    // This is a direct-action worker like social-post, but targets the
+    // band's own Telegram channel — broadcasting announcements, release
+    // reminders, and show updates to existing subscribers. The bot token
+    // is already stored on the telegram connection row; the agent service
+    // posts via the Bot API sendMessage endpoint.
+    if snapshot.template_id == "telegram-poster"
+        && effective_hours >= telegram_poster_cd
+        && retry_ready
+    {
+        let mut prompt = "Draft a Telegram channel post for the band. Keep it concise (under 500 characters), conversational, and engaging. Reference upcoming events, new releases, or behind-the-scenes content. Write in Polish for the primary audience. Use Telegram formatting (bold, italic) where helpful. Do not use hashtags — Telegram channels rarely use them.".to_owned();
+        if !insights.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&insights);
+        }
+        return Some(IntelligenceRequest {
+            template_id: "telegram-poster",
+            priority: 2,
+            prompt,
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                telegram_poster_cd
+            },
+            reason: "Telegram channel post cadence is due (2-day cycle)",
+            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            prediction: make_prediction(
+                "telegram-poster",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
+            treatment_stats,
+        });
+    }
+
     // community-engager is handled by community_engager_candidates in
     // growth_intelligence_candidate, which produces one candidate per
     // target community. This function is never called with
@@ -470,9 +634,12 @@ pub fn evaluate_growth_intelligence(
     // When an event is within 14 days, the cadence tightens to 1 day and
     // priority rises — fans need time to plan attendance, and a push sent
     // the day before is too late.
+    // Signal inviter is only dispatched when the north star is SignalInstalls.
     if snapshot.template_id == "signal-inviter"
         && effective_hours >= signal_inviter_cd
         && retry_ready
+        && snapshot.world_model.north_star
+            == crowdrelay_domain::growth_metrics::NorthStarMetric::SignalInstalls
     {
         let days_to_event = snapshot.days_to_next_event.unwrap_or(u32::MAX);
         let (priority, reason) = if days_to_event <= 14 {
@@ -982,9 +1149,11 @@ fn template_post_format(template_id: &str) -> Option<String> {
         "reddit-scanner" => Some("text_report".to_owned()),
         "community-engager" => Some("text_post".to_owned()),
         "social-post" => Some("social_post".to_owned()),
+        "telegram-poster" => Some("telegram_post".to_owned()),
         "press-pitch" => Some("email_pitch".to_owned()),
         "signal-inviter" => Some("direct_message".to_owned()),
         "growth-strategist" => Some("text_report".to_owned()),
+        "bandcamp-scanner" => Some("text_report".to_owned()),
         _ => None,
     }
 }

@@ -67,6 +67,7 @@ mod autopilot;
 mod beacon_signal;
 mod commerce;
 mod concert_qr;
+mod connections_simple;
 mod connections_tiktok;
 mod control_plane;
 mod ecosystem;
@@ -326,6 +327,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
     routing::application_routes(state.clone())
         .merge(area_admin::router(state.clone()))
         .merge(control_plane::router(state.clone()))
+        .layer(from_fn_with_state(state.clone(), gate_signal_routes))
         .layer(from_fn_with_state(state, enforce_privileged_namespace))
         .layer(middleware)
 }
@@ -435,6 +437,36 @@ async fn enforce_privileged_namespace(
         return Problem::unauthorized(request_id(request.headers()))
             .private()
             .into_response();
+    }
+    next.run(request).await
+}
+
+/// Gates Signal (beacon) routes on the `signal_enabled` product flag.
+/// When a tenant opts out of Signal, all `/v1/beacon/` endpoints return 404.
+///
+/// The flag is read per request rather than from the boot-time tenant profile:
+/// `signal_enabled` is editable at runtime through `/v1/control-plane/tenant-settings`,
+/// and a snapshot taken at startup would leave the endpoints serving until the
+/// process was restarted. `TenantSettingsRepository` caches behind a
+/// process-wide 60-second TTL, so this costs a memory read on the warm path,
+/// and only beacon requests reach it at all.
+async fn gate_signal_routes(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if request.uri().path().starts_with("/v1/beacon/") {
+        let enabled = crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(
+            state.database.clone(),
+        )
+        .brand_settings(state.ops.workspace_id().into_uuid())
+        .await
+        .map_or(state.tenant.products.signal, |brand| brand.signal_enabled);
+        if !enabled {
+            return Problem::not_found(request_id(request.headers()))
+                .private()
+                .into_response();
+        }
     }
     next.run(request).await
 }

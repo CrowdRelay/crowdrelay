@@ -66,22 +66,40 @@ impl SourceKind {
     }
 }
 
-/// External platforms a fanbase connection can link to. The DB CHECK
-/// constraint is the authority; this enum mirrors it for type safety.
+/// External platforms a fanbase connection can link to.
+///
+/// This enum is the authority for the vocabulary, not a mirror of it:
+/// `scripts/test_platform_vocabulary_v1.py` fails when the
+/// `fanbase_connections_platform_check` constraint and `Platform::ALL`
+/// disagree, so a migration cannot add or drop a value on its own. Adding a
+/// variant here breaks every `match` below until it is handled.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
     Meta,
+    #[serde(rename = "tiktok")]
     Tiktok,
     GoogleAds,
     Reddit,
     Bandsintown,
     Spotify,
     Youtube,
+    Facebook,
+    Instagram,
+    #[serde(rename = "soundcloud")]
+    Soundcloud,
+    Discord,
+    Telegram,
+    #[serde(rename = "lastfm")]
+    LastFm,
+    Deezer,
+    Discogs,
+    Bluesky,
+    Bandcamp,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 7] = [
+    pub const ALL: [Platform; 17] = [
         Platform::Meta,
         Platform::Tiktok,
         Platform::GoogleAds,
@@ -89,6 +107,16 @@ impl Platform {
         Platform::Bandsintown,
         Platform::Spotify,
         Platform::Youtube,
+        Platform::Facebook,
+        Platform::Instagram,
+        Platform::Soundcloud,
+        Platform::Discord,
+        Platform::Telegram,
+        Platform::LastFm,
+        Platform::Deezer,
+        Platform::Discogs,
+        Platform::Bluesky,
+        Platform::Bandcamp,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -100,6 +128,16 @@ impl Platform {
             Self::Bandsintown => "bandsintown",
             Self::Spotify => "spotify",
             Self::Youtube => "youtube",
+            Self::Facebook => "facebook",
+            Self::Instagram => "instagram",
+            Self::Soundcloud => "soundcloud",
+            Self::Discord => "discord",
+            Self::Telegram => "telegram",
+            Self::LastFm => "lastfm",
+            Self::Deezer => "deezer",
+            Self::Discogs => "discogs",
+            Self::Bluesky => "bluesky",
+            Self::Bandcamp => "bandcamp",
         }
     }
 
@@ -108,6 +146,50 @@ impl Platform {
             .iter()
             .copied()
             .find(|platform| platform.as_str() == value)
+    }
+
+    /// Whether the growth metric sync worker polls this platform for an
+    /// audience level.
+    ///
+    /// Meta and Google Ads carry spend, not an audience the brain can grow.
+    /// Bandsintown is excluded for a different reason: its tracker counts
+    /// arrive through the event sync worker, which already holds the event
+    /// context, so polling it here would write the same series twice.
+    pub const fn polled_by_growth_metric_sync(self) -> bool {
+        match self {
+            Self::Meta | Self::GoogleAds | Self::Bandsintown => false,
+            Self::Tiktok
+            | Self::Reddit
+            | Self::Spotify
+            | Self::Youtube
+            | Self::Facebook
+            | Self::Instagram
+            | Self::Soundcloud
+            | Self::Discord
+            | Self::Telegram
+            | Self::LastFm
+            | Self::Deezer
+            | Self::Discogs
+            | Self::Bluesky
+            | Self::Bandcamp => true,
+        }
+    }
+
+    /// Whether a connection to this platform can be synced with no
+    /// process-level credential. Discord reads a free public API, Telegram
+    /// carries its bot token on the connection row, Reddit goes through the
+    /// proxy pool and Spotify mints a token from the public embed page.
+    pub const fn syncs_without_process_credential(self) -> bool {
+        matches!(
+            self,
+            Self::Discord
+                | Self::Telegram
+                | Self::Reddit
+                | Self::Spotify
+                | Self::Deezer
+                | Self::Bluesky
+                | Self::Bandcamp
+        )
     }
 
     /// Human-readable label for UI display.
@@ -120,6 +202,16 @@ impl Platform {
             Self::Bandsintown => "Bandsintown",
             Self::Spotify => "Spotify",
             Self::Youtube => "YouTube",
+            Self::Facebook => "Facebook",
+            Self::Instagram => "Instagram",
+            Self::Soundcloud => "SoundCloud",
+            Self::Discord => "Discord",
+            Self::Telegram => "Telegram",
+            Self::LastFm => "Last.fm",
+            Self::Deezer => "Deezer",
+            Self::Discogs => "Discogs",
+            Self::Bluesky => "Bluesky",
+            Self::Bandcamp => "Bandcamp",
         }
     }
 }
@@ -205,6 +297,51 @@ mod tests {
             assert_eq!(Platform::from_storage(platform.as_str()), Some(platform));
         }
         assert_eq!(Platform::from_storage("myspace"), None);
+    }
+
+    #[test]
+    fn platform_all_covers_every_variant() {
+        // Exhaustive on purpose: a new variant stops this compiling until it is
+        // added to ALL, which is what `from_storage` and the migration contract
+        // both read.
+        for platform in Platform::ALL {
+            match platform {
+                Platform::Meta
+                | Platform::Tiktok
+                | Platform::GoogleAds
+                | Platform::Reddit
+                | Platform::Bandsintown
+                | Platform::Spotify
+                | Platform::Youtube
+                | Platform::Facebook
+                | Platform::Instagram
+                | Platform::Soundcloud
+                | Platform::Discord
+                | Platform::Telegram
+                | Platform::LastFm
+                | Platform::Deezer
+                | Platform::Discogs
+                | Platform::Bluesky
+                | Platform::Bandcamp => {}
+            }
+        }
+        let mut keys: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), Platform::ALL.len(), "duplicate storage key");
+    }
+
+    #[test]
+    fn platform_serde_agrees_with_storage_key() {
+        // `rename_all = "snake_case"` renders CamelCase runs with an underscore
+        // (`Tiktok` is fine, `TikTok` would be `tik_tok`), so a variant added
+        // without a matching rename would serialize a value storage rejects.
+        for platform in Platform::ALL {
+            let encoded = serde_json::to_string(&platform).expect("serialize");
+            assert_eq!(encoded, format!("\"{}\"", platform.as_str()));
+            let decoded: Platform = serde_json::from_str(&encoded).expect("deserialize");
+            assert_eq!(decoded, platform);
+        }
     }
 
     #[test]

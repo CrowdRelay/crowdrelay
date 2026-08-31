@@ -96,24 +96,27 @@ impl PostgresFanbaseRepository {
         self
     }
 
-    /// Associated data for OAuth token encryption. Binds the ciphertext to
+    /// Associated data for token encryption. Binds the ciphertext to
     /// the workspace and provider account so a token stolen from one
-    /// workspace cannot be decrypted in another.
-    fn oauth_aad(workspace_id: Uuid, open_id: &str) -> Vec<u8> {
-        format!("crowdrelay.fanbase.oauth.tiktok.v1\0{workspace_id}\0{open_id}").into_bytes()
+    /// workspace cannot be decrypted in another. The `platform` parameter
+    /// ensures tokens encrypted for one platform cannot be decrypted for
+    /// another.
+    fn token_aad(workspace_id: Uuid, platform: &str, account_id: &str) -> Vec<u8> {
+        format!("crowdrelay.fanbase.oauth.{platform}.v1\0{workspace_id}\0{account_id}").into_bytes()
     }
 
     fn encrypt_token(
         &self,
         plaintext: &str,
         workspace_id: Uuid,
-        open_id: &str,
+        platform: &str,
+        account_id: &str,
     ) -> Result<String, FanbaseError> {
         let key = self
             .encryption_key
             .as_ref()
             .ok_or(FanbaseError::Encryption)?;
-        let aad = Self::oauth_aad(workspace_id, open_id);
+        let aad = Self::token_aad(workspace_id, platform, account_id);
         let encrypted =
             encrypt_value(plaintext.as_bytes(), key, &aad).map_err(|_| FanbaseError::Encryption)?;
         Ok(URL_SAFE_NO_PAD.encode(&encrypted))
@@ -617,8 +620,9 @@ impl PostgresFanbaseRepository {
         expires_at: time::OffsetDateTime,
         scope: &str,
     ) -> Result<(), FanbaseError> {
-        let encrypted_access = self.encrypt_token(access_token, workspace_id, open_id)?;
-        let encrypted_refresh = self.encrypt_token(refresh_token, workspace_id, open_id)?;
+        let encrypted_access = self.encrypt_token(access_token, workspace_id, "tiktok", open_id)?;
+        let encrypted_refresh =
+            self.encrypt_token(refresh_token, workspace_id, "tiktok", open_id)?;
         let credential_ref = format!("tiktok:{open_id}");
         let label = format!("TikTok — {open_id}");
         sqlx::query(
@@ -656,6 +660,134 @@ impl PostgresFanbaseRepository {
         // Notify the growth metric sync worker so it picks up the new
         // connection immediately.
         sqlx::query("SELECT pg_notify('growth_metric_sync', 'tiktok-connected')")
+            .execute(&self.pool)
+            .await
+            .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
+    /// Registers a Discord server connection for growth metric sync.
+    /// The `guild_id` is the Discord server ID (snowflake). No encrypted
+    /// tokens are needed — disdex.io is a free public API.
+    pub async fn upsert_discord_connection(
+        &self,
+        workspace_id: Uuid,
+        guild_id: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        let credential_ref = format!("discord:{guild_id}");
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status, provider_account_id
+            )
+            VALUES ($1, 'discord', $2, $3, $4, 'connected', $2)
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                credential_ref = EXCLUDED.credential_ref,
+                label = EXCLUDED.label,
+                status = 'connected',
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(guild_id)
+        .bind(&credential_ref)
+        .bind(label)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        sqlx::query("SELECT pg_notify('growth_metric_sync', 'discord-connected')")
+            .execute(&self.pool)
+            .await
+            .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
+    /// Registers a simple credential-less connection for growth metric sync.
+    /// Used by platforms like Last.fm where the API key is a shared env var
+    /// and the only per-connection identifier is the artist/entity name
+    /// stored in `provider_account_id`.
+    pub async fn upsert_simple_connection(
+        &self,
+        workspace_id: Uuid,
+        platform: &str,
+        account_id: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        let credential_ref = format!("{platform}:{account_id}");
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status, provider_account_id
+            )
+            VALUES ($1, $2, $3, $4, $5, 'connected', $3)
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                credential_ref = EXCLUDED.credential_ref,
+                label = EXCLUDED.label,
+                status = 'connected',
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(platform)
+        .bind(account_id)
+        .bind(&credential_ref)
+        .bind(label)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        let notify_msg = format!("{platform}-connected");
+        sqlx::query("SELECT pg_notify('growth_metric_sync', $1)")
+            .bind(&notify_msg)
+            .execute(&self.pool)
+            .await
+            .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
+    /// Registers a Telegram channel connection for growth metric sync.
+    /// The `channel` is the channel username (e.g. `@virya_music`).
+    /// The `bot_token` is encrypted and stored in `encrypted_access_token`.
+    pub async fn upsert_telegram_connection(
+        &self,
+        workspace_id: Uuid,
+        channel: &str,
+        bot_token: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        let encrypted_token = self.encrypt_token(bot_token, workspace_id, "telegram", channel)?;
+        let credential_ref = format!("telegram:{channel}");
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status, provider_account_id,
+                encrypted_access_token, token_type
+            )
+            VALUES ($1, 'telegram', $2, $3, $4, 'connected', $2,
+                    $5, 'bearer')
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                credential_ref = EXCLUDED.credential_ref,
+                label = EXCLUDED.label,
+                encrypted_access_token = EXCLUDED.encrypted_access_token,
+                status = 'connected',
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(channel)
+        .bind(&credential_ref)
+        .bind(label)
+        .bind(&encrypted_token)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        sqlx::query("SELECT pg_notify('growth_metric_sync', 'telegram-connected')")
             .execute(&self.pool)
             .await
             .map_err(Self::unexpected)?;

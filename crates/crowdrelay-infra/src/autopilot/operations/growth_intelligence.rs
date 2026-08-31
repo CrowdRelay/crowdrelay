@@ -33,6 +33,7 @@ use crowdrelay_brain::{
     GrowthTrend, RecentInsight, TenantPreferencePosterior, UnengagedTarget, WorldModel,
     agent_standing_policy,
 };
+use crowdrelay_domain::growth_metrics::NorthStarMetric;
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
 
 /// The worker templates the brain may dispatch, in the order the evaluator
@@ -40,8 +41,12 @@ use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
 /// evaluator's rules.
 const WORKER_TEMPLATES: &[&str] = &[
     "reddit-scanner",
+    "telegram-scanner",
+    "metal-archives-scanner",
+    "bandcamp-scanner",
     "press-pitch",
     "social-post",
+    "telegram-poster",
     "community-engager",
     "signal-inviter",
     "growth-strategist",
@@ -523,12 +528,104 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     let best_performing_community = engagement_history.first().map(|e| e.subreddit.clone());
     let worst_performing_community = engagement_history.last().map(|e| e.subreddit.clone());
 
+    // Load the north star metric from tenant_settings. Default is signal_installs.
+    let north_star_str: Option<(String,)> = sqlx::query_as(
+        r#"SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'north_star_metric'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let north_star = north_star_str
+        .and_then(|(s,)| NorthStarMetric::parse(&s))
+        .unwrap_or_default();
+
+    // Load the current value for the north star metric from the growth metric
+    // series. For SignalInstalls we use the signal install counts (already
+    // loaded). For the others we read the platform's own series.
+    //
+    // Points store absolute levels, never deltas (see 0073), so "this month"
+    // is a subtraction: level now minus level at the start of the month. A
+    // workspace may run several accounts on one platform (two YouTube
+    // channels), so levels are summed across that platform's series.
+    let (north_star_current, north_star_this_month) =
+        match (north_star.platform(), north_star.metric_key()) {
+            (Some(platform), Some(metric_key)) => {
+                let metric_counts: (i64, i64) = sqlx::query_as(
+                    r#"
+                WITH target_series AS (
+                    SELECT id FROM viryaos_growth_metric_series
+                    WHERE workspace_id = $1
+                      AND platform = $2
+                      AND metric_key = $3
+                      AND active
+                ),
+                points AS (
+                    SELECT p.series_id, p.captured_at, p.value
+                    FROM viryaos_growth_metric_points p
+                    JOIN target_series s ON s.id = p.series_id
+                    WHERE p.workspace_id = $1
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (series_id) series_id, value
+                    FROM points
+                    ORDER BY series_id, captured_at DESC
+                ),
+                before_month AS (
+                    SELECT DISTINCT ON (series_id) series_id, value
+                    FROM points
+                    WHERE captured_at < date_trunc('month', now())
+                    ORDER BY series_id, captured_at DESC
+                ),
+                first_in_month AS (
+                    SELECT DISTINCT ON (series_id) series_id, value
+                    FROM points
+                    WHERE captured_at >= date_trunc('month', now())
+                    ORDER BY series_id, captured_at ASC
+                ),
+                baseline AS (
+                    -- Level this series stood at when the month opened. A
+                    -- series first observed this month falls back to its own
+                    -- first reading, so connecting an account mid-month does
+                    -- not report its whole existing audience as won this month.
+                    SELECT l.series_id, COALESCE(b.value, f.value, 0) AS value
+                    FROM latest l
+                    LEFT JOIN before_month b ON b.series_id = l.series_id
+                    LEFT JOIN first_in_month f ON f.series_id = l.series_id
+                )
+                SELECT
+                    COALESCE((SELECT SUM(value) FROM latest), 0)::bigint,
+                    GREATEST(
+                        COALESCE((SELECT SUM(value) FROM latest), 0)
+                            - COALESCE((SELECT SUM(value) FROM baseline), 0),
+                        0
+                    )::bigint
+                "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(platform.as_str())
+                .bind(metric_key)
+                .fetch_optional(pool)
+                .await
+                .map_err(map_sqlx)?
+                .unwrap_or((0, 0));
+                (
+                    u32::try_from(metric_counts.0.max(0)).unwrap_or(u32::MAX),
+                    u32::try_from(metric_counts.1.max(0)).unwrap_or(u32::MAX),
+                )
+            }
+            // SignalInstalls, and any future north star without a platform series.
+            _ => (total_signal_installs, signal_installs_this_month),
+        };
+
     // Growth target progress.
-    let growth_target = GrowthTarget::from_fan_count(total_fans);
+    let growth_target = GrowthTarget::from_fan_count(total_fans, north_star, north_star_current);
     let growth_target_progress = GrowthTargetProgress::from_counts(
         growth_target,
         fans_this_month,
         signal_installs_this_month,
+        north_star,
+        north_star_this_month,
     );
 
     let world_model = WorldModel {
@@ -539,6 +636,9 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         total_signal_installs,
         signal_installs_this_month,
         signal_conversion_rate_bps,
+        north_star,
+        north_star_current,
+        north_star_this_month,
         discovered_communities,
         active_communities,
         avg_community_engagement_bps,

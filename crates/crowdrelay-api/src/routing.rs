@@ -55,6 +55,34 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(connections_tiktok::callback),
         )
         .route(
+            "/v1/admin/connections/discord",
+            post(connections_simple::create_discord_connection),
+        )
+        .route(
+            "/v1/admin/connections/telegram",
+            post(connections_simple::create_telegram_connection),
+        )
+        .route(
+            "/v1/admin/connections/lastfm",
+            post(connections_simple::create_lastfm_connection),
+        )
+        .route(
+            "/v1/admin/connections/deezer",
+            post(connections_simple::create_deezer_connection),
+        )
+        .route(
+            "/v1/admin/connections/discogs",
+            post(connections_simple::create_discogs_connection),
+        )
+        .route(
+            "/v1/admin/connections/bluesky",
+            post(connections_simple::create_bluesky_connection),
+        )
+        .route(
+            "/v1/admin/connections/bandcamp",
+            post(connections_simple::create_bandcamp_connection),
+        )
+        .route(
             "/v1/beacon/invitations/exchange",
             post(beacon_signal::exchange_invite),
         )

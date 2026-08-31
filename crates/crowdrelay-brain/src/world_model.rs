@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crowdrelay_domain::growth_metrics::NorthStarMetric;
+
 /// The brain's belief about the world — one unified picture with uncertainty.
 /// Every number carries implicit confidence (the brain knows it has exact
 /// counts for fans and signal installs, but averages for engagement).
@@ -34,6 +36,14 @@ pub struct WorldModel {
     /// Signal conversion rate: what fraction of fans have Signal installed
     /// (in basis points, e.g. 1000 = 10%).
     pub signal_conversion_rate_bps: u16,
+
+    // ── North star state ──
+    /// Which metric the autopilot optimizes as its primary goal.
+    pub north_star: NorthStarMetric,
+    /// Current total for the north star metric (e.g. total YouTube subscribers).
+    pub north_star_current: u32,
+    /// This-month delta for the north star metric.
+    pub north_star_this_month: u32,
 
     // ── Community reach state ──
     /// Total discovered communities (discovery_places with status='active').
@@ -114,18 +124,24 @@ impl GrowthTrend {
 /// The brain's monthly fan acquisition target.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GrowthTarget {
-    /// New fans to acquire this month.
+    /// New fans to acquire this month (secondary target — always relevant).
     pub new_fans_per_month: u32,
-    /// Signal installs to achieve this month.
+    /// Signal installs to achieve this month (primary when north star is Signal).
     pub signal_installs_per_month: u32,
+    /// North star metric target per month (primary target for the configured north star).
+    pub north_star_target_per_month: u32,
 }
 
 impl GrowthTarget {
-    /// Derives a target from the current fan count. Smaller fanbases get
-    /// more aggressive targets because the aggregation phase has more
-    /// low-hanging fruit.
+    /// Derives a target from the current fan count and north star metric.
+    /// Smaller fanbases get more aggressive targets because the aggregation
+    /// phase has more low-hanging fruit.
     #[must_use]
-    pub fn from_fan_count(total_fans: u32) -> Self {
+    pub fn from_fan_count(
+        total_fans: u32,
+        north_star: NorthStarMetric,
+        north_star_current: u32,
+    ) -> Self {
         let new_fans = match total_fans {
             0..=99 => 20,    // aggressive aggregation: 20 new fans/month
             100..=999 => 50, // growth phase: 50 new fans/month
@@ -133,9 +149,15 @@ impl GrowthTarget {
         };
         // Signal installs target: 10% of fan count per month.
         let signal_installs = (total_fans / 10).max(5);
+        // North star target: 10% of current metric value per month, minimum 5.
+        let north_star_target = match north_star {
+            NorthStarMetric::SignalInstalls => signal_installs,
+            _ => (north_star_current / 10).max(5),
+        };
         Self {
             new_fans_per_month: new_fans,
             signal_installs_per_month: signal_installs,
+            north_star_target_per_month: north_star_target,
         }
     }
 }
@@ -154,6 +176,10 @@ pub struct GrowthTargetProgress {
     pub progress_bps: u16,
     /// Whether the brain is behind, on track, or ahead of target.
     pub status: TargetStatus,
+    /// North star metric progress in basis points (0–10_000).
+    pub north_star_progress_bps: u16,
+    /// North star metric status relative to its target.
+    pub north_star_status: TargetStatus,
 }
 
 /// How the brain is doing relative to its growth target.
@@ -176,6 +202,8 @@ impl GrowthTargetProgress {
         target: GrowthTarget,
         fans_this_month: u32,
         signal_installs_this_month: u32,
+        north_star: NorthStarMetric,
+        north_star_this_month: u32,
     ) -> Self {
         let progress_bps = if target.new_fans_per_month == 0 {
             10_000
@@ -191,12 +219,34 @@ impl GrowthTargetProgress {
             5_000..=7_999 => TargetStatus::OnTrack,
             _ => TargetStatus::Ahead,
         };
+        // North star progress: tracks the north star metric's monthly target.
+        let north_star_this_month_value = match north_star {
+            NorthStarMetric::SignalInstalls => signal_installs_this_month,
+            _ => north_star_this_month,
+        };
+        let north_star_progress_bps = if target.north_star_target_per_month == 0 {
+            10_000
+        } else {
+            u16::try_from(
+                (u64::from(north_star_this_month_value) * 10_000
+                    / u64::from(target.north_star_target_per_month))
+                .min(10_000),
+            )
+            .unwrap_or(10_000)
+        };
+        let north_star_status = match north_star_progress_bps {
+            0..=4_999 => TargetStatus::Behind,
+            5_000..=7_999 => TargetStatus::OnTrack,
+            _ => TargetStatus::Ahead,
+        };
         Self {
             target,
             fans_this_month,
             signal_installs_this_month,
             progress_bps,
             status,
+            north_star_progress_bps,
+            north_star_status,
         }
     }
 }
@@ -245,23 +295,29 @@ mod tests {
 
     #[test]
     fn growth_target_for_small_fanbase_is_aggressive() {
-        let target = GrowthTarget::from_fan_count(50);
+        let target = GrowthTarget::from_fan_count(50, NorthStarMetric::default(), 0);
         assert_eq!(target.new_fans_per_month, 20);
         assert_eq!(target.signal_installs_per_month, 5);
     }
 
     #[test]
     fn growth_target_for_medium_fanbase_is_moderate() {
-        let target = GrowthTarget::from_fan_count(500);
+        let target = GrowthTarget::from_fan_count(500, NorthStarMetric::default(), 0);
         assert_eq!(target.new_fans_per_month, 50);
         assert_eq!(target.signal_installs_per_month, 50);
     }
 
     #[test]
     fn growth_target_for_large_fanbase_is_steady() {
-        let target = GrowthTarget::from_fan_count(5000);
+        let target = GrowthTarget::from_fan_count(5000, NorthStarMetric::default(), 0);
         assert_eq!(target.new_fans_per_month, 100);
         assert_eq!(target.signal_installs_per_month, 500);
+    }
+
+    #[test]
+    fn growth_target_for_youtube_north_star_uses_subscriber_count() {
+        let target = GrowthTarget::from_fan_count(500, NorthStarMetric::YoutubeSubscribers, 1000);
+        assert_eq!(target.north_star_target_per_month, 100); // 10% of 1000
     }
 
     #[test]
@@ -269,8 +325,10 @@ mod tests {
         let target = GrowthTarget {
             new_fans_per_month: 20,
             signal_installs_per_month: 5,
+            north_star_target_per_month: 5,
         };
-        let progress = GrowthTargetProgress::from_counts(target, 5, 1);
+        let progress =
+            GrowthTargetProgress::from_counts(target, 5, 1, NorthStarMetric::default(), 0);
         assert_eq!(progress.progress_bps, 2_500); // 5/20 = 25%
         assert_eq!(progress.status, TargetStatus::Behind);
     }
@@ -280,8 +338,10 @@ mod tests {
         let target = GrowthTarget {
             new_fans_per_month: 20,
             signal_installs_per_month: 5,
+            north_star_target_per_month: 5,
         };
-        let progress = GrowthTargetProgress::from_counts(target, 12, 3);
+        let progress =
+            GrowthTargetProgress::from_counts(target, 12, 3, NorthStarMetric::default(), 0);
         assert_eq!(progress.progress_bps, 6_000); // 12/20 = 60%
         assert_eq!(progress.status, TargetStatus::OnTrack);
     }
@@ -291,8 +351,10 @@ mod tests {
         let target = GrowthTarget {
             new_fans_per_month: 20,
             signal_installs_per_month: 5,
+            north_star_target_per_month: 5,
         };
-        let progress = GrowthTargetProgress::from_counts(target, 18, 4);
+        let progress =
+            GrowthTargetProgress::from_counts(target, 18, 4, NorthStarMetric::default(), 0);
         assert_eq!(progress.progress_bps, 9_000); // 18/20 = 90%
         assert_eq!(progress.status, TargetStatus::Ahead);
     }
@@ -302,8 +364,10 @@ mod tests {
         let target = GrowthTarget {
             new_fans_per_month: 20,
             signal_installs_per_month: 5,
+            north_star_target_per_month: 5,
         };
-        let progress = GrowthTargetProgress::from_counts(target, 50, 10);
+        let progress =
+            GrowthTargetProgress::from_counts(target, 50, 10, NorthStarMetric::default(), 0);
         assert_eq!(progress.progress_bps, 10_000); // capped
         assert_eq!(progress.status, TargetStatus::Ahead);
     }
@@ -321,10 +385,31 @@ mod tests {
         let target = GrowthTarget {
             new_fans_per_month: 0,
             signal_installs_per_month: 0,
+            north_star_target_per_month: 0,
         };
-        let progress = GrowthTargetProgress::from_counts(target, 5, 1);
+        let progress =
+            GrowthTargetProgress::from_counts(target, 5, 1, NorthStarMetric::default(), 0);
         assert_eq!(progress.progress_bps, 10_000); // target met (no target)
         assert_eq!(progress.status, TargetStatus::Ahead);
+    }
+
+    #[test]
+    fn north_star_progress_tracks_north_star_metric() {
+        let target = GrowthTarget {
+            new_fans_per_month: 20,
+            signal_installs_per_month: 5,
+            north_star_target_per_month: 100,
+        };
+        // YouTube north star: 50 subscribers this month out of 100 target = 50%
+        let progress = GrowthTargetProgress::from_counts(
+            target,
+            10,
+            2,
+            NorthStarMetric::YoutubeSubscribers,
+            50,
+        );
+        assert_eq!(progress.north_star_progress_bps, 5_000);
+        assert_eq!(progress.north_star_status, TargetStatus::OnTrack);
     }
 
     #[test]

@@ -420,6 +420,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let tiktok_client_secret = std::env::var("CROWDRELAY_TIKTOK_CLIENT_SECRET")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    let lastfm_api_key = std::env::var("CROWDRELAY_LASTFM_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let discogs_token = std::env::var("CROWDRELAY_DISCOGS_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
@@ -427,6 +433,8 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         reddit_proxy_url,
         tiktok_client_key,
         tiktok_client_secret,
+        lastfm_api_key,
+        discogs_token,
         config.response_encryption_key.clone(),
         config.database.operation_timeout,
     )

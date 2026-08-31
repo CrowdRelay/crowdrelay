@@ -2732,10 +2732,10 @@ async fn insert_executor_action_with_assignment(
     let experiment_uuid = uuid::Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
-           (workspace_id, assignment_id, experiment_uuid, unit_id, unit_kind,
+           (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
-            interference_score, is_interference_controllable,
+            contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id, trace_id)
            VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
@@ -3542,10 +3542,10 @@ async fn insert_assignment_for_evidence_test(
     let experiment_uuid = uuid::Uuid::now_v7();
     sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
-           (workspace_id, assignment_id, experiment_uuid, unit_id, unit_kind,
+           (workspace_id, id, experiment_uuid, unit_id, unit_kind,
             arm, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
-            interference_score, is_interference_controllable,
+            contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
            VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
@@ -4213,7 +4213,7 @@ async fn insert_bare_assignment(
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
             arm, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
-            interference_score, is_interference_controllable,
+            contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
            VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
@@ -4283,7 +4283,7 @@ async fn t28b_second_assignment_for_same_action_fails() {
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
             arm, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
-            interference_score, is_interference_controllable,
+            contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
            VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
@@ -4377,7 +4377,7 @@ async fn t28d_null_action_id_remains_allowed() {
                (id, workspace_id, experiment_uuid, unit_id, unit_kind,
                 arm, propensity, prediction, context, strategy,
                 eligibility_criteria, selection_context, interference_policy,
-                interference_score, is_interference_controllable,
+                contamination_estimate, is_interference_controllable,
                 experiment_status, execution_status, action_id)
                VALUES ($1,$2,$3,$4,'target_community','control',0.5,
                        '{}'::jsonb,'{}'::jsonb,'discovery',
@@ -4433,7 +4433,7 @@ async fn t28e_experiment_unit_uniqueness_remains_intact() {
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
             arm, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
-            interference_score, is_interference_controllable,
+            contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
            VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',

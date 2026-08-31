@@ -21,13 +21,83 @@ use crate::{GrowthMetricSeriesId, autonomy::Confidence};
 /// Scale applied to per-day rates so integer division keeps three decimals.
 const RATE_SCALE: i64 = 1_000;
 
-/// External platform a series is observed on. The list is the set of platforms
-/// the ingestion contract accepts today; adding one is a migration plus a match
-/// arm, never a new subsystem.
+/// The brain's north star — the primary metric a tenant's autopilot optimizes.
+///
+/// This is a per-tenant setting stored in `tenant_settings`. It parameterizes
+/// which `GrowthTarget` the brain tracks, which `GrowthStrategy` variant is
+/// selected when the tenant is behind, and which worker templates are
+/// dispatched. The default (`SignalInstalls`) preserves Virya's behavior.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NorthStarMetric {
+    #[default]
+    SignalInstalls,
+    YoutubeSubscribers,
+    SpotifyFollowers,
+    BandsintownTrackers,
+}
+
+impl NorthStarMetric {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SignalInstalls => "signal_installs",
+            Self::YoutubeSubscribers => "youtube_subscribers",
+            Self::SpotifyFollowers => "spotify_followers",
+            Self::BandsintownTrackers => "bandsintown_trackers",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "signal_installs" => Some(Self::SignalInstalls),
+            "youtube_subscribers" => Some(Self::YoutubeSubscribers),
+            "spotify_followers" => Some(Self::SpotifyFollowers),
+            "bandsintown_trackers" => Some(Self::BandsintownTrackers),
+            _ => None,
+        }
+    }
+
+    /// The growth-metric platform this north star corresponds to, if any.
+    /// `SignalInstalls` has no platform (it's a first-party metric).
+    #[must_use]
+    pub const fn platform(self) -> Option<MetricPlatform> {
+        match self {
+            Self::SignalInstalls => None,
+            Self::YoutubeSubscribers => Some(MetricPlatform::YouTube),
+            Self::SpotifyFollowers => Some(MetricPlatform::Spotify),
+            Self::BandsintownTrackers => Some(MetricPlatform::Bandsintown),
+        }
+    }
+
+    /// The `metric_key` the series carrying this north star is recorded under.
+    /// A platform publishes several keys (YouTube records both `subscribers`
+    /// and view counts), so reading the platform alone would mix them.
+    #[must_use]
+    pub const fn metric_key(self) -> Option<&'static str> {
+        match self {
+            Self::SignalInstalls => None,
+            Self::YoutubeSubscribers => Some("subscribers"),
+            Self::SpotifyFollowers => Some("followers"),
+            Self::BandsintownTrackers => Some("trackers"),
+        }
+    }
+}
+
+/// External platform a series is observed on.
+///
+/// This enum is the authority for the vocabulary:
+/// `scripts/test_platform_vocabulary_v1.py` fails when the
+/// `viryaos_growth_metric_series_platform_check` constraint and
+/// `MetricPlatform::ALL` disagree, so a migration cannot add or drop a value on
+/// its own. Adding one is a migration plus a match arm, never a new subsystem.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricPlatform {
     Spotify,
+    // snake_case would render this `you_tube`; storage and the API say `youtube`.
+    #[serde(rename = "youtube")]
     YouTube,
     Bandsintown,
     Social,
@@ -35,10 +105,20 @@ pub enum MetricPlatform {
     Ticketing,
     Signal,
     Merch,
+    #[serde(rename = "tiktok")]
     TikTok,
+    #[serde(rename = "soundcloud")]
     SoundCloud,
     Instagram,
     Facebook,
+    Discord,
+    Telegram,
+    #[serde(rename = "lastfm")]
+    LastFm,
+    Deezer,
+    Discogs,
+    Bluesky,
+    Bandcamp,
 }
 
 impl MetricPlatform {
@@ -57,25 +137,73 @@ impl MetricPlatform {
             Self::SoundCloud => "soundcloud",
             Self::Instagram => "instagram",
             Self::Facebook => "facebook",
+            Self::Discord => "discord",
+            Self::Telegram => "telegram",
+            Self::LastFm => "lastfm",
+            Self::Deezer => "deezer",
+            Self::Discogs => "discogs",
+            Self::Bluesky => "bluesky",
+            Self::Bandcamp => "bandcamp",
         }
     }
 
+    /// Every variant, in storage order. Kept in step with the enum by
+    /// `all_covers_every_variant`, which stops compiling when a variant is
+    /// added and left out.
+    pub const ALL: [Self; 19] = [
+        Self::Spotify,
+        Self::YouTube,
+        Self::Bandsintown,
+        Self::Social,
+        Self::Website,
+        Self::Ticketing,
+        Self::Signal,
+        Self::Merch,
+        Self::TikTok,
+        Self::SoundCloud,
+        Self::Instagram,
+        Self::Facebook,
+        Self::Discord,
+        Self::Telegram,
+        Self::LastFm,
+        Self::Deezer,
+        Self::Discogs,
+        Self::Bluesky,
+        Self::Bandcamp,
+    ];
+
+    /// Derived from `as_str` so the two can never disagree.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "spotify" => Some(Self::Spotify),
-            "youtube" => Some(Self::YouTube),
-            "bandsintown" => Some(Self::Bandsintown),
-            "social" => Some(Self::Social),
-            "website" => Some(Self::Website),
-            "ticketing" => Some(Self::Ticketing),
-            "signal" => Some(Self::Signal),
-            "merch" => Some(Self::Merch),
-            "tiktok" => Some(Self::TikTok),
-            "soundcloud" => Some(Self::SoundCloud),
-            "instagram" => Some(Self::Instagram),
-            "facebook" => Some(Self::Facebook),
-            _ => None,
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|platform| platform.as_str() == value)
+    }
+
+    /// Whether the platform is somewhere the agent has to be *given* sight —
+    /// an outside account it does not own the rows for. Signal, merch,
+    /// ticketing and the website are measured from our own tables and cannot
+    /// go unconnected, so they are never reported as missing coverage.
+    #[must_use]
+    pub const fn is_off_platform_feed(self) -> bool {
+        match self {
+            Self::Website | Self::Ticketing | Self::Signal | Self::Merch => false,
+            Self::Spotify
+            | Self::YouTube
+            | Self::Bandsintown
+            | Self::Social
+            | Self::TikTok
+            | Self::SoundCloud
+            | Self::Instagram
+            | Self::Facebook
+            | Self::Discord
+            | Self::Telegram
+            | Self::LastFm
+            | Self::Deezer
+            | Self::Discogs
+            | Self::Bluesky
+            | Self::Bandcamp => true,
         }
     }
 }
@@ -563,16 +691,31 @@ pub fn velocity_ratio_basis_points(
 /// Signal and merch are measured from our own rows and cannot go unconnected.
 ///
 /// `Social` covers the Meta surfaces, which report through one adapter.
-pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 8] = [
-    MetricPlatform::Spotify,
-    MetricPlatform::YouTube,
-    MetricPlatform::Bandsintown,
-    MetricPlatform::Social,
-    MetricPlatform::TikTok,
-    MetricPlatform::SoundCloud,
-    MetricPlatform::Instagram,
-    MetricPlatform::Facebook,
-];
+/// Membership is decided by `MetricPlatform::is_off_platform_feed`, so a new
+/// platform joins this list by answering that match arm and nothing else.
+// Indexing is evaluated at compile time here: `source` is bounded by the loop
+// condition and `next` by the assert below, and a const-eval out-of-bounds is a
+// build error, not a runtime panic. Iterators are not available in const yet.
+#[allow(clippy::indexing_slicing)]
+pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 15] = {
+    let mut feeds = [MetricPlatform::Spotify; 15];
+    let mut source = 0;
+    let mut next = 0;
+    while source < MetricPlatform::ALL.len() {
+        let platform = MetricPlatform::ALL[source];
+        if platform.is_off_platform_feed() {
+            feeds[next] = platform;
+            next += 1;
+        }
+        source += 1;
+    }
+    // A length mismatch panics at compile time rather than silently truncating.
+    assert!(
+        next == 15,
+        "OFF_PLATFORM_FEEDS length must match the predicate"
+    );
+    feeds
+};
 
 /// Whether the agent can currently see a platform at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -634,6 +777,107 @@ pub fn off_platform_coverage(observed: &[(MetricPlatform, bool)]) -> Vec<FeedCov
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_covers_every_variant() {
+        // The match is exhaustive on purpose: adding a variant stops this test
+        // compiling until ALL is updated too, which is what keeps `parse`,
+        // OFF_PLATFORM_FEEDS and the migration contract honest.
+        for platform in MetricPlatform::ALL {
+            match platform {
+                MetricPlatform::Spotify
+                | MetricPlatform::YouTube
+                | MetricPlatform::Bandsintown
+                | MetricPlatform::Social
+                | MetricPlatform::Website
+                | MetricPlatform::Ticketing
+                | MetricPlatform::Signal
+                | MetricPlatform::Merch
+                | MetricPlatform::TikTok
+                | MetricPlatform::SoundCloud
+                | MetricPlatform::Instagram
+                | MetricPlatform::Facebook
+                | MetricPlatform::Discord
+                | MetricPlatform::Telegram
+                | MetricPlatform::LastFm
+                | MetricPlatform::Deezer
+                | MetricPlatform::Discogs
+                | MetricPlatform::Bluesky
+                | MetricPlatform::Bandcamp => {}
+            }
+        }
+        let mut seen: Vec<&str> = MetricPlatform::ALL.iter().map(|p| p.as_str()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            MetricPlatform::ALL.len(),
+            "duplicate storage key"
+        );
+    }
+
+    #[test]
+    fn parse_round_trips_every_variant() {
+        for platform in MetricPlatform::ALL {
+            assert_eq!(MetricPlatform::parse(platform.as_str()), Some(platform));
+        }
+        assert_eq!(MetricPlatform::parse("myspace"), None);
+    }
+
+    #[test]
+    fn off_platform_feeds_matches_the_predicate() {
+        let expected: Vec<MetricPlatform> = MetricPlatform::ALL
+            .into_iter()
+            .filter(|p| p.is_off_platform_feed())
+            .collect();
+        assert_eq!(OFF_PLATFORM_FEEDS.to_vec(), expected);
+    }
+
+    #[test]
+    fn serde_agrees_with_storage_key() {
+        // The coverage response serializes MetricPlatform directly, so a serde
+        // rename that drifts from as_str would emit a platform the database
+        // has never heard of.
+        for platform in MetricPlatform::ALL {
+            let encoded = serde_json::to_string(&platform).expect("serialize");
+            assert_eq!(encoded, format!("\"{}\"", platform.as_str()));
+        }
+    }
+
+    #[test]
+    fn north_star_metric_round_trip_is_total() {
+        for metric in [
+            NorthStarMetric::SignalInstalls,
+            NorthStarMetric::YoutubeSubscribers,
+            NorthStarMetric::SpotifyFollowers,
+            NorthStarMetric::BandsintownTrackers,
+        ] {
+            assert_eq!(NorthStarMetric::parse(metric.as_str()), Some(metric));
+        }
+        assert_eq!(NorthStarMetric::parse("unknown"), None);
+    }
+
+    #[test]
+    fn north_star_default_is_signal_installs() {
+        assert_eq!(NorthStarMetric::default(), NorthStarMetric::SignalInstalls);
+    }
+
+    #[test]
+    fn north_star_platform_mapping() {
+        assert_eq!(NorthStarMetric::SignalInstalls.platform(), None);
+        assert_eq!(
+            NorthStarMetric::YoutubeSubscribers.platform(),
+            Some(MetricPlatform::YouTube)
+        );
+        assert_eq!(
+            NorthStarMetric::SpotifyFollowers.platform(),
+            Some(MetricPlatform::Spotify)
+        );
+        assert_eq!(
+            NorthStarMetric::BandsintownTrackers.platform(),
+            Some(MetricPlatform::Bandsintown)
+        );
+    }
 
     #[test]
     fn a_platform_with_no_series_reads_as_blind_rather_than_quiet() {

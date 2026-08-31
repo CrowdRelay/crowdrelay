@@ -33,10 +33,41 @@ impl GrowthStrategy {
         {
             return Self::EventDriven;
         }
-        if world.total_fans > 50 && world.signal_conversion_rate_bps < 500 {
+        if Self::needs_conversion_push(world) {
             return Self::SignalConversion;
         }
+        // A tenant behind on an off-platform north star needs more reach, not
+        // more Signal invites. Widening the top of the funnel is the lever that
+        // moves subscriber and follower counts.
+        if world.growth_target_progress.north_star_status == TargetStatus::Behind {
+            return Self::AggressiveDiscovery;
+        }
         Self::ContentFirst
+    }
+
+    /// Whether the brain should prioritize Signal conversion workers.
+    ///
+    /// Only when Signal installs *are* the north star. `SignalConversion`
+    /// leads with `signal-inviter`, and the evaluator refuses to dispatch that
+    /// template unless the north star is `SignalInstalls` — so selecting this
+    /// strategy for a YouTube or Spotify tenant would pick a plan whose first
+    /// action can never fire.
+    #[must_use]
+    fn needs_conversion_push(world: &WorldModel) -> bool {
+        use crowdrelay_domain::growth_metrics::NorthStarMetric;
+        world.north_star == NorthStarMetric::SignalInstalls
+            && world.total_fans > 50
+            && world.signal_conversion_rate_bps < 500
+    }
+
+    /// Hysteresis version of the conversion push check: a more lenient
+    /// threshold so the brain doesn't flip-flop in and out of SignalConversion.
+    #[must_use]
+    fn needs_conversion_push_with_hysteresis(world: &WorldModel) -> bool {
+        use crowdrelay_domain::growth_metrics::NorthStarMetric;
+        world.north_star == NorthStarMetric::SignalInstalls
+            && world.total_fans > 50
+            && world.signal_conversion_rate_bps < 700
     }
 
     /// Derives the strategy with hysteresis.
@@ -65,7 +96,7 @@ impl GrowthStrategy {
                 }
             }
             Self::SignalConversion => {
-                if world.total_fans > 50 && world.signal_conversion_rate_bps < 700 {
+                if Self::needs_conversion_push_with_hysteresis(world) {
                     return Self::SignalConversion;
                 }
             }
@@ -80,34 +111,50 @@ impl GrowthStrategy {
         match self {
             Self::AggressiveDiscovery => &[
                 "reddit-scanner",
+                "telegram-scanner",
+                "metal-archives-scanner",
+                "bandcamp-scanner",
                 "community-engager",
                 "growth-strategist",
                 "social-post",
+                "telegram-poster",
                 "signal-inviter",
                 "press-pitch",
             ],
             Self::EventDriven => &[
                 "press-pitch",
                 "social-post",
+                "telegram-poster",
                 "signal-inviter",
                 "community-engager",
                 "reddit-scanner",
+                "telegram-scanner",
+                "metal-archives-scanner",
+                "bandcamp-scanner",
                 "growth-strategist",
             ],
             Self::ContentFirst => &[
                 "social-post",
+                "telegram-poster",
                 "community-engager",
                 "growth-strategist",
                 "reddit-scanner",
+                "telegram-scanner",
+                "metal-archives-scanner",
+                "bandcamp-scanner",
                 "signal-inviter",
                 "press-pitch",
             ],
             Self::SignalConversion => &[
                 "signal-inviter",
                 "social-post",
+                "telegram-poster",
                 "growth-strategist",
                 "community-engager",
                 "reddit-scanner",
+                "telegram-scanner",
+                "metal-archives-scanner",
+                "bandcamp-scanner",
                 "press-pitch",
             ],
         }

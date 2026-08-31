@@ -6216,6 +6216,273 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/FanbaseIngestionCounters'
+  /admin/connections/discord:
+    post:
+      operationId: createDiscordConnection
+      summary: Register a Discord server connection for growth metric sync
+      description: Creates or updates a Discord server connection. The guild ID is stored and the growth metric sync worker fetches the member count from disdex.io (free, no API key).
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [guildId]
+              properties:
+                guildId:
+                  type: string
+                  description: Discord server (guild) ID — a numeric snowflake.
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Discord — {guildId}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/telegram:
+    post:
+      operationId: createTelegramConnection
+      summary: Register a Telegram channel connection for growth metric sync
+      description: Creates or updates a Telegram channel connection. The bot token is encrypted and stored. The growth metric sync worker fetches the subscriber count via the Bot API getChatMemberCount endpoint.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel, botToken]
+              properties:
+                channel:
+                  type: string
+                  description: Telegram channel username (e.g. @virya_music).
+                botToken:
+                  type: string
+                  description: Bot token from @BotFather.
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Telegram — {channel}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/lastfm:
+    post:
+      operationId: createLastfmConnection
+      summary: Register a Last.fm artist connection for growth metric sync
+      description: Creates or updates a Last.fm artist connection. The artist name is stored and the growth metric sync worker fetches listener and play counts via the official Last.fm API (artist.getInfo). The API key is a shared env var — no per-connection secret is needed.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artist]
+              properties:
+                artist:
+                  type: string
+                  description: Last.fm artist name (canonical spelling).
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Last.fm — {artist}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/deezer:
+    post:
+      operationId: createDeezerConnection
+      summary: Register a Deezer artist connection for growth metric sync
+      description: Creates or updates a Deezer artist connection. The numeric artist ID is stored and the growth metric sync worker fetches the fan count via the free Deezer API (api.deezer.com/artist/{id}). No API key is needed.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artistId]
+              properties:
+                artistId:
+                  type: string
+                  description: Numeric Deezer artist ID.
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Deezer — {artistId}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/discogs:
+    post:
+      operationId: createDiscogsConnection
+      summary: Register a Discogs artist connection for growth metric sync
+      description: Creates or updates a Discogs artist connection. The numeric artist ID is stored and the growth metric sync worker fetches collection and wantlist counts via the Discogs API (api.discogs.com/artists/{id}). A shared personal access token (CROWDRELAY_DISCOGS_TOKEN) is used for higher rate limits.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artistId]
+              properties:
+                artistId:
+                  type: string
+                  description: Numeric Discogs artist ID.
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Discogs — {artistId}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/bluesky:
+    post:
+      operationId: createBlueskyConnection
+      summary: Register a Bluesky actor connection for growth metric sync
+      description: Creates or updates a Bluesky actor connection. The handle is stored and the growth metric sync worker fetches the follower count via the free public Bluesky API (public.api.bsky.app/xrpc/app.bsky.actor.getProfile). No API key is needed.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [handle]
+              properties:
+                handle:
+                  type: string
+                  description: Bluesky handle (e.g. "virya.bsky.social").
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Bluesky — {handle}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/bandcamp:
+    post:
+      operationId: createBandcampConnection
+      summary: Register a Bandcamp artist connection for growth metric sync
+      description: Creates or updates a Bandcamp artist connection. The subdomain is stored and the growth metric sync worker scrapes the community page HTML to count recent supporters. No API key is needed — Bandcamp has no public API.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subdomain]
+              properties:
+                subdomain:
+                  type: string
+                  description: Bandcamp subdomain (e.g. "virya" for virya.bandcamp.com).
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Bandcamp — {subdomain}".
+      responses:
+        '201':
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
   /admin/portfolio/organization:
     post:
       operationId: createPortfolioOrganization

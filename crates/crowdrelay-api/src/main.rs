@@ -42,6 +42,7 @@ use crowdrelay_infra::{
     observability,
     referrals::PostgresReferralRepository,
     sensitive_response::SensitiveResponseCodec,
+    tenant_settings::TenantSettingsRepository,
 };
 use tokio::{
     net::TcpListener,
@@ -72,7 +73,7 @@ async fn main() -> Result<()> {
         config.require_double_opt_in,
         sensitive_response_codec.clone(),
     ));
-    let tenant_profile = TenantProfile::from_process_env(&config.workspace_slug)
+    let mut tenant_profile = TenantProfile::from_process_env(&config.workspace_slug)
         .context("invalid tenant profile configuration")?;
     let workspace_id = postgres_repository
         .resolve_workspace(&config.workspace_slug)
@@ -81,6 +82,18 @@ async fn main() -> Result<()> {
         .ok_or_else(|| {
             anyhow!("configured workspace does not exist; run the worker bootstrap command first")
         })?;
+    // Override product opt-ins from tenant_settings (database is authoritative
+    // for multi-tenant deployments; env-var defaults preserve Virya's behavior).
+    // A read failure is fatal rather than ignored: `signal_enabled` defaults to
+    // true, so silently falling back would re-expose the beacon surface of a
+    // tenant that had opted out.
+    let settings_repo = TenantSettingsRepository::new(database.clone());
+    let brand = settings_repo
+        .brand_settings(workspace_id.into_uuid())
+        .await
+        .context("failed to load tenant product settings")?;
+    tenant_profile.products.signal = brand.signal_enabled;
+    tenant_profile.products.synesthesia = brand.synesthesia_enabled;
     let repository: Arc<dyn AcquisitionRepository> = postgres_repository;
     let referral_repository: Arc<dyn ReferralRepository> =
         Arc::new(PostgresReferralRepository::new(
