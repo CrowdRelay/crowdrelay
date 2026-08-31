@@ -41,13 +41,24 @@ const TIKTOK_SCOPES: &str = "user.info.basic,user.info.stats";
 const ALLOWED_POST_REDIRECTS: &[&str] = &["/connections", "/connections/tiktok", "/portfolio", "/"];
 
 /// Validates that a post-redirect path is in the allowlist. Returns the
-/// validated path or the default `/connections`.
+/// validated path or the default `/`. Accepts exact matches from the
+/// allowlist plus the dynamic `/tenants/{slug}/portfolio` pattern used
+/// by the control plane SPA.
 fn validate_post_redirect(path: &str) -> &str {
     if ALLOWED_POST_REDIRECTS.contains(&path) {
-        path
-    } else {
-        "/portfolio"
+        return path;
     }
+    // Allow the control plane portfolio route: /tenants/{slug}/portfolio
+    if let Some(rest) = path.strip_prefix("/tenants/")
+        && let Some(slug) = rest.strip_suffix("/portfolio")
+        && !slug.is_empty()
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return path;
+    }
+    "/"
 }
 
 /// Query parameters for the OAuth authorize redirect.
