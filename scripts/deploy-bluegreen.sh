@@ -118,10 +118,9 @@ if ! grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$EDGE_CADDYFILE"; then
   sed "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g; s|reverse_proxy ${GREEN_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g; s|reverse_proxy ${ACTIVE_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g" "$EDGE_CADDYFILE" > /tmp/caddy-reconcile.tmp
   cat /tmp/caddy-reconcile.tmp > "$EDGE_CADDYFILE"
   rm -f /tmp/caddy-reconcile.tmp
-  # Copy the fixed Caddyfile directly into the container (bypasses any
-  # stale bind mount) and reload. No restart needed — reload is zero-downtime.
-  docker cp "$EDGE_CADDYFILE" "$EDGE_CONTAINER:/etc/caddy/Caddyfile" >/dev/null 2>&1 || \
-    fail "cannot copy Caddyfile into edge Caddy container"
+  # Reload Caddy with the updated host-side Caddyfile. The bind mount
+  # means the container already sees the file — we just need to reload.
+  # No restart needed — reload is zero-downtime.
   docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
     fail "caddy reload failed after reconciliation — investigate manually"
   sleep 2
@@ -132,18 +131,21 @@ fi
 # Pre-deploy: reconcile edge Caddy bind mount.
 # The ecosystem deploy syncs source code (git merge) which may replace the
 # Caddyfile with a new inode. The Docker bind mount still points at the old
-# inode, so the container serves stale config. Detect and fix this before
-# the deploy proceeds by copying the file directly into the container
-# and reloading — no restart needed.
+# inode, so the container serves stale config. Since the Caddyfile is
+# bind-mounted, we can't docker cp over it — instead we write to the host
+# path (which the bind mount sees) and reload. If the inode changed, we
+# copy the content to force the bind mount to see the new content.
 if ! cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE"; then
-  printf 'EDGE_RECONCILE=STALE copying Caddyfile into container and reloading\n' >&2
-  docker cp "$EDGE_CADDYFILE" "$EDGE_CONTAINER:/etc/caddy/Caddyfile" >/dev/null 2>&1 || \
-    fail "cannot copy Caddyfile into edge Caddy container"
+  printf 'EDGE_RECONCILE=STALE rewriting Caddyfile on host and reloading\n' >&2
+  # Copy content to a temp file, then overwrite the bind-mounted file
+  cp "$EDGE_CADDYFILE" /tmp/caddy-edge-sync.tmp
+  cat /tmp/caddy-edge-sync.tmp > "$EDGE_CADDYFILE"
+  rm -f /tmp/caddy-edge-sync.tmp
   docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
     fail "caddy reload failed after stale bind mount fix — investigate manually"
   sleep 2
   cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE" || \
-    fail "edge Caddyfile still stale after copy+reload — manual intervention required"
+    fail "edge Caddyfile still stale after rewrite+reload — manual intervention required"
   printf 'EDGE_RECONCILE=PASS\n'
 fi
 
