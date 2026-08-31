@@ -33,6 +33,9 @@ fn error_response(error: FanbaseError, request_id_value: Option<String>) -> Resp
             Problem::conflict(request_id_value).into_response()
         }
         FanbaseError::Database(_) => Problem::service_unavailable(request_id_value).into_response(),
+        FanbaseError::Encryption | FanbaseError::Decryption => {
+            Problem::service_unavailable(request_id_value).into_response()
+        }
     }
 }
 

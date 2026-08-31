@@ -427,6 +427,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         reddit_proxy_url,
         tiktok_client_key,
         tiktok_client_secret,
+        config.response_encryption_key.clone(),
         config.database.operation_timeout,
     )
     .context("invalid growth metric sync worker configuration")?;

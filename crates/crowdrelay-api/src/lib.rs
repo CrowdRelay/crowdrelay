@@ -44,6 +44,7 @@ use crowdrelay_infra::{
     beacon_signal::PostgresBeaconReleaseRepository,
     commerce_inventory::PostgresCommerceInventoryRepository,
     concert_qr::PostgresConcertQrRepository, database, ecosystem::PostgresEcosystemRepository,
+    sensitive_response::SensitiveResponseKey,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -168,6 +169,10 @@ pub struct AppState {
     pub(crate) concert_qr_repo: PostgresConcertQrRepository,
     pub(crate) push: push::PushPublicState,
     pub(crate) tenant: tenant::TenantProfile,
+    /// Encryption key for OAuth token storage (TikTok, future providers).
+    pub(crate) response_encryption_key: SensitiveResponseKey,
+    /// Shared HTTP client for outbound OAuth token exchanges.
+    pub(crate) http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -193,6 +198,7 @@ impl AppState {
         autopilot_runtime_enabled: bool,
         push: push::PushPublicState,
         tenant: tenant::TenantProfile,
+        response_encryption_key: SensitiveResponseKey,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
         let beacon_release = PostgresBeaconReleaseRepository::new(database.clone());
@@ -225,6 +231,8 @@ impl AppState {
             concert_qr_repo,
             push,
             tenant,
+            response_encryption_key,
+            http_client: reqwest::Client::new(),
         }
     }
 }

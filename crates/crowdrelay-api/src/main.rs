@@ -274,6 +274,7 @@ async fn main() -> Result<()> {
                 fcm_project_id: config.push_delivery.fcm_project_id.clone(),
             },
             tenant_profile,
+            config.response_encryption_key.clone(),
         ),
         http_config,
     );

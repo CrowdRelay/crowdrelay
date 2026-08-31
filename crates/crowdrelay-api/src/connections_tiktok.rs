@@ -5,12 +5,15 @@
 //!      redirects to TikTok's OAuth consent page.
 //!   2. GET /v1/public/connections/tiktok/callback — public (browser
 //!      redirect from TikTok), exchanges the authorization code for
-//!      access/refresh tokens and stores them in fanbase_connections.
+//!      access/refresh tokens and stores them encrypted in
+//!      fanbase_connections.
 //!
-//! Token storage: the OAuth tokens (access_token, refresh_token, open_id,
-//! expires_at) are stored as a JSON blob in fanbase_connections.credential_ref.
-//! The growth metric sync worker parses this blob, refreshes the access token
-//! when expired, and calls /v2/user/info/ for follower_count.
+//! Token storage: the OAuth tokens (access_token, refresh_token) are
+//! encrypted with `SensitiveResponseKey` and stored in
+//! `encrypted_access_token` / `encrypted_refresh_token`. The
+//! `credential_ref` column stores a short reference identifier
+//! (`tiktok:{open_id}`), not a secret blob. The growth metric sync worker
+//! decrypts the tokens at point of use and refreshes them when expired.
 
 use axum::{
     extract::{Query, State},
@@ -31,11 +34,26 @@ const STATE_COOKIE_FLAGS: &str = "HttpOnly; SameSite=Lax; Path=/";
 /// Scopes requested from TikTok: basic profile + stats (follower count).
 const TIKTOK_SCOPES: &str = "user.info.basic,user.info.stats";
 
+/// Allowlist of permitted post-redirect paths. The OAuth callback must
+/// not redirect to arbitrary URLs from the state cookie — only these
+/// internal control-plane paths are accepted.
+const ALLOWED_POST_REDIRECTS: &[&str] = &["/connections", "/connections/tiktok", "/"];
+
+/// Validates that a post-redirect path is in the allowlist. Returns the
+/// validated path or the default `/connections`.
+fn validate_post_redirect(path: &str) -> &str {
+    if ALLOWED_POST_REDIRECTS.contains(&path) {
+        path
+    } else {
+        "/connections"
+    }
+}
+
 /// Query parameters for the OAuth authorize redirect.
 #[derive(Deserialize)]
 pub struct AuthorizeParams {
-    /// Where to redirect after successful connection. Defaults to the
-    /// control plane connections page.
+    /// Where to redirect after successful connection. Must be in the
+    /// allowlist. Defaults to `/connections`.
     redirect: Option<String>,
 }
 
@@ -54,8 +72,13 @@ pub async fn authorize(
     let state = uuid::Uuid::new_v4().to_string();
 
     // Store the post-connection redirect target in the state cookie so the
-    // callback knows where to send the browser after success.
-    let post_redirect = params.redirect.as_deref().unwrap_or("/connections");
+    // callback knows where to send the browser after success. The path is
+    // validated against an allowlist to prevent open redirect.
+    let post_redirect = params
+        .redirect
+        .as_deref()
+        .map(validate_post_redirect)
+        .unwrap_or("/connections");
     let state_value = format!("{state}:{post_redirect}");
 
     let tiktok_url = format!(
@@ -86,7 +109,8 @@ pub struct CallbackParams {
 
 /// Handles the OAuth callback from TikTok. Public (no admin auth — the
 /// browser is redirected here by TikTok). Verifies the state cookie,
-/// exchanges the code for tokens, and stores them in fanbase_connections.
+/// exchanges the code for tokens, encrypts them, and stores them in
+/// fanbase_connections.
 pub async fn callback(
     State(state): State<crate::AppState>,
     Query(params): Query<CallbackParams>,
@@ -128,8 +152,8 @@ pub async fn callback(
     let redirect_uri = build_redirect_uri();
 
     // Exchange the authorization code for access + refresh tokens.
-    let http_client = reqwest::Client::new();
-    let token_response = http_client
+    let token_response = state
+        .http_client
         .post("https://open.tiktokapis.com/v2/oauth/token/")
         .form(&[
             ("client_key", client_key.as_str()),
@@ -186,22 +210,20 @@ pub async fn callback(
     let expires_at =
         time::OffsetDateTime::now_utc() + time::Duration::seconds(expires_in.saturating_sub(60));
 
-    // Store tokens as JSON in credential_ref.
-    let credential_json = serde_json::json!({
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "open_id": open_id,
-        "expires_at": expires_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-    })
-    .to_string();
-
     let workspace_id: uuid::Uuid = state.ops.workspace_id().into_uuid();
 
-    // Store the connection via the fanbase repository (SQL stays in infra).
-    let repo = crowdrelay_infra::fanbase::PostgresFanbaseRepository::new(state.database.clone());
-    let label = format!("TikTok — {open_id}");
+    // Store encrypted tokens via the fanbase repository.
+    let repo = crowdrelay_infra::fanbase::PostgresFanbaseRepository::new(state.database.clone())
+        .with_encryption_key(state.response_encryption_key.clone());
     if let Err(error) = repo
-        .upsert_tiktok_connection(workspace_id, open_id, &credential_json, &label)
+        .upsert_tiktok_connection(
+            workspace_id,
+            open_id,
+            access_token,
+            refresh_token,
+            expires_at,
+            TIKTOK_SCOPES,
+        )
         .await
     {
         tracing::error!(error = %error, "failed to store TikTok connection");
@@ -211,8 +233,12 @@ pub async fn callback(
     tracing::info!(open_id = open_id, "TikTok connection established");
 
     // Clear the state cookie and redirect to the control plane.
+    // The post-redirect path was validated against an allowlist when the
+    // authorize endpoint set the cookie, but we validate again here for
+    // defense in depth.
+    let validated_redirect = validate_post_redirect(post_redirect);
     let clear_cookie = format!("{STATE_COOKIE}=; Max-Age=0; {STATE_COOKIE_FLAGS}");
-    let redirect_url = format!("https://control.virya.music{post_redirect}");
+    let redirect_url = format!("https://control.virya.music{validated_redirect}");
 
     (
         StatusCode::FOUND,

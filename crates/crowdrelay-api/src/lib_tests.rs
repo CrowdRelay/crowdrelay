@@ -441,6 +441,9 @@ mod tests {
                     data_region: crate::tenant::RegionalSource::TenantProfile,
                 },
             },
+            crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
+                b"test-encryption-key",
+            ),
         ))
     }
 

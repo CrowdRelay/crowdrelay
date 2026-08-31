@@ -31,6 +31,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, encrypt_value};
 use serde::Deserialize;
 use sqlx::{FromRow, PgPool, postgres::PgListener};
 use thiserror::Error;
@@ -119,6 +121,9 @@ pub struct GrowthMetricSyncWorker {
     /// TikTok Display API credentials for OAuth token refresh.
     tiktok_client_key: Option<String>,
     tiktok_client_secret: Option<String>,
+    /// Encryption key for decrypting OAuth tokens stored in
+    /// `encrypted_access_token` / `encrypted_refresh_token`.
+    response_encryption_key: SensitiveResponseKey,
     operation_timeout: Duration,
 }
 
@@ -129,6 +134,7 @@ impl GrowthMetricSyncWorker {
     /// the worker is enabled as long as any other platform is configured.
     /// Spotify needs no credentials either — it uses Spotify's public embed
     /// page to obtain a web player token.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         youtube_api_key: Option<String>,
@@ -136,10 +142,14 @@ impl GrowthMetricSyncWorker {
         reddit_proxy_url: Option<String>,
         tiktok_client_key: Option<String>,
         tiktok_client_secret: Option<String>,
+        response_encryption_key: SensitiveResponseKey,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
-        if youtube_api_key.is_none() && facebook_page_access_token.is_none() {
-            tracing::info!("growth metric sync disabled: no YouTube API key or Facebook token");
+        if youtube_api_key.is_none()
+            && facebook_page_access_token.is_none()
+            && tiktok_client_key.is_none()
+        {
+            tracing::info!("growth metric sync disabled: no platform credentials configured");
             return Ok(None);
         }
         // The main HTTP client is used for YouTube and Spotify — no proxy.
@@ -164,6 +174,7 @@ impl GrowthMetricSyncWorker {
             reddit_proxy_pool: Arc::new(Mutex::new(RedditProxyPool::new())),
             tiktok_client_key,
             tiktok_client_secret,
+            response_encryption_key,
             operation_timeout,
         }))
     }
@@ -661,9 +672,11 @@ impl GrowthMetricSyncWorker {
     }
 
     /// TikTok: fetch creator follower count via the Display API
-    /// /v2/user/info/ endpoint. Requires OAuth tokens stored in
-    /// fanbase_connections.credential_ref as a JSON blob. Refreshes the
-    /// access token if expired using the stored refresh token.
+    /// /v2/user/info/ endpoint. Requires OAuth tokens stored encrypted in
+    /// `encrypted_access_token` / `encrypted_refresh_token`. Refreshes the
+    /// access token if expired. On refresh failure, marks the connection
+    /// as `expired` and returns an error — never silently falls back to
+    /// old expired credentials.
     async fn sync_tiktok(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
         let client_key = self.tiktok_client_key.as_ref().ok_or_else(|| {
             GrowthMetricSyncError::ProviderApi("no TikTok client key configured".to_string())
@@ -672,23 +685,74 @@ impl GrowthMetricSyncWorker {
             GrowthMetricSyncError::ProviderApi("no TikTok client secret configured".to_string())
         })?;
 
-        // Read the credential_ref JSON blob from the connection.
-        let credential_json: String =
-            sqlx::query_scalar("SELECT credential_ref FROM fanbase_connections WHERE id = $1")
-                .bind(conn.id)
-                .fetch_one(&self.pool)
-                .await?;
+        let open_id = &conn.provider_account_id;
 
-        let mut creds: TikTokCredentials = serde_json::from_str(&credential_json).map_err(|e| {
-            GrowthMetricSyncError::ProviderApi(format!("failed to parse TikTok credentials: {e}"))
+        // Read encrypted tokens from the connection.
+        let row: (Option<String>, Option<String>, Option<OffsetDateTime>) = sqlx::query_as(
+            r#"SELECT encrypted_access_token, encrypted_refresh_token, token_expires_at
+               FROM fanbase_connections WHERE id = $1"#,
+        )
+        .bind(conn.id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let encrypted_access = row.0.ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(
+                "TikTok connection missing encrypted_access_token".to_string(),
+            )
+        })?;
+        let encrypted_refresh = row.1.ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(
+                "TikTok connection missing encrypted_refresh_token".to_string(),
+            )
+        })?;
+        let token_expires_at = row.2.ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(
+                "TikTok connection missing token_expires_at".to_string(),
+            )
+        })?;
+
+        // Decrypt tokens at point of use.
+        let aad = tiktok_oauth_aad(conn.workspace_id, open_id);
+        let access_bytes = URL_SAFE_NO_PAD.decode(&encrypted_access).map_err(|_| {
+            GrowthMetricSyncError::ProviderApi(
+                "TikTok access token is not valid base64".to_string(),
+            )
+        })?;
+        let refresh_bytes = URL_SAFE_NO_PAD.decode(&encrypted_refresh).map_err(|_| {
+            GrowthMetricSyncError::ProviderApi(
+                "TikTok refresh token is not valid base64".to_string(),
+            )
+        })?;
+        let mut access_token = String::from_utf8(
+            decrypt_value(&access_bytes, &self.response_encryption_key, &aad).map_err(|e| {
+                GrowthMetricSyncError::ProviderApi(format!(
+                    "TikTok access token decryption failed: {e}"
+                ))
+            })?,
+        )
+        .map_err(|_| {
+            GrowthMetricSyncError::ProviderApi("TikTok access token is not valid UTF-8".to_string())
+        })?;
+        let refresh_token = String::from_utf8(
+            decrypt_value(&refresh_bytes, &self.response_encryption_key, &aad).map_err(|e| {
+                GrowthMetricSyncError::ProviderApi(format!(
+                    "TikTok refresh token decryption failed: {e}"
+                ))
+            })?,
+        )
+        .map_err(|_| {
+            GrowthMetricSyncError::ProviderApi(
+                "TikTok refresh token is not valid UTF-8".to_string(),
+            )
         })?;
 
         // Refresh the access token if it's expired (or about to expire).
         let now = OffsetDateTime::now_utc();
-        if creds.expires_at <= now + time::Duration::seconds(60) {
+        if token_expires_at <= now + time::Duration::seconds(60) {
             tracing::info!(
                 connection_id = %conn.id,
-                open_id = %creds.open_id,
+                open_id = open_id,
                 "TikTok access token expired, refreshing"
             );
             let refresh_response = self
@@ -697,15 +761,28 @@ impl GrowthMetricSyncWorker {
                 .form(&[
                     ("client_key", client_key.as_str()),
                     ("client_secret", client_secret.as_str()),
-                    ("refresh_token", creds.refresh_token.as_str()),
+                    ("refresh_token", refresh_token.as_str()),
                     ("grant_type", "refresh_token"),
                 ])
                 .send()
                 .await?;
 
             if !refresh_response.status().is_success() {
+                // Mark the connection as expired — the operator must re-auth.
+                tracing::warn!(
+                    connection_id = %conn.id,
+                    open_id = open_id,
+                    status = refresh_response.status().as_u16(),
+                    "TikTok token refresh failed, marking connection as expired"
+                );
+                let _ = sqlx::query(
+                    "UPDATE fanbase_connections SET status = 'expired', updated_at = now() WHERE id = $1",
+                )
+                .bind(conn.id)
+                .execute(&self.pool)
+                .await;
                 return Err(GrowthMetricSyncError::ProviderApi(format!(
-                    "TikTok token refresh failed: HTTP {}",
+                    "TikTok token refresh failed: HTTP {} — connection marked as expired, re-auth required",
                     refresh_response.status()
                 )));
             }
@@ -717,37 +794,77 @@ impl GrowthMetricSyncWorker {
                 )
             })?;
 
-            creds.access_token = data
+            // Refresh MUST return a new access_token. If it doesn't, the
+            // refresh failed — do NOT fall back to the old expired token.
+            let new_access_token = data
                 .get("access_token")
                 .and_then(|v| v.as_str())
-                .unwrap_or(&creds.access_token)
-                .to_string();
-            creds.refresh_token = data
+                .ok_or_else(|| {
+                    GrowthMetricSyncError::ProviderApi(
+                        "TikTok refresh response missing access_token — cannot use old expired token".to_string(),
+                    )
+                })?;
+            // Some providers return a new refresh_token, some don't.
+            // If a new one is provided, use it; otherwise keep the old one.
+            let new_refresh_token = data
                 .get("refresh_token")
                 .and_then(|v| v.as_str())
-                .unwrap_or(&creds.refresh_token)
-                .to_string();
+                .unwrap_or(&refresh_token);
             let expires_in = data
                 .get("expires_in")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(86400);
-            creds.expires_at = now + time::Duration::seconds(expires_in.saturating_sub(60));
+            let new_expires_at = now + time::Duration::seconds(expires_in.saturating_sub(60));
 
-            // Persist the refreshed tokens back to the DB.
-            let updated_json = serde_json::to_string(&creds).map_err(|e| {
-                GrowthMetricSyncError::ProviderApi(format!(
-                    "failed to serialize TikTok credentials: {e}"
-                ))
-            })?;
-            sqlx::query("UPDATE fanbase_connections SET credential_ref = $1, updated_at = now() WHERE id = $2")
-                .bind(&updated_json)
-                .bind(conn.id)
-                .execute(&self.pool)
-                .await?;
+            // Encrypt and persist the refreshed tokens.
+            let enc_access = URL_SAFE_NO_PAD.encode(
+                encrypt_value(
+                    new_access_token.as_bytes(),
+                    &self.response_encryption_key,
+                    &aad,
+                )
+                .map_err(|_| {
+                    GrowthMetricSyncError::ProviderApi(
+                        "failed to encrypt refreshed access token".to_string(),
+                    )
+                })?,
+            );
+            let enc_refresh = URL_SAFE_NO_PAD.encode(
+                encrypt_value(
+                    new_refresh_token.as_bytes(),
+                    &self.response_encryption_key,
+                    &aad,
+                )
+                .map_err(|_| {
+                    GrowthMetricSyncError::ProviderApi(
+                        "failed to encrypt refreshed refresh token".to_string(),
+                    )
+                })?,
+            );
+            sqlx::query(
+                r#"UPDATE fanbase_connections
+                   SET encrypted_access_token = $1,
+                       encrypted_refresh_token = $2,
+                       token_expires_at = $3,
+                       status = 'connected',
+                       updated_at = now()
+                   WHERE id = $4"#,
+            )
+            .bind(&enc_access)
+            .bind(&enc_refresh)
+            .bind(new_expires_at)
+            .bind(conn.id)
+            .execute(&self.pool)
+            .await?;
+
+            access_token = new_access_token.to_string();
+            // refresh_token is not used after this point — the new value
+            // was already persisted in the UPDATE above. Keeping the old
+            // variable would be misleading, so we drop it.
 
             tracing::info!(
                 connection_id = %conn.id,
-                open_id = %creds.open_id,
+                open_id = open_id,
                 "TikTok access token refreshed"
             );
         }
@@ -760,7 +877,7 @@ impl GrowthMetricSyncWorker {
                 "fields",
                 "open_id,display_name,follower_count,following_count,likes_count,video_count",
             )])
-            .header("Authorization", format!("Bearer {}", creds.access_token))
+            .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await?;
 
@@ -816,7 +933,7 @@ impl GrowthMetricSyncWorker {
 
         tracing::info!(
             connection_id = %conn.id,
-            open_id = %creds.open_id,
+            open_id = open_id,
             artist = %display_name,
             followers = follower_count,
             "tiktok follower count recorded"
@@ -1273,18 +1390,12 @@ struct InstagramUserResponse {
     followers_count: i64,
 }
 
-// --- TikTok credential types ---
+// --- TikTok helpers ---
 
-/// OAuth tokens stored in fanbase_connections.credential_ref as JSON.
-/// The sync worker reads this, refreshes the access_token when expired,
-/// and persists the updated tokens back.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct TikTokCredentials {
-    access_token: String,
-    refresh_token: String,
-    open_id: String,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
+/// Associated data for OAuth token encryption. Must match the AAD used
+/// by `PostgresFanbaseRepository::oauth_aad` in the infra crate.
+fn tiktok_oauth_aad(workspace_id: Uuid, open_id: &str) -> Vec<u8> {
+    format!("crowdrelay.fanbase.oauth.tiktok.v1\0{workspace_id}\0{open_id}").into_bytes()
 }
 
 // --- SoundCloud response types ---

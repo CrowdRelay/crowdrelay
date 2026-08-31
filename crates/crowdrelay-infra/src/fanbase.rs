@@ -8,14 +8,20 @@
 //! attributed to its source via the external-id ledger, and the batch closes
 //! atomically with its ingestion ledger row.
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::sensitive_response::{SensitiveResponseKey, encrypt_value};
 use crowdrelay_domain::fanbase::{AdmissionAction, SourceKind, admission_for};
 
 #[derive(Clone)]
 pub struct PostgresFanbaseRepository {
     pool: PgPool,
+    /// Encryption key for OAuth tokens stored in `encrypted_access_token` /
+    /// `encrypted_refresh_token`. `None` for callers that never touch OAuth
+    /// connections (legacy n8n-backed paths).
+    encryption_key: Option<SensitiveResponseKey>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +36,10 @@ pub enum FanbaseError {
     ConnectionExists,
     #[error("fanbase database operation failed")]
     Database(sqlx::Error),
+    #[error("OAuth token encryption failed")]
+    Encryption,
+    #[error("OAuth token decryption failed")]
+    Decryption,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -71,7 +81,42 @@ pub struct IngestionCounts {
 impl PostgresFanbaseRepository {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            encryption_key: None,
+        }
+    }
+
+    /// Sets the encryption key for OAuth token storage. Required before
+    /// calling `upsert_tiktok_connection` or any method that reads
+    /// encrypted credentials.
+    #[must_use]
+    pub fn with_encryption_key(mut self, key: SensitiveResponseKey) -> Self {
+        self.encryption_key = Some(key);
+        self
+    }
+
+    /// Associated data for OAuth token encryption. Binds the ciphertext to
+    /// the workspace and provider account so a token stolen from one
+    /// workspace cannot be decrypted in another.
+    fn oauth_aad(workspace_id: Uuid, open_id: &str) -> Vec<u8> {
+        format!("crowdrelay.fanbase.oauth.tiktok.v1\0{workspace_id}\0{open_id}").into_bytes()
+    }
+
+    fn encrypt_token(
+        &self,
+        plaintext: &str,
+        workspace_id: Uuid,
+        open_id: &str,
+    ) -> Result<String, FanbaseError> {
+        let key = self
+            .encryption_key
+            .as_ref()
+            .ok_or(FanbaseError::Encryption)?;
+        let aad = Self::oauth_aad(workspace_id, open_id);
+        let encrypted =
+            encrypt_value(plaintext.as_bytes(), key, &aad).map_err(|_| FanbaseError::Encryption)?;
+        Ok(URL_SAFE_NO_PAD.encode(&encrypted))
     }
 
     fn unexpected(error: sqlx::Error) -> FanbaseError {
@@ -559,33 +604,52 @@ impl PostgresFanbaseRepository {
 
     /// Upserts a TikTok connection with OAuth tokens. Called by the
     /// TikTok OAuth callback handler after a successful token exchange.
-    /// The `credential_json` blob contains access_token, refresh_token,
-    /// open_id, and expires_at as RFC 3339.
+    /// Tokens are encrypted with `SensitiveResponseKey` and stored in
+    /// `encrypted_access_token` / `encrypted_refresh_token`. The
+    /// `credential_ref` column stores a short reference identifier
+    /// (`tiktok:{open_id}`), not a secret blob.
     pub async fn upsert_tiktok_connection(
         &self,
         workspace_id: Uuid,
         open_id: &str,
-        credential_json: &str,
-        label: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: time::OffsetDateTime,
+        scope: &str,
     ) -> Result<(), FanbaseError> {
+        let encrypted_access = self.encrypt_token(access_token, workspace_id, open_id)?;
+        let encrypted_refresh = self.encrypt_token(refresh_token, workspace_id, open_id)?;
+        let credential_ref = format!("tiktok:{open_id}");
+        let label = format!("TikTok — {open_id}");
         sqlx::query(
             r#"
             INSERT INTO fanbase_connections (
                 workspace_id, platform, external_account_ref,
-                credential_ref, label, status, provider_account_id
+                credential_ref, label, status, provider_account_id,
+                encrypted_access_token, encrypted_refresh_token,
+                token_expires_at, token_scope, token_type
             )
-            VALUES ($1, 'tiktok', $2, $3, $4, 'connected', $2)
+            VALUES ($1, 'tiktok', $2, $3, $4, 'connected', $2,
+                    $5, $6, $7, $8, 'bearer')
             ON CONFLICT (workspace_id, platform, external_account_ref)
             DO UPDATE SET
                 credential_ref = EXCLUDED.credential_ref,
+                encrypted_access_token = EXCLUDED.encrypted_access_token,
+                encrypted_refresh_token = EXCLUDED.encrypted_refresh_token,
+                token_expires_at = EXCLUDED.token_expires_at,
+                token_scope = EXCLUDED.token_scope,
                 status = 'connected',
                 updated_at = now()
             "#,
         )
         .bind(workspace_id)
         .bind(open_id)
-        .bind(credential_json)
-        .bind(label)
+        .bind(&credential_ref)
+        .bind(&label)
+        .bind(&encrypted_access)
+        .bind(&encrypted_refresh)
+        .bind(expires_at)
+        .bind(scope)
         .execute(&self.pool)
         .await
         .map_err(Self::unexpected)?;
