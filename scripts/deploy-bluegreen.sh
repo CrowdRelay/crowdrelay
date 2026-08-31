@@ -219,19 +219,39 @@ python3 "$RECEIPT_HELPER" pending \
 
 trap 'rollback $?' ERR INT TERM HUP
 
-# --- 1. Start new containers ------------------------------------------------
+# --- 1. Run migrations as a one-shot exact-image job -------------------------
 
-printf '\n==> 1/6 — Start %s api+worker\n' "$DEPLOY_COLOR"
+printf '\n==> 1/7 — Run migrations (one-shot setup)\n'
+CROWDRELAY_IMAGE_TAG="$CROWDRELAY_GREEN_TAG" \
+docker compose --env-file "$env_file" -f "$compose_file" \
+  run --rm -T setup </dev/null
+printf 'MIGRATIONS=PASS\n'
+
+python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
+  --release-id "$RELEASE_ID" --phase migration --status pass >/dev/null
+
+# --- 2. Start candidate API (worker in standby) ------------------------------
+
+printf '\n==> 2/7 — Start %s API + worker (standby)\n' "$DEPLOY_COLOR"
 NEW_STARTED=true
 
 if [[ "$DEPLOY_COLOR" == "green" ]]; then
+  # Start API first, then worker in standby mode
   docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
-    up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api-green worker-green
+    up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api-green
+  # Start worker in standby — it will wait for leadership before running loops
+  CROWDRELAY_WORKER_STANDBY=true \
+  docker compose --env-file "$env_file" -f "$compose_file" -f compose.bluegreen.yaml \
+    up -d --no-deps worker-green
 else
   # Deploy blue: override the image tag without modifying .crowdrelay.local.sh
   export CROWDRELAY_IMAGE_TAG="sha-${TARGET}"
   docker compose --env-file "$env_file" -f "$compose_file" \
-    up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api worker
+    up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api
+  # Start worker in standby
+  CROWDRELAY_WORKER_STANDBY=true \
+  docker compose --env-file "$env_file" -f "$compose_file" \
+    up -d --no-deps worker
 fi
 
 for container in "$NEW_API" "$NEW_WORKER"; do
@@ -239,14 +259,14 @@ for container in "$NEW_API" "$NEW_WORKER"; do
   restart_policy="$(docker inspect "$container" --format '{{.HostConfig.RestartPolicy.Name}}')"
   [[ "$restart_policy" == "unless-stopped" ]] || fail "candidate restart policy is not durable: container=$container policy=$restart_policy"
 done
-printf 'NEW_CONTAINERS=STARTED color=%s restart=unless-stopped\n' "$DEPLOY_COLOR"
+printf 'NEW_CONTAINERS=STARTED color=%s restart=unless-stopped worker=standby\n' "$DEPLOY_COLOR"
 
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
   --release-id "$RELEASE_ID" --phase start-candidate --status pass >/dev/null
 
-# --- 2. Health-check new API directly ---------------------------------------
+# --- 3. Health-check new API directly ---------------------------------------
 
-printf '\n==> 2/6 — Health-check %s API\n' "$DEPLOY_COLOR"
+printf '\n==> 3/7 — Health-check %s API\n' "$DEPLOY_COLOR"
 new_health=""
 for attempt in $(seq 1 30); do
   new_health="$(docker inspect "$NEW_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
@@ -280,20 +300,9 @@ printf 'NEW_HEALTH=PASS meta_sha=%s\n' "$TARGET"
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
   --release-id "$RELEASE_ID" --phase health-check --status pass >/dev/null
 
-# --- 3. Run migrations via setup --------------------------------------------
-
-printf '\n==> 3/6 — Run migrations (setup)\n'
-CROWDRELAY_IMAGE_TAG="$CROWDRELAY_GREEN_TAG" \
-docker compose --env-file "$env_file" -f "$compose_file" \
-  run --rm -T setup </dev/null
-printf 'MIGRATIONS=PASS\n'
-
-python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
-  --release-id "$RELEASE_ID" --phase migration --status pass >/dev/null
-
 # --- 4. Atomically prefer the candidate at the public edge -------------------
 
-printf '\n==> 4/6 — Gracefully switch Caddy preference to %s API\n' "$DEPLOY_COLOR"
+printf '\n==> 4/7 — Gracefully switch Caddy preference to %s API\n' "$DEPLOY_COLOR"
 caddy_candidate="$(mktemp -t caddyfile-candidate.XXXXXX)"
 if [[ "$DEPLOY_COLOR" == "green" ]]; then
   sed \
@@ -319,9 +328,33 @@ printf 'CADDY_SWITCH=PASS primary=%s fallback=%s reload=graceful\n' "$NEW_API" "
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
   --release-id "$RELEASE_ID" --phase cutover --status pass >/dev/null
 
+# --- 4b. Worker leadership handoff -------------------------------------------
+# Signal the old worker to shut down (SIGTERM), which triggers its graceful
+# drain and leadership release. The candidate worker, running in standby,
+# will acquire leadership and start its background loops.
+printf '\n==> 4b/7 — Worker leadership handoff (old drains, candidate takes over)\n'
+docker stop --time 30 "$CURRENT_WORKER" >/dev/null 2>&1 || true
+
+# Wait for the candidate worker to acquire leadership (up to 60s)
+leader_acquired=false
+for leader_attempt in $(seq 1 30); do
+  # Check if the candidate worker is running and healthy
+  candidate_worker_health="$(docker inspect "$NEW_WORKER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+  if [[ "$candidate_worker_health" == "healthy" || "$candidate_worker_health" == "running" ]]; then
+    leader_acquired=true
+    break
+  fi
+  sleep 2
+done
+[[ "$leader_acquired" == true ]] || fail "candidate worker did not become healthy after leadership handoff"
+printf 'WORKER_LEADERSHIP=PASS old=%s drained new=%s active\n' "$CURRENT_WORKER" "$NEW_WORKER"
+
+python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
+  --release-id "$RELEASE_ID" --phase leadership-handoff --status pass >/dev/null
+
 # --- 5. Verify public health ------------------------------------------------
 
-printf '\n==> 5/6 — Verify public health\n'
+printf '\n==> 5/7 — Verify public health\n'
 public_url="${CROWDRELAY_PUBLIC_BASE_URL:-https://signal-api.virya.music}"
 for endpoint in "health/live" "health/ready"; do
   code="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 1 --retry-all-errors \
@@ -398,7 +431,7 @@ python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
 
 # --- 6. Stop old containers, finalize ---------------------------------------
 
-printf '\n==> 6/6 — Stop old containers, finalize\n'
+printf '\n==> 7/7 — Stop old containers, finalize\n'
 docker stop --time 30 "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 docker rm "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true
 

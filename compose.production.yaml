@@ -62,7 +62,10 @@ services:
     image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     labels:
       io.crowdrelay.release.ref: ${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
-    command: ["run"]
+    # When CROWDRELAY_WORKER_STANDBY=true, the worker starts in standby mode
+    # and waits for leadership before running background loops. The deploy
+    # script sets this during blue-green cutover to prevent overlapping workers.
+    command: ["sh", "-c", "exec crowdrelay-worker run $${CROWDRELAY_WORKER_STANDBY:+--standby}"]
     env_file:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
     environment:

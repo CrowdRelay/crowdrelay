@@ -35,6 +35,7 @@ use crowdrelay_worker::{
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     growth_metric_sync::GrowthMetricSyncWorker,
+    leadership::acquire_leadership,
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     push_delivery::PushDeliveryWorker,
@@ -73,7 +74,7 @@ const MAX_WEBHOOK_SECRET_REFERENCES: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
-    Run,
+    Run { standby: bool },
     Migrate,
     Bootstrap,
     Setup,
@@ -81,7 +82,8 @@ enum Command {
 }
 
 impl Command {
-    const KNOWN: &'static str = "`run`, `migrate`, `bootstrap`, `setup`, or `replay`";
+    const KNOWN: &'static str =
+        "`run`, `run --standby`, `migrate`, `bootstrap`, `setup`, or `replay`";
 }
 
 #[tokio::main]
@@ -116,9 +118,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Command::Run => {
-            tracing::info!(environment = %config.environment, "CrowdRelay worker started");
-            run(database.clone(), &config).await?;
+        Command::Run { standby } => {
+            tracing::info!(environment = %config.environment, standby, "CrowdRelay worker started");
+            run(database.clone(), &config, standby).await?;
             tracing::info!("CrowdRelay worker stopped");
         }
     }
@@ -134,8 +136,8 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command> {
     let rest: Vec<String> = args.collect();
     let command = match head.as_deref() {
         None | Some("run") => {
-            reject_extras(&rest)?;
-            Command::Run
+            let standby = parse_standby_flag(&rest)?;
+            Command::Run { standby }
         }
         Some("migrate") => {
             reject_extras(&rest)?;
@@ -164,6 +166,17 @@ fn reject_extras(rest: &[String]) -> Result<()> {
         bail!("unexpected worker argument `{extra}`");
     }
     Ok(())
+}
+
+fn parse_standby_flag(rest: &[String]) -> Result<bool> {
+    let mut standby = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--standby" => standby = true,
+            other => bail!("unexpected `run` argument `{other}`; expected `--standby`"),
+        }
+    }
+    Ok(standby)
 }
 
 async fn run_migrations(database_pool: &PgPool) -> Result<()> {
@@ -217,7 +230,7 @@ async fn run_bootstrap(database_pool: &PgPool, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn run(database: PgPool, config: &Config) -> Result<()> {
+async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let secret_provider = load_secret_provider()?;
     timeout(
         config.database.operation_timeout,
@@ -225,6 +238,21 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     )
     .await
     .context("active webhook endpoint validation timed out")??;
+
+    // Acquire single-active worker leadership before starting background loops.
+    // In standby mode (blue-green deploy), polls until the old worker releases.
+    // In normal mode, waits briefly then proceeds best-effort.
+    let worker_id = format!("{}-{}", config.environment, uuid::Uuid::now_v7().simple());
+    let (leadership_shutdown_tx, leadership_shutdown_rx) = watch::channel(false);
+    let leadership =
+        acquire_leadership(database.clone(), worker_id, standby, leadership_shutdown_rx)
+            .await
+            .context("failed to acquire worker leadership")?;
+    tracing::info!(
+        worker_id = leadership.worker_id(),
+        generation = leadership.generation(),
+        "worker leadership acquired, starting background loops"
+    );
     let outbox_config = OutboxWorkerConfig {
         database_operation_timeout: config.database.operation_timeout,
         allow_http_endpoints: !config.environment.is_production(),
@@ -600,6 +628,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     };
 
     let _ = shutdown_sender.send(true);
+    let _ = leadership_shutdown_tx.send(true);
     let shutdown_result = drain_worker_tasks(
         &mut runtime_tasks,
         config
@@ -609,6 +638,9 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
             .saturating_add(Duration::from_secs(2)),
     )
     .await;
+
+    // Release worker leadership so a standby candidate can immediately acquire.
+    leadership.release().await;
 
     runtime_result.and(shutdown_result)
 }
@@ -919,8 +951,25 @@ mod tests {
 
     #[test]
     fn defaults_to_run() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(parse_command(Vec::<String>::new())?, Command::Run);
+        assert_eq!(
+            parse_command(Vec::<String>::new())?,
+            Command::Run { standby: false }
+        );
         Ok(())
+    }
+
+    #[test]
+    fn accepts_run_standby() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            parse_command(["run".to_owned(), "--standby".to_owned()])?,
+            Command::Run { standby: true }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_run_with_unknown_flag() {
+        assert!(parse_command(["run".to_owned(), "--bogus".to_owned()]).is_err());
     }
 
     #[test]

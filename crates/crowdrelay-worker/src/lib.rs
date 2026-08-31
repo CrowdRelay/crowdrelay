@@ -31,6 +31,7 @@ pub mod discovery;
 pub mod draws;
 pub mod event_sync;
 pub mod growth_metric_sync;
+pub mod leadership;
 pub mod ops_watchdog;
 pub mod outbox;
 pub mod push_delivery;

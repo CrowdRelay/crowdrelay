@@ -108,10 +108,14 @@ class EcosystemDeployContract(unittest.TestCase):
         self.assertIn("v1/health/ready", BLUEGREEN_TEXT)
 
     def test_bluegreen_stops_blue_after_verification(self) -> None:
-        # Blue stop must come after public health verification
+        # The old API container must not be stopped before public health passes.
+        # The old worker is stopped earlier for leadership handoff, but the old
+        # API (which serves traffic) must remain until soak completes.
         health_check = BLUEGREEN_TEXT.index("PUBLIC_SMOKE=PASS")
-        blue_stop = BLUEGREEN_TEXT.index("docker stop")
-        self.assertLess(health_check, blue_stop, "blue must not stop before public health passes")
+        # Find the docker stop that stops the old API (CURRENT_API), not the
+        # worker leadership handoff stop (CURRENT_WORKER).
+        blue_stop = BLUEGREEN_TEXT.index('docker stop --time 30 "$CURRENT_API"')
+        self.assertLess(health_check, blue_stop, "old API must not stop before public health passes")
 
     def test_bluegreen_verifies_green_meta_sha(self) -> None:
         self.assertIn("v1/meta", BLUEGREEN_TEXT)
