@@ -219,6 +219,7 @@ async fn load_learning_loop(
             FROM viryaos_autopilot_outcomes
             WHERE workspace_id = $1
               AND decision_id = d.id
+              AND effect_assessment IS NOT NULL
             ORDER BY observed_at DESC
             LIMIT 1
         ) o ON true
