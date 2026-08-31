@@ -815,7 +815,7 @@ fn is_valid_proxy_line(line: &str) -> bool {
     if line.is_empty() || line.starts_with('#') {
         return false;
     }
-    // Expect format: host:port (e.g. "1.2.3.4:8080")
+    // Expect format: host:port (e.g. "192.0.2.1:8080")
     let mut parts = line.rsplitn(2, ':');
     let port_str = parts.next().unwrap_or("");
     let host = parts.next().unwrap_or("");
@@ -1033,8 +1033,8 @@ mod tests {
 
     #[test]
     fn is_valid_proxy_line_accepts_host_port() {
-        assert!(is_valid_proxy_line("1.2.3.4:8080"));
-        assert!(is_valid_proxy_line("10.0.0.1:3128"));
+        assert!(is_valid_proxy_line("192.0.2.1:8080"));
+        assert!(is_valid_proxy_line("198.51.100.1:3128"));
         assert!(is_valid_proxy_line("example.com:80"));
     }
 
@@ -1044,8 +1044,8 @@ mod tests {
         assert!(!is_valid_proxy_line("# comment"));
         assert!(!is_valid_proxy_line("not a proxy"));
         assert!(!is_valid_proxy_line("no-port-here"));
-        assert!(!is_valid_proxy_line("1.2.3.4:0"));
-        assert!(!is_valid_proxy_line("1.2.3.4:999999"));
+        assert!(!is_valid_proxy_line("192.0.2.1:0"));
+        assert!(!is_valid_proxy_line("192.0.2.1:999999"));
     }
 
     #[test]
@@ -1059,19 +1059,19 @@ mod tests {
     fn reddit_proxy_pool_mark_failed_evicts() {
         let mut pool = RedditProxyPool::new();
         pool.working = vec![
-            "http://1.1.1.1:8080".to_string(),
-            "http://2.2.2.2:8080".to_string(),
+            "http://192.0.2.1:8080".to_string(),
+            "http://198.51.100.1:8080".to_string(),
         ];
-        pool.mark_failed("http://1.1.1.1:8080");
+        pool.mark_failed("http://192.0.2.1:8080");
         assert_eq!(pool.working.len(), 1);
-        assert_eq!(pool.working[0], "http://2.2.2.2:8080");
+        assert_eq!(pool.working[0], "http://198.51.100.1:8080");
     }
 
     #[test]
     fn reddit_proxy_pool_mark_failed_unknown_is_noop() {
         let mut pool = RedditProxyPool::new();
-        pool.working = vec!["http://1.1.1.1:8080".to_string()];
-        pool.mark_failed("http://9.9.9.9:8080");
+        pool.working = vec!["http://192.0.2.1:8080".to_string()];
+        pool.mark_failed("http://203.0.113.1:8080");
         assert_eq!(pool.working.len(), 1);
     }
 }
