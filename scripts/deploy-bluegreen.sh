@@ -289,12 +289,16 @@ if actual != expected:
 ALIAS_MOVED=true
 printf 'ALIAS_MOVE=PASS active=%s container=%s\n' "$ACTIVE_ALIAS" "$NEW_API"
 
-# Reload the edge Caddy so it re-resolves crowdrelay-api-active to the
-# new container's IP. Caddy caches DNS lookups at config load time; the
-# health check alone won't trigger re-resolution while the old container
-# is still serving (blue-green keeps it alive until step 6).
-docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || \
-  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || true
+# Restart the edge Caddy so it re-resolves crowdrelay-api-active to the
+# new container's IP. Caddy caches DNS lookups at config load time; a
+# reload alone does NOT force re-resolution when the Caddyfile hasn't
+# changed (the hostname is the same, only the Docker alias IP moved).
+# A full restart forces DNS re-resolution and is the safe choice for
+# blue-green cutover. The old container stays alive until step 6, so
+# there is zero downtime — Caddy picks up the new IP on restart.
+docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || \
+  fail "failed to restart edge Caddy after alias move"
+sleep 2
 printf 'CADDY_RELOAD=PASS\n'
 
 # Also update the area management proxy Caddyfile if it references a
@@ -331,11 +335,12 @@ done
 printf 'PUBLIC_SMOKE=PASS\n'
 
 # Verify public meta matches target (blocking — stale edge or CDN must be caught)
-# Caddy re-resolves DNS on reload but CDN/edge caches may take longer to
-# expire. Poll for up to 120 seconds (24 attempts × 5s).
+# The edge Caddy was restarted above, so DNS should re-resolve immediately.
+# But CDN/edge caches may take longer to expire. Poll for up to 180 seconds
+# (36 attempts × 5s) to give ample time for cache expiry.
 public_meta=""
 actual=""
-for meta_attempt in $(seq 1 24); do
+for meta_attempt in $(seq 1 36); do
   public_meta="$(curl -sS --connect-timeout 3 --max-time 10 "${public_url%/}/v1/meta" 2>/dev/null || true)"
   if [[ -n "$public_meta" ]]; then
     actual="$(printf '%s' "$public_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
@@ -348,7 +353,7 @@ done
 if [[ "$actual" == "$TARGET" ]]; then
   printf 'PUBLIC_META=PASS gitSha=%s\n' "$actual"
 else
-  fail "public meta gitSha mismatch after 120s: got=${actual:-unavailable} expected=$TARGET"
+  fail "public meta gitSha mismatch after 180s: got=${actual:-unavailable} expected=$TARGET"
 fi
 
 # --- 6. Stop old containers, finalize ---------------------------------------
