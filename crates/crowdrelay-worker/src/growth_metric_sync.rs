@@ -502,9 +502,6 @@ impl GrowthMetricSyncWorker {
     /// Reddit: fetch subreddit subscriber count via public JSON (no auth).
     /// Recorded under platform='social' because the MetricPlatform enum has
     /// no 'reddit' variant — Reddit feeds the social coverage bucket.
-    /// Reddit: fetch subreddit subscriber count via public JSON (no auth).
-    /// Recorded under platform='social' because the MetricPlatform enum has
-    /// no 'reddit' variant — Reddit feeds the social coverage bucket.
     ///
     /// Reddit blocks datacenter IPs. The worker tries:
     ///   1. A static proxy if `CROWDRELAY_REDDIT_PROXY_URL` is set.

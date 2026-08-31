@@ -1,9 +1,10 @@
 //! Action Ledger state machine — the canonical execution state for every
 //! autopilot action.
 //!
-//! The ledger is append-only and history-safe. The current row is a
-//! projection — the full transition history is auditable through the trace
-//! timeline.
+//! The action ledger is a current-state projection with database-enforced
+//! state transitions. The current row is updated in place; immutable
+//! transition history is not yet implemented. Historical execution context
+//! is reconstructed from trace/event records available today.
 //!
 //! # Enforcement
 //!

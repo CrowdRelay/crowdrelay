@@ -479,9 +479,11 @@ fn final_outcome(
         DispatchDisposition::Retryable if attempt_number < max_attempts => AttemptOutcome::Retry,
         DispatchDisposition::Retryable | DispatchDisposition::Permanent => AttemptOutcome::Dead,
         // Ambiguous: the request may have reached the provider. If we
-        // still have retries, retry (the provider deduplicates or the
-        // operation is idempotent). If retries are exhausted, the
-        // outcome is ambiguous — not definitively failed.
+        // still have retries, retry — but only when the specific
+        // adapter/provider is known to be retry-safe. CrowdRelay's
+        // idempotency key does not make a downstream provider idempotent.
+        // If retries are exhausted, the outcome is ambiguous — not
+        // definitively failed — and requires reconciliation.
         DispatchDisposition::Ambiguous if attempt_number < max_attempts => AttemptOutcome::Retry,
         DispatchDisposition::Ambiguous => AttemptOutcome::Ambiguous,
     }

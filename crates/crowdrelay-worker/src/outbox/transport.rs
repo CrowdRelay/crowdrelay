@@ -219,9 +219,12 @@ pub(super) enum DispatchDisposition {
     /// The request was sent but no response was received (e.g., HTTP
     /// timeout after the connection was established). The provider may
     /// or may not have processed the request — the side effect is
-    /// externally ambiguous. Retries are safe (the provider deduplicates
-    /// or the operation is idempotent), but if retries are exhausted,
-    /// the outcome must not be reported as definitively failed.
+    /// externally ambiguous. Retries are only safe when the specific
+    /// adapter/provider guarantees idempotency or declares the operation
+    /// retry-safe; CrowdRelay's own idempotency key does not make a
+    /// downstream provider idempotent. If retries are exhausted, the
+    /// outcome must not be reported as definitively failed — it remains
+    /// UNKNOWN and requires reconciliation.
     Ambiguous,
 }
 
