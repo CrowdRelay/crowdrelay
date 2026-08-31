@@ -54,18 +54,20 @@ signal-api.virya.music {
 		max_size 32KB
 	}
 
-	# dynamic a: Caddy re-resolves Docker DNS every 5s, picking up
-	# blue-green alias moves without a restart or reload. Zero 503s.
-	reverse_proxy {
-		dynamic a crowdrelay-api-active {
-			port 8080
-			refresh 5s
-		}
+	# CROWDRELAY_ACTIVE=blue
+	reverse_proxy crowdrelay-api-1:8080 crowdrelay-api-green-1:8080 {
+		lb_policy first
 		health_uri /v1/health/ready
-		health_interval 5s
+		health_interval 2s
+		health_timeout 2s
+		lb_try_duration 3s
+		lb_retry_match {
+			method GET HEAD OPTIONS
+		}
 		transport http {
 			dial_timeout 2s
 			response_header_timeout 10s
+			keepalive 60s
 		}
 	}
 }
@@ -79,6 +81,22 @@ signal-api.virya.music {
 # native credential dialog beside the styled login form. Deferred deletions
 # never see the challenge, so handle_errors rewrites the 401 without it:
 # same status and empty body, no native credential dialog.
+#
+# Static blue-green upstreams with lb_policy first: the active color is listed
+# first, the fallback second. Cutover is a graceful reload that reorders the
+# `to` line in the cp_upstream snippet — no Docker alias moves, no restarts.
+# CONTROL_PLANE_ACTIVE=blue
+(cp_upstream) {
+	to crowdrelay-control-plane-app-1:8090 crowdrelay-control-plane-app-green-1:8090
+	lb_policy first
+	health_uri /healthz/ready
+	health_interval 2s
+	health_timeout 2s
+	lb_try_duration 3s
+	lb_retry_match {
+		method GET HEAD OPTIONS
+	}
+}
 control.virya.music {
     encode zstd gzip
     import security_headers
@@ -93,13 +111,12 @@ control.virya.music {
         @auth path /api/v1/auth/*
         handle @auth {
             reverse_proxy {
-                dynamic a control-plane-active {
-                    port 8090
-                    refresh 5s
+                import cp_upstream
+                transport http {
+                    dial_timeout 2s
+                    response_header_timeout 10s
+                    keepalive 60s
                 }
-                health_uri /healthz/ready
-                health_interval 15s
-                health_timeout 3s
             }
         }
 
@@ -109,13 +126,12 @@ control.virya.music {
         @session_request header Cookie *crowdrelay_cp_session=*
         handle @session_request {
             reverse_proxy {
-                dynamic a control-plane-active {
-                    port 8090
-                    refresh 5s
+                import cp_upstream
+                transport http {
+                    dial_timeout 2s
+                    response_header_timeout 10s
+                    keepalive 60s
                 }
-                health_uri /healthz/ready
-                health_interval 15s
-                health_timeout 3s
             }
         }
         @runtime_put {
@@ -124,16 +140,11 @@ control.virya.music {
         }
         handle @runtime_put {
             reverse_proxy {
-                dynamic a control-plane-active {
-                    port 8090
-                    refresh 5s
-                }
-                health_uri /healthz/ready
-                health_interval 15s
-                health_timeout 3s
+                import cp_upstream
                 transport http {
                     dial_timeout 2s
                     response_header_timeout 10s
+                    keepalive 60s
                 }
             }
         }
@@ -143,16 +154,11 @@ control.virya.music {
         @automation_ingest path /api/v1/automation/events
         handle @automation_ingest {
             reverse_proxy {
-                dynamic a control-plane-active {
-                    port 8090
-                    refresh 5s
-                }
-                health_uri /healthz/ready
-                health_interval 15s
-                health_timeout 3s
+                import cp_upstream
                 transport http {
                     dial_timeout 2s
                     response_header_timeout 10s
+                    keepalive 60s
                 }
             }
         }
@@ -160,16 +166,11 @@ control.virya.music {
         @provisioner path /api/v1/provisioner/*
         handle @provisioner {
             reverse_proxy {
-                dynamic a control-plane-active {
-                    port 8090
-                    refresh 5s
-                }
-                health_uri /healthz/ready
-                health_interval 15s
-                health_timeout 3s
+                import cp_upstream
                 transport http {
                     dial_timeout 2s
                     response_header_timeout 10s
+                    keepalive 60s
                 }
             }
         }
@@ -192,14 +193,7 @@ control.virya.music {
         }
 
         reverse_proxy {
-            dynamic a control-plane-active {
-                port 8090
-                refresh 5s
-            }
-            health_uri /healthz/ready
-            health_interval 15s
-            health_timeout 3s
-            lb_try_duration 3s
+            import cp_upstream
             header_up Authorization "Bearer {file./config/control-plane-admin-token}"
             header_up X-Control-Plane-Edge "oracle-caddy"
             transport http {

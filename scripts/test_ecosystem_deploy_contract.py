@@ -89,15 +89,15 @@ class EcosystemDeployContract(unittest.TestCase):
         self.assertIn("rollback()", BLUEGREEN_TEXT)
         self.assertIn("ROLLBACK=START", BLUEGREEN_TEXT)
         self.assertIn("ROLLBACK=COMPLETE", BLUEGREEN_TEXT)
-        self.assertIn("ALIAS_MOVE=PASS", BLUEGREEN_TEXT)
+        self.assertIn("CADDY_SWITCH=PASS", BLUEGREEN_TEXT)
 
     def test_bluegreen_starts_green_before_switching(self) -> None:
-        # Green containers must start before the alias move (which switches traffic).
+        # Green containers must start before the Caddy cutover (which switches traffic).
         green_start = BLUEGREEN_TEXT.index("up -d --no-deps --wait")
-        # The alias move is the traffic switch — it disconnects the old
-        # container and connects the new one with the active alias.
-        alias_move = BLUEGREEN_TEXT.index("ALIAS_MOVED=true")
-        self.assertLess(green_start, alias_move, "green must start before alias move")
+        # The Caddy switch is the traffic switch — it reorders the static
+        # upstream pair and gracefully reloads Caddy.
+        caddy_switch = BLUEGREEN_TEXT.index("ALIAS_MOVED=true")
+        self.assertLess(green_start, caddy_switch, "green must start before Caddy switch")
 
     def test_bluegreen_health_checks_green_directly(self) -> None:
         # Alternating blue-green: the new color is health-checked directly
@@ -123,18 +123,17 @@ class EcosystemDeployContract(unittest.TestCase):
         self.assertIn("crowdrelay-api-green", COMPOSE_TEXT)
         self.assertIn("CROWDRELAY_GREEN_TAG", COMPOSE_TEXT)
 
-    def test_compose_overlay_green_has_no_restart(self) -> None:
-        # Green containers should not auto-restart — they're temporary
-        # and should be explicitly managed by the deploy script.
-        # Find the actual service definition (indented under services:)
-        # rather than comments that mention the service name.
+    def test_compose_overlay_green_has_durable_restart(self) -> None:
+        # Green containers must be restart-safe: the deploy script enforces
+        # unless-stopped after health verification, and the compose overlay
+        # must match so a Docker daemon restart doesn't kill the active color.
         import yaml
         compose = yaml.safe_load(COMPOSE_TEXT)
         services = compose.get("services", {})
         for service in ("api-green", "worker-green"):
             self.assertIn(service, services, f"{service} not in compose overlay")
             restart = services[service].get("restart", "")
-            self.assertEqual(restart, "no", f"{service} should have restart: no, got {restart}")
+            self.assertEqual(restart, "unless-stopped", f"{service} should have restart: unless-stopped, got {restart}")
 
     def test_classifier_distinguishes_expand_and_contract(self) -> None:
         self.assertIn("CONTRACT_PATTERNS", CLASSIFIER_TEXT)

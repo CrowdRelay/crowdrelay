@@ -53,6 +53,8 @@ check: fmt lint test
     python3 scripts/test_sql_identifiers_v1.py
     python3 scripts/check-postgres-major.py
     python3 scripts/test-image-provenance-policy.py
+    python3 scripts/test_release_receipt.py
+    python3 scripts/test_ecosystem_deploy_contract.py
 
 # Everything a push should have passed
 ci: check validate-contract-assets policy-checks
