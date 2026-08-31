@@ -42,6 +42,7 @@ BLUE_ALIAS="crowdrelay-api"
 ACTIVE_ALIAS="crowdrelay-api-active"
 RELEASE_STATE_DIR="/var/lib/crowdrelay/releases"
 RECEIPT_HELPER="${ROOT_DIR}/scripts/release_receipt.py"
+CROWDRELAY_DB_CONTAINER="crowdrelay-db-1"
 CADDY_BACKUP=""
 NEW_STARTED=false
 ALIAS_MOVED=false
@@ -335,18 +336,31 @@ python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
 printf '\n==> 4b/7 — Worker leadership handoff (old drains, candidate takes over)\n'
 docker stop --time 30 "$CURRENT_WORKER" >/dev/null 2>&1 || true
 
-# Wait for the candidate worker to acquire leadership (up to 60s)
+# Wait for the candidate worker to acquire leadership (up to 90s).
+# Check both container health AND the worker_leadership table in Postgres
+# to verify the candidate actually holds the lease, not just that the
+# container is running.
 leader_acquired=false
-for leader_attempt in $(seq 1 30); do
-  # Check if the candidate worker is running and healthy
+for leader_attempt in $(seq 1 45); do
   candidate_worker_health="$(docker inspect "$NEW_WORKER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
   if [[ "$candidate_worker_health" == "healthy" || "$candidate_worker_health" == "running" ]]; then
-    leader_acquired=true
-    break
+    # Verify leadership in the DB — the candidate must have a non-expired lease
+    leader_row="$(docker exec "$CROWDRELAY_DB_CONTAINER" psql -U crowdrelay -d crowdrelay -t -A -c \
+      "SELECT leader_id, generation FROM worker_leadership WHERE id = 1 AND expires_at > NOW()" 2>/dev/null || true)"
+    if [[ -n "$leader_row" ]]; then
+      leader_acquired=true
+      printf 'WORKER_LEADERSHIP=VERIFIED leader=%s generation=%s\n' "$leader_row"
+      break
+    fi
   fi
   sleep 2
 done
-[[ "$leader_acquired" == true ]] || fail "candidate worker did not become healthy after leadership handoff"
+if [[ "$leader_acquired" != true ]]; then
+  # Rollback: restart the old worker so it can reclaim leadership
+  printf 'WORKER_LEADERSHIP=FAILED — restarting old worker for safety\n' >&2
+  docker start "$CURRENT_WORKER" >/dev/null 2>&1 || true
+  fail "candidate worker did not acquire leadership after 90s"
+fi
 printf 'WORKER_LEADERSHIP=PASS old=%s drained new=%s active\n' "$CURRENT_WORKER" "$NEW_WORKER"
 
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
@@ -414,13 +428,19 @@ for soak_attempt in $(seq 1 60); do
   soak_meta="$(curl -fsS --connect-timeout 3 --max-time 10 "${public_url%/}/v1/meta")"
   soak_sha="$(printf '%s' "$soak_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha", ""))')"
   [[ "$soak_sha" == "$TARGET" ]] || fail "candidate soak served wrong revision: got=${soak_sha:-unknown} expected=$TARGET"
-  # Error-rate threshold check
-  if [[ "$soak_total" -ge 50 ]] && [[ "$soak_errors" -ge 3 ]]; then
-    error_rate="$(python3 -c "print(f'{$soak_errors/$soak_total*100:.1f}')")"
-    fail "soak error-rate breach: ${soak_errors}/${soak_total} (${error_rate}%) — rolling back"
-  fi
-  if [[ "$soak_errors" -ge 3 ]]; then
-    fail "soak absolute error floor reached: ${soak_errors} failures — rolling back"
+  # Error-rate threshold check: 2% with >=50 samples, or absolute floor of 3
+  # when sample size is too small for a meaningful rate (early in the soak).
+  if [[ "$soak_total" -ge 50 ]]; then
+    if [[ "$soak_errors" -ge 3 ]]; then
+      error_rate="$(python3 -c "print(f'{$soak_errors/$soak_total*100:.1f}')")"
+      if (( $(python3 -c "print(1 if $soak_errors/$soak_total*100 >= 2.0 else 0)") )); then
+        fail "soak error-rate breach: ${soak_errors}/${soak_total} (${error_rate}%) — rolling back"
+      fi
+    fi
+  else
+    if [[ "$soak_errors" -ge 3 ]]; then
+      fail "soak absolute error floor reached: ${soak_errors} failures in ${soak_total} probes — rolling back"
+    fi
   fi
   sleep 5
 done

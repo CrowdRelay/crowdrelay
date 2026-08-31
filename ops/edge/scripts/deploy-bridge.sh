@@ -26,8 +26,11 @@ step() { printf '==> %s\n' "$*"; }
 snapshot_sqlite() {
   local stamp
   stamp="$(date +%Y%m%dT%H%M%SZ)"
-  local snap="/tmp/bridge-sqlite-${stamp}"
+  local snap="/var/lib/bridge-snapshots/bridge-sqlite-${stamp}"
   step "Snapshotting SQLite volume to $snap"
+  # Stop the bridge first to ensure a consistent SQLite snapshot
+  docker stop --time 10 "$CONTAINER" >/dev/null 2>&1 || true
+  mkdir -p "$snap"
   docker run --rm -v "${VOLUME}:/data:ro" -v "$snap:/backup" alpine \
     sh -c 'cp -a /data/. /backup/' 2>/dev/null || true
   printf '%s' "$snap"
@@ -37,6 +40,8 @@ restore_sqlite() {
   local snap="$1"
   [[ -d "$snap" ]] || fail "snapshot $snap not found"
   step "Restoring SQLite volume from $snap"
+  # Stop the bridge before restoring to avoid corrupting an open DB
+  docker stop --time 10 "$CONTAINER" >/dev/null 2>&1 || true
   docker run --rm -v "${VOLUME}:/data" -v "$snap:/backup" alpine \
     sh -c 'rm -rf /data/* /data/.* 2>/dev/null; cp -a /backup/. /data/'
 }
@@ -58,8 +63,8 @@ health_check() {
 if [[ "${1:-}" == "rollback" ]]; then
   step "Rolling back bridge"
   PREV_TAG="${BRIDGE_PREV_TAG:-latest}"
-  latest_snap="$(ls -1dt /tmp/bridge-sqlite-* 2>/dev/null | head -1 || true)"
-  [[ -n "$latest_snap" ]] || fail "no SQLite snapshot found in /tmp/bridge-sqlite-*"
+  latest_snap="$(ls -1dt /var/lib/bridge-snapshots/bridge-sqlite-* 2>/dev/null | head -1 || true)"
+  [[ -n "$latest_snap" ]] || fail "no SQLite snapshot found in /var/lib/bridge-snapshots/bridge-sqlite-*"
   restore_sqlite "$latest_snap"
   BRIDGE_IMAGE_TAG="$PREV_TAG" docker compose -f "$COMPOSE_FILE" -p "$PROJECT" up -d --no-build crowdrelay-n8n-bridge
   health_check || fail "rollback health check failed — inspect $CONTAINER"
