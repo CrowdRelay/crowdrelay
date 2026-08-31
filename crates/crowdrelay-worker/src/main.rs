@@ -414,6 +414,9 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let spotify_client_secret = std::env::var("CROWDRELAY_SPOTIFY_CLIENT_SECRET")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    let facebook_page_access_token = std::env::var("CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let reddit_proxy_url = std::env::var("CROWDRELAY_REDDIT_PROXY_URL")
         .ok()
         .filter(|v| !v.trim().is_empty());
@@ -422,6 +425,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         youtube_api_key,
         spotify_client_id,
         spotify_client_secret,
+        facebook_page_access_token,
         reddit_proxy_url,
         config.database.operation_timeout,
     )

@@ -134,6 +134,41 @@ pub(in crate::autopilot) async fn load_growth_evidence(
 ) -> Result<Vec<GrowthEvidence>, RepositoryError> {
     let pool = &repo.pool;
 
+    // Diagnostic: check for legacy duplicate experiment assignments.
+    // Migration 0201 added a partial UNIQUE INDEX on
+    // (workspace_id, action_id) that prevents new duplicates, but
+    // legacy rows predating the constraint may still exist. This is a
+    // cheap existence check — EXISTS with LIMIT 1 short-circuits on
+    // the first duplicate group found. The warning is emitted once
+    // per invocation, not per duplicate row.
+    //
+    // This is diagnostic telemetry, not correctness logic:
+    //   - query succeeds + duplicates exist → warn
+    //   - query fails → loader continues normally (false = "could not
+    //     establish duplicates exist", NOT "definitely no duplicates")
+    let has_duplicates: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(
+            SELECT 1
+            FROM viryaos_experiment_assignments
+            WHERE workspace_id = $1 AND action_id IS NOT NULL
+            GROUP BY workspace_id, action_id
+            HAVING COUNT(*) > 1
+            LIMIT 1
+        )"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_optional(pool)
+    .await
+    .map(Option::unwrap_or_default)
+    .unwrap_or(false);
+    if has_duplicates {
+        tracing::warn!(
+            workspace_id = %workspace_id.into_uuid(),
+            "legacy duplicate experiment assignments detected — \
+             migration 0201 prevents new ones but legacy data may need manual cleanup"
+        );
+    }
+
     /// Evidence row from the database.
     #[derive(sqlx::FromRow)]
     struct EvidenceRow {

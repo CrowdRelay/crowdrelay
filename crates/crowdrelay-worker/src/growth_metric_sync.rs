@@ -77,7 +77,7 @@ const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
 /// coverage bucket. Reddit connections record under 'social' because the
 /// MetricPlatform enum has no 'reddit' variant — Reddit feeds the social
 /// coverage bucket.
-const SYNCED_PLATFORMS: &[&str] = &["youtube", "spotify", "reddit"];
+const SYNCED_PLATFORMS: &[&str] = &["youtube", "spotify", "reddit", "facebook"];
 
 #[derive(Debug, Error)]
 pub enum GrowthMetricSyncError {
@@ -91,6 +91,8 @@ pub enum GrowthMetricSyncError {
     NoYoutubeApiKey,
     #[error("no spotify credentials configured")]
     NoSpotifyCredentials,
+    #[error("no facebook page access token configured")]
+    NoFacebookToken,
     #[error("http client build failed: {0}")]
     ClientBuild(reqwest::Error),
 }
@@ -102,6 +104,8 @@ pub struct GrowthMetricSyncWorker {
     youtube_api_key: Option<String>,
     spotify_client_id: Option<String>,
     spotify_client_secret: Option<String>,
+    /// Facebook Page access token for Graph API calls.
+    facebook_page_access_token: Option<String>,
     /// Static proxy override. If set, the worker uses this single proxy
     /// for all Reddit requests instead of the free proxy pool.
     reddit_static_proxy: Option<String>,
@@ -121,14 +125,16 @@ impl GrowthMetricSyncWorker {
         youtube_api_key: Option<String>,
         spotify_client_id: Option<String>,
         spotify_client_secret: Option<String>,
+        facebook_page_access_token: Option<String>,
         reddit_proxy_url: Option<String>,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
         if youtube_api_key.is_none()
             && (spotify_client_id.is_none() || spotify_client_secret.is_none())
+            && facebook_page_access_token.is_none()
         {
             tracing::info!(
-                "growth metric sync disabled: no YouTube API key or Spotify credentials"
+                "growth metric sync disabled: no YouTube API key, Spotify credentials, or Facebook token"
             );
             return Ok(None);
         }
@@ -151,6 +157,7 @@ impl GrowthMetricSyncWorker {
             youtube_api_key,
             spotify_client_id,
             spotify_client_secret,
+            facebook_page_access_token,
             reddit_static_proxy: reddit_proxy_url,
             reddit_proxy_pool: Arc::new(Mutex::new(RedditProxyPool::new())),
             operation_timeout,
@@ -359,6 +366,7 @@ impl GrowthMetricSyncWorker {
             "youtube" => self.sync_youtube(conn).await,
             "spotify" => self.sync_spotify(conn).await,
             "reddit" => self.sync_reddit(conn).await,
+            "facebook" => self.sync_facebook(conn).await,
             _ => Ok(()),
         }
     }
@@ -496,6 +504,51 @@ impl GrowthMetricSyncWorker {
                  unless data is inserted manually or via user-level OAuth."
             );
         }
+        Ok(())
+    }
+
+    /// Facebook: fetch Page fan_count and followers_count via Graph API.
+    /// Uses a Page access token (no App Review needed for owned pages).
+    /// Recorded under platform='facebook' in the growth metric series.
+    async fn sync_facebook(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let token = self
+            .facebook_page_access_token
+            .as_ref()
+            .ok_or(GrowthMetricSyncError::NoFacebookToken)?;
+        let page_id = &conn.provider_account_id;
+
+        let url = format!(
+            "https://graph.facebook.com/v21.0/{page_id}?fields=name,fan_count,followers_count&access_token={token}"
+        );
+        let response = self.http_client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "Facebook Graph API returned HTTP {} for page {page_id}",
+                response.status()
+            )));
+        }
+        let body: FacebookPageResponse = response.json().await?;
+        let follower_count = body.followers_count.unwrap_or(body.fan_count);
+
+        let display_name = body.name.as_deref().unwrap_or("Facebook Page");
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "facebook",
+            "followers",
+            &format!("Facebook followers — {display_name}"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            page_id = %page_id,
+            followers = follower_count,
+            "facebook page follower count recorded"
+        );
         Ok(())
     }
 
@@ -705,32 +758,46 @@ impl RedditProxyPool {
         self.last_refresh = Some(Instant::now());
     }
 
-    /// Fetches proxy lists from all public sources and deduplicates.
+    /// Fetches proxy lists from all public sources concurrently and
+    /// deduplicates. Each source is fetched independently — a failing
+    /// source does not cancel the others. Worst-case latency is the
+    /// timeout of a single source (~10s), not the sum of all sources.
     async fn fetch_proxy_candidates(&self, client: &reqwest::Client) -> Vec<String> {
-        let mut all: Vec<String> = Vec::new();
+        use tokio::task::JoinSet;
+
+        let mut join_set: JoinSet<Option<Vec<String>>> = JoinSet::new();
         for source in PROXY_SOURCES {
-            match client
-                .get(*source)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let text = match resp.text().await {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    };
-                    for line in text.lines() {
-                        let line = line.trim();
-                        if is_valid_proxy_line(line) {
-                            all.push(format!("http://{line}"));
-                        }
+            let client = client.clone();
+            join_set.spawn(async move {
+                match client
+                    .get(*source)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let text = resp.text().await.ok()?;
+                        Some(
+                            text.lines()
+                                .map(str::trim)
+                                .filter(|l| is_valid_proxy_line(l))
+                                .map(|l| format!("http://{l}"))
+                                .collect::<Vec<_>>(),
+                        )
                     }
+                    Err(e) => {
+                        tracing::debug!(error = %e, source = *source, "proxy source fetch failed");
+                        None
+                    }
+                    _ => None,
                 }
-                Err(e) => {
-                    tracing::debug!(error = %e, source = *source, "proxy source fetch failed");
-                }
-                _ => {}
+            });
+        }
+
+        let mut all: Vec<String> = Vec::new();
+        while let Some(res) = join_set.join_next().await {
+            if let Ok(Some(proxies)) = res {
+                all.extend(proxies);
             }
         }
         all.sort();
@@ -740,11 +807,19 @@ impl RedditProxyPool {
 }
 
 /// Tests proxies concurrently against Reddit, returns the ones that work.
+/// Stops spawning and aborts remaining in-flight tasks once PROXY_POOL_MAX
+/// working proxies are found, avoiding wasted network/CPU.
 async fn test_proxies_concurrently(candidates: &[String]) -> Vec<String> {
     use tokio::task::JoinSet;
 
-    let mut join_set = JoinSet::new();
+    let mut join_set: JoinSet<Option<String>> = JoinSet::new();
+    let mut working: Vec<String> = Vec::new();
+
     for proxy_url in candidates.iter().take(200) {
+        // Stop spawning if we already have enough working proxies.
+        if working.len() >= PROXY_POOL_MAX {
+            break;
+        }
         let proxy = proxy_url.clone();
         join_set.spawn(async move {
             if test_single_proxy(&proxy).await {
@@ -753,23 +828,28 @@ async fn test_proxies_concurrently(candidates: &[String]) -> Vec<String> {
                 None
             }
         });
-        // Throttle: don't spawn more than PROXY_TEST_CONCURRENCY at once.
+        // Throttle: don't have more than PROXY_TEST_CONCURRENCY in flight.
         while join_set.len() >= PROXY_TEST_CONCURRENCY {
-            if let Some(Ok(Some(_p))) = join_set.join_next().await {
-                // Early exit if we have enough working proxies.
-                // (We still need to collect from the JoinSet later.)
-                // We can't break here — just let it run.
+            if let Some(res) = join_set.join_next().await
+                && let Ok(Some(proxy)) = res
+            {
+                working.push(proxy);
+                if working.len() >= PROXY_POOL_MAX {
+                    join_set.abort_all();
+                    return working;
+                }
             }
         }
     }
 
-    let mut working: Vec<String> = Vec::new();
-    while let Some(res) = join_set.join_next().await {
-        if let Ok(Some(proxy)) = res {
-            working.push(proxy);
-            if working.len() >= PROXY_POOL_MAX {
-                break;
-            }
+    // Drain remaining tasks (if we didn't early-exit above).
+    while let Some(res) = join_set.join_next().await
+        && let Ok(Some(proxy)) = res
+    {
+        working.push(proxy);
+        if working.len() >= PROXY_POOL_MAX {
+            join_set.abort_all();
+            break;
         }
     }
     working
@@ -880,6 +960,20 @@ struct SpotifyArtistResponse {
 #[derive(Debug, Deserialize)]
 struct SpotifyFollowers {
     total: i64,
+}
+
+// --- Facebook response types ---
+
+#[derive(Debug, Deserialize)]
+struct FacebookPageResponse {
+    name: Option<String>,
+    /// Number of users who like the page. On New Pages Experience pages
+    /// this may equal followers_count.
+    #[serde(default)]
+    fan_count: i64,
+    /// Number of page followers. May be absent on some page types.
+    #[serde(default)]
+    followers_count: Option<i64>,
 }
 
 // --- Reddit response types ---
@@ -1010,6 +1104,25 @@ mod tests {
         let json = br#"{"access_token":"BQxyz123","token_type":"Bearer","expires_in":3600}"#;
         let token: SpotifyTokenResponse = serde_json::from_slice(json).unwrap();
         assert_eq!(token.access_token, "BQxyz123");
+    }
+
+    #[test]
+    fn facebook_page_response_parses_followers() {
+        let json =
+            br#"{"name":"Virya","fan_count":1256,"followers_count":1256,"id":"101848539107631"}"#;
+        let response: FacebookPageResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.name.as_deref(), Some("Virya"));
+        assert_eq!(response.fan_count, 1256);
+        assert_eq!(response.followers_count, Some(1256));
+    }
+
+    #[test]
+    fn facebook_page_response_without_followers_count() {
+        // Some page types may omit followers_count — fall back to fan_count.
+        let json = br#"{"name":"Virya","fan_count":999,"id":"101848539107631"}"#;
+        let response: FacebookPageResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.fan_count, 999);
+        assert!(response.followers_count.is_none());
     }
 
     #[test]

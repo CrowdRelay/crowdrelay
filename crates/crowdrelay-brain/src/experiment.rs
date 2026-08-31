@@ -1166,6 +1166,83 @@ mod tests {
         }
     }
 
+    // ── CausalEstimand inclusion semantics tests ──
+
+    #[test]
+    fn itt_includes_all_assigned_rows() {
+        // ITT includes every assigned unit regardless of execution status.
+        // The treatment indicator is the arm assignment (Z), not the
+        // execution outcome. Both arms always contribute.
+        for status in [
+            ExecutionStatus::Control,
+            ExecutionStatus::Withheld,
+            ExecutionStatus::Dispatched,
+            ExecutionStatus::Executed,
+            ExecutionStatus::Failed,
+            ExecutionStatus::Unknown,
+        ] {
+            assert!(
+                CausalEstimand::IntentToTreat.includes_in_treatment_effect(true, status),
+                "ITT must include treatment arm with {status:?}"
+            );
+            assert!(
+                CausalEstimand::IntentToTreat.includes_in_treatment_effect(false, status),
+                "ITT must include control arm with {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn per_protocol_excludes_non_adherent_treatment() {
+        // PerProtocol: treatment arm must have actually executed.
+        // Non-adherent treatment rows (withheld, dispatched, failed) are
+        // excluded from the treatment-effect posterior. Control arm is
+        // always included (provides the counterfactual).
+        assert!(
+            CausalEstimand::PerProtocol
+                .includes_in_treatment_effect(true, ExecutionStatus::Executed)
+        );
+        assert!(
+            !CausalEstimand::PerProtocol
+                .includes_in_treatment_effect(true, ExecutionStatus::Withheld)
+        );
+        assert!(
+            !CausalEstimand::PerProtocol
+                .includes_in_treatment_effect(true, ExecutionStatus::Dispatched)
+        );
+        assert!(
+            !CausalEstimand::PerProtocol
+                .includes_in_treatment_effect(true, ExecutionStatus::Failed)
+        );
+        assert!(
+            !CausalEstimand::PerProtocol
+                .includes_in_treatment_effect(true, ExecutionStatus::Unknown)
+        );
+        // Control arm always included regardless of status.
+        assert!(
+            CausalEstimand::PerProtocol
+                .includes_in_treatment_effect(false, ExecutionStatus::Control)
+        );
+    }
+
+    #[test]
+    fn per_protocol_is_population_filter_not_full_estimator() {
+        // PerProtocol defines which rows belong to the protocol-adherent
+        // population. It does NOT claim causal identification — that
+        // requires the identification assumptions documented on the
+        // variant. This test verifies the inclusion rule is a boolean
+        // filter (in/out), not an effect estimate. The return type is
+        // bool — a population membership decision. If someone changes
+        // the return type to carry an effect estimate, this test must
+        // fail to compile, forcing an explicit review of the semantics.
+        let includes: bool = CausalEstimand::PerProtocol
+            .includes_in_treatment_effect(true, ExecutionStatus::Executed);
+        assert!(includes);
+        let excludes: bool = CausalEstimand::PerProtocol
+            .includes_in_treatment_effect(true, ExecutionStatus::Withheld);
+        assert!(!excludes);
+    }
+
     // ── ExperimentDesign tests ──
 
     fn make_prediction(template: &str) -> crate::causal_model::DispatchPrediction {
