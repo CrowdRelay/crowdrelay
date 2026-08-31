@@ -52,15 +52,30 @@
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
-		reverse_proxy http://api:8080
+		reverse_proxy {
+			dynamic a crowdrelay-api-active {
+				port 8080
+				refresh 5s
+			}
+		}
 	}
 
 	handle @area {
-		reverse_proxy http://api:8080
+		reverse_proxy {
+			dynamic a crowdrelay-api-active {
+				port 8080
+				refresh 5s
+			}
+		}
 	}
 
 	handle @operations {
-		reverse_proxy http://api:8080
+		reverse_proxy {
+			dynamic a crowdrelay-api-active {
+				port 8080
+				refresh 5s
+			}
+		}
 	}
 
 	respond 404

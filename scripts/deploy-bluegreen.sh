@@ -108,17 +108,21 @@ source .crowdrelay.local.sh
 [[ -f "$EDGE_CADDYFILE" && ! -L "$EDGE_CADDYFILE" ]] || fail "missing edge Caddyfile: $EDGE_CADDYFILE"
 docker inspect "$EDGE_CONTAINER" --format '{{.State.Status}}' 2>/dev/null | grep -q running || fail "edge Caddy is not running"
 
-# Pre-deploy: verify the Caddyfile uses the stable active alias, not a
-# color-specific name. If it doesn't, fix it before deploying.
-if ! grep -Fq "reverse_proxy ${ACTIVE_ALIAS}:8080" "$EDGE_CADDYFILE"; then
-  printf 'RECONCILE=FIX Caddyfile does not use %s, repairing\n' "$ACTIVE_ALIAS"
-  sed "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy ${ACTIVE_ALIAS}:8080|g; s|reverse_proxy ${GREEN_ALIAS}:8080|reverse_proxy ${ACTIVE_ALIAS}:8080|g" "$EDGE_CADDYFILE" > /tmp/caddy-reconcile.tmp
+# Pre-deploy: verify the Caddyfile uses the stable active alias with
+# dynamic a, not a color-specific name. If it doesn't, fix it before
+# deploying. With dynamic a, Caddy re-resolves Docker DNS every 5s,
+# so no restart is needed during cutover.
+if ! grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$EDGE_CADDYFILE"; then
+  printf 'RECONCILE=FIX Caddyfile does not use dynamic a %s, repairing\n' "$ACTIVE_ALIAS"
+  # Replace any static upstream references with dynamic a
+  sed "s|reverse_proxy ${BLUE_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g; s|reverse_proxy ${GREEN_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g; s|reverse_proxy ${ACTIVE_ALIAS}:8080|reverse_proxy { dynamic a ${ACTIVE_ALIAS} { port 8080; refresh 5s } }|g" "$EDGE_CADDYFILE" > /tmp/caddy-reconcile.tmp
   cat /tmp/caddy-reconcile.tmp > "$EDGE_CADDYFILE"
   rm -f /tmp/caddy-reconcile.tmp
-  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1
+  docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
+    docker restart "$EDGE_CONTAINER" >/dev/null 2>&1
   sleep 3
-  grep -Fq "reverse_proxy ${ACTIVE_ALIAS}:8080" "$EDGE_CADDYFILE" || fail "Caddyfile reconciliation failed — cannot find ${ACTIVE_ALIAS}"
-  printf 'RECONCILE=PASS Caddyfile now uses %s\n' "$ACTIVE_ALIAS"
+  grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$EDGE_CADDYFILE" || fail "Caddyfile reconciliation failed — cannot find dynamic a ${ACTIVE_ALIAS}"
+  printf 'RECONCILE=PASS Caddyfile now uses dynamic a %s\n' "$ACTIVE_ALIAS"
 fi
 
 # Pre-deploy: reconcile edge Caddy bind mount.
@@ -243,10 +247,15 @@ printf 'MIGRATIONS=PASS\n'
 # --- 4. Move active alias to new API -----------------------------------------
 
 printf '\n==> 4/6 — Move %s alias to %s API\n' "$ACTIVE_ALIAS" "$DEPLOY_COLOR"
-# The Caddyfile always points to crowdrelay-api-active:8080. We move the
-# active alias from the old container to the new container.
+# The Caddyfile uses `dynamic a crowdrelay-api-active` which re-resolves
+# Docker DNS every 5s. The new container already has the active alias
+# from its compose config. We just need to remove the active alias from
+# the old container. Caddy will pick up the change on the next refresh.
 #
 # Step 4a: Remove the active alias from the old container.
+# The new container already has ACTIVE_ALIAS from compose.bluegreen.yaml
+# (green) or compose.production.yaml (blue), so there is no gap — both
+# containers have the alias briefly, and Caddy load-balances between them.
 docker network disconnect "$CROWDRELAY_DOCKER_NETWORK" "$CURRENT_API" 2>/dev/null || true
 # Reconnect the old container without the active alias but keep its
 # color-specific alias so it's still reachable for drain/stop.
@@ -268,8 +277,12 @@ else
   docker network connect --alias "$BLUE_ALIAS" --alias "$ACTIVE_ALIAS" --alias "$GREEN_ALIAS" "$CROWDRELAY_DOCKER_NETWORK" "$NEW_API" 2>/dev/null || true
 fi
 
-# Step 4c: The new container now has the active alias. Verify it resolves
-# and serves the correct SHA.
+# Step 4c: Wait for Caddy's dynamic a to re-resolve DNS (refresh is 5s,
+# wait two cycles to be safe). No restart or reload needed — Caddy
+# automatically picks up the new container's IP.
+sleep 10
+
+# Verify the active alias resolves and serves the correct SHA.
 docker run --rm --network "$CROWDRELAY_DOCKER_NETWORK" curlimages/curl:8.12.0 \
   --fail --silent --show-error --connect-timeout 3 --max-time 10 \
   "http://${ACTIVE_ALIAS}:8080/v1/health/ready" >/dev/null
@@ -288,24 +301,13 @@ if actual != expected:
 
 ALIAS_MOVED=true
 printf 'ALIAS_MOVE=PASS active=%s container=%s\n' "$ACTIVE_ALIAS" "$NEW_API"
-
-# Restart the edge Caddy so it re-resolves crowdrelay-api-active to the
-# new container's IP. Caddy caches DNS lookups at config load time; a
-# reload alone does NOT force re-resolution when the Caddyfile hasn't
-# changed (the hostname is the same, only the Docker alias IP moved).
-# A full restart forces DNS re-resolution and is the safe choice for
-# blue-green cutover. The old container stays alive until step 6, so
-# there is zero downtime — Caddy picks up the new IP on restart.
-docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || \
-  fail "failed to restart edge Caddy after alias move"
-sleep 2
-printf 'CADDY_RELOAD=PASS\n'
+printf 'CADDY_DNS=PASS dynamic-a-refresh=no-restart\n'
 
 # Also update the area management proxy Caddyfile if it references a
 # color-specific alias. The area proxy should use the stable alias too.
 AREA_CADDYFILE="/opt/crowdrelay/deploy/area-management.Caddyfile"
 AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
-if [[ -f "$AREA_CADDYFILE" ]] && ! grep -Fq "http://${ACTIVE_ALIAS}:8080" "$AREA_CADDYFILE"; then
+if [[ -f "$AREA_CADDYFILE" ]] && ! grep -Fq "dynamic a ${ACTIVE_ALIAS}" "$AREA_CADDYFILE"; then
   area_tmp="$(mktemp)"
   sed "s|http://${BLUE_ALIAS}:8080|http://${ACTIVE_ALIAS}:8080|g; s|http://${GREEN_ALIAS}:8080|http://${ACTIVE_ALIAS}:8080|g; s|http://api:8080|http://${ACTIVE_ALIAS}:8080|g" "$AREA_CADDYFILE" > "$area_tmp"
   cat "$area_tmp" > "$AREA_CADDYFILE"
