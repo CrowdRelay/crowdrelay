@@ -237,7 +237,7 @@ async fn load_learning_loop(
             o.observed_at AS outcome_observed_at
         FROM viryaos_autopilot_decisions d
         LEFT JOIN LATERAL (
-            SELECT id AS action_id, action_kind, status AS action_status, finished_at
+            SELECT id AS action_id, action_kind, status AS action_status, finished_at AS action_finished_at
             FROM viryaos_autopilot_actions
             WHERE workspace_id = $1 AND decision_id = d.id
             ORDER BY created_at DESC

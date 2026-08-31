@@ -354,6 +354,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
                 | "/v1/control-plane/autopilot/scorecard"
                 | "/v1/control-plane/autopilot/reply-triage"
                 | "/v1/control-plane/autopilot/next-best-actions"
+                | "/v1/control-plane/autopilot/learning-loop"
                 | "/v1/control-plane/portfolio/overview"
                 | "/v1/control-plane/portfolio/amplification"
                 | "/v1/control-plane/tenant-settings"
@@ -369,6 +370,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
             "/v1/control-plane/autopilot/decisions/",
             "/handled-externally",
         )
+        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/decisions/", "/evidence")
         || one_segment_with_suffix(
             path,
             "/v1/control-plane/portfolio/amplification/",
