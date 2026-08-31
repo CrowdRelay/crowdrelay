@@ -47,13 +47,14 @@ services:
       - virya-edge
 
   crowdrelay-n8n-bridge:
-    # n8n's own image, reused only for its Node runtime: the bridge is a single
-    # dependency-free script, not an n8n instance.
-    image: docker.n8n.io/n8nio/n8n:2.32.6
+    # Dedicated image built from bridge.Dockerfile. CI should publish it to
+    # GHCR; locally `docker compose build` produces the same artifact.
+    image: ghcr.io/crowdrelay/bridge:${BRIDGE_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: bridge.Dockerfile
     container_name: virya-crowdrelay-n8n-bridge
     restart: unless-stopped
-    entrypoint: ["node"]
-    command: ["/opt/bridge/bridge.js"]
     environment:
       BRIDGE_CONFIG_PATH: /opt/bridge/config.json
       BRIDGE_ROUTES_PATH: /opt/bridge/routes.json
@@ -66,8 +67,6 @@ services:
       BRIDGE_TICKET_MAILER_TOKEN_PATH: /run/secrets/virya_ticket_mailer_token
       NODE_ENV: production
     volumes:
-      - ./bridge.js:/opt/bridge/bridge.js:ro
-      - ./routes.json:/opt/bridge/routes.json:ro
       - ${EDGE_ROOT:?EDGE_ROOT required}/crowdrelay-n8n-bridge/config.json:/opt/bridge/config.json:ro
       - ${EDGE_ROOT}/crowdrelay-n8n-bridge/bridge_internal_token:/run/secrets/bridge_internal_token:ro
       - ${EDGE_ROOT}/crowdrelay-n8n-bridge/crowdrelay_webhook_secret:/run/secrets/crowdrelay_webhook_secret:ro
