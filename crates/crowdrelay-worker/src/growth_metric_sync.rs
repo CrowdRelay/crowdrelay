@@ -437,28 +437,46 @@ impl GrowthMetricSyncWorker {
             )));
         }
         let artist: SpotifyArtistResponse = response.json().await?;
-        let follower_count = artist.followers.total;
-
         let display_name = &artist.name;
-        record_metric_point(
-            &self.pool,
-            conn.workspace_id,
-            conn.id,
-            "spotify",
-            "followers",
-            &format!("Spotify followers — {display_name}"),
-            follower_count,
-            OffsetDateTime::now_utc(),
-        )
-        .await?;
 
-        tracing::info!(
-            connection_id = %conn.id,
-            artist_id = %artist_id,
-            artist = %display_name,
-            followers = follower_count,
-            "spotify follower count recorded"
-        );
+        // Spotify deprecated the `followers` field in the public Web API
+        // (client credentials flow). The field is now omitted from all
+        // responses. We handle both cases: if followers is present, record
+        // it; if not, log a warning and skip — the series stays live from
+        // the last manual/operator-inserted data point until Spotify
+        // restores the field or we switch to user-level OAuth.
+        let follower_count = artist.followers.as_ref().map(|f| f.total);
+
+        if let Some(count) = follower_count {
+            record_metric_point(
+                &self.pool,
+                conn.workspace_id,
+                conn.id,
+                "spotify",
+                "followers",
+                &format!("Spotify followers — {display_name}"),
+                count,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+
+            tracing::info!(
+                connection_id = %conn.id,
+                artist_id = %artist_id,
+                artist = %display_name,
+                followers = count,
+                "spotify follower count recorded"
+            );
+        } else {
+            tracing::warn!(
+                connection_id = %conn.id,
+                artist_id = %artist_id,
+                artist = %display_name,
+                "spotify API returned no followers field — Spotify deprecated \
+                 follower counts in the public Web API. Series will go stale \
+                 unless data is inserted manually or via user-level OAuth."
+            );
+        }
         Ok(())
     }
 
@@ -548,7 +566,8 @@ struct SpotifyTokenResponse {
 #[derive(Debug, Deserialize)]
 struct SpotifyArtistResponse {
     name: String,
-    followers: SpotifyFollowers,
+    #[serde(default)]
+    followers: Option<SpotifyFollowers>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -666,7 +685,17 @@ mod tests {
         let json = br#"{"name":"Virya","followers":{"total":12345},"id":"6bbW0jOKAWJWm3h6CTWaAS"}"#;
         let artist: SpotifyArtistResponse = serde_json::from_slice(json).unwrap();
         assert_eq!(artist.name, "Virya");
-        assert_eq!(artist.followers.total, 12345);
+        assert_eq!(artist.followers.as_ref().unwrap().total, 12345);
+    }
+
+    #[test]
+    fn spotify_artist_response_parses_without_followers() {
+        // Spotify deprecated the followers field in the public Web API.
+        // The response may omit it entirely — the struct must still parse.
+        let json = br#"{"name":"Virya","id":"6bbW0jOKAWJWm3h6CTWaAS","type":"artist","uri":"spotify:artist:6bbW0jOKAWJWm3h6CTWaAS"}"#;
+        let artist: SpotifyArtistResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(artist.name, "Virya");
+        assert!(artist.followers.is_none());
     }
 
     #[test]
