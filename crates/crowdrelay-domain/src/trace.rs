@@ -193,21 +193,6 @@ impl TraceContext {
         }
     }
 
-    /// Creates a root trace context that already carries a decision_id.
-    ///
-    /// Used when the decision has already been created and we need a
-    /// trace context for the action that follows from it.
-    #[must_use]
-    pub fn root_for_decision(tenant_id: WorkspaceId, decision_id: Uuid) -> Self {
-        Self {
-            trace_id: TraceId::new(),
-            causation_id: None,
-            tenant_id,
-            action_id: None,
-            decision_id: Some(decision_id),
-        }
-    }
-
     /// Creates a trace context for continuing an existing trace into a
     /// new action. The trace_id is carried from the parent context;
     /// the action_id and decision_id are set explicitly.
@@ -229,32 +214,6 @@ impl TraceContext {
             action_id: Some(action_id),
             decision_id,
         }
-    }
-
-    /// Creates a child trace context — same trace, new causation.
-    #[must_use]
-    pub fn child(&self, causation_id: CausationId) -> Self {
-        Self {
-            trace_id: self.trace_id,
-            causation_id: Some(causation_id),
-            tenant_id: self.tenant_id,
-            action_id: self.action_id,
-            decision_id: self.decision_id,
-        }
-    }
-
-    /// Returns a copy with the action_id set.
-    #[must_use]
-    pub fn with_action(mut self, action_id: Uuid) -> Self {
-        self.action_id = Some(action_id);
-        self
-    }
-
-    /// Returns a copy with the decision_id set.
-    #[must_use]
-    pub fn with_decision(mut self, decision_id: Uuid) -> Self {
-        self.decision_id = Some(decision_id);
-        self
     }
 
     /// Returns the trace identifier.
@@ -308,15 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn root_for_decision_carries_decision_id() {
-        let decision_id = Uuid::now_v7();
-        let ctx = TraceContext::root_for_decision(WorkspaceId::new(), decision_id);
-        assert_eq!(ctx.decision_id(), Some(decision_id));
-        assert!(ctx.action_id().is_none());
-        assert!(ctx.causation_id().is_none());
-    }
-
-    #[test]
     fn for_action_carries_trace_and_action() {
         let trace_id = TraceId::new();
         let action_id = Uuid::now_v7();
@@ -348,25 +298,6 @@ mod tests {
             ctx.causation_id().is_none(),
             "causation_id must be None when decision_id is None — self-causation is not meaningful"
         );
-    }
-
-    #[test]
-    fn child_inherits_trace_and_tenant() {
-        let root = TraceContext::root(WorkspaceId::new());
-        let cause = CausationId::from_uuid(Uuid::now_v7());
-        let child = root.child(cause);
-        assert_eq!(child.trace_id(), root.trace_id());
-        assert_eq!(child.tenant_id(), root.tenant_id());
-        assert_eq!(child.causation_id(), Some(cause));
-    }
-
-    #[test]
-    fn with_action_and_decision_are_chainable() {
-        let ctx = TraceContext::root(WorkspaceId::new())
-            .with_action(Uuid::now_v7())
-            .with_decision(Uuid::now_v7());
-        assert!(ctx.action_id().is_some());
-        assert!(ctx.decision_id().is_some());
     }
 
     #[test]

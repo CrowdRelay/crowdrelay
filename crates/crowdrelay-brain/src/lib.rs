@@ -87,7 +87,7 @@ pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvid
 pub use experiment::{
     CausalEstimand, ExecutionStatus, ExperimentAssignment, ExperimentDesign, ExperimentKind,
     ExperimentStatus, ExperimentUnitKind, FanProvenanceEvent, InterferencePolicy,
-    ProvenanceEventKind, TreatmentAssignment, TreatmentView,
+    ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
 pub use opportunity::{OpportunityAction, OpportunityId};

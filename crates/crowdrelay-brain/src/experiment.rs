@@ -170,62 +170,6 @@ impl CausalEstimand {
     }
 }
 
-/// A descriptive view of realized treatment — NOT a causal estimand.
-///
-/// `TreatmentView` is a **type-level semantic distinction**: it separates
-/// "which units actually received the treatment?" (descriptive) from
-/// "what is the causal effect of assignment?" (causal, under
-/// [`CausalEstimand`]). The two concepts must not be conflated under a
-/// single type.
-///
-/// `TreatmentView` does NOT expose a causal inclusion operation. The
-/// sole causal inclusion API is
-/// [`CausalEstimand::includes_in_treatment_effect`]. For descriptive
-/// execution interpretation, use [`ExecutionStatus`] directly where
-/// needed.
-///
-/// # Why this is separate from `CausalEstimand`
-///
-/// `RealizedTreatment` uses `execution_status` (T) as the treatment
-/// indicator. This is a **descriptive** observation, not a causal
-/// identification strategy. Housing it in `CausalEstimand` would imply
-/// causal identification that the method does not deliver.
-///
-/// # Conservative fallback
-///
-/// `TreatmentOnTreated` is intentionally NOT included here either. TOT
-/// requires explicit identification assumptions (instrumental variables,
-/// compliance modeling, etc.) that are not yet implemented. A future
-/// sprint may add TOT to `CausalEstimand` — not here — when the
-/// implementation can explicitly state and test the assumptions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TreatmentView {
-    /// Realized treatment: uses execution_status (T) as the treatment
-    /// indicator. This is the internal selection/execution interpretation.
-    ///
-    /// Contract:
-    /// - denominator = executed + control (and withheld as control-like)
-    /// - treatment indicator = execution_status == Executed
-    /// - withheld treated as non-treatment (the unit was never dispatched)
-    /// - failed treated as non-treatment (the intervention did not occur)
-    ///
-    /// NOTE: This is NOT TreatmentOnTreated. TOT requires explicit
-    /// identification assumptions (instrumental variables, compliance
-    /// modeling, etc.) that are not yet implemented. RealizedTreatment
-    /// is a descriptive estimator, not a causal one.
-    RealizedTreatment,
-}
-
-impl TreatmentView {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RealizedTreatment => "realized_treatment",
-        }
-    }
-}
-
 impl TreatmentAssignment {
     /// Returns 1.0 for treatment, 0.0 for control — used in IPW calculations.
     #[must_use]

@@ -116,6 +116,12 @@ async fn persist_decision_and_action_tx(
         return Ok(DecisionActionOutcome::NoAction);
     };
     let action_id = Uuid::now_v7();
+    let action_trace = TraceContext::for_action(
+        workspace_id,
+        trace.trace_id(),
+        action_id,
+        Some(decision_id),
+    );
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO viryaos_autopilot_actions (
@@ -149,9 +155,8 @@ async fn persist_decision_and_action_tx(
     // Recorded now rather than derived at read time: this is the class
     // the action was authorised under, which is what an audit needs.
     .bind(candidate.action.action_class().as_str())
-    .bind(trace.trace_id().into_uuid())
-    // The action is caused by the decision — causation_id = decision_id.
-    .bind(decision_id)
+    .bind(action_trace.trace_id().into_uuid())
+    .bind(action_trace.causation_id().map(|c| c.into_uuid()))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;

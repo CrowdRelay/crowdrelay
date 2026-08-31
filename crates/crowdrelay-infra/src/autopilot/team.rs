@@ -485,7 +485,6 @@ pub(super) async fn queue_team_email_action(
     // preceded it.
     let trace = TraceContext::root(workspace_id);
     let trace_id = trace.trace_id().into_uuid();
-    let causation_id = trace.causation_id().map(|c| c.into_uuid());
     let decision_id =
         if let Some(id) = sqlx::query_scalar::<_, Uuid>(
             r#"INSERT INTO viryaos_autopilot_decisions (
@@ -531,6 +530,9 @@ pub(super) async fn queue_team_email_action(
     })
     .map_err(|_| RepositoryError::Unexpected)?;
 
+    let action_id = Uuid::now_v7();
+    let action_trace =
+        TraceContext::for_action(workspace_id, trace.trace_id(), action_id, Some(decision_id));
     sqlx::query(
         r#"INSERT INTO viryaos_autopilot_actions (
                id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
@@ -540,7 +542,7 @@ pub(super) async fn queue_team_email_action(
                      'queued',$8,'system:team-router',$8,$9,$10)
            ON CONFLICT (workspace_id, idempotency_key) DO NOTHING"#,
     )
-    .bind(Uuid::now_v7())
+    .bind(action_id)
     .bind(workspace_id.into_uuid())
     .bind(decision_id)
     .bind(context)
@@ -548,8 +550,8 @@ pub(super) async fn queue_team_email_action(
     .bind(idempotency_key)
     .bind(payload)
     .bind(now)
-    .bind(trace_id)
-    .bind(causation_id)
+    .bind(action_trace.trace_id().into_uuid())
+    .bind(action_trace.causation_id().map(|c| c.into_uuid()))
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
