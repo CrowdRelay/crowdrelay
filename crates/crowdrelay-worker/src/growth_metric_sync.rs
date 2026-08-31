@@ -82,11 +82,11 @@ const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
 const SYNCED_PLATFORMS: &[&str] = &[
     "youtube",
     "spotify",
-    "reddit",
+    "tiktok",
     "facebook",
     "instagram",
     "soundcloud",
-    "tiktok",
+    "reddit",
 ];
 
 #[derive(Debug, Error)]
@@ -240,13 +240,27 @@ impl GrowthMetricSyncWorker {
                 "growth metric sync cycle: syncing due connections"
             );
             for conn in connections {
-                if let Err(error) = self.sync_connection(&conn).await {
-                    tracing::warn!(
-                        connection_id = %conn.id,
-                        platform = %conn.platform,
-                        error = %error,
-                        "growth metric sync failed for connection"
-                    );
+                // Per-connection timeout prevents one slow provider
+                // (e.g. Reddit proxy testing) from starving the cycle.
+                let per_conn = Duration::from_secs(20);
+                let result = timeout(per_conn, self.sync_connection(&conn)).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            connection_id = %conn.id,
+                            platform = %conn.platform,
+                            error = %error,
+                            "growth metric sync failed for connection"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            connection_id = %conn.id,
+                            platform = %conn.platform,
+                            "growth metric sync timed out for connection (20s)"
+                        );
+                    }
                 }
             }
             Ok(())
