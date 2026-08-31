@@ -190,13 +190,9 @@ pub async fn callback(
         }
     };
 
-    let data = match token_data.get("data") {
-        Some(d) => d,
-        None => {
-            tracing::warn!(response = %token_data, "TikTok token response missing 'data' field");
-            return Problem::service_unavailable(request_id_value).into_response();
-        }
-    };
+    // TikTok's token endpoint returns fields at the root level (not wrapped
+    // in a "data" object, unlike the user info endpoint).
+    let data = &token_data;
 
     let access_token = data
         .get("access_token")
