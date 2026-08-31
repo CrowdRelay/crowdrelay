@@ -1,0 +1,104 @@
+name: Ecosystem release audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-char SHA to audit (defaults to latest main)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+concurrency:
+  group: ecosystem-release-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Read-only release audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out CrowdRelay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve target SHA
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.sha }}" ]]; then
+            target="${{ inputs.sha }}"
+          else
+            target="$(git rev-parse HEAD)"
+          fi
+          [[ "$target" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid SHA: $target"; exit 1; }
+          echo "sha=$target" >> "$GITHUB_OUTPUT"
+          echo "TARGET_SHA=$target"
+
+      - name: Configure SSH for read-only remote queries
+        shell: bash
+        env:
+          SSH_KEY: ${{ secrets.CROWDRELAY_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.CROWDRELAY_DEPLOY_KNOWN_HOSTS }}
+          CROWDRELAY_DEPLOY_HOST_IP: ${{ secrets.CROWDRELAY_DEPLOY_HOST_IP }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SSH_KEY" ]]; then
+            echo "No SSH key configured — remote audit steps will fail."
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<SSH
+          Host virya-crowdrelay
+              HostName ${CROWDRELAY_DEPLOY_HOST_IP}
+              User ubuntu
+              IdentityFile ~/.ssh/deploy_key
+              IdentitiesOnly yes
+              ServerAliveInterval 30
+              ServerAliveCountMax 3
+          Host virya-home
+              HostName 192.168.100.27
+              User wojtek
+              IdentityFile ~/.ssh/deploy_key
+              IdentitiesOnly yes
+              ServerAliveInterval 30
+              ServerAliveCountMax 3
+          SSH
+          chmod 600 ~/.ssh/config
+
+      - name: Log in to GHCR for image size checks
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run read-only release audit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/audit-release.sh "${{ steps.target.outputs.sha }}"
+
+      - name: Report audit status
+        if: always()
+        shell: bash
+        run: |
+          if [[ ${{ job.status }} == "success" ]]; then
+            echo "✅ Release audit passed for ${{ steps.target.outputs.sha }}"
+          else
+            echo "❌ Release audit failed for ${{ steps.target.outputs.sha }}"
+          fi
