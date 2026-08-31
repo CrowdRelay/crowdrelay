@@ -27,6 +27,8 @@
 //! on (workspace_id, series_id, captured_at). A crash mid-sync leaves no
 //! partial state — the next wake reclaims the work.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -34,7 +36,7 @@ use sqlx::{FromRow, PgPool, postgres::PgListener};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::{
-    sync::watch,
+    sync::{Mutex, watch},
     time::{Instant, sleep, timeout},
 };
 use uuid::Uuid;
@@ -52,6 +54,23 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS_PER_CYCLE: usize = 10;
 
 const USER_AGENT: &str = "CrowdRelay/1.0 (growth metric sync)";
+
+/// Free proxy list sources. Fetched at startup and when the pool is
+/// exhausted. Each returns a newline-separated list of `host:port` entries.
+const PROXY_SOURCES: &[&str] = &[
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all",
+    "https://www.proxy-list.download/api/v1/get?type=http",
+];
+
+/// How many proxies to test concurrently when refreshing the pool.
+const PROXY_TEST_CONCURRENCY: usize = 20;
+/// Timeout for a single proxy test (connect + fetch Reddit about.json).
+const PROXY_TEST_TIMEOUT: Duration = Duration::from_secs(8);
+/// Maximum number of working proxies to keep in the pool.
+const PROXY_POOL_MAX: usize = 10;
+/// How long to keep a proxy in the pool before forcing a refresh.
+const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Platforms the growth metric sync worker handles. The fanbase_connection
 /// platform is the connectable surface; the metric series platform is the
@@ -83,6 +102,12 @@ pub struct GrowthMetricSyncWorker {
     youtube_api_key: Option<String>,
     spotify_client_id: Option<String>,
     spotify_client_secret: Option<String>,
+    /// Static proxy override. If set, the worker uses this single proxy
+    /// for all Reddit requests instead of the free proxy pool.
+    reddit_static_proxy: Option<String>,
+    /// Rotating free-proxy pool for Reddit. Lazily populated on first
+    /// Reddit sync and refreshed when exhausted or stale.
+    reddit_proxy_pool: Arc<Mutex<RedditProxyPool>>,
     operation_timeout: Duration,
 }
 
@@ -107,33 +132,27 @@ impl GrowthMetricSyncWorker {
             );
             return Ok(None);
         }
-        let mut client_builder = reqwest::Client::builder()
+        // The main HTTP client is used for YouTube and Spotify — no proxy.
+        // Reddit gets its own per-request clients with proxies.
+        let http_client = reqwest::Client::builder()
             .connect_timeout(HTTP_TIMEOUT.min(Duration::from_secs(10)))
             .timeout(HTTP_TIMEOUT)
-            .user_agent(USER_AGENT);
-        if let Some(proxy_url) = reddit_proxy_url.as_deref() {
-            match reqwest::Proxy::all(proxy_url) {
-                Ok(proxy) => {
-                    client_builder = client_builder.proxy(proxy);
-                    tracing::info!("growth metric sync: using Reddit proxy");
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "growth metric sync: invalid Reddit proxy URL, ignoring"
-                    );
-                }
-            }
-        }
-        let http_client = client_builder
+            .user_agent(USER_AGENT)
             .build()
             .map_err(GrowthMetricSyncError::ClientBuild)?;
+        if let Some(ref url) = reddit_proxy_url {
+            tracing::info!("growth metric sync: using static Reddit proxy: {url}");
+        } else {
+            tracing::info!("growth metric sync: using free proxy pool for Reddit");
+        }
         Ok(Some(Self {
             pool,
             http_client,
             youtube_api_key,
             spotify_client_id,
             spotify_client_secret,
+            reddit_static_proxy: reddit_proxy_url,
+            reddit_proxy_pool: Arc::new(Mutex::new(RedditProxyPool::new())),
             operation_timeout,
         }))
     }
@@ -483,11 +502,21 @@ impl GrowthMetricSyncWorker {
     /// Reddit: fetch subreddit subscriber count via public JSON (no auth).
     /// Recorded under platform='social' because the MetricPlatform enum has
     /// no 'reddit' variant — Reddit feeds the social coverage bucket.
+    /// Reddit: fetch subreddit subscriber count via public JSON (no auth).
+    /// Recorded under platform='social' because the MetricPlatform enum has
+    /// no 'reddit' variant — Reddit feeds the social coverage bucket.
+    ///
+    /// Reddit blocks datacenter IPs. The worker tries:
+    ///   1. A static proxy if `CROWDRELAY_REDDIT_PROXY_URL` is set.
+    ///   2. The free rotating proxy pool (fetched from public proxy lists,
+    ///      tested against Reddit, cached for 30 minutes).
+    ///   3. Direct connection as a last resort (may work from non-datacenter
+    ///      IPs; logs a warning if it fails).
     async fn sync_reddit(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
         let subreddit = &conn.provider_account_id;
-
         let url = format!("https://www.reddit.com/r/{subreddit}/about.json");
-        let response = self.http_client.get(&url).send().await?;
+
+        let response = self.fetch_reddit(&url).await?;
         if !response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
                 "Reddit API returned HTTP {} for r/{subreddit}",
@@ -518,6 +547,287 @@ impl GrowthMetricSyncWorker {
         );
         Ok(())
     }
+
+    /// Fetches a Reddit URL, trying the static proxy, then the proxy pool,
+    /// then a direct connection.
+    async fn fetch_reddit(&self, url: &str) -> Result<reqwest::Response, GrowthMetricSyncError> {
+        // 1. Static proxy (if configured).
+        if let Some(ref proxy_url) = self.reddit_static_proxy
+            && let Ok(client) = self.build_proxied_client(proxy_url)
+        {
+            match client.get(url).send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    proxy = %proxy_url,
+                    "reddit static proxy failed, falling back to pool"
+                ),
+            }
+        }
+
+        // 2. Free proxy pool.
+        if let Some(proxy_url) = self.get_pool_proxy().await
+            && let Ok(client) = self.build_proxied_client(&proxy_url)
+        {
+            match client.get(url).send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => tracing::debug!(
+                    error = %e,
+                    proxy = %proxy_url,
+                    "reddit pool proxy failed"
+                ),
+            }
+            self.mark_proxy_failed(&proxy_url).await;
+        }
+
+        // 3. Direct connection (last resort — usually blocked from datacenter).
+        tracing::debug!("reddit: trying direct connection (no proxy)");
+        let resp = self.http_client.get(url).send().await?;
+        if resp.status().is_success() {
+            tracing::warn!(
+                "reddit direct connection succeeded — datacenter IP not blocked \
+                 (unexpected). Consider setting CROWDRELAY_REDDIT_PROXY_URL for reliability."
+            );
+        }
+        Ok(resp)
+    }
+
+    /// Builds a reqwest client that routes through the given proxy.
+    fn build_proxied_client(&self, proxy_url: &str) -> Result<reqwest::Client, reqwest::Error> {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy_url)?)
+            .connect_timeout(PROXY_TEST_TIMEOUT)
+            .timeout(HTTP_TIMEOUT)
+            .user_agent(USER_AGENT)
+            .build()
+    }
+
+    /// Gets a working proxy from the pool, refreshing if stale or empty.
+    async fn get_pool_proxy(&self) -> Option<String> {
+        let mut pool = self.reddit_proxy_pool.lock().await;
+        pool.get_proxy(&self.http_client).await
+    }
+
+    /// Marks a proxy as failed in the pool.
+    async fn mark_proxy_failed(&self, proxy_url: &str) {
+        let mut pool = self.reddit_proxy_pool.lock().await;
+        pool.mark_failed(proxy_url);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Reddit proxy pool
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A rotating pool of free HTTP proxies for Reddit requests.
+///
+/// Reddit blocks datacenter IPs from accessing its public JSON API. The
+/// pool fetches proxy lists from public sources, tests each proxy against
+/// Reddit, and caches the working ones. When a proxy fails, it's evicted.
+/// The pool refreshes when stale (30 min TTL) or empty.
+struct RedditProxyPool {
+    /// Working proxies, in order of discovery.
+    working: Vec<String>,
+    /// Round-robin index into `working`.
+    next_idx: AtomicUsize,
+    /// When the pool was last refreshed.
+    last_refresh: Option<Instant>,
+}
+
+impl RedditProxyPool {
+    fn new() -> Self {
+        Self {
+            working: Vec::new(),
+            next_idx: AtomicUsize::new(0),
+            last_refresh: None,
+        }
+    }
+
+    /// Returns a working proxy, refreshing the pool if stale or empty.
+    /// Returns `None` if no working proxy can be found.
+    async fn get_proxy(&mut self, direct_client: &reqwest::Client) -> Option<String> {
+        let needs_refresh = self.working.is_empty()
+            || self
+                .last_refresh
+                .is_none_or(|t| t.elapsed() > PROXY_POOL_TTL);
+
+        if needs_refresh {
+            self.refresh(direct_client).await;
+        }
+
+        if self.working.is_empty() {
+            return None;
+        }
+
+        let idx = self.next_idx.fetch_add(1, Ordering::Relaxed) % self.working.len();
+        self.working.get(idx).cloned()
+    }
+
+    /// Evicts a proxy that failed during a Reddit request.
+    fn mark_failed(&mut self, proxy_url: &str) {
+        let before = self.working.len();
+        self.working.retain(|p| p != proxy_url);
+        if self.working.len() < before {
+            tracing::debug!(
+                proxy = %proxy_url,
+                remaining = self.working.len(),
+                "evicted failed proxy from pool"
+            );
+        }
+    }
+
+    /// Fetches proxy lists from public sources, tests each proxy against
+    /// Reddit's about.json, and keeps the ones that work (up to PROXY_POOL_MAX).
+    async fn refresh(&mut self, direct_client: &reqwest::Client) {
+        tracing::info!("reddit proxy pool: refreshing from public sources");
+
+        // Fetch candidate proxies from all sources.
+        let candidates = self.fetch_proxy_candidates(direct_client).await;
+        if candidates.is_empty() {
+            tracing::warn!("reddit proxy pool: no candidates from any source");
+            self.last_refresh = Some(Instant::now());
+            return;
+        }
+
+        tracing::info!(
+            candidates = candidates.len(),
+            "reddit proxy pool: testing candidates against Reddit"
+        );
+
+        // Test candidates concurrently.
+        let working = test_proxies_concurrently(&candidates).await;
+
+        tracing::info!(
+            working = working.len(),
+            tested = candidates.len(),
+            "reddit proxy pool: refresh complete"
+        );
+
+        self.working = working;
+        self.next_idx.store(0, Ordering::Relaxed);
+        self.last_refresh = Some(Instant::now());
+    }
+
+    /// Fetches proxy lists from all public sources and deduplicates.
+    async fn fetch_proxy_candidates(&self, client: &reqwest::Client) -> Vec<String> {
+        let mut all: Vec<String> = Vec::new();
+        for source in PROXY_SOURCES {
+            match client
+                .get(*source)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let text = match resp.text().await {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if is_valid_proxy_line(line) {
+                            all.push(format!("http://{line}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, source = *source, "proxy source fetch failed");
+                }
+                _ => {}
+            }
+        }
+        all.sort();
+        all.dedup();
+        all
+    }
+}
+
+/// Tests proxies concurrently against Reddit, returns the ones that work.
+async fn test_proxies_concurrently(candidates: &[String]) -> Vec<String> {
+    use tokio::task::JoinSet;
+
+    let mut join_set = JoinSet::new();
+    for proxy_url in candidates.iter().take(200) {
+        let proxy = proxy_url.clone();
+        join_set.spawn(async move {
+            if test_single_proxy(&proxy).await {
+                Some(proxy)
+            } else {
+                None
+            }
+        });
+        // Throttle: don't spawn more than PROXY_TEST_CONCURRENCY at once.
+        while join_set.len() >= PROXY_TEST_CONCURRENCY {
+            if let Some(Ok(Some(_p))) = join_set.join_next().await {
+                // Early exit if we have enough working proxies.
+                // (We still need to collect from the JoinSet later.)
+                // We can't break here — just let it run.
+            }
+        }
+    }
+
+    let mut working: Vec<String> = Vec::new();
+    while let Some(res) = join_set.join_next().await {
+        if let Ok(Some(proxy)) = res {
+            working.push(proxy);
+            if working.len() >= PROXY_POOL_MAX {
+                break;
+            }
+        }
+    }
+    working
+}
+
+/// Tests a single proxy by fetching Reddit's about.json for r/Metal.
+async fn test_single_proxy(proxy_url: &str) -> bool {
+    let proxy = match reqwest::Proxy::all(proxy_url) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let client = match reqwest::Client::builder()
+        .proxy(proxy)
+        .connect_timeout(PROXY_TEST_TIMEOUT)
+        .timeout(PROXY_TEST_TIMEOUT)
+        .user_agent(USER_AGENT)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let url = "https://www.reddit.com/r/Metal/about.json";
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            // Verify it's actually JSON (not a block page).
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            content_type.contains("json")
+        }
+        _ => false,
+    }
+}
+
+/// Checks if a line from a proxy list looks like a valid `host:port` entry.
+fn is_valid_proxy_line(line: &str) -> bool {
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+    // Expect format: host:port (e.g. "1.2.3.4:8080")
+    let mut parts = line.rsplitn(2, ':');
+    let port_str = parts.next().unwrap_or("");
+    let host = parts.next().unwrap_or("");
+    let port: u16 = match port_str.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if port == 0 {
+        return false;
+    }
+    // Host part should not contain spaces.
+    !host.contains(' ')
 }
 
 #[derive(Debug, FromRow)]
@@ -719,5 +1029,49 @@ mod tests {
         let response: RedditAboutResponse = serde_json::from_slice(json).unwrap();
         assert_eq!(response.data.subscribers, 42);
         assert!(response.data.display_name.is_none());
+    }
+
+    #[test]
+    fn is_valid_proxy_line_accepts_host_port() {
+        assert!(is_valid_proxy_line("1.2.3.4:8080"));
+        assert!(is_valid_proxy_line("10.0.0.1:3128"));
+        assert!(is_valid_proxy_line("example.com:80"));
+    }
+
+    #[test]
+    fn is_valid_proxy_line_rejects_garbage() {
+        assert!(!is_valid_proxy_line(""));
+        assert!(!is_valid_proxy_line("# comment"));
+        assert!(!is_valid_proxy_line("not a proxy"));
+        assert!(!is_valid_proxy_line("no-port-here"));
+        assert!(!is_valid_proxy_line("1.2.3.4:0"));
+        assert!(!is_valid_proxy_line("1.2.3.4:999999"));
+    }
+
+    #[test]
+    fn reddit_proxy_pool_starts_empty() {
+        let pool = RedditProxyPool::new();
+        assert!(pool.working.is_empty());
+        assert!(pool.last_refresh.is_none());
+    }
+
+    #[test]
+    fn reddit_proxy_pool_mark_failed_evicts() {
+        let mut pool = RedditProxyPool::new();
+        pool.working = vec![
+            "http://1.1.1.1:8080".to_string(),
+            "http://2.2.2.2:8080".to_string(),
+        ];
+        pool.mark_failed("http://1.1.1.1:8080");
+        assert_eq!(pool.working.len(), 1);
+        assert_eq!(pool.working[0], "http://2.2.2.2:8080");
+    }
+
+    #[test]
+    fn reddit_proxy_pool_mark_failed_unknown_is_noop() {
+        let mut pool = RedditProxyPool::new();
+        pool.working = vec!["http://1.1.1.1:8080".to_string()];
+        pool.mark_failed("http://9.9.9.9:8080");
+        assert_eq!(pool.working.len(), 1);
     }
 }

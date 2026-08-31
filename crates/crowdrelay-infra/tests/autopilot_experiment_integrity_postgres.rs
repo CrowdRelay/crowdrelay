@@ -4197,3 +4197,259 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
     .expect("episode count");
     assert_eq!(episode_count, 2, "exactly two episodes — one per action");
 }
+
+// ── T28: action-to-assignment 1:1 invariant (migration 0201) ──
+
+/// Helper: insert a bare experiment assignment with a specific action_id.
+async fn insert_bare_assignment(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    experiment_uuid: uuid::Uuid,
+    unit_id: &str,
+) {
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (id, workspace_id, experiment_uuid, unit_id, unit_kind,
+            arm, propensity, prediction, context, strategy,
+            eligibility_criteria, selection_context, interference_policy,
+            interference_score, is_interference_controllable,
+            experiment_status, execution_status, action_id)
+           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+                   '{}'::jsonb,'{}'::jsonb,'discovery',
+                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                   'active','dispatched',$5)"#,
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(workspace_id.into_uuid())
+    .bind(experiment_uuid)
+    .bind(unit_id)
+    .bind(action_id)
+    .execute(pool)
+    .await
+    .expect("insert bare assignment");
+}
+
+/// T28a: First assignment for an action succeeds.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t28a_first_assignment_for_action_succeeds() {
+    let f = setup().await.expect("fixture");
+    let action_id = uuid::Uuid::now_v7();
+    let experiment_uuid = uuid::Uuid::now_v7();
+    insert_bare_assignment(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        experiment_uuid,
+        "r/t28a",
+    )
+    .await;
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("count");
+    assert_eq!(count, 1, "first assignment for action should succeed");
+}
+
+/// T28b: Second assignment for the same (workspace_id, action_id) fails
+/// with a uniqueness violation.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t28b_second_assignment_for_same_action_fails() {
+    let f = setup().await.expect("fixture");
+    let action_id = uuid::Uuid::now_v7();
+    let experiment_uuid_1 = uuid::Uuid::now_v7();
+    insert_bare_assignment(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        experiment_uuid_1,
+        "r/t28b-1",
+    )
+    .await;
+
+    // Second assignment with a DIFFERENT experiment_uuid but the SAME
+    // action_id must fail due to the partial unique index.
+    let experiment_uuid_2 = uuid::Uuid::now_v7();
+    let result = sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (id, workspace_id, experiment_uuid, unit_id, unit_kind,
+            arm, propensity, prediction, context, strategy,
+            eligibility_criteria, selection_context, interference_policy,
+            interference_score, is_interference_controllable,
+            experiment_status, execution_status, action_id)
+           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+                   '{}'::jsonb,'{}'::jsonb,'discovery',
+                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                   'active','dispatched',$5)"#,
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(f.workspace_id.into_uuid())
+    .bind(experiment_uuid_2)
+    .bind("r/t28b-2")
+    .bind(action_id)
+    .execute(&f.pool)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "second assignment for same (workspace_id, action_id) must fail"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("unique")
+            || err.to_string().to_lowercase().contains("duplicate"),
+        "error should be a uniqueness violation, got: {err}"
+    );
+}
+
+/// T28c: Two different workspaces may use the same action_id.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t28c_different_workspaces_same_action_id_succeeds() {
+    let f = setup().await.expect("fixture");
+    let action_id = uuid::Uuid::now_v7();
+
+    // First workspace.
+    let experiment_uuid_1 = uuid::Uuid::now_v7();
+    insert_bare_assignment(
+        &f.pool,
+        f.workspace_id,
+        action_id,
+        experiment_uuid_1,
+        "r/t28c-ws1",
+    )
+    .await;
+
+    // Second workspace — insert a workspace row first.
+    let workspace_id_2 = WorkspaceId::new();
+    let suffix = workspace_id_2.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id_2.into_uuid())
+        .bind(format!("exp-integrity-ws2-{suffix}"))
+        .bind("Second Workspace")
+        .execute(&f.pool)
+        .await
+        .expect("insert workspace 2");
+
+    let experiment_uuid_2 = uuid::Uuid::now_v7();
+    insert_bare_assignment(
+        &f.pool,
+        workspace_id_2,
+        action_id,
+        experiment_uuid_2,
+        "r/t28c-ws2",
+    )
+    .await;
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+         WHERE action_id = $1",
+    )
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("count");
+    assert_eq!(
+        count, 2,
+        "two different workspaces may use the same action_id"
+    );
+}
+
+/// T28d: NULL action_id remains allowed (withheld / non-dispatched).
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t28d_null_action_id_remains_allowed() {
+    let f = setup().await.expect("fixture");
+    let experiment_uuid = uuid::Uuid::now_v7();
+
+    // Insert two assignments with NULL action_id — both should succeed.
+    for unit in ["r/t28d-1", "r/t28d-2"] {
+        sqlx::query(
+            r#"INSERT INTO viryaos_experiment_assignments
+               (id, workspace_id, experiment_uuid, unit_id, unit_kind,
+                arm, propensity, prediction, context, strategy,
+                eligibility_criteria, selection_context, interference_policy,
+                interference_score, is_interference_controllable,
+                experiment_status, execution_status, action_id)
+               VALUES ($1,$2,$3,$4,'target_community','control',0.5,
+                       '{}'::jsonb,'{}'::jsonb,'discovery',
+                       '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                       'active','control',NULL)"#,
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(f.workspace_id.into_uuid())
+        .bind(experiment_uuid)
+        .bind(unit)
+        .execute(&f.pool)
+        .await
+        .expect("insert control assignment with NULL action_id");
+    }
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
+         WHERE workspace_id = $1 AND action_id IS NULL",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("count");
+    assert_eq!(
+        count, 2,
+        "multiple NULL action_id assignments must be allowed"
+    );
+}
+
+/// T28e: Existing experiment uniqueness (workspace_id, experiment_uuid,
+/// assignment_round, unit_id) remains intact.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn t28e_experiment_unit_uniqueness_remains_intact() {
+    let f = setup().await.expect("fixture");
+    let experiment_uuid = uuid::Uuid::now_v7();
+    let action_id_1 = uuid::Uuid::now_v7();
+
+    insert_bare_assignment(
+        &f.pool,
+        f.workspace_id,
+        action_id_1,
+        experiment_uuid,
+        "r/t28e",
+    )
+    .await;
+
+    // Same (workspace_id, experiment_uuid, assignment_round=1, unit_id)
+    // with a DIFFERENT action_id must still fail.
+    let action_id_2 = uuid::Uuid::now_v7();
+    let result = sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (id, workspace_id, experiment_uuid, unit_id, unit_kind,
+            arm, propensity, prediction, context, strategy,
+            eligibility_criteria, selection_context, interference_policy,
+            interference_score, is_interference_controllable,
+            experiment_status, execution_status, action_id)
+           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+                   '{}'::jsonb,'{}'::jsonb,'discovery',
+                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                   'active','dispatched',$5)"#,
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(f.workspace_id.into_uuid())
+    .bind(experiment_uuid)
+    .bind("r/t28e")
+    .bind(action_id_2)
+    .execute(&f.pool)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "duplicate (workspace_id, experiment_uuid, assignment_round, unit_id) must fail"
+    );
+}

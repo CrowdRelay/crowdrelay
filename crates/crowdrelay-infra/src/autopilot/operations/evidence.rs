@@ -177,11 +177,14 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                ge.episode_id, ge.resolved_at
         FROM viryaos_growth_evidence ge
         -- LATERAL subquery: pick at most ONE assignment row per evidence
-        -- row to prevent fan-out. The experiment_assignments table does
-        -- NOT have a unique constraint on (workspace_id, action_id) —
-        -- only a non-unique index. A plain LEFT JOIN could duplicate
-        -- evidence rows if multiple assignments exist for one action.
-        -- LATERAL + LIMIT 1 guarantees one row per evidence.
+        -- row to prevent fan-out. A partial UNIQUE INDEX on
+        -- (workspace_id, action_id) WHERE action_id IS NOT NULL
+        -- (migration 0201) now enforces the 1:1 action-to-assignment
+        -- invariant at the DB level. LATERAL + LIMIT 1 remains as a
+        -- defensive safety net for legacy or externally imported data
+        -- that might predate the constraint. Multiple assignments for
+        -- one action are INVALID STATE, not a supported case — the
+        -- LIMIT 1 does not make them acceptable.
         LEFT JOIN LATERAL (
             SELECT execution_status
             FROM viryaos_experiment_assignments ea
@@ -199,10 +202,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
           -- where we cannot establish whether the treatment happened.
           -- The treatment/non-treatment distinction (executed vs failed
           -- vs control) is handled downstream by the causal layer's
-          -- CausalEstimand::includes_in_treatment_effect() or
-          -- TreatmentView::includes_in_treatment_effect(), not by this
+          -- CausalEstimand::includes_in_treatment_effect(), not by this
           -- SQL filter. SQL provides eligible observations; the causal
-          -- layer chooses the estimand or view.
+          -- layer chooses the estimand.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
           AND ($2::timestamptz IS NULL OR ge.timestamp > $2)
         ORDER BY ge.timestamp ASC

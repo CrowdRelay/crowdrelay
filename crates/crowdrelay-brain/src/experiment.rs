@@ -52,8 +52,10 @@ pub enum TreatmentAssignment {
 /// domain decision, not a SQL filtering choice.
 ///
 /// Each estimand has a contract defining which execution_status categories
-/// are included and how they're weighted. SQL provides eligible observations
-/// (raw execution_status); the causal layer chooses the estimand.
+/// are included and how they're weighted, together with the identification
+/// assumptions that make the causal interpretation valid. SQL provides
+/// eligible observations (raw execution_status); the causal layer chooses
+/// the estimand.
 ///
 /// # Why this is a domain type, not a SQL predicate
 ///
@@ -82,6 +84,14 @@ pub enum CausalEstimand {
     /// - withholding (treatment arm, not dispatched) retained as treatment
     /// - execution failure retained as treatment
     /// - no exclusion based on execution_status
+    ///
+    /// # Identification assumptions
+    ///
+    /// ITT is the conservative estimand: it requires randomization
+    /// (which the experiment design provides) but does NOT require
+    /// that protocol adherence is independent of potential outcomes.
+    /// Withholding and execution failure are part of the effect being
+    /// estimated, not nuisance to be adjusted away.
     IntentToTreat,
     /// Per-protocol: denominator = protocol-compliant units only.
     /// Excludes withheld and failed treatments from the treatment arm.
@@ -93,6 +103,20 @@ pub enum CausalEstimand {
     /// - withheld (treatment arm, not dispatched) excluded
     /// - failed (treatment arm, execution failed) excluded
     /// - control arm included regardless of execution_status
+    ///
+    /// # Identification assumptions
+    ///
+    /// Per-protocol interpretation requires that protocol adherence is
+    /// not associated with potential outcomes after conditioning on the
+    /// measured pre-treatment covariates used by the design/analysis,
+    /// together with the usual consistency and no-interference
+    /// assumptions required by the estimator.
+    ///
+    /// The implementation must document the exact identification
+    /// conditions of the estimator actually used.
+    ///
+    /// When those assumptions are not credible, use ITT as the
+    /// conservative estimand.
     PerProtocol,
 }
 
@@ -148,10 +172,17 @@ impl CausalEstimand {
 
 /// A descriptive view of realized treatment — NOT a causal estimand.
 ///
-/// `TreatmentView` answers a different question than `CausalEstimand`:
-/// "which units actually received the treatment?" rather than "what is
-/// the causal effect of assignment?" The two concepts are semantically
-/// distinct and must not be conflated under a single type.
+/// `TreatmentView` is a **type-level semantic distinction**: it separates
+/// "which units actually received the treatment?" (descriptive) from
+/// "what is the causal effect of assignment?" (causal, under
+/// [`CausalEstimand`]). The two concepts must not be conflated under a
+/// single type.
+///
+/// `TreatmentView` does NOT expose a causal inclusion operation. The
+/// sole causal inclusion API is
+/// [`CausalEstimand::includes_in_treatment_effect`]. For descriptive
+/// execution interpretation, use [`ExecutionStatus`] directly where
+/// needed.
 ///
 /// # Why this is separate from `CausalEstimand`
 ///
@@ -191,37 +222,6 @@ impl TreatmentView {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RealizedTreatment => "realized_treatment",
-        }
-    }
-
-    /// Returns whether a given evidence row should update the
-    /// treatment-effect posterior under this descriptive view.
-    ///
-    /// This is the same operation as
-    /// [`CausalEstimand::includes_in_treatment_effect`] but for a
-    /// descriptive view rather than a causal estimand. The two methods
-    /// are intentionally separate — they answer different questions and
-    /// must not be abstracted into a shared trait.
-    ///
-    /// # Parameters
-    /// - `is_treatment_arm`: whether the evidence row's assignment was
-    ///   randomized to the treatment arm (Z = 1).
-    /// - `execution_status`: the realized execution status of the
-    ///   assignment (Executed, Failed, Withheld, Control, etc.).
-    #[must_use]
-    pub fn includes_in_treatment_effect(
-        self,
-        _is_treatment_arm: bool,
-        execution_status: ExecutionStatus,
-    ) -> bool {
-        match self {
-            Self::RealizedTreatment => {
-                // Realized treatment: treatment indicator is execution_status.
-                // Executed rows and control rows contribute. Withheld and
-                // failed do not (they're non-treatment).
-                execution_status == ExecutionStatus::Executed
-                    || execution_status == ExecutionStatus::Control
-            }
         }
     }
 }
