@@ -132,6 +132,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/decisions/{decision_id}/handled-externally",
             post(crate::autopilot::mark_decision_handled_externally),
         )
+        // Decision evidence: structured "why this decision" data from the
+        // persisted decision row. Read-only — no authority path of its own.
+        .route(
+            "/v1/control-plane/autopilot/decisions/{decision_id}/evidence",
+            get(crate::autopilot::decision_evidence),
+        )
+        // Learning loop: last 20 decisions with their actions and outcomes.
+        // The real decision → action → outcome chain, not fabricated.
+        .route(
+            "/v1/control-plane/autopilot/learning-loop",
+            get(crate::autopilot::learning_loop),
+        )
         // Label portfolio: roster KPIs and the consent-edge decisions. Same
         // handlers as the admin surface, so the control plane grows no
         // authority path of its own.

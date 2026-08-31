@@ -77,7 +77,7 @@ const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
 /// coverage bucket. Reddit connections record under 'social' because the
 /// MetricPlatform enum has no 'reddit' variant — Reddit feeds the social
 /// coverage bucket.
-const SYNCED_PLATFORMS: &[&str] = &["youtube", "spotify", "reddit", "facebook"];
+const SYNCED_PLATFORMS: &[&str] = &["youtube", "spotify", "reddit", "facebook", "instagram"];
 
 #[derive(Debug, Error)]
 pub enum GrowthMetricSyncError {
@@ -367,6 +367,7 @@ impl GrowthMetricSyncWorker {
             "spotify" => self.sync_spotify(conn).await,
             "reddit" => self.sync_reddit(conn).await,
             "facebook" => self.sync_facebook(conn).await,
+            "instagram" => self.sync_instagram(conn).await,
             _ => Ok(()),
         }
     }
@@ -548,6 +549,54 @@ impl GrowthMetricSyncWorker {
             page_id = %page_id,
             followers = follower_count,
             "facebook page follower count recorded"
+        );
+        Ok(())
+    }
+
+    /// Instagram: fetch IG professional account follower count via the
+    /// Graph API. Uses the same Facebook Page access token — the IG
+    /// Business account is linked to the Facebook Page, so the Page
+    /// token grants access to the IG account's data. No separate
+    /// Instagram login flow needed.
+    /// Recorded under platform='instagram' in the growth metric series.
+    async fn sync_instagram(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let token = self
+            .facebook_page_access_token
+            .as_ref()
+            .ok_or(GrowthMetricSyncError::NoFacebookToken)?;
+        let ig_user_id = &conn.provider_account_id;
+
+        let url = format!(
+            "https://graph.facebook.com/v21.0/{ig_user_id}?fields=username,followers_count&access_token={token}"
+        );
+        let response = self.http_client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "Instagram Graph API returned HTTP {} for ig_user {ig_user_id}",
+                response.status()
+            )));
+        }
+        let body: InstagramUserResponse = response.json().await?;
+        let follower_count = body.followers_count;
+        let display_name = body.username.as_deref().unwrap_or("Instagram");
+
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "instagram",
+            "followers",
+            &format!("Instagram followers — {display_name}"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            ig_user_id = %ig_user_id,
+            followers = follower_count,
+            "instagram follower count recorded"
         );
         Ok(())
     }
@@ -976,6 +1025,15 @@ struct FacebookPageResponse {
     followers_count: Option<i64>,
 }
 
+// --- Instagram response types ---
+
+#[derive(Debug, Deserialize)]
+struct InstagramUserResponse {
+    username: Option<String>,
+    #[serde(default)]
+    followers_count: i64,
+}
+
 // --- Reddit response types ---
 
 #[derive(Debug, Deserialize)]
@@ -1123,6 +1181,15 @@ mod tests {
         let response: FacebookPageResponse = serde_json::from_slice(json).unwrap();
         assert_eq!(response.fan_count, 999);
         assert!(response.followers_count.is_none());
+    }
+
+    #[test]
+    fn instagram_user_response_parses_followers() {
+        let json =
+            br#"{"username":"virya.official","followers_count":522,"id":"17841455886865962"}"#;
+        let response: InstagramUserResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.username.as_deref(), Some("virya.official"));
+        assert_eq!(response.followers_count, 522);
     }
 
     #[test]
