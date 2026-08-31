@@ -3,7 +3,9 @@
 //
 // No new tables, no migrations, no fabricated data. Every field comes from an
 // existing column in viryaos_autopilot_decisions, viryaos_autopilot_actions,
-// or viryaos_autopilot_outcomes.
+// or viryaos_autopilot_outcomes. Missing fields within a present stage are
+// NOT fabricated — they surface as a `data_integrity_warning` so the operator
+// can see corruption rather than being given a polished but false history.
 //
 // The ranking is lexicographic, NOT a weighted score. The evidence endpoint
 // returns the raw input_snapshot and policy_snapshot as-is — the frontend
@@ -52,7 +54,10 @@ struct DecisionEvidenceRow {
 
 /// One entry in the learning loop: a decision with its action and outcome
 /// where they exist. Missing stages are `None` — the frontend shows
-/// "Not yet measured", never fabricated success.
+/// "Not yet measured", never fabricated success. If an action or outcome row
+/// exists but has missing required fields, `data_integrity_warning` is set
+/// and the corrupt entity is surfaced as `None` — distinguishing absence
+/// from corruption.
 #[derive(Debug, Serialize)]
 pub struct LearningLoopEntry {
     pub decision_id: Uuid,
@@ -66,13 +71,23 @@ pub struct LearningLoopEntry {
     #[serde(with = "time::serde::rfc3339")]
     pub evaluated_at: OffsetDateTime,
     /// The action that resulted from this decision, if one was created.
-    /// `None` for observe_only decisions or decisions that produced no action.
+    /// `None` for observe_only decisions, decisions that produced no action,
+    /// or when an action row exists but has corrupt/missing required fields
+    /// (see `data_integrity_warning`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<LearningLoopAction>,
     /// The measured outcome of the action, if one was recorded.
-    /// `None` when the action hasn't completed or no measurement exists.
+    /// `None` when the action hasn't completed, no measurement exists,
+    /// or when an outcome row exists but has corrupt/missing required fields
+    /// (see `data_integrity_warning`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<LearningLoopOutcome>,
+    /// Set when an action or outcome row exists but has missing required
+    /// fields. Distinguishes "no action" from "action row exists but is
+    /// corrupt." The frontend renders this as an explicit data integrity
+    /// issue, never as fabricated success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_integrity_warning: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,7 +142,9 @@ pub async fn decision_evidence(
     Path(decision_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Response {
-    match load_decision_evidence(&state.database, decision_id).await {
+    match load_decision_evidence(&state.database, decision_id, state.ops.workspace_id().into_uuid())
+        .await
+    {
         Ok(Some(evidence)) => private_json(StatusCode::OK, evidence),
         Ok(None) => Problem::not_found(request_id(&headers)).into_response(),
         Err(error) => {
@@ -140,6 +157,7 @@ pub async fn decision_evidence(
 async fn load_decision_evidence(
     pool: &sqlx::PgPool,
     decision_id: Uuid,
+    workspace_id: Uuid,
 ) -> Result<Option<DecisionEvidence>, sqlx::Error> {
     let row = sqlx::query_as::<_, DecisionEvidenceRow>(
         r#"
@@ -147,10 +165,11 @@ async fn load_decision_evidence(
                confidence_basis_points, disposition, reason,
                input_snapshot, policy_snapshot, recommendation, evaluated_at
         FROM viryaos_autopilot_decisions
-        WHERE id = $1
+        WHERE id = $1 AND workspace_id = $2
         "#,
     )
     .bind(decision_id)
+    .bind(workspace_id)
     .fetch_optional(pool)
     .await?;
 
@@ -175,6 +194,8 @@ async fn load_decision_evidence(
 /// Returns the last 20 decisions with their associated actions and outcomes.
 /// The chain is real and traceable: decision → action (via decision_id FK) →
 /// outcome (via action_id FK). Missing stages are `None`, not fabricated.
+/// If an action or outcome row exists but has missing required fields, the
+/// entry carries a `data_integrity_warning` instead of fabricating defaults.
 pub async fn learning_loop(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match load_learning_loop(&state.database, state.ops.workspace_id().into_uuid()).await {
         Ok(entries) => private_json(StatusCode::OK, entries),
@@ -201,19 +222,27 @@ async fn load_learning_loop(
             d.disposition,
             d.reason,
             d.evaluated_at,
-            -- Action fields (nullable: observe_only decisions have no action)
-            a.id AS action_id,
+            -- Action fields (nullable: observe_only decisions have no action).
+            -- LATERAL LIMIT 1: multiple actions per decision is invalid/
+            -- unsupported state; latest-row selection is a read-model safety
+            -- net only, not semantic endorsement of 1:N cardinality.
+            a.action_id,
             a.action_kind,
-            a.status AS action_status,
-            a.finished_at AS action_finished_at,
+            a.action_status,
+            a.action_finished_at,
             -- Outcome fields (nullable: not all actions have measured outcomes)
             o.effect_assessment AS outcome_effect_assessment,
             o.metric_key AS outcome_metric_key,
             o.delta_basis_points AS outcome_delta_basis_points,
             o.observed_at AS outcome_observed_at
         FROM viryaos_autopilot_decisions d
-        LEFT JOIN viryaos_autopilot_actions a
-          ON a.workspace_id = d.workspace_id AND a.decision_id = d.id
+        LEFT JOIN LATERAL (
+            SELECT id AS action_id, action_kind, status AS action_status, finished_at
+            FROM viryaos_autopilot_actions
+            WHERE workspace_id = $1 AND decision_id = d.id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) a ON true
         LEFT JOIN LATERAL (
             SELECT effect_assessment, metric_key, delta_basis_points, observed_at
             FROM viryaos_autopilot_outcomes
@@ -234,30 +263,79 @@ async fn load_learning_loop(
 
     Ok(rows
         .into_iter()
-        .map(|r| LearningLoopEntry {
-            decision_id: r.decision_id,
-            context: r.context,
-            decision_kind: r.decision_kind,
-            subject_kind: r.subject_kind,
-            subject_id: r.subject_id,
-            confidence_basis_points: r.confidence_basis_points,
-            disposition: r.disposition,
-            reason: r.reason,
-            evaluated_at: r.evaluated_at,
-            action: r.action_id.map(|id| LearningLoopAction {
-                action_id: id,
-                action_kind: r.action_kind.unwrap_or_default(),
-                status: r.action_status.unwrap_or_default(),
-                finished_at: r.action_finished_at,
-            }),
-            outcome: r
-                .outcome_effect_assessment
-                .map(|assessment| LearningLoopOutcome {
-                    effect_assessment: assessment,
-                    metric_key: r.outcome_metric_key.unwrap_or_default(),
-                    delta_basis_points: r.outcome_delta_basis_points.unwrap_or(0),
-                    observed_at: r.outcome_observed_at.unwrap_or_else(OffsetDateTime::now_utc),
-                }),
+        .map(|r| {
+            let mut warnings: Vec<String> = Vec::new();
+
+            // Action: required fields are action_kind and action_status.
+            // If the row exists but either is NULL, that's corruption —
+            // surface it, don't fabricate.
+            let action = r.action_id.and_then(|id| {
+                match (r.action_kind.as_ref(), r.action_status.as_ref()) {
+                    (Some(kind), Some(status)) => Some(LearningLoopAction {
+                        action_id: id,
+                        action_kind: kind.clone(),
+                        status: status.clone(),
+                        finished_at: r.action_finished_at,
+                    }),
+                    _ => {
+                        warnings.push(format!(
+                            "action {id} exists but has missing required fields"
+                        ));
+                        None
+                    }
+                }
+            });
+
+            // Outcome: required fields are metric_key, delta_basis_points,
+            // and observed_at. If the row exists but any are NULL, that's
+            // corruption — surface it, don't fabricate.
+            let outcome = r.outcome_effect_assessment.as_ref().and_then(|assessment| {
+                match (
+                    r.outcome_metric_key.as_ref(),
+                    r.outcome_delta_basis_points,
+                    r.outcome_observed_at,
+                ) {
+                    (Some(key), Some(delta), Some(observed)) => Some(LearningLoopOutcome {
+                        effect_assessment: assessment.clone(),
+                        metric_key: key.clone(),
+                        delta_basis_points: delta,
+                        observed_at: observed,
+                    }),
+                    _ => {
+                        warnings.push(
+                            "outcome exists but has missing required fields".to_string(),
+                        );
+                        None
+                    }
+                }
+            });
+
+            if !warnings.is_empty() {
+                tracing::warn!(
+                    decision_id = %r.decision_id,
+                    warnings = warnings.join("; "),
+                    "data integrity issues in learning loop entry"
+                );
+            }
+
+            LearningLoopEntry {
+                decision_id: r.decision_id,
+                context: r.context,
+                decision_kind: r.decision_kind,
+                subject_kind: r.subject_kind,
+                subject_id: r.subject_id,
+                confidence_basis_points: r.confidence_basis_points,
+                disposition: r.disposition,
+                reason: r.reason,
+                evaluated_at: r.evaluated_at,
+                action,
+                outcome,
+                data_integrity_warning: if warnings.is_empty() {
+                    None
+                } else {
+                    Some(warnings.join("; "))
+                },
+            }
         })
         .collect())
 }
