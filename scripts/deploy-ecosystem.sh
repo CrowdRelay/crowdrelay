@@ -256,9 +256,9 @@ for component in api worker; do
 done
 PULL_IMAGES
 
-# Run blue-green deploy
+# Run the canonical exact-artifact deploy so digest verification cannot drift.
 printf '\n==> 1c — Blue-green CrowdRelay deploy\n'
-ssh -T "$CROWDRELAY_REMOTE" bash -s -- "$TARGET" "$CROWDRELAY_REPO" < "$ROOT_DIR/scripts/deploy-bluegreen.sh"
+bash "$ROOT_DIR/scripts/deploy.sh" "$TARGET"
 
 printf 'CROWDRELAY_DEPLOY=PASS sha=%s\n' "$TARGET"
 

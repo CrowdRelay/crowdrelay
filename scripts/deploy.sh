@@ -12,6 +12,9 @@ ORACLE_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
 BLUEGREEN="$ROOT_DIR/scripts/deploy-bluegreen.sh"
 # Fallback for bootstrap/recovery when no blue container is running
 CANONICAL="$ROOT_DIR/scripts/deploy-production-safe.sh"
+IMAGE_RUN_ID=""
+CROWDRELAY_API_DIGEST=""
+CROWDRELAY_WORKER_DIGEST=""
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -22,7 +25,7 @@ require() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
-for command in git gh ssh bash; do require "$command"; done
+for command in git gh ssh bash sha256sum; do require "$command"; done
 [[ "$WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail 'CROWDRELAY_DEPLOY_WAIT_SECONDS must be a positive integer'
 [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail 'CROWDRELAY_DEPLOY_POLL_SECONDS must be a positive integer'
 
@@ -66,7 +69,7 @@ wait_for_workflow() {
 }
 
 wait_for_image_release() {
-  local deadline artifact_name run_id last_notice
+  local deadline artifact_name run_id last_notice run_identity
   deadline=$((SECONDS + WAIT_SECONDS))
   artifact_name="crowdrelay-image-digests-${TARGET}"
   run_id=""
@@ -90,7 +93,10 @@ wait_for_image_release() {
         2>/dev/null || true
     )"
     if [[ -n "$run_id" ]]; then
-      printf 'IMAGES_RUN=%s\n' "$run_id"
+      IMAGE_RUN_ID="$run_id"
+      run_identity="$(gh run view "$IMAGE_RUN_ID" --repo "$REPO" --json workflowName,headSha,conclusion --jq '[.workflowName,.headSha,.conclusion] | join("|")')"
+      [[ "$run_identity" == "Publish container images|${TARGET}|success" ]] || fail "image artifact run identity mismatch: $run_identity"
+      printf 'IMAGES_RUN=%s\n' "$IMAGE_RUN_ID"
       printf 'IMAGES_ARTIFACT=%s\n' "$artifact_name"
       printf 'IMAGES=PASS sha=%s\n' "$TARGET"
       return 0
@@ -102,6 +108,35 @@ wait_for_image_release() {
     sleep "$POLL_SECONDS"
   done
   fail "timed out waiting for immutable image digest artifact $artifact_name"
+}
+
+download_image_manifest() {
+  local artifact_name artifact_dir expected_sum actual_sum release_sha
+  artifact_name="crowdrelay-image-digests-${TARGET}"
+  [[ -n "$IMAGE_RUN_ID" ]] || fail 'image release run was not resolved'
+  artifact_dir="$(mktemp -d)"
+  if ! gh run download "$IMAGE_RUN_ID" --repo "$REPO" --name "$artifact_name" --dir "$artifact_dir"; then
+    rm -rf -- "$artifact_dir"
+    fail "cannot download immutable image manifest: $artifact_name"
+  fi
+  [[ -f "$artifact_dir/images.env" && -f "$artifact_dir/images.env.sha256" ]] || {
+    rm -rf -- "$artifact_dir"
+    fail 'image digest manifest is incomplete'
+  }
+  expected_sum="$(awk 'NR==1 {print $1}' "$artifact_dir/images.env.sha256")"
+  actual_sum="$(sha256sum "$artifact_dir/images.env" | awk '{print $1}')"
+  [[ "$expected_sum" =~ ^[0-9a-f]{64}$ && "$expected_sum" == "$actual_sum" ]] || {
+    rm -rf -- "$artifact_dir"
+    fail 'image digest manifest checksum failed'
+  }
+  release_sha="$(sed -n 's/^CROWDRELAY_RELEASE_SHA=//p' "$artifact_dir/images.env")"
+  CROWDRELAY_API_DIGEST="$(sed -n 's/^CROWDRELAY_API_DIGEST=//p' "$artifact_dir/images.env")"
+  CROWDRELAY_WORKER_DIGEST="$(sed -n 's/^CROWDRELAY_WORKER_DIGEST=//p' "$artifact_dir/images.env")"
+  rm -rf -- "$artifact_dir"
+  [[ "$release_sha" == "$TARGET" ]] || fail "image manifest SHA mismatch: got=$release_sha expected=$TARGET"
+  [[ "$CROWDRELAY_API_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'invalid API digest in image manifest'
+  [[ "$CROWDRELAY_WORKER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'invalid worker digest in image manifest'
+  printf 'IMAGE_MANIFEST=PASS sha=%s api=%s worker=%s\n' "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST"
 }
 
 control_plane_tunnel_fingerprint() {
@@ -228,6 +263,7 @@ REMOTE_RECOVERY
 
 wait_for_workflow "CI" "CI"
 wait_for_image_release
+download_image_manifest
 
 [[ "$(git rev-parse HEAD)" == "$TARGET" ]] || fail 'local HEAD moved while waiting for release gates'
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree changed while waiting for release gates'
@@ -263,7 +299,7 @@ if [[ "$blue_green_eligible" == "eligible" ]]; then
   printf 'SOURCE_CONTRACTS=PASS\n'
 
   # Ship the blue-green script to the remote and execute it
-  ssh -T "$ORACLE" bash -s -- "$TARGET" "$ORACLE_REPO" < "$BLUEGREEN"
+  ssh -T "$ORACLE" bash -s -- "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST" "$ORACLE_REPO" < "$BLUEGREEN"
   deploy_status=$?
 else
   printf '\n==> Bootstrap/recovery deploy (force-recreate — no blue/green container running)\n'

@@ -16,7 +16,7 @@ umask 077
 # leaving production on the previous release with no user-visible downtime.
 #
 # Usage (called by deploy-ecosystem.sh or directly):
-#   bash scripts/deploy-bluegreen.sh <target-sha> [repo-dir]
+#   bash scripts/deploy-bluegreen.sh <target-sha> <api-digest> <worker-digest> [repo-dir]
 #
 # Environment:
 #   CROWDRELAY_DOCKER_NETWORK  — shared Docker network (from .crowdrelay.local.sh)
@@ -27,7 +27,9 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd -P 2>/dev/null || echo /opt/crowdrelay)"
 TARGET="${1:-}"
-REPO_DIR="${2:-$ROOT_DIR}"
+API_DIGEST="${2:-}"
+WORKER_DIGEST="${3:-}"
+REPO_DIR="${4:-$ROOT_DIR}"
 EDGE_CADDYFILE="/opt/crowdrelay/ops/edge/Caddyfile"
 EDGE_CONTAINER="virya-edge-caddy"
 HEALTH_TIMEOUT="${CROWDRELAY_DEPLOY_WAIT_TIMEOUT_SECONDS:-180}"
@@ -97,10 +99,14 @@ absolute_path() {
 
 # --- Pre-flight -------------------------------------------------------------
 
-[[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || fail "usage: deploy-bluegreen.sh <full-40-char-sha>"
-for command in docker curl python3; do command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"; done
+[[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || fail "usage: deploy-bluegreen.sh <sha> <api-digest> <worker-digest> [repo-dir]"
+[[ "$API_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid API digest: $API_DIGEST"
+[[ "$WORKER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid worker digest: $WORKER_DIGEST"
+for command in docker curl python3 flock; do command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"; done
 
 cd "$REPO_DIR"
+exec 9> .git/crowdrelay-deploy.lock
+flock -n 9 || fail 'another CrowdRelay deployment is already running'
 [[ -f .crowdrelay.local.sh && ! -L .crowdrelay.local.sh ]] || fail "missing .crowdrelay.local.sh"
 # shellcheck source=/dev/null
 source .crowdrelay.local.sh
@@ -150,13 +156,26 @@ export CROWDRELAY_ENV_FILE="$env_file"
 export CROWDRELAY_DOCKER_NETWORK
 export CROWDRELAY_GREEN_TAG="sha-${TARGET}"
 
-# Verify the new images are available
-for component in api worker; do
-  image="ghcr.io/crowdrelay/crowdrelay-${component}:${CROWDRELAY_GREEN_TAG}"
-  revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
-  [[ "$revision" == "$TARGET" ]] || fail "image not available or revision mismatch: $image (got=${revision})"
-done
-printf 'NEW_IMAGES=PASS sha=%s\n' "$TARGET"
+verify_image() {
+  local component="$1" digest="$2" repository ref image_id revision architecture host_architecture repo_digests
+  repository="ghcr.io/crowdrelay/crowdrelay-${component}"
+  ref="${repository}@${digest}"
+  docker pull "$ref" >/dev/null || fail "cannot pull immutable ${component} image: $ref"
+  image_id="$(docker image inspect "$ref" --format '{{.Id}}')"
+  revision="$(docker image inspect "$image_id" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  architecture="$(docker image inspect "$image_id" --format '{{.Architecture}}')"
+  host_architecture="$(docker version --format '{{.Server.Arch}}')"
+  repo_digests="$(docker image inspect "$image_id" --format '{{join .RepoDigests "\n"}}')"
+  [[ "$revision" == "$TARGET" ]] || fail "${component} OCI revision mismatch: got=$revision expected=$TARGET"
+  [[ "$architecture" == "$host_architecture" ]] || fail "${component} architecture mismatch: got=$architecture expected=$host_architecture"
+  grep -Fq "@${digest}" <<<"$repo_digests" || fail "${component} RepoDigests do not contain $digest"
+  docker tag "$image_id" "${repository}:${CROWDRELAY_GREEN_TAG}"
+  printf 'IMMUTABLE_IMAGE=PASS component=%s digest=%s revision=%s architecture=%s\n' "$component" "$digest" "$revision" "$architecture"
+}
+
+verify_image api "$API_DIGEST"
+verify_image worker "$WORKER_DIGEST"
+printf 'NEW_IMAGES=PASS sha=%s exact-digests=true\n' "$TARGET"
 
 # Detect which color is currently active and determine deploy direction.
 blue_health="$(docker inspect "$BLUE_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
