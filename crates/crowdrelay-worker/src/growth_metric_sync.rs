@@ -298,7 +298,17 @@ impl GrowthMetricSyncWorker {
                     AND s.subject_id = fc.id
                     AND p.captured_at > now() - ($2::bigint * interval '1 second')
               )
-            ORDER BY fc.created_at
+            ORDER BY CASE fc.platform
+                        WHEN 'youtube' THEN 1
+                        WHEN 'spotify' THEN 2
+                        WHEN 'tiktok' THEN 3
+                        WHEN 'facebook' THEN 4
+                        WHEN 'instagram' THEN 5
+                        WHEN 'soundcloud' THEN 6
+                        WHEN 'reddit' THEN 7
+                        ELSE 8
+                     END,
+                     fc.created_at
             LIMIT $3
             "#,
         )
