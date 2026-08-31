@@ -749,7 +749,7 @@ impl RedditProxyPool {
 
         tracing::info!(
             working = working.len(),
-            tested = candidates.len(),
+            candidates = candidates.len(),
             "reddit proxy pool: refresh complete"
         );
 
