@@ -7,7 +7,8 @@ Enforces three invariants that the substrate hardening sprint established:
 3. learning_loop must use LATERAL LIMIT 1 for actions to prevent join fan-out.
 
 Also enforces that the read model distinguishes absent entities from corrupt
-entities via data_integrity_warning.
+entities via stage-specific data_integrity warnings (action and outcome are
+independent — action corruption does NOT mark outcome corrupt).
 """
 
 import unittest
@@ -52,14 +53,36 @@ class ReadModelIntegrityContract(unittest.TestCase):
             "learning loop must use LIMIT 1 in LATERAL subqueries",
         )
 
-    def test_data_integrity_warning_field_exists(self):
-        """LearningLoopEntry must have data_integrity_warning to distinguish
-        absent entities from corrupt entities."""
+    def test_data_integrity_warnings_are_stage_specific(self):
+        """LearningLoopEntry must have stage-specific data_integrity warnings
+        (action and outcome are independent). The old single
+        data_integrity_warning field must NOT exist."""
         text = EVIDENCE.read_text()
         self.assertIn(
+            "data_integrity",
+            text,
+            "LearningLoopEntry must have data_integrity field",
+        )
+        self.assertIn(
+            "DataIntegrityWarnings",
+            text,
+            "DataIntegrityWarnings struct must exist",
+        )
+        self.assertIn(
+            "pub action: Option<String>",
+            text,
+            "DataIntegrityWarnings must have stage-specific action field",
+        )
+        self.assertIn(
+            "pub outcome: Option<String>",
+            text,
+            "DataIntegrityWarnings must have stage-specific outcome field",
+        )
+        # The old single-field data_integrity_warning must NOT exist
+        self.assertNotIn(
             "data_integrity_warning",
             text,
-            "LearningLoopEntry must have data_integrity_warning field",
+            "old single data_integrity_warning field must be removed",
         )
 
 

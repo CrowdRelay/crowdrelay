@@ -4,8 +4,9 @@
 // No new tables, no migrations, no fabricated data. Every field comes from an
 // existing column in viryaos_autopilot_decisions, viryaos_autopilot_actions,
 // or viryaos_autopilot_outcomes. Missing fields within a present stage are
-// NOT fabricated — they surface as a `data_integrity_warning` so the operator
-// can see corruption rather than being given a polished but false history.
+// NOT fabricated — they surface as stage-specific `data_integrity` warnings
+// so the operator can see corruption rather than being given a polished but
+// false history. Action corruption does NOT imply outcome corruption.
 //
 // The ranking is lexicographic, NOT a weighted score. The evidence endpoint
 // returns the raw input_snapshot and policy_snapshot as-is — the frontend
@@ -55,9 +56,10 @@ struct DecisionEvidenceRow {
 /// One entry in the learning loop: a decision with its action and outcome
 /// where they exist. Missing stages are `None` — the frontend shows
 /// "Not yet measured", never fabricated success. If an action or outcome row
-/// exists but has missing required fields, `data_integrity_warning` is set
-/// and the corrupt entity is surfaced as `None` — distinguishing absence
-/// from corruption.
+/// exists but has missing required fields, the corresponding field in
+/// `data_integrity` is set and the corrupt entity is surfaced as `None` —
+/// distinguishing absence from corruption. Action corruption does NOT
+/// imply outcome corruption, and vice versa.
 #[derive(Debug, Serialize)]
 pub struct LearningLoopEntry {
     pub decision_id: Uuid,
@@ -73,21 +75,41 @@ pub struct LearningLoopEntry {
     /// The action that resulted from this decision, if one was created.
     /// `None` for observe_only decisions, decisions that produced no action,
     /// or when an action row exists but has corrupt/missing required fields
-    /// (see `data_integrity_warning`).
+    /// (see `data_integrity.action`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<LearningLoopAction>,
     /// The measured outcome of the action, if one was recorded.
     /// `None` when the action hasn't completed, no measurement exists,
     /// or when an outcome row exists but has corrupt/missing required fields
-    /// (see `data_integrity_warning`).
+    /// (see `data_integrity.outcome`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<LearningLoopOutcome>,
-    /// Set when an action or outcome row exists but has missing required
-    /// fields. Distinguishes "no action" from "action row exists but is
-    /// corrupt." The frontend renders this as an explicit data integrity
-    /// issue, never as fabricated success.
+    /// Stage-specific integrity warnings. `action` is set when an action row
+    /// exists but has missing required fields; `outcome` is set when an
+    /// outcome row exists but has missing required fields. The two are
+    /// independent — action corruption does NOT mark the outcome corrupt,
+    /// and vice versa. Omitted entirely when both are absent.
+    #[serde(skip_serializing_if = "DataIntegrityWarnings::is_empty")]
+    pub data_integrity: DataIntegrityWarnings,
+}
+
+/// Stage-specific data integrity warnings for a learning loop entry.
+/// Each field is independent: action corruption does not imply outcome
+/// corruption, and vice versa. The frontend uses the per-stage field to
+/// render "Data integrity issue" only for the stage that is actually
+/// corrupt, never for a stage that is simply absent.
+#[derive(Debug, Default, Serialize)]
+pub struct DataIntegrityWarnings {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_integrity_warning: Option<String>,
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
+impl DataIntegrityWarnings {
+    fn is_empty(&self) -> bool {
+        self.action.is_none() && self.outcome.is_none()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -195,7 +217,8 @@ async fn load_decision_evidence(
 /// The chain is real and traceable: decision → action (via decision_id FK) →
 /// outcome (via action_id FK). Missing stages are `None`, not fabricated.
 /// If an action or outcome row exists but has missing required fields, the
-/// entry carries a `data_integrity_warning` instead of fabricating defaults.
+/// entry carries stage-specific `data_integrity` warnings instead of
+/// fabricating defaults.
 pub async fn learning_loop(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match load_learning_loop(&state.database, state.ops.workspace_id().into_uuid()).await {
         Ok(entries) => private_json(StatusCode::OK, entries),
@@ -264,7 +287,8 @@ async fn load_learning_loop(
     Ok(rows
         .into_iter()
         .map(|r| {
-            let mut warnings: Vec<String> = Vec::new();
+            let mut action_warning: Option<String> = None;
+            let mut outcome_warning: Option<String> = None;
 
             // Action: required fields are action_kind and action_status.
             // If the row exists but either is NULL, that's corruption —
@@ -278,7 +302,7 @@ async fn load_learning_loop(
                         finished_at: r.action_finished_at,
                     }),
                     _ => {
-                        warnings.push(format!(
+                        action_warning = Some(format!(
                             "action {id} exists but has missing required fields"
                         ));
                         None
@@ -302,7 +326,7 @@ async fn load_learning_loop(
                         observed_at: observed,
                     }),
                     _ => {
-                        warnings.push(
+                        outcome_warning = Some(
                             "outcome exists but has missing required fields".to_string(),
                         );
                         None
@@ -310,10 +334,14 @@ async fn load_learning_loop(
                 }
             });
 
-            if !warnings.is_empty() {
+            if action_warning.is_some() || outcome_warning.is_some() {
+                let parts: Vec<&str> = [action_warning.as_deref(), outcome_warning.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                 tracing::warn!(
                     decision_id = %r.decision_id,
-                    warnings = warnings.join("; "),
+                    warnings = parts.join("; "),
                     "data integrity issues in learning loop entry"
                 );
             }
@@ -330,10 +358,9 @@ async fn load_learning_loop(
                 evaluated_at: r.evaluated_at,
                 action,
                 outcome,
-                data_integrity_warning: if warnings.is_empty() {
-                    None
-                } else {
-                    Some(warnings.join("; "))
+                data_integrity: DataIntegrityWarnings {
+                    action: action_warning,
+                    outcome: outcome_warning,
                 },
             }
         })

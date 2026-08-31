@@ -47,7 +47,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(fanbase::ingest_fanbase),
         )
         .route(
-            "/v1/admin/connections/tiktok/authorize",
+            "/v1/public/connections/tiktok/authorize",
             get(connections_tiktok::authorize),
         )
         .route(

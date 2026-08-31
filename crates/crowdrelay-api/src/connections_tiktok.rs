@@ -1,8 +1,9 @@
 //! TikTok OAuth connection flow for fanbase growth metric sync.
 //!
 //! Two endpoints:
-//!   1. GET /v1/admin/connections/tiktok/authorize — admin-initiated,
-//!      redirects to TikTok's OAuth consent page.
+//!   1. GET /v1/public/connections/tiktok/authorize — public, redirects
+//!      to TikTok's OAuth consent page. No admin auth needed — this only
+//!      generates a redirect URL and sets a CSRF state cookie.
 //!   2. GET /v1/public/connections/tiktok/callback — public (browser
 //!      redirect from TikTok), exchanges the authorization code for
 //!      access/refresh tokens and stores them encrypted in

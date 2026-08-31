@@ -6076,13 +6076,11 @@ paths:
           description: One JSON document describing the roster story.
         '503':
           $ref: '#/components/responses/Problem'
-  /admin/connections/tiktok/authorize:
+  /public/connections/tiktok/authorize:
     get:
       operationId: authorizeTiktokConnection
       summary: Redirect to TikTok OAuth consent page
-      description: Admin-initiated OAuth flow. Redirects the browser to TikTok's consent page with user.info.basic and user.info.stats scopes. Sets a state cookie for CSRF protection.
-      security:
-      - adminBearer: []
+      description: Public endpoint that redirects the browser to TikTok's consent page with user.info.basic and user.info.stats scopes. Sets a state cookie for CSRF protection. No admin auth needed — this only generates a redirect URL and sets a cookie.
       parameters:
       - name: redirect
         in: query

@@ -8,6 +8,30 @@ struct AttentionEcosystemOverview {
     bandsintown_sync: Option<crate::ecosystem::BandsintownSyncStatus>,
 }
 
+/// Lightweight summary of a pending autopilot action — just the fields the
+/// AttentionInbox needs to render an approval item. NOT the full
+/// `PendingAutopilotAction` (which includes payload, briefing, assignee,
+/// executor readiness, etc.) — the attention snapshot is a summary view,
+/// not a detail modal.
+#[derive(Debug, Serialize)]
+struct PendingActionSummary {
+    id: uuid::Uuid,
+    context: String,
+    action_kind: String,
+    subject_kind: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    approval_expires_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct PendingActionSummaryRow {
+    id: uuid::Uuid,
+    context: String,
+    action_kind: String,
+    subject_kind: String,
+    approval_expires_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Serialize)]
 struct OperatorAttentionSnapshot {
     summary: OpsSummary,
@@ -17,6 +41,13 @@ struct OperatorAttentionSnapshot {
     dead_push: Vec<PushDeliveryItem>,
     ecosystem: AttentionEcosystemOverview,
     findings: Vec<crate::ecosystem::ReconciliationFinding>,
+    /// Pending autopilot actions awaiting human approval. Comes from the
+    /// same authoritative query as `load_control_overview` — just the
+    /// summary fields the inbox renders, not the full action detail.
+    needs_you: Vec<PendingActionSummary>,
+    /// Count of opportunities awaiting approval. Derived from authoritative
+    /// action state, not from rendered UI items.
+    awaiting_approval: i64,
 }
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -28,9 +59,16 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let dead_push = run_with_timeout(timeout_duration, load_dead_push(&state.ops));
     let ecosystem = run_with_timeout(timeout_duration, load_attention_ecosystem(&state));
     let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
+    let needs_you = run_with_timeout(timeout_duration, load_needs_you(&state.ops));
+    let awaiting_approval = run_with_timeout(timeout_duration, load_awaiting_approval(&state.ops));
 
-    let (summary, alerts, dead_outbox, dead_deliveries, dead_push, ecosystem, findings) =
-        tokio::join!(summary, alerts, dead_outbox, dead_deliveries, dead_push, ecosystem, findings);
+    let (
+        summary, alerts, dead_outbox, dead_deliveries, dead_push,
+        ecosystem, findings, needs_you, awaiting_approval,
+    ) = tokio::join!(
+        summary, alerts, dead_outbox, dead_deliveries, dead_push,
+        ecosystem, findings, needs_you, awaiting_approval,
+    );
 
     let request_id_value = request_id(&headers);
     let summary = match summary {
@@ -61,6 +99,14 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let needs_you = match needs_you {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let awaiting_approval = match awaiting_approval {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     private_json(
         StatusCode::OK,
@@ -72,6 +118,8 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             dead_push,
             ecosystem,
             findings,
+            needs_you,
+            awaiting_approval,
         },
     )
 }
@@ -257,6 +305,58 @@ async fn load_open_findings(
     )
     .bind(state.ticketing.workspace_id().into_uuid())
     .fetch_all(state.ticketing.pool())
+    .await
+    .map_err(OpsError::sqlx)
+}
+
+/// Load pending autopilot actions awaiting human approval — the same query
+/// as `load_control_overview` branch C, but only the summary fields the
+/// AttentionInbox renders. NOT the full `PendingAutopilotAction` with
+/// payload, briefing, assignee, and executor readiness.
+async fn load_needs_you(state: &OpsState) -> Result<Vec<PendingActionSummary>, OpsError> {
+    sqlx::query_as::<_, PendingActionSummaryRow>(
+        r#"
+        SELECT id, context, action_kind, subject_kind, approval_expires_at
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND status = 'awaiting_approval'
+          AND (approval_expires_at IS NULL OR approval_expires_at > now())
+        ORDER BY created_at, id
+        LIMIT 50
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|r| PendingActionSummary {
+                id: r.id,
+                context: r.context,
+                action_kind: r.action_kind,
+                subject_kind: r.subject_kind,
+                approval_expires_at: r.approval_expires_at,
+            })
+            .collect()
+    })
+    .map_err(OpsError::sqlx)
+}
+
+/// Count of actions awaiting approval — derived from authoritative action
+/// state, not from rendered UI items. Same WHERE clause as `load_needs_you`
+/// but returns a count.
+async fn load_awaiting_approval(state: &OpsState) -> Result<i64, OpsError> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)::bigint
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1
+          AND status = 'awaiting_approval'
+          AND (approval_expires_at IS NULL OR approval_expires_at > now())
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .fetch_one(&state.pool)
     .await
     .map_err(OpsError::sqlx)
 }
