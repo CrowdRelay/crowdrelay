@@ -168,7 +168,10 @@ pub async fn callback(
 
     let response = match token_response {
         Ok(r) => r,
-        Err(_) => return Problem::service_unavailable(request_id_value).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "TikTok token exchange HTTP request failed");
+            return Problem::service_unavailable(request_id_value).into_response();
+        }
     };
 
     if !response.status().is_success() {
@@ -181,12 +184,18 @@ pub async fn callback(
 
     let token_data: serde_json::Value = match response.json().await {
         Ok(v) => v,
-        Err(_) => return Problem::service_unavailable(request_id_value).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "TikTok token exchange response JSON parse failed");
+            return Problem::service_unavailable(request_id_value).into_response();
+        }
     };
 
     let data = match token_data.get("data") {
         Some(d) => d,
-        None => return Problem::service_unavailable(request_id_value).into_response(),
+        None => {
+            tracing::warn!(response = %token_data, "TikTok token response missing 'data' field");
+            return Problem::service_unavailable(request_id_value).into_response();
+        }
     };
 
     let access_token = data
@@ -204,6 +213,7 @@ pub async fn callback(
         .unwrap_or(86400);
 
     if access_token.is_empty() || open_id.is_empty() {
+        tracing::warn!(response = %token_data, "TikTok token response has empty access_token or open_id");
         return Problem::service_unavailable(request_id_value).into_response();
     }
 
