@@ -77,7 +77,14 @@ const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
 /// coverage bucket. Reddit connections record under 'social' because the
 /// MetricPlatform enum has no 'reddit' variant — Reddit feeds the social
 /// coverage bucket.
-const SYNCED_PLATFORMS: &[&str] = &["youtube", "spotify", "reddit", "facebook", "instagram"];
+const SYNCED_PLATFORMS: &[&str] = &[
+    "youtube",
+    "spotify",
+    "reddit",
+    "facebook",
+    "instagram",
+    "soundcloud",
+];
 
 #[derive(Debug, Error)]
 pub enum GrowthMetricSyncError {
@@ -357,6 +364,7 @@ impl GrowthMetricSyncWorker {
             "reddit" => self.sync_reddit(conn).await,
             "facebook" => self.sync_facebook(conn).await,
             "instagram" => self.sync_instagram(conn).await,
+            "soundcloud" => self.sync_soundcloud(conn).await,
             _ => Ok(()),
         }
     }
@@ -595,6 +603,50 @@ impl GrowthMetricSyncWorker {
             ig_user_id = %ig_user_id,
             followers = follower_count,
             "instagram follower count recorded"
+        );
+        Ok(())
+    }
+
+    /// SoundCloud: fetch artist follower count from the public artist page.
+    /// SoundCloud embeds user data as hydration JSON in the page HTML. No
+    /// API key or app registration needed — same approach as Spotify.
+    async fn sync_soundcloud(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let permalink = &conn.provider_account_id;
+        let url = format!("https://soundcloud.com/{permalink}");
+        let response = self.http_client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "SoundCloud page returned HTTP {} for {permalink}",
+                response.status()
+            )));
+        }
+        let html = response.text().await?;
+        let user_data = extract_soundcloud_user_data(&html).ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(
+                "could not extract user data from SoundCloud page".to_string(),
+            )
+        })?;
+        let follower_count = user_data.followers_count;
+        let display_name = user_data.username;
+
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "soundcloud",
+            "followers",
+            &format!("SoundCloud followers — {display_name}"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            permalink = %permalink,
+            artist = %display_name,
+            followers = follower_count,
+            "soundcloud follower count recorded"
         );
         Ok(())
     }
@@ -1048,6 +1100,38 @@ struct InstagramUserResponse {
     followers_count: i64,
 }
 
+// --- SoundCloud response types ---
+
+/// Subset of SoundCloud's user hydration data. The full object has many
+/// more fields, but we only care about followers and the display name.
+#[derive(Debug, Deserialize)]
+struct SoundCloudUserData {
+    username: String,
+    #[serde(default)]
+    followers_count: i64,
+}
+
+/// Extracts the user data JSON from SoundCloud's `window.__sc_hydration`
+/// array. The hydration data is an array of objects, each with a
+/// `hydratable` field and a `data` field. The user object has
+/// `hydratable: "user"`.
+fn extract_soundcloud_user_data(html: &str) -> Option<SoundCloudUserData> {
+    let marker = "window.__sc_hydration = ";
+    let start = html.find(marker)? + marker.len();
+    let rest = html.get(start..)?;
+    let end = rest.find(";</script>")?;
+    let json_str = rest.get(..end)?;
+    let hydration: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+    for entry in &hydration {
+        if entry.get("hydratable").and_then(|v| v.as_str()) == Some("user") {
+            let data = entry.get("data")?;
+            let user: SoundCloudUserData = serde_json::from_value(data.clone()).ok()?;
+            return Some(user);
+        }
+    }
+    None
+}
+
 // --- Spotify embed token extraction ---
 
 /// Extracts the public web player access token from a Spotify embed page's
@@ -1312,5 +1396,46 @@ mod tests {
         pool.working = vec!["http://192.0.2.1:8080".to_string()];
         pool.mark_failed("http://203.0.113.1:8080");
         assert_eq!(pool.working.len(), 1);
+    }
+
+    #[test]
+    fn soundcloud_user_data_parses_followers() {
+        let json =
+            br#"{"username":"Virya","followers_count":11,"followings_count":0,"track_count":14}"#;
+        let user: SoundCloudUserData = serde_json::from_slice(json).unwrap();
+        assert_eq!(user.username, "Virya");
+        assert_eq!(user.followers_count, 11);
+    }
+
+    #[test]
+    fn soundcloud_user_data_parses_without_followers() {
+        let json = br#"{"username":"TestArtist"}"#;
+        let user: SoundCloudUserData = serde_json::from_slice(json).unwrap();
+        assert_eq!(user.username, "TestArtist");
+        assert_eq!(user.followers_count, 0);
+    }
+
+    #[test]
+    fn extract_soundcloud_user_data_finds_user() {
+        let html = r#"<html><head></head><body><script>window.__sc_hydration = [{"hydratable":"sound","data":{"id":1}},{"hydratable":"user","data":{"username":"Virya","followers_count":11,"id":1176127912}}];</script></body></html>"#;
+        let user = extract_soundcloud_user_data(html);
+        assert!(user.is_some());
+        let user = user.unwrap();
+        assert_eq!(user.username, "Virya");
+        assert_eq!(user.followers_count, 11);
+    }
+
+    #[test]
+    fn extract_soundcloud_user_data_returns_none_when_missing() {
+        let html = r#"<html><body>no hydration data here</body></html>"#;
+        let user = extract_soundcloud_user_data(html);
+        assert!(user.is_none());
+    }
+
+    #[test]
+    fn extract_soundcloud_user_data_returns_none_when_no_user_entry() {
+        let html = r#"<html><script>window.__sc_hydration = [{"hydratable":"sound","data":{"id":1}}];</script></html>"#;
+        let user = extract_soundcloud_user_data(html);
+        assert!(user.is_none());
     }
 }
