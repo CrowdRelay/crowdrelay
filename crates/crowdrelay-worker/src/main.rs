@@ -408,12 +408,6 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let youtube_api_key = std::env::var("CROWDRELAY_YOUTUBE_API_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let spotify_client_id = std::env::var("CROWDRELAY_SPOTIFY_CLIENT_ID")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    let spotify_client_secret = std::env::var("CROWDRELAY_SPOTIFY_CLIENT_SECRET")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
     let facebook_page_access_token = std::env::var("CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty());
@@ -423,8 +417,6 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let growth_metric_sync = GrowthMetricSyncWorker::new(
         database.clone(),
         youtube_api_key,
-        spotify_client_id,
-        spotify_client_secret,
         facebook_page_access_token,
         reddit_proxy_url,
         config.database.operation_timeout,

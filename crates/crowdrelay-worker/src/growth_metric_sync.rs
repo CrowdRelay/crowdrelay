@@ -89,8 +89,6 @@ pub enum GrowthMetricSyncError {
     ProviderApi(String),
     #[error("no youtube API key configured")]
     NoYoutubeApiKey,
-    #[error("no spotify credentials configured")]
-    NoSpotifyCredentials,
     #[error("no facebook page access token configured")]
     NoFacebookToken,
     #[error("http client build failed: {0}")]
@@ -102,8 +100,6 @@ pub struct GrowthMetricSyncWorker {
     pool: PgPool,
     http_client: reqwest::Client,
     youtube_api_key: Option<String>,
-    spotify_client_id: Option<String>,
-    spotify_client_secret: Option<String>,
     /// Facebook Page access token for Graph API calls.
     facebook_page_access_token: Option<String>,
     /// Static proxy override. If set, the worker uses this single proxy
@@ -117,25 +113,20 @@ pub struct GrowthMetricSyncWorker {
 
 impl GrowthMetricSyncWorker {
     /// Creates a new worker. Returns `Ok(None)` if no platform is configured
-    /// (no YouTube API key and no Spotify credentials) — the caller should
+    /// (no YouTube API key and no Facebook token) — the caller should
     /// not spawn the worker in that case. Reddit needs no credentials, so
     /// the worker is enabled as long as any other platform is configured.
+    /// Spotify needs no credentials either — it uses Spotify's public embed
+    /// page to obtain a web player token.
     pub fn new(
         pool: PgPool,
         youtube_api_key: Option<String>,
-        spotify_client_id: Option<String>,
-        spotify_client_secret: Option<String>,
         facebook_page_access_token: Option<String>,
         reddit_proxy_url: Option<String>,
         operation_timeout: Duration,
     ) -> Result<Option<Self>, GrowthMetricSyncError> {
-        if youtube_api_key.is_none()
-            && (spotify_client_id.is_none() || spotify_client_secret.is_none())
-            && facebook_page_access_token.is_none()
-        {
-            tracing::info!(
-                "growth metric sync disabled: no YouTube API key, Spotify credentials, or Facebook token"
-            );
+        if youtube_api_key.is_none() && facebook_page_access_token.is_none() {
+            tracing::info!("growth metric sync disabled: no YouTube API key or Facebook token");
             return Ok(None);
         }
         // The main HTTP client is used for YouTube and Spotify — no proxy.
@@ -155,8 +146,6 @@ impl GrowthMetricSyncWorker {
             pool,
             http_client,
             youtube_api_key,
-            spotify_client_id,
-            spotify_client_secret,
             facebook_page_access_token,
             reddit_static_proxy: reddit_proxy_url,
             reddit_proxy_pool: Arc::new(Mutex::new(RedditProxyPool::new())),
@@ -422,89 +411,98 @@ impl GrowthMetricSyncWorker {
         Ok(())
     }
 
-    /// Spotify: fetch artist follower count via Web API (client credentials).
+    /// Spotify: fetch artist follower count via the internal partner API.
+    /// Uses Spotify's public embed page to obtain a web player token, then
+    /// calls the pathfinder GraphQL API for artist stats. No API key, no
+    /// app registration, no Extended Quota needed.
     async fn sync_spotify(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
-        let client_id = self
-            .spotify_client_id
-            .as_ref()
-            .ok_or(GrowthMetricSyncError::NoSpotifyCredentials)?;
-        let client_secret = self
-            .spotify_client_secret
-            .as_ref()
-            .ok_or(GrowthMetricSyncError::NoSpotifyCredentials)?;
         let artist_id = &conn.provider_account_id;
 
-        // Client credentials flow: get an access token.
-        let token_response = self
-            .http_client
-            .post("https://accounts.spotify.com/api/token")
-            .form(&[("grant_type", "client_credentials")])
-            .basic_auth(client_id, Some(client_secret))
-            .send()
-            .await?;
-        if !token_response.status().is_success() {
+        // Spotify deprecated the `followers` field in the public Web API
+        // (client credentials flow) in February 2026. The field is omitted
+        // from all responses for Development Mode apps. Extended Quota Mode
+        // (where it still works) requires a registered organization with
+        // 250k+ MAUs — not feasible.
+        //
+        // Instead, we use Spotify's internal partner API — the same one the
+        // web player at open.spotify.com uses. The approach:
+        //   1. Fetch the embed page HTML for the artist
+        //   2. Extract the public web player access token from the HTML
+        //   3. Call the pathfinder GraphQL API (queryArtistOverview) with
+        //      that token to get stats.followers and stats.monthlyListeners
+        //
+        // No API key, no app registration, no Extended Quota needed. The
+        // embed token is a public token that Spotify gives to anyone
+        // loading the embed page.
+
+        // Step 1: Fetch the embed page and extract the access token.
+        let embed_url = format!("https://open.spotify.com/embed/artist/{artist_id}");
+        let embed_response = self.http_client.get(&embed_url).send().await?;
+        if !embed_response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "Spotify token endpoint returned HTTP {}",
-                token_response.status()
+                "Spotify embed page returned HTTP {} for artist {artist_id}",
+                embed_response.status()
             )));
         }
-        let token: SpotifyTokenResponse = token_response.json().await?;
+        let html = embed_response.text().await?;
+        let token = extract_spotify_embed_token(&html).ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(
+                "could not extract access token from Spotify embed page".to_string(),
+            )
+        })?;
 
-        // Fetch artist info.
-        let artist_url = format!("https://api.spotify.com/v1/artists/{artist_id}");
+        // Step 2: Call the pathfinder GraphQL API for artist stats.
+        let variables = format!(
+            r#"{{"uri":"spotify:artist:{artist_id}","locale":"","includePrerelease":false}}"#
+        );
+        let extensions = r#"{"persistedQuery":{"version":1,"sha256Hash":"d66221ea13998b2f81883c5187d174c8646e4041d67f5b1e103bc262d447e3a0"}}"#;
+        let graphql_url = format!(
+            "https://api-partner.spotify.com/pathfinder/v1/query?operationName=queryArtistOverview&variables={}&extensions={}",
+            urlencode(&variables),
+            urlencode(extensions),
+        );
         let response = self
             .http_client
-            .get(&artist_url)
-            .bearer_auth(&token.access_token)
+            .get(&graphql_url)
+            .bearer_auth(&token)
+            .header("Accept", "application/json")
             .send()
             .await?;
         if !response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "Spotify API returned HTTP {}",
+                "Spotify pathfinder API returned HTTP {} for artist {artist_id}",
                 response.status()
             )));
         }
-        let artist: SpotifyArtistResponse = response.json().await?;
-        let display_name = &artist.name;
-
-        // Spotify deprecated the `followers` field in the public Web API
-        // (client credentials flow). The field is now omitted from all
-        // responses. We handle both cases: if followers is present, record
-        // it; if not, log a warning and skip — the series stays live from
-        // the last manual/operator-inserted data point until Spotify
-        // restores the field or we switch to user-level OAuth.
-        let follower_count = artist.followers.as_ref().map(|f| f.total);
-
-        if let Some(count) = follower_count {
-            record_metric_point(
-                &self.pool,
-                conn.workspace_id,
-                conn.id,
-                "spotify",
-                "followers",
-                &format!("Spotify followers — {display_name}"),
-                count,
-                OffsetDateTime::now_utc(),
+        let body: SpotifyPartnerArtistResponse = response.json().await?;
+        let stats = body.data.artist.stats.ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(
+                "Spotify pathfinder response missing stats field".to_string(),
             )
-            .await?;
+        })?;
+        let follower_count = stats.followers;
+        let display_name = body.data.artist.profile.name;
 
-            tracing::info!(
-                connection_id = %conn.id,
-                artist_id = %artist_id,
-                artist = %display_name,
-                followers = count,
-                "spotify follower count recorded"
-            );
-        } else {
-            tracing::warn!(
-                connection_id = %conn.id,
-                artist_id = %artist_id,
-                artist = %display_name,
-                "spotify API returned no followers field — Spotify deprecated \
-                 follower counts in the public Web API. Series will go stale \
-                 unless data is inserted manually or via user-level OAuth."
-            );
-        }
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "spotify",
+            "followers",
+            &format!("Spotify followers — {display_name}"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            artist_id = %artist_id,
+            artist = %display_name,
+            followers = follower_count,
+            monthly_listeners = stats.monthly_listeners,
+            "spotify follower count recorded via partner API"
+        );
         Ok(())
     }
 
@@ -992,23 +990,39 @@ struct YoutubeChannelStatistics {
     subscriber_count: Option<serde_json::Value>,
 }
 
-// --- Spotify response types ---
+// --- Spotify response types (internal partner API) ---
 
+/// Top-level response from Spotify's pathfinder GraphQL API.
 #[derive(Debug, Deserialize)]
-struct SpotifyTokenResponse {
-    access_token: String,
+struct SpotifyPartnerArtistResponse {
+    data: SpotifyPartnerData,
 }
 
 #[derive(Debug, Deserialize)]
-struct SpotifyArtistResponse {
-    name: String,
+struct SpotifyPartnerData {
+    artist: SpotifyPartnerArtist,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyPartnerArtist {
     #[serde(default)]
-    followers: Option<SpotifyFollowers>,
+    stats: Option<SpotifyPartnerStats>,
+    profile: SpotifyPartnerProfile,
 }
 
 #[derive(Debug, Deserialize)]
-struct SpotifyFollowers {
-    total: i64,
+struct SpotifyPartnerStats {
+    followers: i64,
+    #[serde(default, rename = "monthlyListeners")]
+    monthly_listeners: i64,
+    #[allow(dead_code)]
+    #[serde(default, rename = "worldRank")]
+    world_rank: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotifyPartnerProfile {
+    name: String,
 }
 
 // --- Facebook response types ---
@@ -1032,6 +1046,39 @@ struct InstagramUserResponse {
     username: Option<String>,
     #[serde(default)]
     followers_count: i64,
+}
+
+// --- Spotify embed token extraction ---
+
+/// Extracts the public web player access token from a Spotify embed page's
+/// HTML. The token appears as "accessToken":"<token>" in the HTML. This is
+/// the same token the Spotify web player uses — it's freely given to anyone
+/// loading the embed page, no authentication required.
+fn extract_spotify_embed_token(html: &str) -> Option<String> {
+    let marker = "\"accessToken\":\"";
+    let start = html.find(marker)? + marker.len();
+    let rest = html.get(start..)?;
+    let end = rest.find('"')?;
+    Some(rest.get(..end)?.to_string())
+}
+
+/// Minimal URL-encoder for GraphQL query parameters. Spotify's pathfinder
+/// API expects the variables and extensions JSON to be URL-encoded in the
+/// query string.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    out
 }
 
 // --- Reddit response types ---
@@ -1140,28 +1187,43 @@ mod tests {
     }
 
     #[test]
-    fn spotify_artist_response_parses_followers() {
-        let json = br#"{"name":"Virya","followers":{"total":12345},"id":"6bbW0jOKAWJWm3h6CTWaAS"}"#;
-        let artist: SpotifyArtistResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(artist.name, "Virya");
-        assert_eq!(artist.followers.as_ref().unwrap().total, 12345);
+    fn spotify_partner_response_parses_stats() {
+        let json = br#"{"data":{"artist":{"id":"6bbW0jOKAWJWm3h6CTWaAS","uri":"spotify:artist:6bbW0jOKAWJWm3h6CTWaAS","profile":{"name":"Virya","verified":true},"stats":{"followers":183,"monthlyListeners":45,"worldRank":0}}}}"#;
+        let response: SpotifyPartnerArtistResponse = serde_json::from_slice(json).unwrap();
+        let stats = response.data.artist.stats.unwrap();
+        assert_eq!(response.data.artist.profile.name, "Virya");
+        assert_eq!(stats.followers, 183);
+        assert_eq!(stats.monthly_listeners, 45);
     }
 
     #[test]
-    fn spotify_artist_response_parses_without_followers() {
-        // Spotify deprecated the followers field in the public Web API.
-        // The response may omit it entirely — the struct must still parse.
-        let json = br#"{"name":"Virya","id":"6bbW0jOKAWJWm3h6CTWaAS","type":"artist","uri":"spotify:artist:6bbW0jOKAWJWm3h6CTWaAS"}"#;
-        let artist: SpotifyArtistResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(artist.name, "Virya");
-        assert!(artist.followers.is_none());
+    fn spotify_partner_response_parses_without_stats() {
+        let json =
+            br#"{"data":{"artist":{"id":"6bbW0jOKAWJWm3h6CTWaAS","profile":{"name":"Virya"}}}}"#;
+        let response: SpotifyPartnerArtistResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.data.artist.profile.name, "Virya");
+        assert!(response.data.artist.stats.is_none());
     }
 
     #[test]
-    fn spotify_token_response_parses_access_token() {
-        let json = br#"{"access_token":"BQxyz123","token_type":"Bearer","expires_in":3600}"#;
-        let token: SpotifyTokenResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(token.access_token, "BQxyz123");
+    fn extract_spotify_embed_token_finds_token() {
+        let html = r#"<html><script id="__NEXT_DATA__">{"props":{"accessToken":"BQxyz123abc"}}</script></html>"#;
+        let token = extract_spotify_embed_token(html);
+        assert_eq!(token.as_deref(), Some("BQxyz123abc"));
+    }
+
+    #[test]
+    fn extract_spotify_embed_token_returns_none_when_missing() {
+        let html = r#"<html><body>no token here</body></html>"#;
+        let token = extract_spotify_embed_token(html);
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn urlencode_encodes_special_chars() {
+        assert_eq!(urlencode("hello world"), "hello%20world");
+        assert_eq!(urlencode(r#"{"key":"val"}"#), "%7B%22key%22%3A%22val%22%7D");
+        assert_eq!(urlencode("abc123-_.~"), "abc123-_.~");
     }
 
     #[test]

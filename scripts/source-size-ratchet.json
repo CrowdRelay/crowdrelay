@@ -34,7 +34,7 @@
     "crates/crowdrelay-worker/src/community_executor.rs": 1322,
     "crates/crowdrelay-worker/src/draws.rs": 1497,
     "crates/crowdrelay-worker/src/event_sync.rs": 1823,
-    "crates/crowdrelay-worker/src/growth_metric_sync.rs": 1254,
+    "crates/crowdrelay-worker/src/growth_metric_sync.rs": 1316,
     "crates/crowdrelay-worker/src/retention.rs": 1419
   },
   "policy": "ratchet-not-hard-cap",
