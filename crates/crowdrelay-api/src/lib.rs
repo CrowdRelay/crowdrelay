@@ -276,24 +276,21 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
             IF_NONE_MATCH,
             X_REQUEST_ID,
             X_CROWDRELAY_CORRELATION_ID,
-            X_TRACE_ID.clone(),
+            X_TRACE_ID,
         ])
         .expose_headers([
             CACHE_CONTROL,
             ETAG,
             X_REQUEST_ID,
-            X_TRACE_ID.clone(),
-            SERVER_TIMING.clone(),
-            X_CROWDRELAY_RELEASE.clone(),
+            X_TRACE_ID,
+            SERVER_TIMING,
+            X_CROWDRELAY_RELEASE,
         ]);
 
     let middleware = ServiceBuilder::new()
         .layer(from_fn(measure_request))
         .layer(from_fn_with_state(state.clone(), normalize_request_id))
-        .layer(SetRequestIdLayer::new(
-            X_REQUEST_ID.clone(),
-            MakeRequestUuid,
-        ))
+        .layer(SetRequestIdLayer::new(X_REQUEST_ID, MakeRequestUuid))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
@@ -312,9 +309,9 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
                 })
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
-        .layer(PropagateRequestIdLayer::new(X_REQUEST_ID.clone()))
+        .layer(PropagateRequestIdLayer::new(X_REQUEST_ID))
         .layer(cors)
-        .layer(Extension(config.rate_limiter.clone()))
+        .layer(Extension(config.rate_limiter))
         .layer(from_fn(rate_limit::enforce_rate_limits));
 
     routing::application_routes(state.clone())
@@ -424,12 +421,10 @@ async fn measure_request(request: Request<Body>, next: Next) -> Response {
     http_metrics().record_route(&method, &route, elapsed_micros, response.status().as_u16());
     let elapsed_ms = elapsed_micros as f64 / 1_000.0;
     if let Ok(value) = HeaderValue::from_str(&format!("app;dur={elapsed_ms:.2}")) {
-        response.headers_mut().insert(SERVER_TIMING.clone(), value);
+        response.headers_mut().insert(SERVER_TIMING, value);
     }
     if let Ok(value) = HeaderValue::from_str(meta::release_identity()) {
-        response
-            .headers_mut()
-            .insert(X_CROWDRELAY_RELEASE.clone(), value);
+        response.headers_mut().insert(X_CROWDRELAY_RELEASE, value);
     }
     response
 }
@@ -493,9 +488,7 @@ async fn normalize_request_id(
                 })
             });
         if let Some(correlation) = correlation {
-            request
-                .headers_mut()
-                .insert(X_REQUEST_ID.clone(), correlation);
+            request.headers_mut().insert(X_REQUEST_ID, correlation);
         }
     }
     request.headers_mut().remove(&X_CROWDRELAY_CORRELATION_ID);
@@ -514,7 +507,7 @@ async fn normalize_request_id(
     request.extensions_mut().insert(trace_id);
     // Also set the header so downstream middleware and the response see it.
     if let Ok(value) = HeaderValue::from_str(&trace_id.to_string()) {
-        request.headers_mut().insert(X_TRACE_ID.clone(), value);
+        request.headers_mut().insert(X_TRACE_ID, value);
     }
     next.run(request).await
 }

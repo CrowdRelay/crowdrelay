@@ -244,7 +244,7 @@ class RuntimePerformanceContract(unittest.TestCase):
         self.assertIn('HeaderName::from_static("x-crowdrelay-correlation-id")', source)
         self.assertIn('request.headers_mut().remove(&X_REQUEST_ID)', source)
         self.assertIn('if privileged && authorization.is_some()', source)
-        self.assertIn('.insert(X_REQUEST_ID.clone(), correlation)', source)
+        self.assertIn('.insert(X_REQUEST_ID, correlation)', source)
 
 
 if __name__ == "__main__":

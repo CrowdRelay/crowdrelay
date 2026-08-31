@@ -235,7 +235,7 @@ pub async fn public_config(
             axum::http::header::CACHE_CONTROL,
             "public, max-age=300, s-maxage=300",
         )],
-        axum::Json(state.tenant.clone()),
+        axum::Json(state.tenant),
     )
 }
 

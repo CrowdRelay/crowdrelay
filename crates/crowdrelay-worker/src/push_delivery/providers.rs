@@ -361,7 +361,7 @@ impl PushProviders {
             .body(envelope.body)
             .send()
             .await;
-        classify_web_push_response(result).await
+        classify_web_push_response(result)
     }
 }
 
@@ -527,7 +527,7 @@ async fn classify_fcm_response(
     }
 }
 
-async fn classify_web_push_response(
+fn classify_web_push_response(
     result: Result<reqwest::Response, reqwest::Error>,
 ) -> ProviderOutcome {
     let response = match result {

@@ -734,6 +734,7 @@ pub(in crate::autopilot) async fn load_contamination_estimate(
 
 /// Loads the calibration bias for a template from the calibration
 /// tracker in brain state. Returns 0.0 when no calibration data exists.
+#[allow(clippy::unused_async)]
 pub(in crate::autopilot) async fn load_calibration_bias(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
