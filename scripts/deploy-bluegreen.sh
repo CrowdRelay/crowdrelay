@@ -225,7 +225,12 @@ else
     up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT" api worker
 fi
 
-printf 'NEW_CONTAINERS=STARTED color=%s\n' "$DEPLOY_COLOR"
+for container in "$NEW_API" "$NEW_WORKER"; do
+  docker update --restart unless-stopped "$container" >/dev/null
+  restart_policy="$(docker inspect "$container" --format '{{.HostConfig.RestartPolicy.Name}}')"
+  [[ "$restart_policy" == "unless-stopped" ]] || fail "candidate restart policy is not durable: container=$container policy=$restart_policy"
+done
+printf 'NEW_CONTAINERS=STARTED color=%s restart=unless-stopped\n' "$DEPLOY_COLOR"
 
 # --- 2. Health-check new API directly ---------------------------------------
 
