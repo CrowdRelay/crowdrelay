@@ -40,7 +40,7 @@ services:
     mem_limit: ${CROWDRELAY_API_MEMORY:-256m}
     cpus: ${CROWDRELAY_API_CPUS:-0.75}
     stop_grace_period: 25s
-    restart: "no"
+    restart: unless-stopped
     logging:
       driver: local
       options:
@@ -86,7 +86,7 @@ services:
     mem_limit: ${CROWDRELAY_WORKER_MEMORY:-256m}
     cpus: ${CROWDRELAY_WORKER_CPUS:-0.35}
     stop_grace_period: 30s
-    restart: "no"
+    restart: unless-stopped
     logging:
       driver: local
       options:

@@ -1,6 +1,6 @@
 {
 	auto_https off
-	admin off
+	admin localhost:2019
 }
 
 :18080 {
