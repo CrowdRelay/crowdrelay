@@ -131,21 +131,16 @@ fi
 # Pre-deploy: reconcile edge Caddy bind mount.
 # The ecosystem deploy syncs source code (git merge) which may replace the
 # Caddyfile with a new inode. The Docker bind mount still points at the old
-# inode, so the container serves stale config. Since the Caddyfile is
-# bind-mounted, we can't docker cp over it — instead we write to the host
-# path (which the bind mount sees) and reload. If the inode changed, we
-# copy the content to force the bind mount to see the new content.
+# inode, so the container serves stale config. This is a pre-deploy step
+# (the old API container is still serving traffic), so a brief Caddy
+# restart here is safe — it doesn't affect the cutover. We restart Caddy
+# to pick up the new bind mount target, then verify.
 if ! cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE"; then
-  printf 'EDGE_RECONCILE=STALE rewriting Caddyfile on host and reloading\n' >&2
-  # Copy content to a temp file, then overwrite the bind-mounted file
-  cp "$EDGE_CADDYFILE" /tmp/caddy-edge-sync.tmp
-  cat /tmp/caddy-edge-sync.tmp > "$EDGE_CADDYFILE"
-  rm -f /tmp/caddy-edge-sync.tmp
-  docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || \
-    fail "caddy reload failed after stale bind mount fix — investigate manually"
-  sleep 2
+  printf 'EDGE_RECONCILE=STALE bind mount has stale inode, restarting edge Caddy\n' >&2
+  docker restart "$EDGE_CONTAINER" >/dev/null 2>&1 || fail "failed to restart edge Caddy for bind mount sync"
+  sleep 3
   cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null) "$EDGE_CADDYFILE" || \
-    fail "edge Caddyfile still stale after rewrite+reload — manual intervention required"
+    fail "edge Caddyfile still stale after restart — manual intervention required"
   printf 'EDGE_RECONCILE=PASS\n'
 fi
 
