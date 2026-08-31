@@ -38,7 +38,7 @@ const TIKTOK_SCOPES: &str = "user.info.basic,user.info.stats";
 /// Allowlist of permitted post-redirect paths. The OAuth callback must
 /// not redirect to arbitrary URLs from the state cookie — only these
 /// internal control-plane paths are accepted.
-const ALLOWED_POST_REDIRECTS: &[&str] = &["/connections", "/connections/tiktok", "/"];
+const ALLOWED_POST_REDIRECTS: &[&str] = &["/connections", "/connections/tiktok", "/portfolio", "/"];
 
 /// Validates that a post-redirect path is in the allowlist. Returns the
 /// validated path or the default `/connections`.
@@ -46,7 +46,7 @@ fn validate_post_redirect(path: &str) -> &str {
     if ALLOWED_POST_REDIRECTS.contains(&path) {
         path
     } else {
-        "/connections"
+        "/portfolio"
     }
 }
 
@@ -79,7 +79,7 @@ pub async fn authorize(
         .redirect
         .as_deref()
         .map(validate_post_redirect)
-        .unwrap_or("/connections");
+        .unwrap_or("/");
     let state_value = format!("{state}:{post_redirect}");
 
     let tiktok_url = format!(
@@ -136,7 +136,7 @@ pub async fn callback(
     // The stored state is "uuid:post_redirect_path".
     let (state_uuid, post_redirect) = stored_state
         .split_once(':')
-        .unwrap_or((stored_state, "/connections"));
+        .unwrap_or((stored_state, "/"));
 
     if state_uuid != params.state {
         return Problem::bad_request(request_id_value).into_response();
