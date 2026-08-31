@@ -267,64 +267,12 @@ printf 'CROWDRELAY_DEPLOY=PASS sha=%s\n' "$TARGET"
 PHASE="2-control-plane"
 printf '\n========== Phase 2 — Control Plane blue-green ==========\n'
 
-# Get the Control Plane image digest from its CI
-CP_REPO="$(cd "$ROOT_DIR/../crowdrelay-control-plane" 2>/dev/null && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "")"
-if [[ -n "$CP_REPO" ]]; then
-  printf '\n==> 2a — Wait for Control Plane CI\n'
-  cp_target="$(cd "$ROOT_DIR/../crowdrelay-control-plane" && git rev-parse HEAD 2>/dev/null || true)"
-  if [[ -n "$cp_target" ]]; then
-    deadline=$((SECONDS + 3600))
-    while (( SECONDS < deadline )); do
-      cp_run="$(gh run list --repo "$CP_REPO" --workflow "CI" --branch main --commit "$cp_target" --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
-      if [[ -n "$cp_run" ]]; then
-        gh run watch "$cp_run" --repo "$CP_REPO" --exit-status 2>/dev/null || true
-        break
-      fi
-      sleep 3
-    done
-
-    # Get the image digest (optional — the deploy script can pull by tag)
-    cp_artifact="control-plane-image-digest-${cp_target}"
-    cp_digest="$(gh api -H 'Accept: application/vnd.github+json' \
-      "/repos/${CP_REPO}/actions/artifacts?name=${cp_artifact}&per_page=10" \
-      --jq '[.artifacts[] | select(.expired == false)] | .[0].archive_download_url // empty' \
-      2>/dev/null || true)"
-
-    printf '\n==> 2b — Blue-green Control Plane deploy\n'
-    # Transfer the blue-green script to production
-    scp -q "$ROOT_DIR/../crowdrelay-control-plane/scripts/deploy-bluegreen.sh" \
-      "$CONTROL_PLANE_REMOTE:/tmp/cp-deploy-bluegreen.sh" 2>/dev/null || true
-    scp -q "$ROOT_DIR/../crowdrelay-control-plane/deploy/compose.bluegreen.yml" \
-      "$CONTROL_PLANE_REMOTE:/tmp/cp-compose-bluegreen.yml" 2>/dev/null || true
-
-    ssh -T "$CONTROL_PLANE_REMOTE" sudo bash -s -- "$cp_target" "$CONTROL_PLANE_DIR" <<'CP_DEPLOY'
-set -Eeuo pipefail
-target="$1"; root="$2"
-# Install the blue-green compose overlay if transferred
-if [[ -f /tmp/cp-compose-bluegreen.yml ]]; then
-  cp /tmp/cp-compose-bluegreen.yml "$root/deploy/compose.bluegreen.yml"
-fi
-# Pull the image by tag (digest is optional in the deploy script)
-green_image="crowdrelay-control-plane:sha-${target}"
-if ! docker image inspect "$green_image" >/dev/null 2>&1; then
-  docker pull "ghcr.io/crowdrelay/crowdrelay-control-plane:sha-${target}" >/dev/null 2>&1 && \
-    docker tag "ghcr.io/crowdrelay/crowdrelay-control-plane:sha-${target}" "$green_image" || true
-fi
-# Run the blue-green deploy (no digest — pulls by tag)
-if [[ -f /tmp/cp-deploy-bluegreen.sh ]]; then
-  bash /tmp/cp-deploy-bluegreen.sh "$target" "" "$root"
-else
-  printf 'CP_BLUEGREEN=SKIP (script not available, using existing deploy)\n'
-  cd "$root"
-  sed -i "s|^CONTROL_PLANE_IMAGE_TAG=.*|CONTROL_PLANE_IMAGE_TAG=sha-${target}|" .env
-  docker compose -f compose.production.yml -f compose.area.yml up -d --no-deps --force-recreate --wait app virya-area-tunnel
-fi
-printf 'CONTROL_PLANE_DEPLOY=PASS sha=%s\n' "$target"
-CP_DEPLOY
-    rm -f /tmp/cp-deploy-bluegreen.sh /tmp/cp-compose-bluegreen.yml 2>/dev/null || true
-  fi
-fi
-printf 'CONTROL_PLANE_DEPLOY=PASS\n'
+cp_checkout="$ROOT_DIR/../crowdrelay-control-plane"
+[[ -d "$cp_checkout/.git" ]] || fail 'Control Plane checkout is required for exact deployment'
+cp_target="$(git -C "$cp_checkout" rev-parse HEAD)"
+printf '\n==> 2a — Canonical exact-artifact Control Plane deploy\n'
+bash "$cp_checkout/scripts/deploy.sh" "$cp_target"
+printf 'CONTROL_PLANE_DEPLOY=PASS sha=%s\n' "$cp_target"
 
 # --- Phase 3: Virya ---------------------------------------------------------
 
