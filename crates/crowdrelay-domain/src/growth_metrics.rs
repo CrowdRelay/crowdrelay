@@ -35,6 +35,10 @@ pub enum MetricPlatform {
     Ticketing,
     Signal,
     Merch,
+    TikTok,
+    SoundCloud,
+    Instagram,
+    Facebook,
 }
 
 impl MetricPlatform {
@@ -49,6 +53,10 @@ impl MetricPlatform {
             Self::Ticketing => "ticketing",
             Self::Signal => "signal",
             Self::Merch => "merch",
+            Self::TikTok => "tiktok",
+            Self::SoundCloud => "soundcloud",
+            Self::Instagram => "instagram",
+            Self::Facebook => "facebook",
         }
     }
 
@@ -63,6 +71,10 @@ impl MetricPlatform {
             "ticketing" => Some(Self::Ticketing),
             "signal" => Some(Self::Signal),
             "merch" => Some(Self::Merch),
+            "tiktok" => Some(Self::TikTok),
+            "soundcloud" => Some(Self::SoundCloud),
+            "instagram" => Some(Self::Instagram),
+            "facebook" => Some(Self::Facebook),
             _ => None,
         }
     }
@@ -551,11 +563,15 @@ pub fn velocity_ratio_basis_points(
 /// Signal and merch are measured from our own rows and cannot go unconnected.
 ///
 /// `Social` covers the Meta surfaces, which report through one adapter.
-pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 4] = [
+pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 8] = [
     MetricPlatform::Spotify,
     MetricPlatform::YouTube,
     MetricPlatform::Bandsintown,
     MetricPlatform::Social,
+    MetricPlatform::TikTok,
+    MetricPlatform::SoundCloud,
+    MetricPlatform::Instagram,
+    MetricPlatform::Facebook,
 ];
 
 /// Whether the agent can currently see a platform at all.
