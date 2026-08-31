@@ -6076,6 +6076,55 @@ paths:
           description: One JSON document describing the roster story.
         '503':
           $ref: '#/components/responses/Problem'
+  /admin/connections/tiktok/authorize:
+    get:
+      operationId: authorizeTiktokConnection
+      summary: Redirect to TikTok OAuth consent page
+      description: Admin-initiated OAuth flow. Redirects the browser to TikTok's consent page with user.info.basic and user.info.stats scopes. Sets a state cookie for CSRF protection.
+      security:
+      - adminBearer: []
+      parameters:
+      - name: redirect
+        in: query
+        required: false
+        schema: { type: string }
+        description: Where to redirect after successful connection (defaults to /connections).
+      responses:
+        '302':
+          description: Redirect to TikTok OAuth consent page.
+          headers:
+            Location:
+              schema: { type: string }
+            Set-Cookie:
+              schema: { type: string }
+        '503':
+          $ref: '#/components/responses/Problem'
+  /public/connections/tiktok/callback:
+    get:
+      operationId: tiktokOAuthCallback
+      summary: TikTok OAuth callback handler
+      description: Receives the authorization code from TikTok's OAuth redirect, exchanges it for access/refresh tokens, and stores them in fanbase_connections. Redirects to the control plane after success.
+      parameters:
+      - name: code
+        in: query
+        required: true
+        schema: { type: string }
+      - name: state
+        in: query
+        required: true
+        schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to control plane connections page after successful connection.
+          headers:
+            Location:
+              schema: { type: string }
+            Set-Cookie:
+              schema: { type: string }
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /admin/fanbases:
     get:
       operationId: listFanbases
