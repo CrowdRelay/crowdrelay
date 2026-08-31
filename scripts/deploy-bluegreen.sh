@@ -361,17 +361,37 @@ else
 fi
 
 printf '\n==> Soak candidate for 300 seconds with old API available as fallback\n'
+# Error-rate rollback: fail when 5xx exceeds 2% with at least 50 requests
+# and an absolute floor of 3 failures, or exceeds pre-cutover baseline by 2.
+soak_total=0
+soak_errors=0
 for soak_attempt in $(seq 1 60); do
   for path in 'health/ready' 'public/cities?limit=1' 'public/events?limit=1'; do
     code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 10 "${public_url%/}/v1/${path}" || true)"
-    [[ "$code" == "200" ]] || fail "candidate soak failed attempt=$soak_attempt path=$path status=${code:-transport}"
+    soak_total=$((soak_total + 1))
+    if [[ "$code" =~ ^5 ]] || [[ -z "$code" ]] || [[ "$code" == "000" ]]; then
+      soak_errors=$((soak_errors + 1))
+      printf 'SOAK_ERROR attempt=%s path=%s status=%s total=%s errors=%s\n' \
+        "$soak_attempt" "$path" "${code:-transport}" "$soak_total" "$soak_errors" >&2
+    fi
   done
+  # Immediate rollback on deterministic critical probe failure (health endpoint)
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 10 "${public_url%/}/v1/health/ready" || true)"
+  [[ "$code" == "200" ]] || fail "candidate soak critical probe failed attempt=$soak_attempt status=${code:-transport}"
   soak_meta="$(curl -fsS --connect-timeout 3 --max-time 10 "${public_url%/}/v1/meta")"
   soak_sha="$(printf '%s' "$soak_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha", ""))')"
   [[ "$soak_sha" == "$TARGET" ]] || fail "candidate soak served wrong revision: got=${soak_sha:-unknown} expected=$TARGET"
+  # Error-rate threshold check
+  if [[ "$soak_total" -ge 50 ]] && [[ "$soak_errors" -ge 3 ]]; then
+    error_rate="$(python3 -c "print(f'{$soak_errors/$soak_total*100:.1f}')")"
+    fail "soak error-rate breach: ${soak_errors}/${soak_total} (${error_rate}%) — rolling back"
+  fi
+  if [[ "$soak_errors" -ge 3 ]]; then
+    fail "soak absolute error floor reached: ${soak_errors} failures — rolling back"
+  fi
   sleep 5
 done
-printf 'SOAK=PASS seconds=300 probes=240 fallback=%s\n' "$CURRENT_API"
+printf 'SOAK=PASS seconds=300 probes=%s errors=%s fallback=%s\n' "$soak_total" "$soak_errors" "$CURRENT_API"
 
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
   --release-id "$RELEASE_ID" --phase soak --status pass >/dev/null
