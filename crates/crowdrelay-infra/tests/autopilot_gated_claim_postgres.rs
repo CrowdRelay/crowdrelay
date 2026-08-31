@@ -165,6 +165,17 @@ async fn gated_actions_are_parked_without_spending_an_attempt()
     assert_eq!(status, "processing");
     assert_eq!(attempts, 1);
 
+    // Clean up: the action ledger has ON DELETE RESTRICT on workspace_id,
+    // so we must delete the actions (which cascade to the ledger) before
+    // the workspace can be removed.
+    sqlx::query("DELETE FROM viryaos_autopilot_actions WHERE workspace_id = $1")
+        .bind(workspace_id.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM viryaos_autopilot_decisions WHERE workspace_id = $1")
+        .bind(workspace_id.into_uuid())
+        .execute(&pool)
+        .await?;
     sqlx::query("DELETE FROM workspaces WHERE id = $1")
         .bind(workspace_id.into_uuid())
         .execute(&pool)
