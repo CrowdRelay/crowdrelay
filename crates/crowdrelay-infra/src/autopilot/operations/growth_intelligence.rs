@@ -471,10 +471,23 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     let signal_installs_this_month = u32::try_from(signal_counts.1.max(0)).unwrap_or(0);
 
     // Discovered communities.
+    //
+    // `COUNT(DISTINCT dp.id)`, not `COUNT(*)`: this is a LEFT JOIN onto posts,
+    // so a place with four recent posts contributes four rows. `COUNT(*)` read
+    // that as four discovered communities. The error grew with activity and
+    // pushed the wrong way — the more the brain posted, the more community
+    // coverage it believed it already had, which weakens the very signal that
+    // asks it to go find more places.
+    //
+    // `active` counts only subreddits by construction: community_posts is
+    // Reddit-shaped and joins on `cp.subreddit = dp.name`, so Discord,
+    // Telegram, forum and Lemmy places can never register as active however
+    // much happens in them. That is a known limit of the posts table, not of
+    // this query.
     let community_counts: (i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            COUNT(*)::bigint AS discovered,
+            COUNT(DISTINCT dp.id)::bigint AS discovered,
             COUNT(DISTINCT cp.subreddit)::bigint AS active
         FROM discovery_places dp
         LEFT JOIN community_posts cp ON cp.subreddit = dp.name
@@ -491,12 +504,15 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     let discovered_communities = u32::try_from(community_counts.0.max(0)).unwrap_or(0);
     let active_communities = u32::try_from(community_counts.1.max(0)).unwrap_or(0);
 
-    // Outreach pipeline counts by status.
+    // Outreach pipeline counts by status. `COUNT(DISTINCT ot.id) FILTER`, not
+    // `COUNT(*) FILTER`, for the same reason as the community counts above: a
+    // target with three posts against it was counted three times, inflating the
+    // pipeline exactly for the targets the brain had worked hardest on.
     let outreach_counts: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE ot.status = 'proposed')::bigint AS pending,
-            COUNT(*) FILTER (WHERE ot.status = 'promoted')::bigint AS promoted,
+            COUNT(DISTINCT ot.id) FILTER (WHERE ot.status = 'proposed')::bigint AS pending,
+            COUNT(DISTINCT ot.id) FILTER (WHERE ot.status = 'promoted')::bigint AS promoted,
             COUNT(DISTINCT cp.target_id)::bigint AS engaged
         FROM agent_outreach_targets ot
         LEFT JOIN community_posts cp ON cp.target_id = ot.id

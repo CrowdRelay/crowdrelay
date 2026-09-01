@@ -74,6 +74,28 @@ def parse_metric_platforms(source: str) -> set[str]:
     return platforms
 
 
+def parse_effective_trigger_body() -> str:
+    """The body of the last notify_growth_metric_sync() definition.
+
+    The function is redefined with CREATE OR REPLACE, so the last definition
+    across migrations in order is the one the database ends up running.
+    """
+    body = ""
+    for migration in sorted(MIGRATIONS.glob("*.sql")):
+        text = migration.read_text()
+        for match in re.finditer(
+            r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+notify_growth_metric_sync\b(.*?)\$\$;",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            body = match.group(1)
+    if not body:
+        raise AssertionError(
+            "notify_growth_metric_sync() not found in any migration"
+        )
+    return body
+
+
 def parse_effective_constraint(constraint_name: str) -> set[str]:
     """Process all migrations in order to find the effective CHECK constraint.
 
@@ -147,6 +169,36 @@ class PlatformVocabularyContract(unittest.TestCase):
             f"Platforms passed to record_metric_point but missing from "
             f"viryaos_growth_metric_series_platform_check: {missing}. "
             f"Add them to the next migration that updates this constraint.",
+        )
+
+    def test_sync_notify_trigger_keeps_no_platform_allowlist(self):
+        """The NOTIFY trigger must not filter on platform.
+
+        It used to: `IF NEW.platform IN ('youtube', 'spotify', 'reddit')`, a
+        third copy of the platform vocabulary written in SQL. The connectable
+        surface grew to seventeen platforms and the worker's SYNCED_PLATFORMS to
+        fourteen while that list stayed at three, so connecting SoundCloud or
+        TikTok raised no NOTIFY and the first sync waited for the worker's next
+        scheduled wake.
+
+        The fix was to delete the list, not to sync it — the worker's lease
+        query already filters on SYNCED_PLATFORMS, so a NOTIFY for a platform it
+        does not poll costs one wakeup that finds nothing. Over-notifying is
+        cheap and self-correcting; under-notifying is silent. This test fails if
+        an allowlist reappears.
+        """
+        body = parse_effective_trigger_body()
+        allowlist = re.search(
+            r"NEW\.platform\s*(?:IN\s*\(|=\s*ANY)",
+            body,
+            re.IGNORECASE,
+        )
+        self.assertIsNone(
+            allowlist,
+            "notify_growth_metric_sync() filters on NEW.platform again. That "
+            "list has to track SYNCED_PLATFORMS by hand and will drift. Let the "
+            "trigger notify for every connected platform and let the worker "
+            "decide what it polls.",
         )
 
     def test_metric_platforms_are_non_empty(self):
