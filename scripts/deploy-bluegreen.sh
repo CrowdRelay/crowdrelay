@@ -133,6 +133,27 @@ docker exec "$EDGE_CONTAINER" wget -qO- http://127.0.0.1:2019/config/ >/dev/null
   || fail 'edge Caddy admin endpoint is unavailable'
 printf 'EDGE_PREFLIGHT=PASS config=synchronized cutover=graceful-reload\n'
 
+# --- Sync the area-management Caddyfile if the repo copy changed ------------
+# The area-management-proxy is a separate container with its own bind-mounted
+# Caddyfile. The blue-green app cutover does not touch it, so a stale
+# allowlist silently 404s new control-plane routes. Sync before the app
+# cutover so new routes are reachable the moment the edge switches.
+# deploy.sh scp's the current Caddyfile to /tmp; fall back to the repo copy.
+AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
+AREA_CADDYFILE="/tmp/crowdrelay-area-management.Caddyfile"
+[[ -f "$AREA_CADDYFILE" ]] || AREA_CADDYFILE="$(absolute_path deploy/area-management.Caddyfile)"
+[[ -f "$AREA_CADDYFILE" ]] || fail "missing area-management Caddyfile"
+if ! cmp -s "$AREA_CADDYFILE" <(docker exec "$AREA_PROXY_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null); then
+  cp "$AREA_CADDYFILE" "$(absolute_path deploy/area-management.Caddyfile)"
+  docker exec "$AREA_PROXY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null \
+    || fail 'area-management Caddyfile is invalid after sync'
+  docker exec "$AREA_PROXY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address 127.0.0.1:2019 >/dev/null \
+    || fail 'area-management Caddy reload failed after sync'
+  printf 'AREA_CADDYFILE=SYNCED reload=graceful\n'
+else
+  printf 'AREA_CADDYFILE=NOOP unchanged=true\n'
+fi
+
 env_file="$(absolute_path "${CROWDRELAY_ENV_FILE:-deploy/.env.production}")"
 compose_file="$(absolute_path "${CROWDRELAY_COMPOSE_FILE:-compose.production.yaml}")"
 export CROWDRELAY_ENV_FILE="$env_file"

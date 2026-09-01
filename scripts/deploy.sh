@@ -298,7 +298,11 @@ if [[ "$blue_green_eligible" == "eligible" ]]; then
   python3 scripts/test_boring_production_deploy_contract.py
   printf 'SOURCE_CONTRACTS=PASS\n'
 
-  # Ship the blue-green script to the remote and execute it
+  # Ship the blue-green script and area-management Caddyfile to the remote.
+  # The Caddyfile is scp'd so the blue-green script can detect drift and
+  # reload the area-management proxy without a separate manual step.
+  scp -q "$ROOT_DIR/deploy/area-management.Caddyfile" \
+       "$ORACLE:/tmp/crowdrelay-area-management.Caddyfile"
   ssh -T "$ORACLE" bash -s -- "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST" "$ORACLE_REPO" < "$BLUEGREEN"
   deploy_status=$?
 else
