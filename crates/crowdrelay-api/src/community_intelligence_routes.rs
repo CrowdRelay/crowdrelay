@@ -1,9 +1,16 @@
 //! Community Intelligence read endpoints.
 //!
-//! Admin-authed read endpoints for the community observation layer.
+//! Control-plane-authed read endpoints for the community observation layer.
 //! These endpoints expose the structured observations and extracted entities
 //! that the Brain can reason over. No sentiment, no affinity, no "relevance
 //! score" — just facts.
+//!
+//! They live in the `/v1/control-plane/` namespace because the only caller is
+//! the platform plane, which holds the derived ControlPlane management token
+//! and never the tenant's admin bearer. Under `/v1/admin/` the authority check
+//! demanded `PrivilegedAuthorization::Admin`, so the panel could not reach them
+//! at all — and the AREA tunnel, which allowlists `/v1/control-plane/` paths
+//! only, answered 404 before the request ever arrived.
 
 use axum::http::StatusCode;
 use axum::{
@@ -35,18 +42,18 @@ fn repository(state: &crate::AppState) -> PostgresCommunityIntelligenceRepositor
     PostgresCommunityIntelligenceRepository::new(state.database.clone())
 }
 
-pub(super) fn admin_routes() -> axum::Router<crate::AppState> {
+pub(super) fn control_plane_routes() -> axum::Router<crate::AppState> {
     axum::Router::new()
         .route(
-            "/v1/admin/community-intelligence/communities",
+            "/v1/control-plane/community-intelligence/communities",
             get(list_communities),
         )
         .route(
-            "/v1/admin/community-intelligence/communities/{place_id}/observations",
+            "/v1/control-plane/community-intelligence/communities/{place_id}/observations",
             get(list_observations),
         )
         .route(
-            "/v1/admin/community-intelligence/communities/{place_id}/entities",
+            "/v1/control-plane/community-intelligence/communities/{place_id}/entities",
             get(list_entities),
         )
 }

@@ -396,6 +396,17 @@ fn is_control_plane_management_path(path: &str) -> bool {
                 | "/v1/control-plane/audience/overview"
                 | "/v1/control-plane/audience/fans"
                 | "/v1/control-plane/audience/segments"
+                | "/v1/control-plane/community-intelligence/communities"
+        )
+        || one_segment_with_suffix(
+            path,
+            "/v1/control-plane/community-intelligence/communities/",
+            "/observations",
+        )
+        || one_segment_with_suffix(
+            path,
+            "/v1/control-plane/community-intelligence/communities/",
+            "/entities",
         )
         || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
         || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
