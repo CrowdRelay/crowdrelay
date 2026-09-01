@@ -51,6 +51,7 @@ pub mod evidence;
 pub mod experiment;
 pub mod exploration;
 pub mod opportunity;
+pub mod platform_yield;
 pub mod portfolio;
 pub mod reach;
 pub mod resource_cost;

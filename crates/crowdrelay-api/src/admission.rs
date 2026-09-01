@@ -570,6 +570,9 @@ fn admission_problem(error: AdmissionUseCaseError, request_id: Option<String>) -
         AdmissionUseCaseError::Repository(crowdrelay_application::RepositoryError::Conflict) => {
             Problem::conflict(request_id)
         }
+        AdmissionUseCaseError::Repository(
+            crowdrelay_application::RepositoryError::ConflictBecause(detail),
+        ) => Problem::conflict_because(detail, request_id),
         AdmissionUseCaseError::Repository(crowdrelay_application::RepositoryError::Unexpected) => {
             Problem::internal(request_id)
         }

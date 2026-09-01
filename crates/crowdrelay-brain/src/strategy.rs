@@ -134,6 +134,17 @@ impl GrowthStrategy {
 
     /// Returns the strategy's recommended template priority order.
     #[must_use]
+    /// The strategy's order, reranked by what each platform actually returns.
+    ///
+    /// `template_priority` stays the prior and is still the only thing that
+    /// decides *which* templates are candidates. This reorders that list using
+    /// measured per-platform yield, so a tenant whose Telegram audience is
+    /// compounding stops being sent to Reddit first merely because the list was
+    /// written that way. With no evidence it returns the prior unchanged.
+    pub fn template_priority_for(self, world: &WorldModel) -> Vec<&'static str> {
+        crate::platform_yield::rank_templates(self.template_priority(), &world.platform_growth)
+    }
+
     pub fn template_priority(self) -> &'static [&'static str] {
         match self {
             Self::AggressiveDiscovery => &[

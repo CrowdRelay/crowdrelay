@@ -6,6 +6,30 @@
 
 use super::*;
 
+/// Why an approve or cancel matched no row, in words an operator can act on.
+///
+/// Only `awaiting_approval` rows are transitionable, so anything else is either
+/// already decided or timed out. The strings are `&'static` so they travel into
+/// `Problem::detail` unchanged.
+fn transition_conflict_reason(status: &str, expired: bool) -> &'static str {
+    match status {
+        "awaiting_approval" if expired => {
+            "This action's approval window has closed. The brain will re-evaluate it on the next cycle."
+        }
+        "queued" | "processing" => {
+            "This action was already approved and is running. Nothing is waiting on you."
+        }
+        "succeeded" => "This action has already run. Nothing is waiting on you.",
+        "failed" => {
+            "This action already ran and failed. Approving it again will not retry it — the brain will decide whether to."
+        }
+        "cancelled" => "This action was already cancelled.",
+        // `awaiting_approval` and unexpired reaching here means the UPDATE lost
+        // a race with a concurrent decision rather than hitting a stale row.
+        _ => "Another decision on this action landed first. Reload to see its current state.",
+    }
+}
+
 impl PostgresAutopilotRepository {
     pub(super) async fn control_action_transition(
         &self,
@@ -83,15 +107,19 @@ impl PostgresAutopilotRepository {
                 .map_err(map_sqlx)?
             };
             // The transition matched nothing, and the operator deserves to know
-            // which nothing. Collapsing all three into `Conflict` made a wrong
-            // action id, an already-approved action and an expired approval
-            // read identically in the cockpit, so a stale queue looked like a
-            // broken button.
+            // which nothing. Collapsing a wrong action id, an already-run action
+            // and an expired approval into one `Conflict` made a stale queue
+            // read exactly like a broken button — which is how "Do it" came to
+            // fail with "cannot be applied to the current durable state" on
+            // every click, on a board whose actions had all already executed.
             let status = match updated {
                 Some(status) => status,
                 None => {
-                    let existing = sqlx::query_scalar::<_, String>(
-                        "SELECT status FROM viryaos_autopilot_actions
+                    let existing = sqlx::query_as::<_, (String, bool)>(
+                        "SELECT status,
+                                approval_expires_at IS NOT NULL
+                                  AND approval_expires_at <= now() AS expired
+                         FROM viryaos_autopilot_actions
                          WHERE workspace_id = $1 AND id = $2",
                     )
                     .bind(workspace_id.into_uuid())
@@ -99,9 +127,14 @@ impl PostgresAutopilotRepository {
                     .fetch_optional(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    return Err(existing.map_or(RepositoryError::NotFound, |_| {
-                        RepositoryError::Conflict
-                    }));
+                    return Err(match existing {
+                        None => RepositoryError::NotFound,
+                        Some((status, expired)) => {
+                            RepositoryError::ConflictBecause(transition_conflict_reason(
+                                &status, expired,
+                            ))
+                        }
+                    });
                 }
             };
             if target_status == "queued" {

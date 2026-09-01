@@ -210,8 +210,11 @@ pub fn evaluate_growth_intelligence(
     // NOT for modifying expected fan value. The rank is the position of
     // this template in the strategy's recommended priority list.
     // `usize::MAX` means the template is not in the strategy's list.
+    // Ranked by measured platform yield, not the list's written order. The
+    // rank is still only eligibility and sort position — it does not touch
+    // expected fan value, so reranking cannot distort the EFE arithmetic.
     let strategy_rank = strategy
-        .template_priority()
+        .template_priority_for(&snapshot.world_model)
         .iter()
         .position(|t| *t == snapshot.template_id)
         .unwrap_or(usize::MAX);
@@ -918,7 +921,7 @@ fn community_engager_candidates(
     };
     let insights = insights_block(&snapshot.recent_insights);
     let strategy_rank = strategy
-        .template_priority()
+        .template_priority_for(&snapshot.world_model)
         .iter()
         .position(|t| *t == "community-engager")
         .unwrap_or(usize::MAX);

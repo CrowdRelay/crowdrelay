@@ -24,6 +24,12 @@ pub(in crate::autopilot) struct TeamRoutingRow {
     pub capacity_basis_points: i32,
     pub open_assignments: i64,
     pub recent_assignments: i64,
+    pub follow_through_basis_points: i32,
+    /// Skills this member has settled history for, paired 1:1 with
+    /// `skill_follow_through`. Two arrays rather than a map because SQLx
+    /// decodes `text[]` and `int[]` directly.
+    pub skill_follow_through_skills: Vec<String>,
+    pub skill_follow_through: Vec<i32>,
 }
 
 #[derive(Debug, FromRow)]
@@ -568,19 +574,92 @@ pub(in crate::autopilot) async fn load_team_routing(
                   member.normalized_email, profile.active, profile.skills,
                   profile.capacity_basis_points,
                   COUNT(assignment.id) FILTER (WHERE assignment.status='open') open_assignments,
-                  COUNT(assignment.id) FILTER (WHERE assignment.assigned_at >= $2 - INTERVAL '30 days') recent_assignments
+                  COUNT(assignment.id) FILTER (WHERE assignment.assigned_at >= $2 - INTERVAL '30 days') recent_assignments,
+                  -- Follow-through: of the work this member was given and that
+                  -- has had time to be done, how much did they actually finish,
+                  -- and how much chasing did it take?
+                  --
+                  -- Each completion is worth 10000 minus 2500 per reminder, so
+                  -- a task done unprompted counts fully and one that needed
+                  -- three reminders counts for little. Anything settled and not
+                  -- completed counts zero. Members with no settled history get
+                  -- the neutral score instead of a zero they did not earn.
+                  --
+                  -- Only assignments older than a day are considered, so work
+                  -- handed out this morning is not scored as ignored.
+                  COALESCE((
+                      SELECT AVG(
+                          CASE WHEN history.completed_at IS NOT NULL
+                               THEN GREATEST(0, 10000 - 2500 * LEAST(4, COALESCE(history.reminder_count, 0)))
+                               ELSE 0
+                          END
+                      )::integer
+                      FROM viryaos_team_assignments history
+                      WHERE history.workspace_id = profile.workspace_id
+                        AND history.assignee_member_id = profile.member_id
+                        AND history.status <> 'open'
+                        AND history.assigned_at < $2 - INTERVAL '1 day'
+                  ), 5000) AS follow_through_basis_points,
+                  -- The same measure, split by the skill the work needed.
+                  -- Whole-member reliability answers "does this person finish
+                  -- things"; routing needs "does this person finish *this*".
+                  -- Someone who never gets round to press mail may be the
+                  -- first to edit a video, and averaging the two hides both.
+                  COALESCE(per_skill.skills, ARRAY[]::text[]) AS skill_follow_through_skills,
+                  COALESCE(per_skill.scores, ARRAY[]::integer[]) AS skill_follow_through
            FROM viryaos_team_profiles profile
            JOIN workspace_members member
              ON member.workspace_id=profile.workspace_id AND member.id=profile.member_id
            LEFT JOIN viryaos_team_assignments assignment
              ON assignment.workspace_id=profile.workspace_id AND assignment.assignee_member_id=profile.member_id
+           LEFT JOIN LATERAL (
+               SELECT array_agg(skill.required_skill ORDER BY skill.required_skill) AS skills,
+                      array_agg(skill.score ORDER BY skill.required_skill) AS scores
+               FROM (
+                   SELECT history.required_skill,
+                          AVG(
+                              CASE WHEN history.completed_at IS NOT NULL
+                                   THEN GREATEST(0, 10000 - 2500 * LEAST(4, COALESCE(history.reminder_count, 0)))
+                                   ELSE 0
+                              END
+                          )::integer AS score
+                   FROM viryaos_team_assignments history
+                   WHERE history.workspace_id = profile.workspace_id
+                     AND history.assignee_member_id = profile.member_id
+                     AND history.status <> 'open'
+                     AND history.assigned_at < $2 - INTERVAL '1 day'
+                   GROUP BY history.required_skill
+               ) skill
+           ) per_skill ON true
            WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
            GROUP BY profile.member_id, profile.member_key, member.display_name,
-                    member.normalized_email, profile.active, profile.skills, profile.capacity_basis_points
+                    member.normalized_email, profile.active, profile.skills, profile.capacity_basis_points,
+                    per_skill.skills, per_skill.scores
            ORDER BY profile.member_key"#,
     )
     .bind(workspace_id.into_uuid()).bind(now)
     .fetch_all(&mut **tx).await.map_err(map_sqlx)
+}
+
+/// This member's follow-through on the skill actually being routed.
+///
+/// Falls back to their overall record when they have no settled history for
+/// this skill, and to neutral when they have none at all. Whole-member
+/// reliability is the weaker signal: the reason to measure at all is that
+/// people are not uniformly diligent, and averaging across every kind of work
+/// hides exactly the difference routing needs to see. Someone who never gets
+/// round to press mail may be first to cut a video.
+fn follow_through_for(member: &TeamRoutingRow, need: TeamAssignmentNeed) -> u16 {
+    let wanted = need.primary_skill.as_str();
+    member
+        .skill_follow_through_skills
+        .iter()
+        .position(|skill| skill == wanted)
+        .and_then(|index| member.skill_follow_through.get(index).copied())
+        .map_or_else(
+            || bounded_u16(i64::from(member.follow_through_basis_points)),
+            |score| bounded_u16(i64::from(score)),
+        )
 }
 
 /// Skill-fit-first, fairness-second selection over the live routing snapshot.
@@ -603,6 +682,7 @@ pub(in crate::autopilot) fn select_member_index(
             open_assignments: bounded_u16(member.open_assignments),
             recent_assignments: bounded_u16(member.recent_assignments),
             capacity_basis_points: bounded_u16(i64::from(member.capacity_basis_points)),
+            follow_through_basis_points: follow_through_for(member, need),
         })
         .collect::<Vec<_>>();
     let decision = select_team_assignee(&snapshots, need)?;

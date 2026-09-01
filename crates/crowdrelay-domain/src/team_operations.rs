@@ -58,6 +58,22 @@ pub struct TeamMemberRoutingSnapshot {
     pub recent_assignments: u16,
     /// 100 = normal capacity. Lower values allow temporary load reduction.
     pub capacity_basis_points: u16,
+    /// How reliably this member finishes work of this kind, unprompted.
+    ///
+    /// Measured, not declared: the share of their past assignments that were
+    /// completed, weighted down for each reminder it took. 10_000 is "always
+    /// finishes without being chased"; 0 is "assignments given to this person
+    /// go unanswered".
+    ///
+    /// Routing used to be skill fit and current load only, so a member who
+    /// never completed a task kept receiving it forever — the queue looked
+    /// balanced while the work sat still.
+    ///
+    /// What this cannot see is *why*. A task finished promptly and one finished
+    /// after three reminders are distinguishable; enjoyment and obligation are
+    /// not. Reminder count is the honest proxy: work someone wants to do rarely
+    /// needs chasing, whatever the reason they want to do it.
+    pub follow_through_basis_points: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +92,13 @@ pub struct TeamAssignmentDecision {
 
 /// Capability first, fairness second. Stable member-key tie breaking keeps
 /// retries deterministic while still distributing work as workloads change.
+/// What a member with no completed history scores.
+///
+/// Neutral rather than zero: a new member has not failed to do anything, and
+/// starting them at the bottom would mean never giving them the first task that
+/// would prove them either way.
+pub const NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS: u16 = 5_000;
+
 #[must_use]
 pub fn select_team_assignee(
     members: &[TeamMemberRoutingSnapshot],
@@ -104,10 +127,16 @@ pub fn select_team_assignee(
             let load_penalty = i32::from(member.open_assignments).saturating_mul(900)
                 + i32::from(member.recent_assignments).saturating_mul(250);
             let capacity_bonus = i32::from(member.capacity_basis_points.min(10_000)) / 10;
+            // Deliberately smaller than the gap between a primary and a
+            // secondary skill (3_000). Follow-through decides between people
+            // who can both do the work; it never hands a specialist's task to
+            // someone unqualified just because they answer quickly.
+            let follow_through_bonus =
+                i32::from(member.follow_through_basis_points.min(10_000)) * 2_500 / 10_000;
             Some(TeamAssignmentDecision {
                 member_id: member.member_id,
                 member_key: member.member_key.clone(),
-                route_score: skill_score + capacity_bonus - load_penalty,
+                route_score: skill_score + capacity_bonus + follow_through_bonus - load_penalty,
             })
         })
         .max_by(|left, right| {
@@ -123,6 +152,75 @@ pub fn select_team_assignee(
 mod tests {
     use super::*;
 
+    /// Work should stop going to whoever never does it.
+    ///
+    /// Routing was skill fit and current load only. A member who left every
+    /// assignment unfinished carried no open ones, so they looked *idle* and
+    /// kept winning the next task — the queue balanced while nothing moved.
+    #[test]
+    fn work_routes_away_from_a_member_who_does_not_finish_it() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let mut absent = member("a-never-finishes", vec![TeamSkill::Social], 0);
+        absent.follow_through_basis_points = 0;
+        // Deliberately carrying work, so load alone would favour the other one.
+        let mut reliable = member("b-finishes", vec![TeamSkill::Social], 1);
+        reliable.follow_through_basis_points = 10_000;
+
+        let decision =
+            select_team_assignee(&[absent, reliable], need).expect("a qualified member exists");
+        assert_eq!(
+            decision.member_key, "b-finishes",
+            "the member who completes this work should win it despite the heavier queue"
+        );
+    }
+
+    /// Follow-through breaks ties between the qualified; it does not override
+    /// qualification. Someone eager but wrong for the task still loses.
+    #[test]
+    fn follow_through_never_outranks_skill_fit() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: Some(TeamSkill::General),
+            allow_generalist: true,
+        };
+        let mut specialist = member("a-specialist", vec![TeamSkill::Social], 0);
+        specialist.follow_through_basis_points = 0;
+        let mut generalist = member("b-generalist", vec![TeamSkill::General], 0);
+        generalist.follow_through_basis_points = 10_000;
+
+        let decision = select_team_assignee(&[specialist, generalist], need)
+            .expect("a qualified member exists");
+        assert_eq!(
+            decision.member_key, "a-specialist",
+            "a perfect follow-through record must not hand a specialist task to a generalist"
+        );
+    }
+
+    /// A new member has not failed at anything yet.
+    #[test]
+    fn an_unproven_member_is_neutral_not_last() {
+        let need = TeamAssignmentNeed {
+            primary_skill: TeamSkill::Social,
+            secondary_skill: None,
+            allow_generalist: false,
+        };
+        let mut unproven = member("a-new", vec![TeamSkill::Social], 0);
+        unproven.follow_through_basis_points = NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS;
+        let mut poor = member("b-poor", vec![TeamSkill::Social], 0);
+        poor.follow_through_basis_points = 0;
+
+        let decision =
+            select_team_assignee(&[unproven, poor], need).expect("a qualified member exists");
+        assert_eq!(
+            decision.member_key, "a-new",
+            "someone with no record should be tried before someone with a bad one"
+        );
+    }
+
     fn member(key: &str, skills: Vec<TeamSkill>, open: u16) -> TeamMemberRoutingSnapshot {
         TeamMemberRoutingSnapshot {
             member_id: WorkspaceMemberId::new(),
@@ -132,6 +230,10 @@ mod tests {
             open_assignments: open,
             recent_assignments: 0,
             capacity_basis_points: 10_000,
+            // Neutral by default so existing cases test the rules they were
+            // written for. A member with no history scores neutral in
+            // production too — see `NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS`.
+            follow_through_basis_points: NEUTRAL_FOLLOW_THROUGH_BASIS_POINTS,
         }
     }
 

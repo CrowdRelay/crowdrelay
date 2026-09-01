@@ -41,3 +41,44 @@ pub(crate) async fn load_watchdog_summary(
     .fetch_one(pool)
     .await
 }
+
+/// Whether the worker process is alive, and for how long it has not been.
+///
+/// The worker serves no HTTP, so nothing could ask it directly. It renews its
+/// leadership lease every 15 seconds, which makes the lease age the one honest
+/// heartbeat — and this summary is already on the operator's screen.
+///
+/// This exists because the worker was killed by a deploy and stayed dead for
+/// over fifteen minutes while every dashboard showed green.
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkerSummary {
+    /// Seconds since the last lease renewal. Renewal is every 15s.
+    pub(crate) lease_age_seconds: i64,
+    /// False once the lease is stale enough that the process cannot be running.
+    pub(crate) alive: bool,
+}
+
+/// Twice the renewal interval plus the lease term: unambiguous death, not a
+/// slow cycle.
+const WORKER_LEASE_DEAD_AFTER_SECONDS: i64 = 120;
+
+pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, sqlx::Error> {
+    // Not workspace-scoped: leadership is per deployment. A missing row means
+    // no worker has ever run, which reads as dead rather than as healthy.
+    let lease_age_seconds: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE((
+            SELECT EXTRACT(EPOCH FROM (
+                now() - (expires_at - INTERVAL '60 seconds')
+            ))::bigint
+            FROM worker_leadership WHERE id = 1
+        ), 999999)
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(WorkerSummary {
+        lease_age_seconds,
+        alive: lease_age_seconds <= WORKER_LEASE_DEAD_AFTER_SECONDS,
+    })
+}

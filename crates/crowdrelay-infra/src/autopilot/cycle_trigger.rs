@@ -97,8 +97,10 @@ pub async fn preview_autopilot_cycle(
 
     Ok(CyclePreview {
         strategy: strategy.as_str().to_owned(),
+        // The ranked order, so the preview shows the order the cycle will
+        // actually use rather than the list as written.
         template_priority: strategy
-            .template_priority()
+            .template_priority_for(world)
             .iter()
             .map(|template| (*template).to_owned())
             .collect(),

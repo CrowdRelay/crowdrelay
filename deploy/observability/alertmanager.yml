@@ -1,14 +1,35 @@
 global:
   resolve_timeout: 5m
 
+# Discord is for things that need a human to stop what they are doing.
+#
+# Every alert used to land there, warnings included, which trained the operator
+# to scroll past the channel — and a channel nobody reads is worse than no
+# channel, because it looks like coverage. Warnings still fire, still resolve,
+# and are still visible in Alertmanager and on the control plane's health panel;
+# they simply do not interrupt anyone.
+#
+# The bar for `severity: critical` is deliberately narrow: fans are not being
+# reached, or the system cannot act at all.
 route:
   group_by: ["alertname", "severity"]
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
-  receiver: discord
+  receiver: silent
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: discord
+      # Criticals repeat sooner than the default: an unacknowledged outage
+      # should nag, and four hours of silence looks identical to a fix.
+      repeat_interval: 1h
 
 receivers:
+  # Warnings resolve here. Not a dead end — they remain queryable in
+  # Alertmanager and are what the control plane's health panel reads.
+  - name: silent
+
   - name: discord
     webhook_configs:
       - url: http://discord-alert-bridge:9880/alert

@@ -23,6 +23,20 @@ assert len(routes) == len(set(routes)), "duplicate control-plane route"
 
 assert "MAX_CONTROL_BODY_BYTES: usize = 8 * 1024" in router
 assert "DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES)" in router
+
+# Route-level body limits override the router-wide one, so an unnoticed
+# override would quietly widen this namespace's exposure while the contract
+# still advertised 8 KiB. Every exception must be named here and bounded.
+overrides = set(re.findall(r"DefaultBodyLimit::max\((\w+)\)", router)) - {
+    "MAX_CONTROL_BODY_BYTES"
+}
+assert overrides <= {"MAX_IMPORT_BODY_BYTES"}, (
+    f"unreviewed control-plane body-limit override: {sorted(overrides)}"
+)
+for name in overrides:
+    declared = re.search(rf"const {name}: usize = (\d+) \* 1024;", router)
+    assert declared, f"{name} must be declared in KiB units for review"
+    assert int(declared.group(1)) <= 512, f"{name} exceeds the reviewed 512 KiB ceiling"
 assert ".route_layer(from_fn_with_state(state.clone(), require_control_plane))" in router
 require_block = router.split("async fn require_control_plane", 1)[1]
 assert "security::bearer_sha256_matches" in require_block
@@ -64,5 +78,6 @@ assert "command.expected_version" in ecosystem
 assert "ecosystem_feature_flags.version = $6" in ecosystem
 print(
     f"CROWDRELAY_CONTROL_PLANE=PASS routes={len(routes)} auth=route-local+separate-key+fail-closed"
-    " body<=8KiB admin-alias=forbidden tunnel=derived"
+    f" body<=8KiB(+{len(overrides)} reviewed override)"
+    " admin-alias=forbidden tunnel=derived"
 )

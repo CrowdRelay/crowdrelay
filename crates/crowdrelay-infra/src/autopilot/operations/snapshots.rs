@@ -228,6 +228,8 @@ struct OutreachRow {
     last_outreach_at: Option<OffsetDateTime>,
     target_last_outreach_at: Option<OffsetDateTime>,
     followup_count: i32,
+    lifetime_outbound: i32,
+    target_ever_replied: bool,
     last_reply_disposition: String,
     in_flight: bool,
 }
@@ -263,6 +265,20 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
                AND interaction.opportunity_id = opportunity.id
                AND interaction.direction = 'outbound'
                AND interaction.phase = 'followup') AS followup_count,
+            -- Scoped to the target, not the opportunity: this is the count the
+            -- person on the other end experiences.
+            (SELECT count(*)::integer
+             FROM viryaos_outreach_interactions AS interaction
+             WHERE interaction.workspace_id = opportunity.workspace_id
+               AND interaction.target_id = target.id
+               AND interaction.direction = 'outbound') AS lifetime_outbound,
+            EXISTS (
+                SELECT 1
+                FROM viryaos_outreach_interactions AS interaction
+                WHERE interaction.workspace_id = opportunity.workspace_id
+                  AND interaction.target_id = target.id
+                  AND interaction.direction = 'inbound'
+            ) AS target_ever_replied,
             COALESCE((
                 SELECT interaction.disposition
                 FROM viryaos_outreach_interactions AS interaction
@@ -316,6 +332,9 @@ pub(in crate::autopilot) async fn load_outreach_snapshots(
                 target_last_outreach_at: row.target_last_outreach_at,
                 followup_count: u16::try_from(row.followup_count)
                     .map_err(|_| RepositoryError::Unexpected)?,
+                lifetime_outbound: u16::try_from(row.lifetime_outbound)
+                    .map_err(|_| RepositoryError::Unexpected)?,
+                target_ever_replied: row.target_ever_replied,
                 last_reply: parse_outreach_reply(&row.last_reply_disposition)?,
                 in_flight: row.in_flight,
             })

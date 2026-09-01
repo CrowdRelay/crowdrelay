@@ -39,5 +39,6 @@
     "crates/crowdrelay-worker/src/retention.rs": 1419
   },
   "policy": "ratchet-not-hard-cap",
-  "reviewThresholdLines": 1200
+  "reviewThresholdLines": 1200,
+  "allowanceLines": 80
 }

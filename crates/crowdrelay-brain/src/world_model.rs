@@ -75,6 +75,14 @@ pub struct WorldModel {
     pub active_communities: u32,
     /// Average upvote ratio across all active communities (in basis points).
     pub avg_community_engagement_bps: u16,
+    /// Per-platform audience and monthly gain, one entry per connected
+    /// platform that reports an audience size.
+    ///
+    /// The aggregate fields above answer "is the audience growing". This
+    /// answers "where", which is the question that decides what to do next.
+    /// Empty until a platform has enough history to measure.
+    pub platform_growth: Vec<crate::platform_yield::PlatformGrowth>,
+
     /// Best performing community by avg score, if any.
     pub best_performing_community: Option<String>,
     /// Worst performing community by avg score, if any.

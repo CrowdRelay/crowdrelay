@@ -1,13 +1,69 @@
+# Alert severity is a routing decision, not a description of how much the
+# author cared.
+#
+#   critical — a human should stop what they are doing. Reaches Discord.
+#              Fans are not being reached, or the system cannot act at all.
+#   warning  — worth looking at when convenient. Visible in Alertmanager and on
+#              the control plane's health panel; interrupts nobody.
+#   info     — background texture.
+#
+# Two rules used to page on `> 0`: one permanently-failed message woke someone
+# up. That is how a channel gets muted, and a muted channel is worse than none
+# because it still looks like coverage. Single failures are now warnings, and
+# the criticals fire on a *rate* — many failing at once, which is systemic.
+#
+# Every rule carries a `remedy` naming the least intrusive fix first. Redeploy
+# is a last resort and is labelled as one; nothing here should ever suggest
+# shipping a release because a message was rejected.
 groups:
   - name: crowdrelay-delivery
     rules:
+      # Warning, not critical: FakApp already reports app up/down to the
+      # operator, and two pagers for one fact means the second gets muted.
+      # This stays as the internal record of the same event.
       - alert: CrowdRelayApiDown
         expr: up{job="crowdrelay-api"} == 0
         for: 2m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: CrowdRelay API is unreachable from Prometheus
+          remedy: >-
+            1. Check the container is up. 2. Check it can reach Postgres —
+            an unreachable database fails readiness, not the process.
+            3. Restart the API container. 4. Roll back to the previous image
+            only if it does not come back.
+
+      # The worker runs the brain, the outbox and every metric sync, and it
+      # serves no HTTP — so `up{job="crowdrelay-worker"}` does not exist and
+      # nothing here covered it. It was killed by a deploy and stayed dead for
+      # over fifteen minutes with every alert quiet.
+      #
+      # The lease renews every 15s with a 60s expiry, so 120s of staleness is
+      # unambiguous death rather than a slow cycle.
+      - alert: CrowdRelayWorkerDown
+        expr: crowdrelay_worker_lease_age_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          headline: The growth engine has stopped
+          summary: CrowdRelay worker is not renewing its leadership lease
+          impact: >-
+            The background process that finds fans, sends everything queued,
+            and updates follower counts is not running. Nothing is being sent
+            and no growth is happening. Fans are not affected right now — the
+            app and website keep working — but the band stops gaining any.
+          remedy: >-
+            1. On the server, run `docker start crowdrelay-worker-green-1`.
+            Nine times out of ten it is still there, just stopped, because a
+            deploy killed it — and starting it is all that is needed.
+            2. Wait a minute and check this alert clears. 3. If it stops again
+            straight away, run `docker logs --tail 50
+            crowdrelay-worker-green-1` and post the output here rather than
+            retrying. 4. A redeploy is only justified if those logs show the
+            program itself failing to start.
+
       - alert: CrowdRelayOpsSnapshotUnavailable
         expr: crowdrelay_ops_metrics_snapshot_available == 0
         for: 5m
@@ -15,20 +71,63 @@ groups:
           severity: warning
         annotations:
           summary: API cannot read database-backed operational metrics
+          remedy: >-
+            Metrics are blind but traffic is unaffected. Usually pool
+            exhaustion or a slow query holding the operational read. Check
+            pool utilization first; no restart is needed for this alone.
+
+      # `> 0` means one message gave up. Worth knowing, never worth waking for.
       - alert: CrowdRelayOutboxDeadLetters
         expr: crowdrelay_outbox_dead > 0
         for: 5m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "{{ $value }} outbox events are dead; delivery intent exists but provider delivery gave up"
-      - alert: CrowdRelayWebhookDeliveriesDead
-        expr: crowdrelay_webhook_delivery_dead > 0
+          remedy: >-
+            Retry the individual events from the control plane's Deliveries
+            panel. Read one failure first — a dead letter is usually a bad
+            endpoint or a rejected payload, and retrying without reading just
+            reproduces it. No restart, no redeploy.
+
+      # Many failing at once is a different event: the provider or our egress
+      # is broken, not one message.
+      - alert: CrowdRelayOutboxDeadLetterSurge
+        expr: increase(crowdrelay_outbox_dead[15m]) > 10
         for: 5m
         labels:
           severity: critical
         annotations:
+          summary: "Outbox dead letters rising fast ({{ $value }} in 15 minutes)"
+          remedy: >-
+            Something systemic — a provider outage, an expired credential, or
+            egress being blocked. 1. Check one dead letter's error. 2. If it is
+            a credential, rotate it; deliveries resume without a restart.
+            3. Restart the worker only if the errors show it wedged.
+
+      - alert: CrowdRelayWebhookDeliveriesDead
+        expr: crowdrelay_webhook_delivery_dead > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
           summary: "{{ $value }} signed webhook deliveries are dead"
+          remedy: >-
+            Retry from the Deliveries panel. Check the consumer is reachable
+            and its signing secret still matches before retrying in bulk.
+
+      - alert: CrowdRelayWebhookDeliverySurge
+        expr: increase(crowdrelay_webhook_delivery_dead[15m]) > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Webhook deliveries failing fast ({{ $value }} in 15 minutes)"
+          remedy: >-
+            A consumer is down or a secret was rotated on one side only.
+            1. Check the endpoint. 2. Re-sync the secret. 3. Clear dead
+            deliveries once the cause is fixed, so the retry is not wasted.
+
       - alert: CrowdRelayPushDeliveriesDead
         expr: crowdrelay_push_delivery_dead > 0
         for: 15m
@@ -36,6 +135,10 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $value }} push deliveries failed or are ambiguous"
+          remedy: >-
+            Usually stale device tokens, which resolve themselves as fans
+            reopen the app. Investigate only if the count keeps climbing.
+
       - alert: CrowdRelayOutboxStalled
         expr: crowdrelay_outbox_oldest_pending_seconds > 600
         for: 10m
@@ -43,6 +146,12 @@ groups:
           severity: warning
         annotations:
           summary: Oldest pending outbox event has waited {{ $value | humanizeDuration }}
+          remedy: >-
+            Work is queued and not moving, which usually means the worker is
+            gone — check CrowdRelayWorkerDown first, since that is the same
+            fault seen from the other end. If the worker is alive, it is
+            leasing but not draining; restart it.
+
       - alert: CrowdRelayDeliveryBacklog
         expr: crowdrelay_webhook_delivery_oldest_pending_seconds > 600
         for: 10m
@@ -50,6 +159,10 @@ groups:
           severity: warning
         annotations:
           summary: Oldest pending webhook delivery has waited {{ $value | humanizeDuration }}
+          remedy: >-
+            Same shape as a stalled outbox: check the worker before touching
+            anything else.
+
   - name: crowdrelay-edge
     rules:
       - alert: CrowdRelayServerErrorRate
@@ -59,6 +172,11 @@ groups:
           severity: critical
         annotations:
           summary: HTTP 5xx ratio above 5% for five minutes
+          remedy: >-
+            1. Read the top failing route. 2. Check pool utilization and
+            database health — most sustained 5xx here is the database, not the
+            code. 3. Roll back only if the rate started at a deploy.
+
       - alert: CrowdRelayPoolSaturation
         expr: crowdrelay_db_pool_utilization_ratio > 0.9
         for: 10m
@@ -66,6 +184,11 @@ groups:
           severity: warning
         annotations:
           summary: PostgreSQL connection pool above 90% utilization
+          remedy: >-
+            Find the slow query before raising the pool size; a bigger pool
+            against a slow query just moves the queue. Restarting clears it
+            temporarily and tells you nothing.
+
       - alert: CrowdRelayRateLimitStorm
         expr: sum(rate(crowdrelay_http_rate_limited_total[5m])) > 5
         for: 10m
@@ -73,3 +196,6 @@ groups:
           severity: info
         annotations:
           summary: Edge rate limiter rejecting more than 5 requests per second
+          remedy: >-
+            The limiter is working. Confirm it is abuse and not a legitimate
+            client that needs its own budget.

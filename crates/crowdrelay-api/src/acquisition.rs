@@ -746,13 +746,16 @@ fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Pro
         RepositoryError::Unexpected => {
             tracing::error!("acquisition repository failed unexpectedly");
         }
-        RepositoryError::NotFound | RepositoryError::Conflict => {}
+        RepositoryError::NotFound
+        | RepositoryError::Conflict
+        | RepositoryError::ConflictBecause(_) => {}
     }
 
     match error {
         RepositoryError::Unavailable => Problem::service_unavailable(request_id),
         RepositoryError::NotFound => Problem::not_found(request_id),
         RepositoryError::Conflict => Problem::conflict(request_id),
+        RepositoryError::ConflictBecause(detail) => Problem::conflict_because(detail, request_id),
         RepositoryError::Unexpected => Problem::internal(request_id),
     }
 }

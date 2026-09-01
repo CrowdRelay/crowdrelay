@@ -213,6 +213,9 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
         crate::ops_summary::load_watchdog_summary(&state.pool, state.workspace_id.into_uuid())
             .await
             .map_err(OpsError::sqlx)?;
+    let worker = crate::ops_summary::load_worker_summary(&state.pool)
+        .await
+        .map_err(OpsError::sqlx)?;
 
     let database = sqlx::query_as::<_, DatabaseRuntimeRow>(
         r#"
@@ -282,6 +285,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             oldest_pending_seconds: row.push_oldest_pending_seconds,
         },
         watchdog,
+        worker,
         http: http_request_summary(crate::http_metrics().snapshot()),
         database,
         area: AreaRuntimeSummary {
@@ -378,6 +382,27 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 )))::bigint, 0) AS oldest_pending_seconds
             FROM fan_push_deliveries
             WHERE workspace_id = $1
+        ),
+        -- Worker liveness, read from the leadership lease.
+        --
+        -- The worker exposes no HTTP surface, so Prometheus cannot scrape it
+        -- and `up{job=...}` does not exist for it. It does renew this lease
+        -- every 15 seconds, which makes the lease age the one honest heartbeat
+        -- available — and the API, which is scraped, can read it.
+        --
+        -- Without this the process running the entire brain, all outbox
+        -- delivery and every metric sync could die unnoticed. It did: killed by
+        -- a deploy, dead for over fifteen minutes, and nothing said so.
+        --
+        -- Not workspace-scoped; leadership is per deployment, not per tenant.
+        -- No row at all reads as maximally stale rather than as healthy.
+        worker AS (
+            SELECT COALESCE((
+                SELECT EXTRACT(EPOCH FROM (
+                    now() - (expires_at - INTERVAL '60 seconds')
+                ))::bigint
+                FROM worker_leadership WHERE id = 1
+            ), 999999) AS lease_age_seconds
         )
         SELECT
             outbox.pending AS outbox_pending,
@@ -393,8 +418,9 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             push.processing AS push_processing,
             push.dead AS push_dead,
             push.suppressed AS push_suppressed,
-            push.oldest_pending_seconds AS push_oldest_pending_seconds
-        FROM outbox CROSS JOIN deliveries CROSS JOIN push
+            push.oldest_pending_seconds AS push_oldest_pending_seconds,
+            worker.lease_age_seconds AS worker_lease_age_seconds
+        FROM outbox CROSS JOIN deliveries CROSS JOIN push CROSS JOIN worker
         "#,
     )
     .bind(state.workspace_id.into_uuid())
@@ -417,6 +443,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         push_dead: row.push_dead,
         push_suppressed: row.push_suppressed,
         push_oldest_pending_seconds: row.push_oldest_pending_seconds,
+        worker_lease_age_seconds: row.worker_lease_age_seconds,
     })
 }
 

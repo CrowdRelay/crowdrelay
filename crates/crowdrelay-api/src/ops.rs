@@ -25,7 +25,7 @@ use database_runtime::{DatabaseRuntimeRow, DatabaseRuntimeSummary};
 
 use crate::{
     IDEMPOTENCY_KEY, Problem,
-    ops_summary::{QueueSummary, WatchdogSummary},
+    ops_summary::{QueueSummary, WatchdogSummary, WorkerSummary},
     request_id,
 };
 

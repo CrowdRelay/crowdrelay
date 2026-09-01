@@ -615,7 +615,7 @@ const fn repository_error_kind(error: RepositoryError) -> &'static str {
     match error {
         RepositoryError::Unavailable => "repository_unavailable",
         RepositoryError::NotFound => "subject_not_found",
-        RepositoryError::Conflict => "state_changed",
+        RepositoryError::Conflict | RepositoryError::ConflictBecause(_) => "state_changed",
         RepositoryError::Unexpected => "unexpected",
     }
 }

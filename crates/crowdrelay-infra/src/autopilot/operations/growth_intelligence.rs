@@ -31,10 +31,61 @@ use super::*;
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
     GrowthTrend, RecentInsight, TenantPreferencePosterior, UnengagedTarget, WorldModel,
-    agent_standing_policy,
+    agent_standing_policy, platform_yield::PlatformGrowth,
 };
 use crowdrelay_domain::growth_metrics::{MetricPlatform, NorthStarMetric};
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
+
+/// The month-over-month audience arithmetic, shared by the total and the
+/// per-platform breakdown.
+///
+/// Both queries need the same four things: the series a caller asked for, the
+/// latest reading of each, the reading it started the month at, and the
+/// difference. Writing that twice meant two copies of a subtle
+/// `DISTINCT ON`/baseline dance that have to stay identical to be comparable —
+/// the per-platform numbers must add up to the total, and they only do if the
+/// month boundary is drawn the same way in both.
+///
+/// `$1` workspace, `$2` platforms, `$3` metric keys.
+const AUDIENCE_WINDOW_CTE: &str = r#"
+        WITH wanted AS (
+            SELECT * FROM unnest($2::text[], $3::text[]) AS t(platform, metric_key)
+        ),
+        target_series AS (
+            SELECT s.id, s.platform
+            FROM viryaos_growth_metric_series s
+            JOIN wanted w ON w.platform = s.platform AND w.metric_key = s.metric_key
+            WHERE s.workspace_id = $1 AND s.active
+        ),
+        points AS (
+            SELECT p.series_id, s.platform, p.captured_at, p.value
+            FROM viryaos_growth_metric_points p
+            JOIN target_series s ON s.id = p.series_id
+            WHERE p.workspace_id = $1
+        ),
+        latest AS (
+            SELECT DISTINCT ON (series_id) series_id, platform, captured_at, value
+            FROM points ORDER BY series_id, captured_at DESC
+        ),
+        before_month AS (
+            SELECT DISTINCT ON (series_id) series_id, value
+            FROM points
+            WHERE captured_at < date_trunc('month', now())
+            ORDER BY series_id, captured_at DESC
+        ),
+        first_in_month AS (
+            SELECT DISTINCT ON (series_id) series_id, value
+            FROM points
+            WHERE captured_at >= date_trunc('month', now())
+            ORDER BY series_id, captured_at ASC
+        ),
+        baseline AS (
+            SELECT l.series_id, l.platform, COALESCE(b.value, f.value, 0) AS value
+            FROM latest l
+            LEFT JOIN before_month b ON b.series_id = l.series_id
+            LEFT JOIN first_in_month f ON f.series_id = l.series_id
+        )
+"#;
 
 /// The worker templates the brain may dispatch, in the order the evaluator
 /// checks them. Adding a new worker template means adding it here and to the
@@ -679,46 +730,16 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         .collect();
     let audience_platforms: Vec<&str> = audience_keys.iter().map(|(p, _)| *p).collect();
     let audience_metric_keys: Vec<&str> = audience_keys.iter().map(|(_, k)| *k).collect();
+    // Per-platform ranking wants Signal alongside the off-platform feeds; the
+    // aggregate above deliberately excludes it, because `off_platform_audience`
+    // means audience that is not already ours.
+    let mut growth_platforms = audience_platforms.clone();
+    let mut growth_metric_keys = audience_metric_keys.clone();
+    growth_platforms.push("signal");
+    growth_metric_keys.push("active_fans");
 
-    let audience_row: (i64, i64, i64, i64) = sqlx::query_as(
-        r#"
-        WITH wanted AS (
-            SELECT * FROM unnest($2::text[], $3::text[]) AS t(platform, metric_key)
-        ),
-        target_series AS (
-            SELECT s.id, s.platform
-            FROM viryaos_growth_metric_series s
-            JOIN wanted w ON w.platform = s.platform AND w.metric_key = s.metric_key
-            WHERE s.workspace_id = $1 AND s.active
-        ),
-        points AS (
-            SELECT p.series_id, s.platform, p.captured_at, p.value
-            FROM viryaos_growth_metric_points p
-            JOIN target_series s ON s.id = p.series_id
-            WHERE p.workspace_id = $1
-        ),
-        latest AS (
-            SELECT DISTINCT ON (series_id) series_id, platform, captured_at, value
-            FROM points ORDER BY series_id, captured_at DESC
-        ),
-        before_month AS (
-            SELECT DISTINCT ON (series_id) series_id, value
-            FROM points
-            WHERE captured_at < date_trunc('month', now())
-            ORDER BY series_id, captured_at DESC
-        ),
-        first_in_month AS (
-            SELECT DISTINCT ON (series_id) series_id, value
-            FROM points
-            WHERE captured_at >= date_trunc('month', now())
-            ORDER BY series_id, captured_at ASC
-        ),
-        baseline AS (
-            SELECT l.series_id, COALESCE(b.value, f.value, 0) AS value
-            FROM latest l
-            LEFT JOIN before_month b ON b.series_id = l.series_id
-            LEFT JOIN first_in_month f ON f.series_id = l.series_id
-        )
+    let audience_row: (i64, i64, i64, i64) = sqlx::query_as(&format!(
+        "{AUDIENCE_WINDOW_CTE}
         SELECT
             COALESCE((SELECT SUM(value) FROM latest), 0)::bigint,
             GREATEST(
@@ -729,8 +750,8 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             (SELECT COUNT(DISTINCT platform) FROM latest)::bigint,
             (SELECT COUNT(DISTINCT platform) FROM latest
              WHERE captured_at > now() - interval '7 days')::bigint
-        "#,
-    )
+        "
+    ))
     .bind(workspace_id.into_uuid())
     .bind(&audience_platforms)
     .bind(&audience_metric_keys)
@@ -738,6 +759,42 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .await
     .map_err(map_sqlx)?
     .unwrap_or((0, 0, 0, 0));
+    // The same audience arithmetic, split by platform instead of summed.
+    //
+    // The aggregate above says whether the audience is growing; this says
+    // where. Nothing read that before, so the strategy's template order stayed
+    // the fixed guess it was written as, however the numbers moved.
+    //
+    // Signal is deliberately included even though it is not an off-platform
+    // feed: an install is the most valuable unit the North Star has, and
+    // leaving it out would rank every platform except the one that matters
+    // most.
+    let platform_growth_rows: Vec<(String, i64, i64)> = sqlx::query_as(&format!(
+        "{AUDIENCE_WINDOW_CTE}
+        SELECT
+            latest.platform,
+            SUM(latest.value)::bigint AS audience,
+            GREATEST(SUM(latest.value) - COALESCE(SUM(baseline.value), 0), 0)::bigint AS gained
+        FROM latest
+        LEFT JOIN baseline ON baseline.series_id = latest.series_id
+        GROUP BY latest.platform
+        "
+    ))
+    .bind(workspace_id.into_uuid())
+    .bind(&growth_platforms)
+    .bind(&growth_metric_keys)
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let platform_growth: Vec<PlatformGrowth> = platform_growth_rows
+        .into_iter()
+        .map(|(platform, audience, gained)| PlatformGrowth {
+            platform,
+            audience: u32::try_from(audience.max(0)).unwrap_or(u32::MAX),
+            gained_this_month: u32::try_from(gained.max(0)).unwrap_or(u32::MAX),
+        })
+        .collect();
+
     let off_platform_audience = u32::try_from(audience_row.0.max(0)).unwrap_or(u32::MAX);
     let off_platform_audience_this_month = u32::try_from(audience_row.1.max(0)).unwrap_or(u32::MAX);
     let connected_platforms = u32::try_from(audience_row.2.max(0)).unwrap_or(u32::MAX);
@@ -777,6 +834,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         off_platform_audience_this_month,
         connected_platforms,
         fresh_platforms,
+        platform_growth,
         discovered_communities,
         active_communities,
         avg_community_engagement_bps,

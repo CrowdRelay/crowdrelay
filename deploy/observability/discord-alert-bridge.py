@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Translate Alertmanager webhook payloads into Discord `content` messages.
+"""Translate Alertmanager webhook payloads into Discord messages a human can act on.
 
 The production smoke probe already posts {"content": ...} to the same
 DISCORD_WEBHOOK_URL, so operators keep exactly one notification channel.
 Stdlib only; no secrets are logged. Fails the request (500) when forwarding
 fails so Alertmanager retries per its own backoff.
+
+This used to render `AlertName (severity): summary` and nothing else, so the
+`remedy` written on every rule never left the repository. Someone paged at
+midnight got a symptom and a guess, and the guess is usually "redeploy" — the
+most intrusive fix, applied to problems a single retry would have solved.
+
+The message is written for whoever is holding the phone, not for the person who
+wrote the alert. That means: what broke, what it means for the band, and a
+numbered list starting with the cheapest thing that might fix it.
 """
 
 from __future__ import annotations
@@ -17,21 +26,62 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 MAX_CONTENT_CHARS = 1900
 
+# Discord renders these; they carry the status faster than the word does.
+STATUS_MARK = {"FIRING": "🔴", "RESOLVED": "🟢"}
+
+
+def render_alert(alert: dict) -> str:
+    labels = alert.get("labels", {})
+    annotations = alert.get("annotations", {})
+    name = labels.get("alertname", "UnknownAlert")
+    severity = labels.get("severity", "info")
+    status = alert.get("status", "firing").upper()
+    mark = STATUS_MARK.get(status, "🔸")
+
+    headline = annotations.get("headline") or annotations.get("summary") or name
+
+    # Resolved alerts need the fact, not the runbook — and the headline is
+    # phrased for the failure, so reusing it verbatim reads as though the
+    # outage is still on ("🟢 The growth engine has stopped").
+    if status == "RESOLVED":
+        return "\n".join(
+            [f"{mark} **Recovered:** {headline}", f"`{name}` · {severity}"]
+        )
+
+    parts = [f"{mark} **{headline}**", f"`{name}` · {severity} · {status.lower()}"]
+
+    impact = annotations.get("impact", "").strip()
+    if impact:
+        parts.append(f"\n**What this means:** {impact}")
+
+    remedy = annotations.get("remedy", "").strip()
+    if remedy:
+        # Remedies are authored as "1. … 2. … 3. …" on one line so the YAML
+        # stays readable. Break them onto their own lines here, because a
+        # numbered list is the whole point of writing them.
+        steps = remedy.replace(" 1. ", "\n1. ")
+        for number in range(2, 8):
+            steps = steps.replace(f" {number}. ", f"\n{number}. ")
+        parts.append(f"\n**What to do:**\n{steps.strip()}")
+
+    return "\n".join(parts)
+
 
 def render(alerts: list[dict]) -> str:
-    lines: list[str] = []
+    blocks: list[str] = []
+    used = 0
     for alert in alerts:
-        labels = alert.get("labels", {})
-        name = labels.get("alertname", "UnknownAlert")
-        status = alert.get("status", "firing").upper()
-        summary = alert.get("annotations", {}).get("summary", "")
-        severity = labels.get("severity", "info")
-        prefix = "[RESOLVED] " if status == "RESOLVED" else ""
-        line = f"{prefix}{name} ({severity}): {summary}".strip()
-        lines.append(line[: MAX_CONTENT_CHARS // 2])
-        if len(lines) * 2 >= MAX_CONTENT_CHARS:
+        block = render_alert(alert)
+        # Keep whole alerts rather than truncating one mid-instruction: half a
+        # remedy is worse than a missing one.
+        if used + len(block) > MAX_CONTENT_CHARS:
+            remaining = len(alerts) - len(blocks)
+            if remaining > 0:
+                blocks.append(f"…and {remaining} more alert(s).")
             break
-    return "\n".join(lines)[:MAX_CONTENT_CHARS]
+        blocks.append(block)
+        used += len(block) + 2
+    return "\n\n".join(blocks)[:MAX_CONTENT_CHARS]
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -600,6 +600,9 @@ fn lifecycle_problem(error: FanLifecycleError, request_id: Option<String>) -> Pr
         FanLifecycleError::Repository(crowdrelay_application::RepositoryError::Conflict) => {
             Problem::conflict(request_id)
         }
+        FanLifecycleError::Repository(
+            crowdrelay_application::RepositoryError::ConflictBecause(detail),
+        ) => Problem::conflict_because(detail, request_id),
         FanLifecycleError::Repository(crowdrelay_application::RepositoryError::Unexpected) => {
             Problem::internal(request_id)
         }

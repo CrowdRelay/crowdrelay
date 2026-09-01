@@ -154,6 +154,9 @@ fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Res
         RepositoryError::Unavailable => Problem::service_unavailable(request_id).private(),
         RepositoryError::NotFound => Problem::not_found(request_id).private(),
         RepositoryError::Conflict => Problem::conflict(request_id).private(),
+        RepositoryError::ConflictBecause(detail) => {
+            Problem::conflict_because(detail, request_id).private()
+        }
         RepositoryError::Unexpected => Problem::internal(request_id).private(),
     }
     .into_response()

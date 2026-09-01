@@ -95,6 +95,16 @@ pub struct OutreachSnapshot {
     /// Latest outbound touch to this relationship across any opportunity.
     pub target_last_outreach_at: Option<OffsetDateTime>,
     pub followup_count: u16,
+    /// Every outbound touch this relationship has ever received, across all
+    /// opportunities. `followup_count` is scoped to one opportunity and resets
+    /// with it; this does not.
+    pub lifetime_outbound: u16,
+    /// Whether this relationship has ever answered, on any opportunity.
+    ///
+    /// Silence and a conversation are different states. Without this, a contact
+    /// who replied last year looks identical to one who has never responded,
+    /// because the reply belongs to an opportunity that has since expired.
+    pub target_ever_replied: bool,
     pub last_reply: OutreachReplyDisposition,
     pub in_flight: bool,
 }
@@ -110,6 +120,15 @@ pub struct OutreachPolicy {
     pub followup_after_days: u32,
     pub declined_cooldown_days: u32,
     pub maximum_followups: u16,
+    /// Total outbound touches a silent contact may ever receive.
+    ///
+    /// `maximum_followups` bounds one opportunity. Nothing bounded the
+    /// relationship: a new opportunity for the same address starts at
+    /// `Initial`, which resets the follow-up counter, so a contact who never
+    /// replied kept receiving a fresh "first" pitch every cooldown for as long
+    /// as opportunities kept being discovered. That is indistinguishable from
+    /// spam to the person receiving it, and it is what happened.
+    pub maximum_lifetime_contacts: u16,
     /// How free-reach pitches are batched for approval. Nested here rather than
     /// given a context of its own because it is the same operator setting: how
     /// this workspace approaches people it does not know, and how much of that
@@ -126,6 +145,9 @@ impl Default for OutreachPolicy {
             followup_after_days: 5,
             declined_cooldown_days: 180,
             maximum_followups: 1,
+            // One pitch and one follow-up. A third unanswered email to a
+            // stranger is not persistence.
+            maximum_lifetime_contacts: 2,
             waves: FreeReachPolicy::default(),
         }
     }
@@ -159,6 +181,9 @@ pub enum OutreachHoldReason {
     Cooldown,
     FollowUpNotDue,
     FollowUpLimit,
+    /// This relationship has had every touch it is ever going to get without
+    /// answering one. Unlike the other holds this one does not expire.
+    ContactExhausted,
 }
 
 #[must_use]
@@ -207,6 +232,16 @@ pub fn evaluate_outreach(
         OutreachReplyDisposition::None => {}
     }
 
+    // Silence is an answer. Checked before the phase split, because the spam
+    // path ran through `Initial`: a fresh opportunity has no outreach of its
+    // own, so it fell straight through to a brand-new first contact no matter
+    // how many the person had already ignored.
+    if !snapshot.target_ever_replied
+        && snapshot.lifetime_outbound >= policy.maximum_lifetime_contacts
+    {
+        return OutreachDecision::Hold(OutreachHoldReason::ContactExhausted);
+    }
+
     let Some(last_outreach) = snapshot.last_outreach_at else {
         if snapshot.target_last_outreach_at.is_some_and(|at| {
             at > now || now - at < Duration::days(i64::from(policy.initial_cooldown_days))
@@ -250,11 +285,83 @@ fn policy_is_valid(policy: OutreachPolicy) -> bool {
         && policy.declined_cooldown_days >= policy.initial_cooldown_days
         && policy.followup_after_days > 0
         && policy.maximum_followups <= 3
+        && policy.maximum_lifetime_contacts >= 1
+        && policy.maximum_lifetime_contacts <= 4
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The antyradio case: a silent contact must not receive an endless
+    /// sequence of "first" pitches.
+    ///
+    /// Every send went out as `Initial`, because each new opportunity carries
+    /// no outreach of its own. `Initial` resets `followup_count`, so the
+    /// follow-up cap never engaged and the only spacing was the initial
+    /// cooldown. Bounding the relationship rather than the opportunity is what
+    /// stops it.
+    #[test]
+    fn a_silent_contact_is_never_pitched_past_the_lifetime_cap() {
+        let policy = OutreachPolicy::default();
+        let mut snapshot = eligible();
+        // A brand-new opportunity: nothing sent on it yet, so the old code
+        // took the Initial branch regardless of history.
+        snapshot.last_outreach_at = None;
+        snapshot.target_last_outreach_at = None;
+        snapshot.target_ever_replied = false;
+
+        snapshot.lifetime_outbound = policy.maximum_lifetime_contacts - 1;
+        assert!(
+            matches!(
+                evaluate_outreach(snapshot, policy, now()),
+                OutreachDecision::Request { .. }
+            ),
+            "a contact below the lifetime cap may still be approached"
+        );
+
+        snapshot.lifetime_outbound = policy.maximum_lifetime_contacts;
+        assert_eq!(
+            evaluate_outreach(snapshot, policy, now()),
+            OutreachDecision::Hold(OutreachHoldReason::ContactExhausted),
+            "at the cap a new opportunity must not restart the sequence"
+        );
+
+        snapshot.lifetime_outbound = 50;
+        assert_eq!(
+            evaluate_outreach(snapshot, policy, now()),
+            OutreachDecision::Hold(OutreachHoldReason::ContactExhausted),
+            "and no amount of further opportunities may reopen it"
+        );
+    }
+
+    /// The cap answers silence, not conversation. Someone who replied is in a
+    /// relationship, and the other holds govern what happens next.
+    #[test]
+    fn a_contact_who_has_ever_replied_is_not_silence_capped() {
+        let policy = OutreachPolicy::default();
+        let mut snapshot = eligible();
+        snapshot.last_outreach_at = None;
+        snapshot.target_last_outreach_at = None;
+        snapshot.lifetime_outbound = 50;
+        snapshot.target_ever_replied = true;
+
+        assert_ne!(
+            evaluate_outreach(snapshot, policy, now()),
+            OutreachDecision::Hold(OutreachHoldReason::ContactExhausted),
+        );
+    }
+
+    /// Default policy is one pitch and one follow-up.
+    #[test]
+    fn the_default_lifetime_cap_is_two_touches() {
+        assert_eq!(OutreachPolicy::default().maximum_lifetime_contacts, 2);
+        assert!(policy_is_valid(OutreachPolicy::default()));
+        assert!(!policy_is_valid(OutreachPolicy {
+            maximum_lifetime_contacts: 0,
+            ..OutreachPolicy::default()
+        }));
+    }
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::UNIX_EPOCH + Duration::days(20_000)
@@ -275,6 +382,8 @@ mod tests {
             last_outreach_at: None,
             target_last_outreach_at: None,
             followup_count: 0,
+            lifetime_outbound: 0,
+            target_ever_replied: false,
             last_reply: OutreachReplyDisposition::None,
             in_flight: false,
         }

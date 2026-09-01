@@ -652,6 +652,7 @@ fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Pro
         RepositoryError::Unavailable => Problem::service_unavailable(request_id),
         RepositoryError::NotFound => Problem::not_found(request_id),
         RepositoryError::Conflict => Problem::conflict(request_id),
+        RepositoryError::ConflictBecause(detail) => Problem::conflict_because(detail, request_id),
         RepositoryError::Unexpected => Problem::internal(request_id),
     }
     .private()

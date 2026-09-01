@@ -75,6 +75,9 @@ const PROXY_TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const PROXY_POOL_MAX: usize = 10;
 /// How long to keep a proxy in the pool before forcing a refresh.
 const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
+/// Cooldown before rebuilding a pool that came back empty. Was effectively
+/// zero, which cost a full candidate sweep per connection.
+const PROXY_POOL_EMPTY_RETRY: Duration = Duration::from_secs(5 * 60);
 
 /// Platforms this worker polls.
 ///
@@ -242,7 +245,7 @@ impl GrowthMetricSyncWorker {
 
         // Initial sync on startup — catches connections that became due
         // while the worker was down.
-        self.sync_cycle().await;
+        self.sync_cycle_interruptibly(&mut shutdown).await;
 
         loop {
             let next_due = self.next_due_time().await;
@@ -261,13 +264,30 @@ impl GrowthMetricSyncWorker {
                 // NOTIFY from Postgres: a new connection was created.
                 _ = listener.recv() => {
                     tracing::debug!("growth_metric_sync NOTIFY received");
-                    self.sync_cycle().await;
+                    self.sync_cycle_interruptibly(&mut shutdown).await;
                 }
                 // Scheduled wake: a connection's next sync time arrived.
                 _ = sleep(sleep_duration) => {
-                    self.sync_cycle().await;
+                    self.sync_cycle_interruptibly(&mut shutdown).await;
                 }
             }
+        }
+    }
+
+    /// A cycle that stops when the process is asked to.
+    ///
+    /// `tokio::select!` races branch *futures*, but a branch's handler body runs
+    /// after the race — so `sync_cycle().await` in a handler saw no shutdown,
+    /// outlived Docker's grace period and died on SIGKILL (137). Racing the
+    /// cycle makes every await inside it a cancellation point. Safe to cancel:
+    /// each point is its own insert and the next cycle recomputes what is due.
+    async fn sync_cycle_interruptibly(&self, shutdown: &mut watch::Receiver<bool>) {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => {
+                tracing::info!("growth metric sync cycle abandoned for shutdown");
+            }
+            () = self.sync_cycle() => {}
         }
     }
 
@@ -1184,6 +1204,20 @@ struct RedditProxyPool {
     last_refresh: Option<Instant>,
 }
 
+/// Whether the Reddit proxy pool may be rebuilt now.
+///
+/// The empty case is the point: `is_empty()` used to be checked before any
+/// clock, so an unfillable pool rebuilt itself on every call — thousands of
+/// candidates per connection, each sweep outliving the 20s timeout, so no
+/// cycle ever finished and shutdown never landed.
+fn needs_proxy_refresh(age: Option<Duration>, pool_is_empty: bool) -> bool {
+    match age {
+        None => true,
+        Some(age) if age > PROXY_POOL_TTL => true,
+        Some(age) => pool_is_empty && age > PROXY_POOL_EMPTY_RETRY,
+    }
+}
+
 impl RedditProxyPool {
     fn new() -> Self {
         Self {
@@ -1195,11 +1229,13 @@ impl RedditProxyPool {
 
     /// Returns a working proxy, refreshing the pool if stale or empty.
     /// Returns `None` if no working proxy can be found.
+    ///
+    /// See [`needs_proxy_refresh`] for when a rebuild is allowed.
     async fn get_proxy(&mut self, direct_client: &reqwest::Client) -> Option<String> {
-        let needs_refresh = self.working.is_empty()
-            || self
-                .last_refresh
-                .is_none_or(|t| t.elapsed() > PROXY_POOL_TTL);
+        let needs_refresh = needs_proxy_refresh(
+            self.last_refresh.map(|instant| instant.elapsed()),
+            self.working.is_empty(),
+        );
 
         if needs_refresh {
             self.refresh(direct_client).await;
@@ -1657,6 +1693,35 @@ async fn record_metric_point(
 mod tests {
     use super::*;
     use crowdrelay_domain::fanbase::Platform as ConnectionPlatform;
+
+    #[test]
+    fn an_unfillable_proxy_pool_backs_off_instead_of_sweeping_every_call() {
+        // Never refreshed, or older than the TTL: rebuild.
+        assert!(needs_proxy_refresh(None, true));
+        assert!(needs_proxy_refresh(None, false));
+        assert!(needs_proxy_refresh(
+            Some(PROXY_POOL_TTL + Duration::from_secs(1)),
+            false
+        ));
+
+        // The regression: an empty pool just refreshed must NOT refresh again.
+        // This was `true`, so every connection triggered a full candidate
+        // sweep, no cycle finished, and the worker was SIGKILLed on deploy.
+        assert!(!needs_proxy_refresh(Some(Duration::from_secs(1)), true));
+        assert!(!needs_proxy_refresh(Some(PROXY_POOL_EMPTY_RETRY), true));
+
+        // Past the cooldown an empty pool is worth another attempt.
+        assert!(needs_proxy_refresh(
+            Some(PROXY_POOL_EMPTY_RETRY + Duration::from_secs(1)),
+            true
+        ));
+
+        // A working pool inside its TTL is left alone.
+        assert!(!needs_proxy_refresh(
+            Some(PROXY_POOL_EMPTY_RETRY + Duration::from_secs(1)),
+            false
+        ));
+    }
 
     #[test]
     fn synced_platforms_match_the_domain() {

@@ -534,3 +534,120 @@ async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::err
     // test database is disposable, so the row is simply left behind.
     Ok(())
 }
+
+/// The brain must be able to see *where* audience is coming from, not only
+/// that it is coming.
+///
+/// Per-platform growth is what lets the strategy's template order stop being a
+/// fixed guess. The series were always there; nothing read them this way, so a
+/// tenant whose Telegram was compounding kept being sent to Reddit first.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_world_model_reports_growth_per_platform() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("platform-growth-{suffix}"))
+        .bind("Platform growth")
+        .execute(&pool)
+        .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let month_start =
+        sqlx::query_scalar::<_, OffsetDateTime>("SELECT date_trunc('month', now())::timestamptz")
+            .fetch_one(&pool)
+            .await?;
+    let before_month = month_start - time::Duration::days(2);
+
+    // Telegram compounding, YouTube flat, Signal growing.
+    seed_series(
+        &pool,
+        workspace_id,
+        "telegram",
+        "subscribers",
+        &[
+            (before_month, 1_000),
+            (now - time::Duration::hours(1), 1_400),
+        ],
+    )
+    .await?;
+    seed_series(
+        &pool,
+        workspace_id,
+        "youtube",
+        "subscribers",
+        &[
+            (before_month, 5_000),
+            (now - time::Duration::hours(1), 5_000),
+        ],
+    )
+    .await?;
+    seed_series(
+        &pool,
+        workspace_id,
+        "signal",
+        "active_fans",
+        &[(before_month, 100), (now - time::Duration::hours(1), 160)],
+    )
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    let find = |platform: &str| {
+        world
+            .platform_growth
+            .iter()
+            .find(|entry| entry.platform == platform)
+            .cloned()
+    };
+
+    let telegram = find("telegram").ok_or("telegram growth missing")?;
+    assert_eq!(telegram.audience, 1_400);
+    assert_eq!(telegram.gained_this_month, 400);
+
+    let youtube = find("youtube").ok_or("youtube growth missing")?;
+    assert_eq!(
+        youtube.gained_this_month, 0,
+        "a flat platform gained nothing"
+    );
+
+    let signal = find("signal").ok_or("signal must be ranked alongside the feeds")?;
+    assert_eq!(signal.gained_this_month, 60);
+
+    // The order the brain will actually try, given this evidence. Telegram's
+    // 400 on 1400 beats YouTube's flat 5000; Signal's 60 on 160 is weighted up
+    // but sits below the evidence floor's full confidence, so the assertion is
+    // only that the flat platform loses.
+    let strategy = crowdrelay_brain::strategy::GrowthStrategy::AggressiveDiscovery;
+    let ranked = strategy.template_priority_for(world);
+    let telegram_at = ranked.iter().position(|t| *t == "telegram-scanner");
+    let reddit_at = ranked.iter().position(|t| *t == "reddit-scanner");
+    assert!(
+        telegram_at < reddit_at,
+        "the platform returning audience should be tried before one with no measured return: {ranked:?}"
+    );
+    Ok(())
+}

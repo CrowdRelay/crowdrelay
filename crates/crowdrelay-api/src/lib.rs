@@ -408,6 +408,9 @@ fn is_control_plane_management_path(path: &str) -> bool {
             "/v1/control-plane/community-intelligence/communities/",
             "/entities",
         )
+        // Audience graph: registering communities was psql-only before this.
+        || path == "/v1/control-plane/audience-graph/places"
+        || path == "/v1/control-plane/audience-graph/places/import"
         || one_segment_after(path, "/v1/control-plane/ecosystem/flags/")
         || one_segment_after(path, "/v1/control-plane/autopilot/policies/")
         || one_segment_after(path, "/v1/control-plane/tenant-settings/")
@@ -798,6 +801,17 @@ async fn metrics(State(state): State<AppState>) -> Response {
 crowdrelay_ops_metrics_snapshot_available 1\n",
     );
 
+    // Worker liveness. The worker serves no HTTP, so Prometheus cannot scrape
+    // it directly and `up{job="crowdrelay-worker"}` does not exist. It renews
+    // its leadership lease every 15 seconds, so the age of that lease is a
+    // true heartbeat, and this process is already a scrape target.
+    body.push_str(&format!(
+        "# HELP crowdrelay_worker_lease_age_seconds Seconds since the worker last renewed its leadership lease.\n\
+# TYPE crowdrelay_worker_lease_age_seconds gauge\n\
+crowdrelay_worker_lease_age_seconds {}\n",
+        ops_snapshot.worker_lease_age_seconds,
+    ));
+
     body.push_str(&http_metrics().route_prometheus());
     let pool = state.ticketing.pool();
     let pool_size = pool.size();
@@ -926,11 +940,23 @@ impl Problem {
     }
 
     fn conflict(request_id: Option<String>) -> Self {
+        Self::conflict_because(
+            "The request cannot be applied to the current durable state.",
+            request_id,
+        )
+    }
+
+    /// A conflict that names its cause.
+    ///
+    /// The generic detail above is true of every 409 and actionable for none.
+    /// Where the repository knows why — an action that already ran, an approval
+    /// window that closed — that reason reaches the operator instead.
+    fn conflict_because(detail: &'static str, request_id: Option<String>) -> Self {
         Self {
             r#type: "https://crowdrelay.dev/problems/conflict",
             title: "Request conflicts with existing state",
             status: StatusCode::CONFLICT.as_u16(),
-            detail: "The request cannot be applied to the current durable state.",
+            detail,
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,

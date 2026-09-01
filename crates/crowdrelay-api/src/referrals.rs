@@ -253,6 +253,7 @@ fn repository_problem(error: RepositoryError, request_id: Option<String>) -> Pro
         }
         RepositoryError::NotFound => Problem::not_found(request_id),
         RepositoryError::Conflict => Problem::conflict(request_id),
+        RepositoryError::ConflictBecause(detail) => Problem::conflict_because(detail, request_id),
         RepositoryError::Unexpected => {
             tracing::error!("referral repository failed unexpectedly");
             Problem::internal(request_id)

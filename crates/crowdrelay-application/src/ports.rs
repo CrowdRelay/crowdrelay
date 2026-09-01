@@ -192,6 +192,19 @@ pub enum RepositoryError {
     /// The request conflicts with existing state (e.g. duplicate signup).
     #[error("acquisition request conflicts with existing state")]
     Conflict,
+    /// A conflict whose cause is worth telling the operator.
+    ///
+    /// Plain `Conflict` renders as "the request cannot be applied to the
+    /// current durable state", which is true of every conflict and useful for
+    /// none. An operator approving a parked action cannot tell an action that
+    /// already ran from one whose approval window closed, so a stale queue is
+    /// indistinguishable from a broken button.
+    ///
+    /// `&'static str` rather than `String`: the reasons are a closed set
+    /// written at the call site, and `Problem::detail` is itself `&'static str`,
+    /// so this carries through to the response body without allocating.
+    #[error("request conflicts with existing state: {0}")]
+    ConflictBecause(&'static str),
     /// An unexpected error occurred in the repository.
     #[error("acquisition repository failed unexpectedly")]
     Unexpected,

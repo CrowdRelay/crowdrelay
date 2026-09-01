@@ -33,6 +33,8 @@ pub struct OpsSummary {
     deliveries: QueueSummary,
     push: QueueSummary,
     watchdog: WatchdogSummary,
+    /// Liveness of the process that runs the brain, the outbox and metric sync.
+    worker: WorkerSummary,
     http: HttpRequestSummary,
     database: DatabaseRuntimeSummary,
     area: AreaRuntimeSummary,
@@ -107,6 +109,11 @@ pub(crate) struct OpsMetricsSnapshot {
     pub(crate) push_dead: i64,
     pub(crate) push_suppressed: i64,
     pub(crate) push_oldest_pending_seconds: i64,
+    /// Seconds since the worker last renewed its leadership lease.
+    ///
+    /// The worker renews every 15s; anything much above that means it is gone.
+    /// A missing lease row reads as maximally stale, never as healthy.
+    pub(crate) worker_lease_age_seconds: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -125,6 +132,7 @@ struct OpsMetricsRow {
     push_dead: i64,
     push_suppressed: i64,
     push_oldest_pending_seconds: i64,
+    worker_lease_age_seconds: i64,
 }
 
 #[derive(Debug, Deserialize)]

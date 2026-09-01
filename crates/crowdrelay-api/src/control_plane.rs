@@ -17,6 +17,12 @@ use serde::Serialize;
 use uuid::Uuid;
 
 const MAX_CONTROL_BODY_BYTES: usize = 8 * 1024;
+/// Body limit for the audience-graph bulk import alone.
+///
+/// `MAX_IMPORT_PLACES` is 500, and a place carries a name, URL, genres and
+/// notes, so the router-wide 8 KiB would reject a payload a quarter of the
+/// handler's own cap. Sized to let the handler's limit be the real one.
+const MAX_IMPORT_BODY_BYTES: usize = 512 * 1024;
 
 pub(crate) fn router(state: crate::AppState) -> Router {
     Router::new()
@@ -420,6 +426,24 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/autopilot/plays",
             get(crate::autopilot::play_ledger),
+        )
+        // ── Audience graph ────────────────────────────────────────────
+        // Where fans already gather. Until now the only way to register a
+        // community was psql against the tenant's database, because the
+        // capability existed solely under `/v1/admin` and nothing proxied it.
+        //
+        // `import` carries its own body limit: the router-wide 8 KiB is right
+        // for the bounded mutations around it, but a scan of communities is a
+        // list — the handler already caps it at MAX_IMPORT_PLACES, and a limit
+        // below that cap would reject payloads the handler is built to accept.
+        .route(
+            "/v1/control-plane/audience-graph/places",
+            get(crate::audience_graph::list_places).post(crate::audience_graph::upsert_place),
+        )
+        .route(
+            "/v1/control-plane/audience-graph/places/import",
+            post(crate::audience_graph::import_scan)
+                .layer(DefaultBodyLimit::max(MAX_IMPORT_BODY_BYTES)),
         )
         // Route-local authentication is intentional. The global middleware
         // still separates AREA and management credentials, but this guard
