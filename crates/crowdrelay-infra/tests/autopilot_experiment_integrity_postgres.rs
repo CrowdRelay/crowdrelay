@@ -2730,14 +2730,15 @@ async fn insert_executor_action_with_assignment(
     // Insert an experiment assignment linked to this action.
     let assignment_id = uuid::Uuid::now_v7();
     let experiment_uuid = uuid::Uuid::now_v7();
+    insert_experiment_design(pool, workspace_id, experiment_uuid).await;
     sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
-            arm, propensity, prediction, context, strategy,
+            arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
             contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id, trace_id)
-           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
                    '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
                    'active',$5,$6,$7)"#,
@@ -3540,14 +3541,15 @@ async fn insert_assignment_for_evidence_test(
 ) {
     let assignment_id = uuid::Uuid::now_v7();
     let experiment_uuid = uuid::Uuid::now_v7();
+    insert_experiment_design(pool, workspace_id, experiment_uuid).await;
     sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
            (workspace_id, id, experiment_uuid, unit_id, unit_kind,
-            arm, propensity, prediction, context, strategy,
+            arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
             contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
-           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
                    '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
                    'active',$5,$6)"#,
@@ -4208,14 +4210,15 @@ async fn insert_bare_assignment(
     experiment_uuid: uuid::Uuid,
     unit_id: &str,
 ) {
+    insert_experiment_design(pool, workspace_id, experiment_uuid).await;
     sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
-            arm, propensity, prediction, context, strategy,
+            arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
             contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
-           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
                    '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
                    'active','dispatched',$5)"#,
@@ -4228,6 +4231,33 @@ async fn insert_bare_assignment(
     .execute(pool)
     .await
     .expect("insert bare assignment");
+}
+
+/// Inserts the `viryaos_experiment_designs` parent row an assignment's
+/// `experiment_uuid` foreign key points at.
+///
+/// Fixtures used to mint an `experiment_uuid` and insert the assignment
+/// directly, which `fk_assignment_experiment` rejects. Production always
+/// designs an experiment before assigning units to it, so the fixture has to
+/// do the same to exercise anything downstream.
+async fn insert_experiment_design(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    experiment_uuid: uuid::Uuid,
+) {
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_designs
+             (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
+              unit_kind, holdout_probability, interference_policy, experiment_status)
+           VALUES ($1, $2, 'reddit-scanner', $3, 'target_community', 0.5, 'none', 'active')
+           ON CONFLICT (experiment_uuid) DO NOTHING"#,
+    )
+    .bind(experiment_uuid)
+    .bind(workspace_id.into_uuid())
+    .bind(experiment_uuid.to_string())
+    .execute(pool)
+    .await
+    .expect("insert experiment design");
 }
 
 /// T28a: First assignment for an action succeeds.
@@ -4281,11 +4311,11 @@ async fn t28b_second_assignment_for_same_action_fails() {
     let result = sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
-            arm, propensity, prediction, context, strategy,
+            arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
             contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
-           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
                    '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
                    'active','dispatched',$5)"#,
@@ -4375,11 +4405,11 @@ async fn t28d_null_action_id_remains_allowed() {
         sqlx::query(
             r#"INSERT INTO viryaos_experiment_assignments
                (id, workspace_id, experiment_uuid, unit_id, unit_kind,
-                arm, propensity, prediction, context, strategy,
+                arm, intended_template_id, propensity, prediction, context, strategy,
                 eligibility_criteria, selection_context, interference_policy,
                 contamination_estimate, is_interference_controllable,
                 experiment_status, execution_status, action_id)
-               VALUES ($1,$2,$3,$4,'target_community','control',0.5,
+               VALUES ($1,$2,$3,$4,'target_community','control','reddit-scanner',0.5,
                        '{}'::jsonb,'{}'::jsonb,'discovery',
                        '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
                        'active','control',NULL)"#,
@@ -4431,11 +4461,11 @@ async fn t28e_experiment_unit_uniqueness_remains_intact() {
     let result = sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
-            arm, propensity, prediction, context, strategy,
+            arm, intended_template_id, propensity, prediction, context, strategy,
             eligibility_criteria, selection_context, interference_policy,
             contamination_estimate, is_interference_controllable,
             experiment_status, execution_status, action_id)
-           VALUES ($1,$2,$3,$4,'target_community','treatment',0.5,
+           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
                    '{}'::jsonb,'{}'::jsonb,'discovery',
                    '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
                    'active','dispatched',$5)"#,

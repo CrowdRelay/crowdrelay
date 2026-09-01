@@ -426,3 +426,174 @@ async fn city_count(
     .fetch_one(pool)
     .await?)
 }
+
+/// The app-store review credential must survive being redeemed more than once.
+///
+/// Every fan action token is single-use, which is right for one mailed to a
+/// person and wrong for the one handed to Google Play: review is several
+/// reviewers, retries, and a fresh review per update, so a single-use demo
+/// login works once and then reports a conflict to everyone after — including
+/// whoever tested it before submitting. Migration 0211 allows a token to be
+/// marked reusable, restricted to `purpose = 'session'` so the rule that a
+/// stale confirmation cannot reactivate an unsubscribed fan stays intact.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn a_reusable_session_token_can_be_redeemed_more_than_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    let workspace_slug = WorkspaceSlug::parse(format!("reusable-token-{suffix}"))?;
+    seed_workspace(&pool, workspace_id, &workspace_slug).await?;
+
+    let database = test_database_config(database_url);
+    let acquisition = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        CountryCode::parse("PL")?,
+        &database,
+        true,
+        test_sensitive_response_codec(),
+    );
+    let store = PostgresFanLifecycleRepository::new(
+        pool.clone(),
+        workspace_slug,
+        &database,
+        test_sensitive_response_codec(),
+    );
+
+    // A session token acts on an already-active fan, which is the state that
+    // survives repeated use.
+    let signup = acquisition
+        .persist_fan_signup(&signup_command(workspace_id, &suffix)?)
+        .await?;
+    sqlx::query("UPDATE fans SET status = 'active' WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id.into_uuid())
+        .bind(signup.fan_id.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let token = FanActionToken::parse(run_token(&suffix, '7'))?;
+    insert_action_token(
+        &pool,
+        workspace_id,
+        signup.fan_id.into_uuid(),
+        "session",
+        &token,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE fan_action_tokens SET reusable = true
+         WHERE workspace_id = $1 AND token_hash = digest($2, 'sha256')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(token.as_str())
+    .execute(&pool)
+    .await?;
+
+    // Distinct idempotency keys, because the client mints a fresh one per
+    // request — a replay would prove nothing about reusability.
+    for attempt in 0..3 {
+        let mut command = confirmation_command(workspace_id, token.clone(), &suffix)?;
+        command.idempotency_key = IdempotencyKey::parse(format!("reuse-{attempt}-{suffix}"))?;
+        command.request_id = RequestId::parse(format!("reuse-req-{attempt}-{suffix}"))?;
+        let result = store
+            .confirm(&command)
+            .await
+            .unwrap_or_else(|error| panic!("redemption {attempt} failed: {error}"));
+        assert_eq!(result.status, FanStatus::Active);
+        assert!(
+            !result.fan_session_token.as_str().is_empty(),
+            "each redemption must mint a session"
+        );
+    }
+
+    // Being reusable waives the spent check, never the record of first use.
+    let consumed_at: Option<time::OffsetDateTime> = sqlx::query_scalar(
+        "SELECT consumed_at FROM fan_action_tokens
+         WHERE workspace_id = $1 AND token_hash = digest($2, 'sha256')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(token.as_str())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        consumed_at.is_some(),
+        "first redemption must still be recorded"
+    );
+
+    Ok(())
+}
+
+/// The waiver is opt-in. An ordinary token stays single-use, which is the
+/// behaviour every mailed link depends on.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn an_ordinary_session_token_is_still_spent_by_one_redemption()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    let workspace_slug = WorkspaceSlug::parse(format!("single-use-{suffix}"))?;
+    seed_workspace(&pool, workspace_id, &workspace_slug).await?;
+
+    let database = test_database_config(database_url);
+    let acquisition = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        CountryCode::parse("PL")?,
+        &database,
+        true,
+        test_sensitive_response_codec(),
+    );
+    let store = PostgresFanLifecycleRepository::new(
+        pool.clone(),
+        workspace_slug,
+        &database,
+        test_sensitive_response_codec(),
+    );
+    let signup = acquisition
+        .persist_fan_signup(&signup_command(workspace_id, &suffix)?)
+        .await?;
+    sqlx::query("UPDATE fans SET status = 'active' WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id.into_uuid())
+        .bind(signup.fan_id.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let token = FanActionToken::parse(run_token(&suffix, '8'))?;
+    insert_action_token(
+        &pool,
+        workspace_id,
+        signup.fan_id.into_uuid(),
+        "session",
+        &token,
+    )
+    .await?;
+
+    let mut first = confirmation_command(workspace_id, token.clone(), &suffix)?;
+    first.idempotency_key = IdempotencyKey::parse(format!("single-a-{suffix}"))?;
+    store.confirm(&first).await?;
+
+    let mut second = confirmation_command(workspace_id, token, &suffix)?;
+    second.idempotency_key = IdempotencyKey::parse(format!("single-b-{suffix}"))?;
+    second.request_id = RequestId::parse(format!("single-b-req-{suffix}"))?;
+    assert!(
+        store.confirm(&second).await.is_err(),
+        "a token that is not marked reusable must stay single-use"
+    );
+
+    Ok(())
+}

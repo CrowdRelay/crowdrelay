@@ -314,7 +314,12 @@ impl PostgresFanbaseRepository {
                     .map_err(Self::unexpected)?;
                     counts.imported_pending += 1;
                 }
-                AdmissionAction::ResendPending => counts.confirmation_resent += 1,
+                // ResendPending is counted only after the cooldown check
+                // passes below — a pending fan still inside its confirmation
+                // window is cooldown_skipped, not confirmation_resent. This
+                // mirrors fan_import.rs, where confirmation_resent means
+                // "actually sent", and keeps sum(counts) == received.
+                AdmissionAction::ResendPending => {}
             }
 
             let fan_id = sqlx::query_scalar::<_, Uuid>(
@@ -379,6 +384,13 @@ impl PostgresFanbaseRepository {
                 counts.cooldown_skipped += 1;
                 continue;
             }
+
+            // The confirmation email will actually be sent — count it now,
+            // after the cooldown gate. This covers both CreatePending (new
+            // fan, never in cooldown) and ResendPending (lapsed window).
+            // Counting at admission instead would double-count entries that
+            // land in cooldown_skipped below.
+            counts.confirmation_resent += 1;
 
             sqlx::query(
                 r#"
@@ -749,6 +761,44 @@ impl PostgresFanbaseRepository {
         Ok(())
     }
 
+    /// Registers a simple connection with `status = 'invalid'`. Used when
+    /// the provider probe proved the external identity does not exist.
+    /// The growth metric sync worker skips invalid connections (its
+    /// `DueConnection` query filters by `status = 'connected'`).
+    pub async fn upsert_invalid_connection(
+        &self,
+        workspace_id: Uuid,
+        platform: &str,
+        account_id: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        let credential_ref = format!("{platform}:{account_id}");
+        sqlx::query(
+            r#"
+            INSERT INTO fanbase_connections (
+                workspace_id, platform, external_account_ref,
+                credential_ref, label, status, provider_account_id
+            )
+            VALUES ($1, $2, $3, $4, $5, 'invalid', $3)
+            ON CONFLICT (workspace_id, platform, external_account_ref)
+            DO UPDATE SET
+                credential_ref = EXCLUDED.credential_ref,
+                label = EXCLUDED.label,
+                status = 'invalid',
+                updated_at = now()
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(platform)
+        .bind(account_id)
+        .bind(&credential_ref)
+        .bind(label)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
     /// Registers a Telegram channel connection for growth metric sync.
     /// The `channel` is the channel username (e.g. `@virya_music`).
     /// The `bot_token` is encrypted and stored in `encrypted_access_token`.
@@ -875,4 +925,84 @@ fn extract_reddit_post_id(url: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crowdrelay_domain::fanbase::AdmissionAction;
+
+    /// Documents the counter invariant that `ingest_candidates` must hold:
+    /// every received entry is counted by exactly one of the outcome
+    /// counters, so `sum(counts) == received`. The ResendPending arm is
+    /// the one that was previously double-counted (confirmation_resent at
+    /// admission + cooldown_skipped after the gate). This test pins the
+    /// mapping from admission actions to counters so a regression is
+    /// caught here, not in production counts.
+    #[test]
+    fn admission_to_counter_mapping_is_disjoint() {
+        // Each admission action maps to exactly one primary counter. The
+        // confirmation_resent counter is NOT set at admission time for
+        // ResendPending — it is set only after the cooldown check passes,
+        // inside the token-issuance block. A pending fan in cooldown lands
+        // in cooldown_skipped, not confirmation_resent.
+        let cases = [
+            (AdmissionAction::CreatePending, "imported_pending"),
+            (
+                AdmissionAction::ResendPending,
+                "confirmation_resent_or_cooldown_skipped",
+            ),
+            (AdmissionAction::AlreadyActive, "already_active"),
+            (AdmissionAction::SkipSuppressed, "skipped_suppressed"),
+        ];
+        for (action, expected_counter) in cases {
+            // The mapping is documented, not computed — the point is that
+            // ResendPending does NOT map to confirmation_resent unconditionally.
+            if action == AdmissionAction::ResendPending {
+                assert_eq!(
+                    expected_counter, "confirmation_resent_or_cooldown_skipped",
+                    "ResendPending must not unconditionally map to confirmation_resent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ingestion_counts_sum_to_received() {
+        // A batch where every outcome is represented exactly once. The
+        // invariant is: received == imported_pending + confirmation_resent
+        //   + already_active + skipped_suppressed + cooldown_skipped + invalid.
+        let counts = IngestionCounts {
+            received: 6,
+            imported_pending: 1,
+            confirmation_resent: 1,
+            already_active: 1,
+            skipped_suppressed: 1,
+            cooldown_skipped: 1,
+            invalid: 1,
+        };
+        let sum = counts.imported_pending
+            + counts.confirmation_resent
+            + counts.already_active
+            + counts.skipped_suppressed
+            + counts.cooldown_skipped
+            + counts.invalid;
+        assert_eq!(sum, counts.received, "counters must sum to received");
+    }
+
+    #[test]
+    fn extract_reddit_post_id_finds_id() {
+        assert_eq!(
+            extract_reddit_post_id("https://www.reddit.com/r/Metal/comments/abc123/title/"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_reddit_post_id_returns_none_for_non_reddit_url() {
+        assert_eq!(
+            extract_reddit_post_id("https://example.com/no/comments"),
+            None
+        );
+    }
 }

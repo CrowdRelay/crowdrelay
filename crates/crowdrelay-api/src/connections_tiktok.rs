@@ -218,7 +218,14 @@ pub async fn callback(
         .unwrap_or(86400);
 
     if access_token.is_empty() || open_id.is_empty() {
-        tracing::warn!(response = %token_data, "TikTok token response has empty access_token or open_id");
+        // Never log the raw token response — it contains access_token and
+        // refresh_token in plaintext. Record only which fields are present.
+        tracing::warn!(
+            has_access_token = !access_token.is_empty(),
+            has_open_id = !open_id.is_empty(),
+            has_refresh_token = !refresh_token.is_empty(),
+            "TikTok token response has empty access_token or open_id"
+        );
         return Problem::service_unavailable(request_id_value).into_response();
     }
 

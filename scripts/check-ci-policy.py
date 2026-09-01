@@ -111,6 +111,63 @@ else:
     if "github.ref" not in security_text and "concurrency:" in security_text:
         failures.append(".github/workflows/security.yml: concurrency must not collapse unrelated refs")
 
+
+# ---------------------------------------------------------------------------
+# Gate self-defence.
+#
+# Two commits switched off most of this repository's verification without a
+# failing test to justify it: 536092c ("fix(deploy): atomic Caddy cutover")
+# dropped 937 contract assertions from `just ci`, and 80c934a ("feat: add
+# Telegram poster") deleted both ratchets outright. Neither showed up in
+# review, because the thing that would have caught it was the thing being
+# removed.
+#
+# So the gates now guard each other: removing one fails this check. Retiring a
+# gate on purpose means deleting its clause here too, which is a visible line
+# in the diff instead of a silent absence.
+# ---------------------------------------------------------------------------
+REQUIRED_GATE_SCRIPTS = [
+    "scripts/source-size-ratchet.py",
+    "scripts/api-sql-ratchet.py",
+    "scripts/test_platform_vocabulary_v1.py",
+    "scripts/test_sql_identifiers_v1.py",
+]
+for relative in REQUIRED_GATE_SCRIPTS:
+    if not (ROOT / relative).exists():
+        failures.append(f"{relative}: required gate script was deleted")
+
+# `unittest discover` is how the ~937 source-reading assertions run. Nothing
+# else invokes them, so losing this one line silently disables all of them.
+DISCOVER = "unittest discover -s scripts -p 'test_*.py'"
+justfile = ROOT / "justfile"
+if justfile.exists():
+    just_text = justfile.read_text()
+    if DISCOVER not in just_text:
+        failures.append("justfile: the contract-test suite is no longer invoked")
+    ci_recipe = next(
+        (line for line in just_text.splitlines() if line.startswith("ci:")),
+        "",
+    )
+    for recipe in ("check", "contract-tests", "policy-checks"):
+        if recipe not in ci_recipe:
+            failures.append(f"justfile: `just ci` no longer runs `{recipe}`")
+
+ci_workflow = ROOT / ".github/workflows/ci.yml"
+if ci_workflow.exists():
+    ci_text = ci_workflow.read_text()
+    if DISCOVER not in ci_text:
+        failures.append(".github/workflows/ci.yml: the contract-test suite is no longer invoked")
+    for relative in REQUIRED_GATE_SCRIPTS:
+        if relative not in ci_text:
+            failures.append(f".github/workflows/ci.yml: no longer runs {relative}")
+    # Postgres targets are enumerated from the tree. A hand-written list
+    # covered 9 of 24 suites and nobody noticed the other 15 never ran.
+    if "crates/*/tests/*_postgres.rs" not in ci_text:
+        failures.append(
+            ".github/workflows/ci.yml: Postgres suites must be discovered, not listed by hand"
+        )
+
+
 if failures:
     for failure in failures:
         print(f"CI_POLICY=FAIL {failure}", file=sys.stderr)

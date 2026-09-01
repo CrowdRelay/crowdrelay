@@ -3,6 +3,10 @@
 mod actions;
 mod actions_execution;
 mod control;
+mod cycle_trigger;
+pub use cycle_trigger::{
+    AUTOPILOT_CYCLE_CHANNEL, CyclePreview, preview_autopilot_cycle, request_autopilot_cycle,
+};
 mod control_mutations;
 mod decisions;
 mod deliverability;

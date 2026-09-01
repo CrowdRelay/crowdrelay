@@ -109,6 +109,7 @@ impl PostgresFanLifecycleRepository {
                 fan_action_tokens.purpose,
                 fan_action_tokens.expires_at,
                 fan_action_tokens.consumed_at,
+                fan_action_tokens.reusable,
                 fans.status,
                 fans.normalized_email,
                 fans.display_name
@@ -128,7 +129,14 @@ impl PostgresFanLifecycleRepository {
         .map_err(LifecycleStoreError::from_sqlx)?
         .ok_or(LifecycleStoreError::NotFound)?;
 
-        if row.consumed_at.is_some() || row.expires_at <= OffsetDateTime::now_utc() {
+        // Expiry binds every token, reusable or not. Only the spent check is
+        // waived, and only for a token an operator marked reusable — the
+        // app-store review credential, which several reviewers redeem across
+        // several devices and re-redeem on every update.
+        if row.expires_at <= OffsetDateTime::now_utc() {
+            return Err(LifecycleStoreError::Conflict);
+        }
+        if row.consumed_at.is_some() && !row.reusable {
             return Err(LifecycleStoreError::Conflict);
         }
         let previous_status = parse_fan_status(&row.status)?;
@@ -144,6 +152,8 @@ impl PostgresFanLifecycleRepository {
         }
 
         let fan_id = FanId::from_uuid(row.fan_id);
+        // A reusable token still records when it was first redeemed — that is
+        // the audit trail — but is never blocked by it.
         sqlx::query(
             r#"
             UPDATE fan_action_tokens
@@ -461,6 +471,7 @@ impl PostgresFanLifecycleRepository {
                 fan_action_tokens.purpose,
                 fan_action_tokens.expires_at,
                 fan_action_tokens.consumed_at,
+                fan_action_tokens.reusable,
                 fans.status,
                 fans.normalized_email,
                 fans.display_name
@@ -852,6 +863,10 @@ struct LifecycleTokenRow {
     purpose: String,
     expires_at: OffsetDateTime,
     consumed_at: Option<OffsetDateTime>,
+    /// Survives being spent. Restricted by migration 0211 to
+    /// `purpose = 'session'` and a 180-day horizon; see that migration for why
+    /// `confirm` is deliberately excluded.
+    reusable: bool,
     status: String,
     normalized_email: String,
     display_name: Option<String>,

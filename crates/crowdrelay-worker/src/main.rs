@@ -21,7 +21,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{
-    autopilot::PostgresAutopilotRepository, config::Config, database, observability,
+    autopilot::PostgresAutopilotRepository,
+    community_intelligence::PostgresCommunityIntelligenceRepository, config::Config, database,
+    observability,
 };
 use crowdrelay_worker::{
     ad_conversion::AdConversionWorker,
@@ -31,6 +33,9 @@ use crowdrelay_worker::{
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     community_executor::CommunityExecutorWorker,
+    community_intelligence::{
+        adapter::SourceAdapter, brutalland::BrutallandAdapter, worker::CommunityIntelligenceWorker,
+    },
     discovery::{DiscoveryConfig, RedditDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
@@ -467,6 +472,20 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         config.database.operation_timeout,
     )
     .context("invalid growth metric sync worker configuration")?;
+
+    // Community Intelligence worker — observation layer for community surfaces.
+    // Sprint A: one adapter (Brutalland). Sprint B will add more adapters.
+    let community_intel_repo = Arc::new(PostgresCommunityIntelligenceRepository::new(
+        database.clone(),
+    ));
+    let community_intel_adapters: Vec<Arc<dyn SourceAdapter>> =
+        vec![Arc::new(BrutallandAdapter::new())];
+    let community_intel_worker = CommunityIntelligenceWorker::new(
+        community_intel_adapters,
+        community_intel_repo,
+        database.clone(),
+    );
+
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
@@ -484,6 +503,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let community_executor_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
+    let community_intel_shutdown = shutdown_receiver.clone();
 
     // Growth readiness summary: tells the operator exactly which growth
     // systems are active and what's missing. This is the single most
@@ -591,6 +611,10 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     runtime_tasks.spawn(async move {
         attribution_worker.run(attribution_shutdown).await;
         "attribution worker"
+    });
+    runtime_tasks.spawn(async move {
+        community_intel_worker.run(community_intel_shutdown).await;
+        "community intelligence worker"
     });
 
     let mut checks = interval(DATABASE_CHECK_INTERVAL);

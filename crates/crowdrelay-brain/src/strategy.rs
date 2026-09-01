@@ -25,6 +25,9 @@ impl GrowthStrategy {
     pub fn from_world_model(world: &WorldModel) -> Self {
         if world.growth_target_progress.status == TargetStatus::Behind
             && world.fan_growth_trend.is_stagnant()
+            // Discovery is the wrong lever when reach already exists but is
+            // not converting — see `reach_outruns_conversion`.
+            && !Self::reach_outruns_conversion(world)
         {
             return Self::AggressiveDiscovery;
         }
@@ -32,6 +35,15 @@ impl GrowthStrategy {
             && days <= 14
         {
             return Self::EventDriven;
+        }
+        // Audience already gathered, but almost none of it has become a fan we
+        // can address directly. Finding more communities does not fix that;
+        // publishing to the audience that already exists does. This is the
+        // aggregate-then-convert split from the North Star, and without it a
+        // tenant with 200k followers and 40 fans would be sent to look for
+        // more followers.
+        if Self::reach_outruns_conversion(world) {
+            return Self::ContentFirst;
         }
         if Self::needs_conversion_push(world) {
             return Self::SignalConversion;
@@ -43,6 +55,21 @@ impl GrowthStrategy {
             return Self::AggressiveDiscovery;
         }
         Self::ContentFirst
+    }
+
+    /// Whether the tenant's off-platform reach dwarfs the fanbase it converted
+    /// out of that reach.
+    ///
+    /// The floor keeps a tenant with 5 followers and 0 fans out of this branch:
+    /// a 10x ratio is meaningless at that scale, and their real problem is
+    /// discovery. Above the floor the ratio is real evidence that the funnel,
+    /// not the top of it, is the constraint.
+    #[must_use]
+    fn reach_outruns_conversion(world: &WorldModel) -> bool {
+        const MIN_REACH: u32 = 1_000;
+        const RATIO: u32 = 10;
+        world.off_platform_audience >= MIN_REACH
+            && world.off_platform_audience >= world.total_fans.saturating_mul(RATIO)
     }
 
     /// Whether the brain should prioritize Signal conversion workers.
@@ -212,6 +239,61 @@ impl GrowthStrategy {
 mod tests {
     use super::*;
     use crate::world_model::{GrowthTargetProgress, GrowthTrend};
+
+    #[test]
+    fn large_reach_with_a_tiny_fanbase_publishes_instead_of_discovering() {
+        // 200k reachable, 40 fans: the funnel is the constraint, not the top
+        // of it. Before this rule the brain sent them looking for more
+        // communities they already had reach into.
+        let world = WorldModel {
+            total_fans: 40,
+            off_platform_audience: 200_000,
+            fan_growth_trend: GrowthTrend::Stagnant,
+            growth_target_progress: GrowthTargetProgress {
+                status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst
+        );
+    }
+
+    #[test]
+    fn small_reach_still_discovers_even_at_a_high_ratio() {
+        // 200 reachable, 0 fans is a 200x ratio but says nothing — below the
+        // floor the tenant genuinely needs discovery.
+        let world = WorldModel {
+            total_fans: 0,
+            off_platform_audience: 200,
+            fan_growth_trend: GrowthTrend::Stagnant,
+            growth_target_progress: GrowthTargetProgress {
+                status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::AggressiveDiscovery
+        );
+    }
+
+    #[test]
+    fn an_imminent_event_still_outranks_the_conversion_gap() {
+        let world = WorldModel {
+            total_fans: 40,
+            off_platform_audience: 200_000,
+            days_to_next_event: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::EventDriven
+        );
+    }
 
     #[test]
     fn strategy_aggressive_discovery_when_behind_and_stagnant() {

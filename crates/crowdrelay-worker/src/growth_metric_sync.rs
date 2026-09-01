@@ -488,7 +488,16 @@ impl GrowthMetricSyncWorker {
         let url = format!(
             "https://www.googleapis.com/youtube/v3/channels?part=statistics&id={channel_id}&key={api_key}"
         );
-        let response = self.http_client.get(&url).send().await?;
+        // The API key is a query parameter, so it is inside the request URL
+        // and reqwest's Display would carry it into the log. Strip the URL
+        // off every error out of this call — same pattern as the Telegram
+        // and Last.fm syncs in simple_platforms.rs.
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| GrowthMetricSyncError::Http(error.without_url()))?;
         if !response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
                 "YouTube API returned HTTP {}",
@@ -635,7 +644,15 @@ impl GrowthMetricSyncWorker {
         let url = format!(
             "https://graph.facebook.com/v21.0/{page_id}?fields=name,fan_count,followers_count&access_token={token}"
         );
-        let response = self.http_client.get(&url).send().await?;
+        // The Page access token is a query parameter, so it is inside the
+        // request URL. Strip the URL off transport errors so the token
+        // cannot reach the log — same pattern as YouTube above.
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| GrowthMetricSyncError::Http(error.without_url()))?;
         if !response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
                 "Facebook Graph API returned HTTP {} for page {page_id}",
@@ -683,7 +700,14 @@ impl GrowthMetricSyncWorker {
         let url = format!(
             "https://graph.facebook.com/v21.0/{ig_user_id}?fields=username,followers_count&access_token={token}"
         );
-        let response = self.http_client.get(&url).send().await?;
+        // The Page access token is a query parameter — strip the URL off
+        // transport errors so the token cannot reach the log.
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| GrowthMetricSyncError::Http(error.without_url()))?;
         if !response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
                 "Instagram Graph API returned HTTP {} for ig_user {ig_user_id}",
@@ -875,16 +899,15 @@ impl GrowthMetricSyncWorker {
                 )));
             }
 
+            // TikTok's /v2/oauth/token/ endpoint returns fields at the root
+            // level (not wrapped in a "data" object), exactly like the
+            // authorization-code exchange in the OAuth callback. The callback
+            // handler documents this explicitly — see connections_tiktok.rs.
             let refresh_data: serde_json::Value = refresh_response.json().await?;
-            let data = refresh_data.get("data").ok_or_else(|| {
-                GrowthMetricSyncError::ProviderApi(
-                    "TikTok refresh response missing data".to_string(),
-                )
-            })?;
 
             // Refresh MUST return a new access_token. If it doesn't, the
             // refresh failed — do NOT fall back to the old expired token.
-            let new_access_token = data
+            let new_access_token = refresh_data
                 .get("access_token")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
@@ -894,11 +917,11 @@ impl GrowthMetricSyncWorker {
                 })?;
             // Some providers return a new refresh_token, some don't.
             // If a new one is provided, use it; otherwise keep the old one.
-            let new_refresh_token = data
+            let new_refresh_token = refresh_data
                 .get("refresh_token")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&refresh_token);
-            let expires_in = data
+            let expires_in = refresh_data
                 .get("expires_in")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(86400);
@@ -1677,6 +1700,37 @@ mod tests {
         let json = br#"{"items":[]}"#;
         let response: YoutubeChannelsResponse = serde_json::from_slice(json).unwrap();
         assert!(response.items.is_empty());
+    }
+
+    #[test]
+    fn tiktok_refresh_response_parses_from_root() {
+        // TikTok's /v2/oauth/token/ endpoint returns access_token,
+        // refresh_token, and expires_in at the root level — NOT wrapped
+        // in a "data" object. This is the same endpoint the OAuth callback
+        // uses (grant_type=authorization_code); the refresh uses
+        // grant_type=refresh_token but hits the same URL and gets the same
+        // response shape. The sync worker must read from the root.
+        let json = br#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":86400,"open_id":"abc","scope":"user.info.basic"}"#;
+        let refresh_data: serde_json::Value = serde_json::from_slice(json).unwrap();
+
+        // The old code read refresh_data.get("data") and always failed.
+        // Reading from the root must succeed.
+        assert!(refresh_data.get("data").is_none());
+        let access_token = refresh_data
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .expect("access_token at root");
+        let refresh_token = refresh_data
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .expect("refresh_token at root");
+        let expires_in = refresh_data
+            .get("expires_in")
+            .and_then(|v| v.as_i64())
+            .expect("expires_in at root");
+        assert_eq!(access_token, "new-access");
+        assert_eq!(refresh_token, "new-refresh");
+        assert_eq!(expires_in, 86400);
     }
 
     #[test]

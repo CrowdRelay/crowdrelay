@@ -33,7 +33,7 @@ use crowdrelay_brain::{
     GrowthTrend, RecentInsight, TenantPreferencePosterior, UnengagedTarget, WorldModel,
     agent_standing_policy,
 };
-use crowdrelay_domain::growth_metrics::NorthStarMetric;
+use crowdrelay_domain::growth_metrics::{MetricPlatform, NorthStarMetric};
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
 
 /// The worker templates the brain may dispatch, in the order the evaluator
@@ -74,8 +74,23 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     //   only `payload.rationale` and no `item` key. The cooldown is measured
     //   from the last effective run, so a failed/empty run does NOT reset
     //   the cooldown.
-    let last_runs: Vec<(String, Option<OffsetDateTime>, Option<OffsetDateTime>)> = sqlx::query_as(
-        r#"
+    //
+    // `agent_service_tasks` belongs to the TypeScript agent service and no
+    // migration here creates it, so on a fresh deployment it does not exist
+    // yet. Querying it unguarded made the whole snapshot load fail, which meant
+    // the brain could not form a world model at all until that service had
+    // started — a startup order dependency nothing declared. "The table is not
+    // there" and "the table is empty" mean the same thing to this query: no
+    // template has run yet. Treat them the same.
+    let tasks_table_exists =
+        sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(map_sqlx)?;
+    let last_runs: Vec<(String, Option<OffsetDateTime>, Option<OffsetDateTime>)> =
+        if tasks_table_exists {
+            sqlx::query_as(
+                r#"
         SELECT ast.template_id,
                MAX(ast.created_at) AS last_any_run,
                MAX(CASE WHEN ao.payload ? 'item'
@@ -85,11 +100,15 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         WHERE ast.workspace_id = $1
         GROUP BY ast.template_id
         "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_all(pool)
+            .await
+            .map_err(map_sqlx)?
+        } else {
+            tracing::info!("agent_service_tasks is absent; treating every template as never run");
+            Vec::new()
+        };
 
     // Load workspace situation: upcoming events, fan growth, unengaged targets.
     // Only `published` events are publicly announced and promotable; the
@@ -153,9 +172,11 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // and marks them consumed after planning. This closes the feedback loop.
     // We join with agent_service_tasks to get the template_id that produced
     // each insight, so the brain can attach insights to the right snapshot.
-    let insights: Vec<(uuid::Uuid, String, String, String, String, Option<String>)> =
-        sqlx::query_as(
-            r#"
+    // The join is dropped when that table is absent (see above): the query
+    // already coalesces a missing template_id to 'unknown', which is the right
+    // answer when the service that records them has never run. The two strings
+    // are constants, not interpolated input.
+    const INSIGHTS_WITH_TEMPLATE: &str = r#"
             SELECT ao.id,
                    COALESCE(ast.template_id, 'unknown') AS template_id,
                    ao.kind,
@@ -170,8 +191,28 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
               AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
             ORDER BY ao.created_at DESC
             LIMIT 50
-            "#,
-        )
+            "#;
+    const INSIGHTS_WITHOUT_TEMPLATE: &str = r#"
+            SELECT ao.id,
+                   'unknown'::text AS template_id,
+                   ao.kind,
+                   COALESCE(ao.payload->'item'->>'headline', ao.payload->'item'->>'subject', '(no headline)') AS headline,
+                   COALESCE(ao.payload->'item'->>'detail', ao.payload->'item'->>'body', '') AS detail,
+                   ao.payload->'item'->>'recommended_action' AS recommended_action
+            FROM agent_outcomes ao
+            WHERE ao.workspace_id = $1
+              AND ao.status = 'processed'
+              AND ao.consumed_at IS NULL
+              AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
+            ORDER BY ao.created_at DESC
+            LIMIT 50
+            "#;
+    let insights: Vec<(uuid::Uuid, String, String, String, String, Option<String>)> =
+        sqlx::query_as(if tasks_table_exists {
+            INSIGHTS_WITH_TEMPLATE
+        } else {
+            INSIGHTS_WITHOUT_TEMPLATE
+        })
         .bind(workspace_id.into_uuid())
         .fetch_all(pool)
         .await
@@ -618,6 +659,88 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             _ => (total_signal_installs, signal_installs_this_month),
         };
 
+    // Off-platform audience across every connected feed.
+    //
+    // The north star above reads one platform. This reads all of them, using
+    // each platform's audience-size key so plays are never added to people.
+    // Same baseline rule as the north star: points hold absolute levels, so
+    // "this month" is latest minus the level at the month boundary, and a
+    // series first seen this month falls back to its own first reading.
+    let audience_keys: Vec<(&str, &str)> = MetricPlatform::ALL
+        .into_iter()
+        .filter(|platform| platform.is_off_platform_feed())
+        .filter_map(|platform| {
+            platform
+                .audience_metric_key()
+                .map(|key| (platform.as_str(), key))
+        })
+        .collect();
+    let audience_platforms: Vec<&str> = audience_keys.iter().map(|(p, _)| *p).collect();
+    let audience_metric_keys: Vec<&str> = audience_keys.iter().map(|(_, k)| *k).collect();
+
+    let audience_row: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        WITH wanted AS (
+            SELECT * FROM unnest($2::text[], $3::text[]) AS t(platform, metric_key)
+        ),
+        target_series AS (
+            SELECT s.id, s.platform
+            FROM viryaos_growth_metric_series s
+            JOIN wanted w ON w.platform = s.platform AND w.metric_key = s.metric_key
+            WHERE s.workspace_id = $1 AND s.active
+        ),
+        points AS (
+            SELECT p.series_id, s.platform, p.captured_at, p.value
+            FROM viryaos_growth_metric_points p
+            JOIN target_series s ON s.id = p.series_id
+            WHERE p.workspace_id = $1
+        ),
+        latest AS (
+            SELECT DISTINCT ON (series_id) series_id, platform, captured_at, value
+            FROM points ORDER BY series_id, captured_at DESC
+        ),
+        before_month AS (
+            SELECT DISTINCT ON (series_id) series_id, value
+            FROM points
+            WHERE captured_at < date_trunc('month', now())
+            ORDER BY series_id, captured_at DESC
+        ),
+        first_in_month AS (
+            SELECT DISTINCT ON (series_id) series_id, value
+            FROM points
+            WHERE captured_at >= date_trunc('month', now())
+            ORDER BY series_id, captured_at ASC
+        ),
+        baseline AS (
+            SELECT l.series_id, COALESCE(b.value, f.value, 0) AS value
+            FROM latest l
+            LEFT JOIN before_month b ON b.series_id = l.series_id
+            LEFT JOIN first_in_month f ON f.series_id = l.series_id
+        )
+        SELECT
+            COALESCE((SELECT SUM(value) FROM latest), 0)::bigint,
+            GREATEST(
+                COALESCE((SELECT SUM(value) FROM latest), 0)
+                    - COALESCE((SELECT SUM(value) FROM baseline), 0),
+                0
+            )::bigint,
+            (SELECT COUNT(DISTINCT platform) FROM latest)::bigint,
+            (SELECT COUNT(DISTINCT platform) FROM latest
+             WHERE captured_at > now() - interval '7 days')::bigint
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&audience_platforms)
+    .bind(&audience_metric_keys)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?
+    .unwrap_or((0, 0, 0, 0));
+    let off_platform_audience = u32::try_from(audience_row.0.max(0)).unwrap_or(u32::MAX);
+    let off_platform_audience_this_month = u32::try_from(audience_row.1.max(0)).unwrap_or(u32::MAX);
+    let connected_platforms = u32::try_from(audience_row.2.max(0)).unwrap_or(u32::MAX);
+    let fresh_platforms = u32::try_from(audience_row.3.max(0)).unwrap_or(u32::MAX);
+
     // Growth target progress.
     let growth_target = GrowthTarget::from_fan_count(total_fans, north_star, north_star_current);
     let growth_target_progress = GrowthTargetProgress::from_counts(
@@ -639,6 +762,10 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         north_star,
         north_star_current,
         north_star_this_month,
+        off_platform_audience,
+        off_platform_audience_this_month,
+        connected_platforms,
+        fresh_platforms,
         discovered_communities,
         active_communities,
         avg_community_engagement_bps,

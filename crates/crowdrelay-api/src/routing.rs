@@ -83,6 +83,26 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(connections_simple::create_bandcamp_connection),
         )
         .route(
+            "/v1/admin/connections/youtube",
+            post(connections_simple::create_youtube_connection),
+        )
+        .route(
+            "/v1/admin/connections/facebook",
+            post(connections_simple::create_facebook_connection),
+        )
+        .route(
+            "/v1/admin/connections/instagram",
+            post(connections_simple::create_instagram_connection),
+        )
+        .route(
+            "/v1/admin/connections/soundcloud",
+            post(connections_simple::create_soundcloud_connection),
+        )
+        .route(
+            "/v1/admin/connections/reddit",
+            post(connections_simple::create_reddit_connection),
+        )
+        .route(
             "/v1/beacon/invitations/exchange",
             post(beacon_signal::exchange_invite),
         )
@@ -961,6 +981,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/staff/admission/redeem", post(admission::redeem_pass))
         .merge(growth_routes())
         .merge(audience_graph::admin_routes())
+        .merge(community_intelligence_routes::admin_routes())
         .merge(portfolio::admin_routes())
         .layer(DefaultBodyLimit::max(MAX_PUBLIC_BODY_BYTES))
         .with_state(state)

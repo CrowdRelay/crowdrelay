@@ -98,11 +98,27 @@ jobs:
           set -euo pipefail
           cargo test --locked --workspace --all-targets --all-features
           node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
+          # The source-reading contract suite. ~937 assertions across 150+
+          # scripts; every one passed when this was restored. It was dropped
+          # from CI in 536092c, a deploy commit, with no failing test to
+          # justify it — the scripts stayed in the tree and stopped running.
+          python3 -m unittest discover -s scripts -p 'test_*.py'
           bash scripts/audit-public-tree.sh
           python3 scripts/check-ci-policy.py
+          # Scripts `unittest discover` cannot match: hyphenated names, or no
+          # `test_` prefix. Listed explicitly or they never run.
+          python3 scripts/source-size-ratchet.py
+          python3 scripts/api-sql-ratchet.py
+          python3 scripts/test-modularity-contract.py
           python3 scripts/test_platform_vocabulary_v1.py
           python3 scripts/test_sql_identifiers_v1.py
           python3 scripts/check-postgres-major.py
+          python3 scripts/postgres18_runtime_contract.py
+          python3 scripts/area_wallet_authority_v2_contract.py
+          python3 scripts/staff_device_sessions_v2_contract.py
+          python3 scripts/test-ecosystem-contract-v2.py
+          python3 scripts/test-ops-control-plane-v2.py
+          python3 scripts/test-ecosystem-design-contract.py
           python3 scripts/test-image-provenance-policy.py
           python3 scripts/test_release_receipt.py
           python3 scripts/test_ecosystem_deploy_contract.py
@@ -246,12 +262,16 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           # autopilot_experiment_integrity_postgres is quarantined, not
-          # forgotten: all 27 of its tests insert columns the migrated schema
-          # does not have (assignment_id, interference_score, resolved_at,
-          # episode_id). Migration 0179 says the DB column stays
-          # contamination_estimate and only the Rust field was renamed, so the
-          # suite drifted from the schema and nobody saw it because this job
-          # never ran it. Re-enable once the fixtures match the migrations.
+          # forgotten. Its fixture drift is fixed (column names per migration
+          # 0179, the NOT NULL intended_template_id, and the experiment_designs
+          # parent row its foreign key needs), which took it from 14 passing to
+          # 15. The remaining 26 are not drift: they assert that recording a
+          # *treatment* assignment creates a viryaos_growth_episodes row, while
+          # experiment_assignments.rs records evidence only for the Control arm
+          # and derives episodes from evidence. That is a disagreement about
+          # intended behavior between the suite and the implementation, and
+          # picking a side is a design decision, not a fixture edit. Re-enable
+          # once that is settled.
           quarantined="autopilot_experiment_integrity_postgres"
           targets=()
           for path in crates/*/tests/*_postgres.rs; do

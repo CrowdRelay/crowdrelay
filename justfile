@@ -45,19 +45,36 @@ check: fmt lint test
 @validate-contract-assets:
     node --disable-warning=ExperimentalWarning --experimental-strip-types scripts/validate-contract-assets.ts
 
+# The source-reading contract suite: ~937 assertions over 150+ scripts.
+# `unittest discover` imports every `test_*.py`, so module-level assert
+# scripts run too — that is how most of these are written.
+@contract-tests:
+    python3 -m unittest discover -s scripts -p 'test_*.py'
+
 # Security, schema and deployment checks that complement compiler-backed tests.
+# Scripts whose names `unittest discover` cannot match (hyphens, or no `test_`
+# prefix) must be listed here explicitly or they never run.
 @policy-checks:
     bash scripts/audit-public-tree.sh
     python3 scripts/check-ci-policy.py
+    python3 scripts/source-size-ratchet.py
+    python3 scripts/api-sql-ratchet.py
+    python3 scripts/test-modularity-contract.py
     python3 scripts/test_platform_vocabulary_v1.py
     python3 scripts/test_sql_identifiers_v1.py
     python3 scripts/check-postgres-major.py
+    python3 scripts/postgres18_runtime_contract.py
+    python3 scripts/area_wallet_authority_v2_contract.py
+    python3 scripts/staff_device_sessions_v2_contract.py
+    python3 scripts/test-ecosystem-contract-v2.py
+    python3 scripts/test-ops-control-plane-v2.py
+    python3 scripts/test-ecosystem-design-contract.py
     python3 scripts/test-image-provenance-policy.py
     python3 scripts/test_release_receipt.py
     python3 scripts/test_ecosystem_deploy_contract.py
 
 # Everything a push should have passed
-ci: check validate-contract-assets policy-checks
+ci: check validate-contract-assets contract-tests policy-checks
 
 # The #[ignore]d Postgres integration tests against a disposable database.
 # Creates and migrates the database itself; safe to re-run at any time.

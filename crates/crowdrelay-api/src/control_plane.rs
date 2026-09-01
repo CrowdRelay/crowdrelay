@@ -91,6 +91,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::ecosystem::update_flag),
         )
         .route(
+            "/v1/control-plane/autopilot/cycle/preview",
+            get(crate::autopilot::preview_autopilot_cycle),
+        )
+        .route(
+            "/v1/control-plane/autopilot/cycle/run",
+            post(crate::autopilot::run_autopilot_cycle),
+        )
+        .route(
             "/v1/control-plane/autopilot/overview",
             get(crate::autopilot::overview),
         )
@@ -214,6 +222,26 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/connections/bandcamp",
             post(crate::connections_simple::create_bandcamp_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/youtube",
+            post(crate::connections_simple::create_youtube_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/facebook",
+            post(crate::connections_simple::create_facebook_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/instagram",
+            post(crate::connections_simple::create_instagram_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/soundcloud",
+            post(crate::connections_simple::create_soundcloud_connection),
+        )
+        .route(
+            "/v1/control-plane/connections/reddit",
+            post(crate::connections_simple::create_reddit_connection),
         )
         .route(
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",

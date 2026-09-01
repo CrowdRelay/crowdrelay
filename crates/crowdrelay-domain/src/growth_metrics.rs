@@ -206,6 +206,40 @@ impl MetricPlatform {
             | Self::Bandcamp => true,
         }
     }
+
+    /// The `metric_key` carrying this platform's audience *size* — the count of
+    /// people reachable there.
+    ///
+    /// A platform publishes several keys and they are not interchangeable:
+    /// Last.fm reports both `listeners` (people) and `playcount` (plays), and
+    /// Discogs reports `in_collection` (people who own a release) alongside
+    /// `in_wantlist` (people who want one). Summing a platform without picking
+    /// its headline key would add plays to people. First-party surfaces return
+    /// `None`: their reach is measured from our own tables, not from a feed.
+    #[must_use]
+    pub const fn audience_metric_key(self) -> Option<&'static str> {
+        match self {
+            Self::Website | Self::Ticketing | Self::Signal | Self::Merch => None,
+            Self::YouTube => Some("subscribers"),
+            // Reddit connections record under the `social` coverage bucket.
+            Self::Social | Self::Telegram => Some("subscribers"),
+            Self::Spotify
+            | Self::TikTok
+            | Self::SoundCloud
+            | Self::Instagram
+            | Self::Facebook
+            | Self::Bluesky => Some("followers"),
+            Self::Bandsintown => Some("trackers"),
+            Self::Discord => Some("members"),
+            // `listeners` is people; `playcount` is plays. Only the former is
+            // an audience size.
+            Self::LastFm => Some("listeners"),
+            Self::Deezer => Some("fans"),
+            // Owning a release is the stronger signal than wanting one.
+            Self::Discogs => Some("in_collection"),
+            Self::Bandcamp => Some("supporters"),
+        }
+    }
 }
 
 /// Whether a rising number is the good outcome. Refunds, unsubscribes and churn

@@ -51,7 +51,15 @@ class TeamEmailDispatchLaneContract(unittest.TestCase):
         self.assertIn("claim_due_team_email_actions", integration)
         self.assertIn("crowdrelay.team.assignment_email_requested", integration)
         self.assertIn('assert_eq!(action_status, "succeeded")', integration)
-        self.assertIn("autopilot_team_email_postgres", ci)
+        # CI used to name each Postgres target by hand, and that list covered
+        # 9 of 24 suites — this one only ran because someone remembered it.
+        # It now enumerates `crates/*/tests/*_postgres.rs`, so the guarantee is
+        # "the glob reaches this file", which is stronger than a literal match.
+        self.assertIn("crates/*/tests/*_postgres.rs", ci)
+        self.assertTrue(
+            (ROOT / "crates/crowdrelay-infra/tests/autopilot_team_email_postgres.rs").exists(),
+            "the suite the CI glob is supposed to pick up no longer exists",
+        )
         self.assertIn("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL", ci)
 
     def test_provider_success_is_monotonic_under_delayed_failure_receipts(self):

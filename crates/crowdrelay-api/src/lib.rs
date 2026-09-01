@@ -66,6 +66,7 @@ mod audience_graph;
 mod autopilot;
 mod beacon_signal;
 mod commerce;
+mod community_intelligence_routes;
 mod concert_qr;
 mod connections_simple;
 mod connections_tiktok;
@@ -174,6 +175,8 @@ pub struct AppState {
     pub(crate) response_encryption_key: SensitiveResponseKey,
     /// Shared HTTP client for outbound OAuth token exchanges.
     pub(crate) http_client: reqwest::Client,
+    /// Provider verifiers for connection creation probes.
+    pub(crate) provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
 }
 
 impl AppState {
@@ -200,6 +203,7 @@ impl AppState {
         push: push::PushPublicState,
         tenant: tenant::TenantProfile,
         response_encryption_key: SensitiveResponseKey,
+        provider_verifiers: crowdrelay_infra::provider_verification::ProviderVerifiers,
     ) -> Self {
         let ecosystem = PostgresEcosystemRepository::new(database.clone());
         let beacon_release = PostgresBeaconReleaseRepository::new(database.clone());
@@ -234,6 +238,7 @@ impl AppState {
             tenant,
             response_encryption_key,
             http_client: reqwest::Client::new(),
+            provider_verifiers,
         }
     }
 }

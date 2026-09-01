@@ -6483,6 +6483,311 @@ paths:
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
+  /admin/connections/youtube:
+    post:
+      operationId: createYoutubeConnection
+      summary: Register a YouTube connection for growth metric sync
+      description: >-
+        Creates or updates a YouTube channel connection. The channel ID is verified against the YouTube Data API v3 at creation time before the connection is stored.
+        The probe is a creation-time diagnostic only: it is not persisted and it is
+        not a durable health signal, because a connection verified now can break
+        the moment a token expires. When the provider proves the identity does not
+        exist the connection is stored with status `invalid` and the sync worker
+        skips it. When the probe cannot reach a verdict — network error, rate limit,
+        or a missing process credential — the connection is stored as `connected`
+        and reported as `unavailable`, because not knowing is not the same as knowing
+        it is wrong.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channelId]
+              properties:
+                channelId:
+                  type: string
+                  description: YouTube channel ID (starts with UC).
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "YouTube — {channelId}".
+      responses:
+        '201':
+          description: >-
+            Connection created. `status` is `connected` unless the provider proved
+            the identity is wrong, in which case it is `invalid`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [platform, status, verification]
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                    enum: [connected, invalid]
+                  verification:
+                    type: string
+                    enum: [verified, invalid, unavailable]
+                    description: Creation-time probe result. Not persisted; not a health state.
+                  displayName:
+                    type: string
+                    description: Name the provider reported, when the probe succeeded.
+                  reason:
+                    type: string
+                    description: Why the probe returned `invalid` or `unavailable`.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/facebook:
+    post:
+      operationId: createFacebookConnection
+      summary: Register a Facebook connection for growth metric sync
+      description: >-
+        Creates or updates a Facebook Page connection. The page ID is verified against the Graph API at creation time using the shared page access token.
+        The probe is a creation-time diagnostic only: it is not persisted and it is
+        not a durable health signal, because a connection verified now can break
+        the moment a token expires. When the provider proves the identity does not
+        exist the connection is stored with status `invalid` and the sync worker
+        skips it. When the probe cannot reach a verdict — network error, rate limit,
+        or a missing process credential — the connection is stored as `connected`
+        and reported as `unavailable`, because not knowing is not the same as knowing
+        it is wrong.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pageId]
+              properties:
+                pageId:
+                  type: string
+                  description: Facebook Page ID (numeric).
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Facebook — {pageId}".
+      responses:
+        '201':
+          description: >-
+            Connection created. `status` is `connected` unless the provider proved
+            the identity is wrong, in which case it is `invalid`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [platform, status, verification]
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                    enum: [connected, invalid]
+                  verification:
+                    type: string
+                    enum: [verified, invalid, unavailable]
+                    description: Creation-time probe result. Not persisted; not a health state.
+                  displayName:
+                    type: string
+                    description: Name the provider reported, when the probe succeeded.
+                  reason:
+                    type: string
+                    description: Why the probe returned `invalid` or `unavailable`.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/instagram:
+    post:
+      operationId: createInstagramConnection
+      summary: Register a Instagram connection for growth metric sync
+      description: >-
+        Creates or updates an Instagram Business account connection. The account ID is verified against the Graph API at creation time using the shared Facebook page access token.
+        The probe is a creation-time diagnostic only: it is not persisted and it is
+        not a durable health signal, because a connection verified now can break
+        the moment a token expires. When the provider proves the identity does not
+        exist the connection is stored with status `invalid` and the sync worker
+        skips it. When the probe cannot reach a verdict — network error, rate limit,
+        or a missing process credential — the connection is stored as `connected`
+        and reported as `unavailable`, because not knowing is not the same as knowing
+        it is wrong.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [igUserId]
+              properties:
+                igUserId:
+                  type: string
+                  description: Instagram Business account ID (numeric).
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Instagram — {igUserId}".
+      responses:
+        '201':
+          description: >-
+            Connection created. `status` is `connected` unless the provider proved
+            the identity is wrong, in which case it is `invalid`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [platform, status, verification]
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                    enum: [connected, invalid]
+                  verification:
+                    type: string
+                    enum: [verified, invalid, unavailable]
+                    description: Creation-time probe result. Not persisted; not a health state.
+                  displayName:
+                    type: string
+                    description: Name the provider reported, when the probe succeeded.
+                  reason:
+                    type: string
+                    description: Why the probe returned `invalid` or `unavailable`.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/soundcloud:
+    post:
+      operationId: createSoundcloudConnection
+      summary: Register a SoundCloud connection for growth metric sync
+      description: >-
+        Creates or updates a SoundCloud artist connection. The permalink is normalized to its canonical form so the same account cannot be connected twice under different spellings, then verified by fetching the public profile page.
+        The probe is a creation-time diagnostic only: it is not persisted and it is
+        not a durable health signal, because a connection verified now can break
+        the moment a token expires. When the provider proves the identity does not
+        exist the connection is stored with status `invalid` and the sync worker
+        skips it. When the probe cannot reach a verdict — network error, rate limit,
+        or a missing process credential — the connection is stored as `connected`
+        and reported as `unavailable`, because not knowing is not the same as knowing
+        it is wrong.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permalink]
+              properties:
+                permalink:
+                  type: string
+                  description: SoundCloud permalink. A full profile URL is accepted and normalized to the permalink (e.g. "https://soundcloud.com/virya/" becomes "virya").
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "SoundCloud — {permalink}".
+      responses:
+        '201':
+          description: >-
+            Connection created. `status` is `connected` unless the provider proved
+            the identity is wrong, in which case it is `invalid`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [platform, status, verification]
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                    enum: [connected, invalid]
+                  verification:
+                    type: string
+                    enum: [verified, invalid, unavailable]
+                    description: Creation-time probe result. Not persisted; not a health state.
+                  displayName:
+                    type: string
+                    description: Name the provider reported, when the probe succeeded.
+                  reason:
+                    type: string
+                    description: Why the probe returned `invalid` or `unavailable`.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /admin/connections/reddit:
+    post:
+      operationId: createRedditConnection
+      summary: Register a Reddit connection for growth metric sync
+      description: >-
+        Creates or updates a subreddit connection. The name is normalized to its canonical form, then verified against the subreddit's public about.json.
+        The probe is a creation-time diagnostic only: it is not persisted and it is
+        not a durable health signal, because a connection verified now can break
+        the moment a token expires. When the provider proves the identity does not
+        exist the connection is stored with status `invalid` and the sync worker
+        skips it. When the probe cannot reach a verdict — network error, rate limit,
+        or a missing process credential — the connection is stored as `connected`
+        and reported as `unavailable`, because not knowing is not the same as knowing
+        it is wrong.
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subreddit]
+              properties:
+                subreddit:
+                  type: string
+                  description: Subreddit name. "Metal", "r/Metal" and "/r/Metal/" all normalize to "Metal".
+                  maxLength: 200
+                label:
+                  type: string
+                  description: Optional display label. Defaults to "Reddit — {subreddit}".
+      responses:
+        '201':
+          description: >-
+            Connection created. `status` is `connected` unless the provider proved
+            the identity is wrong, in which case it is `invalid`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [platform, status, verification]
+                properties:
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                    enum: [connected, invalid]
+                  verification:
+                    type: string
+                    enum: [verified, invalid, unavailable]
+                    description: Creation-time probe result. Not persisted; not a health state.
+                  displayName:
+                    type: string
+                    description: Name the provider reported, when the probe succeeded.
+                  reason:
+                    type: string
+                    description: Why the probe returned `invalid` or `unavailable`.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
   /admin/portfolio/organization:
     post:
       operationId: createPortfolioOrganization

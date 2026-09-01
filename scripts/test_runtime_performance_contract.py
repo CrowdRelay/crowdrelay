@@ -116,15 +116,25 @@ class RuntimePerformanceContract(unittest.TestCase):
             ROOT / "crates/crowdrelay-worker/src",
             ROOT / "crates/crowdrelay-infra/src",
         ]
+        # `MissedTickBehavior` is written both bare and fully qualified across
+        # the tree; both compile to the same behavior, and this check is about
+        # behavior. Matching only the bare spelling made the contract miss
+        # `leadership.rs` entirely.
+        skips_missed_ticks = re.compile(
+            r"set_missed_tick_behavior\(\s*(?:tokio::time::)?MissedTickBehavior::Skip\s*\)"
+        )
+        # `\b` before `interval` is load-bearing: it excludes `make_interval(`,
+        # `jitter_interval(` and `recommended_interval(`, none of which tick.
+        creates_a_ticker = re.compile(r"\binterval\(")
         interval_sources = []
         for source_root in roots:
             for path in source_root.rglob("*.rs"):
                 text = path.read_text()
-                if re.search(r"\binterval\(", text):
+                if creates_a_ticker.search(text):
                     interval_sources.append(path)
-                    self.assertIn(
-                        "set_missed_tick_behavior(MissedTickBehavior::Skip)",
+                    self.assertRegex(
                         text,
+                        skips_missed_ticks,
                         f"{path.relative_to(ROOT)} may burst after a stall",
                     )
         self.assertGreaterEqual(len(interval_sources), 8)

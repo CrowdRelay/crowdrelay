@@ -14,11 +14,21 @@ use crowdrelay_application::{
 };
 use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
 use crowdrelay_infra::autopilot::PostgresAutopilotRepository;
+use sqlx::postgres::PgListener;
 use time::OffsetDateTime;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval},
 };
+
+/// NOTIFY channel an operator's "run a cycle now" request arrives on.
+///
+/// A manual run wakes this loop rather than executing anywhere else, so it
+/// takes the identical path as a scheduled tick — including the 24-hour action
+/// quota, which is enforced in the same transaction that writes an action.
+/// There is deliberately no second code path to keep in step, and therefore no
+/// way for the button to outrun the guardrails.
+pub const AUTOPILOT_CYCLE_CHANNEL: &str = "autopilot_cycle";
 
 const ACTION_BATCH_SIZE: u32 = 32;
 const MEASUREMENT_BATCH_SIZE: u32 = 16;
@@ -56,11 +66,50 @@ impl AutopilotWorker {
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut ticks = interval(self.poll_interval);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // The listener is optional on purpose. Losing it costs the manual
+        // trigger, not the scheduled cycle, so a listener that will not connect
+        // must not take the autopilot down with it.
+        let mut listener = match PgListener::connect_with(self.repository.pool()).await {
+            Ok(mut listener) => match listener.listen(AUTOPILOT_CYCLE_CHANNEL).await {
+                Ok(()) => Some(listener),
+                Err(error) => {
+                    tracing::warn!(error = %error, "autopilot cycle listener could not subscribe; scheduled cycles continue");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(error = %error, "autopilot cycle listener unavailable; scheduled cycles continue");
+                None
+            }
+        };
+
         loop {
+            let notified = async {
+                match listener.as_mut() {
+                    Some(listener) => listener.recv().await.map(|_| ()).map_err(|error| {
+                        tracing::warn!(error = %error, "autopilot cycle listener dropped");
+                    }),
+                    // No listener: never resolve, so `select!` falls through to
+                    // the tick arm exactly as it did before.
+                    None => std::future::pending().await,
+                }
+            };
+
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
+                    }
+                }
+                result = notified => {
+                    if result.is_err() {
+                        listener = None;
+                        continue;
+                    }
+                    tracing::info!("ViryaOS Autopilot cycle requested by operator");
+                    if let Err(error) = self.run_once(OffsetDateTime::now_utc()).await {
+                        tracing::warn!(error = %error, "ViryaOS Autopilot cycle failed");
                     }
                 }
                 _ = ticks.tick() => {

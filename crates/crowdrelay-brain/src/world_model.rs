@@ -45,6 +45,29 @@ pub struct WorldModel {
     /// This-month delta for the north star metric.
     pub north_star_this_month: u32,
 
+    // ── Off-platform audience ──
+    /// Total reachable audience summed across every connected off-platform
+    /// feed, using each platform's audience-size key.
+    ///
+    /// The north star is one number from one platform. An operator who has
+    /// connected thirteen platforms has thirteen audiences, and without this
+    /// the brain could not see twelve of them: the reach it can actually
+    /// address was invisible to every strategy decision.
+    ///
+    /// Deliberately a sum of distinct platform audiences, not a unique-person
+    /// count. The same fan following on Spotify and Bandcamp counts twice —
+    /// there is no cross-platform identity to deduplicate on, so this is
+    /// "addressable slots", not "people".
+    pub off_platform_audience: u32,
+    /// Growth in that audience since the start of this month.
+    pub off_platform_audience_this_month: u32,
+    /// Connected feeds the brain has any observation for.
+    pub connected_platforms: u32,
+    /// Connected feeds whose newest observation is recent enough to act on.
+    /// A gap between this and `connected_platforms` is measurement debt: the
+    /// brain is blind on those platforms even though they are configured.
+    pub fresh_platforms: u32,
+
     // ── Community reach state ──
     /// Total discovered communities (discovery_places with status='active').
     pub discovered_communities: u32,

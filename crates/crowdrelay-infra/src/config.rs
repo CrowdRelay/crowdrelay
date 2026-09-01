@@ -68,6 +68,12 @@ const AUTOPILOT_POLL_INTERVAL_MS_KEY: &str = "CROWDRELAY_AUTOPILOT_POLL_INTERVAL
 const AGENT_OUTCOMES_ENABLED_KEY: &str = "CROWDRELAY_AGENT_OUTCOMES_ENABLED";
 const REDDIT_PROXY_URL_KEY: &str = "CROWDRELAY_REDDIT_PROXY_URL";
 const AGENT_SERVICE_URL_KEY: &str = "CROWDRELAY_AGENT_SERVICE_URL";
+/// YouTube Data API v3 key. Shared by the growth metric sync worker and
+/// the connection creation verifier.
+const YOUTUBE_API_KEY: &str = "CROWDRELAY_YOUTUBE_API_KEY";
+/// Facebook Page access token for Graph API calls. Shared by the growth
+/// metric sync worker and the connection creation verifier.
+const FACEBOOK_PAGE_ACCESS_TOKEN_KEY: &str = "CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN";
 const ADMIN_API_KEY_KEY: &str = "CROWDRELAY_ADMIN_API_KEY";
 const STAFF_API_KEY_KEY: &str = "CROWDRELAY_STAFF_API_KEY";
 const QR_SIGNING_SECRET_KEY: &str = "CROWDRELAY_QR_SIGNING_SECRET";
@@ -158,6 +164,8 @@ const KNOWN_KEYS: &[&str] = &[
     AGENT_OUTCOMES_ENABLED_KEY,
     REDDIT_PROXY_URL_KEY,
     AGENT_SERVICE_URL_KEY,
+    YOUTUBE_API_KEY,
+    FACEBOOK_PAGE_ACCESS_TOKEN_KEY,
     ADMIN_API_KEY_KEY,
     STAFF_API_KEY_KEY,
     QR_SIGNING_SECRET_KEY,
@@ -236,6 +244,12 @@ pub struct Config {
     /// Reddit session cookies (obtained by the Playwright scraper) for
     /// authenticated JSON API access. Default: `http://127.0.0.1:8095`.
     pub agent_service_url: String,
+    /// YouTube Data API v3 key. Used by the growth metric sync worker and
+    /// the connection creation verifier.
+    pub youtube_api_key: Option<String>,
+    /// Facebook Page access token for Graph API calls. Used by the growth
+    /// metric sync worker and the connection creation verifier.
+    pub facebook_page_access_token: Option<String>,
     pub admission_security: AdmissionSecurityConfig,
     /// Optional secret-backed team contacts used only to bootstrap routing identities.
     pub team_operations: TeamOperationsConfig,
@@ -399,6 +413,16 @@ impl Config {
             .filter(|v| !v.is_empty())
             .map(|v| v.to_owned())
             .unwrap_or_else(|| "http://127.0.0.1:8095".to_owned());
+        let youtube_api_key = values
+            .get(YOUTUBE_API_KEY)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_owned());
+        let facebook_page_access_token = values
+            .get(FACEBOOK_PAGE_ACCESS_TOKEN_KEY)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_owned());
         let autopilot_poll_interval = parse_bounded_duration(
             values.get(AUTOPILOT_POLL_INTERVAL_MS_KEY),
             AUTOPILOT_POLL_INTERVAL_MS_KEY,
@@ -458,6 +482,8 @@ impl Config {
             agent_outcomes_enabled,
             reddit_proxy_url,
             agent_service_url,
+            youtube_api_key,
+            facebook_page_access_token,
             admission_security,
             team_operations,
             response_encryption_key,

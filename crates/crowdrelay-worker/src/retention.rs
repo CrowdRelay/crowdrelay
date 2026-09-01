@@ -208,6 +208,10 @@ impl RetentionWorker {
             consumed_agent_outcomes_deleted,
             RetentionStep::ConsumedAgentOutcomes
         );
+        execute_step!(
+            community_observations_deleted,
+            RetentionStep::ExpiredCommunityObservations
+        );
 
         if let Some(error) = first_failure {
             return Err(error);
@@ -284,6 +288,9 @@ impl RetentionWorker {
             RetentionStep::ConsumedAgentOutcomes => {
                 delete_consumed_agent_outcomes(&mut transaction, self.batch_size).await?
             }
+            RetentionStep::ExpiredCommunityObservations => {
+                delete_expired_community_observations(&mut transaction, self.batch_size).await?
+            }
         };
 
         transaction
@@ -311,6 +318,7 @@ enum RetentionStep {
     BeaconReleaseDeliveryPii,
     ExpiredGrowthMetricPoints,
     ConsumedAgentOutcomes,
+    ExpiredCommunityObservations,
 }
 
 impl RetentionStep {
@@ -331,6 +339,7 @@ impl RetentionStep {
             Self::BeaconReleaseDeliveryPii => "beacon_release_delivery_pii",
             Self::ExpiredGrowthMetricPoints => "expired_growth_metric_points",
             Self::ConsumedAgentOutcomes => "consumed_agent_outcomes",
+            Self::ExpiredCommunityObservations => "expired_community_observations",
         }
     }
 }
@@ -353,6 +362,7 @@ pub struct RetentionStats {
     pub beacon_release_delivery_pii_purged: u64,
     pub growth_metric_points_deleted: u64,
     pub consumed_agent_outcomes_deleted: u64,
+    pub community_observations_deleted: u64,
 }
 
 impl RetentionStats {
@@ -373,6 +383,7 @@ impl RetentionStats {
             || self.beacon_release_delivery_pii_purged > 0
             || self.growth_metric_points_deleted > 0
             || self.consumed_agent_outcomes_deleted > 0
+            || self.community_observations_deleted > 0
     }
 }
 

@@ -585,6 +585,37 @@ async fn delete_expired_growth_metric_points(
     Ok(result.rows_affected())
 }
 
+/// Community observations are an append-only time series: one row per place
+/// per sweep. Nothing reads past the trend window, so unbounded retention only
+/// grows the table. The horizon matches growth metric points (90 days) so the
+/// two evidence streams stay correlatable over the same span.
+///
+/// `community_entities` rows cascade from the observation, so deleting the
+/// parent removes them without a second step.
+async fn delete_expired_community_observations(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM community_observations AS observation
+        WHERE observation.id IN (
+            SELECT candidate.id
+            FROM community_observations AS candidate
+            WHERE candidate.observed_at < now() - interval '90 days'
+            ORDER BY candidate.observed_at, candidate.id
+            FOR UPDATE OF candidate SKIP LOCKED
+            LIMIT $1
+        )
+        "#,
+    )
+    .bind(batch_size)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}
+
 /// Deletes agent outcomes that the brain has consumed (read and factored
 /// into planning) more than 7 days ago. The 7-day window gives operators
 /// a short audit/debugging buffer before the row is permanently removed.
