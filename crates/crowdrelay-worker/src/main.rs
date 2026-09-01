@@ -141,7 +141,10 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command> {
     let rest: Vec<String> = args.collect();
     let command = match head.as_deref() {
         None | Some("run") => {
-            let standby = parse_standby_flag(&rest)?;
+            let mut standby = parse_standby_flag(&rest)?;
+            if !standby && std::env::var("CROWDRELAY_WORKER_STANDBY").as_deref() == Ok("true") {
+                standby = true;
+            }
             Command::Run { standby }
         }
         Some("migrate") => {
