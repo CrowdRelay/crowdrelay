@@ -376,3 +376,161 @@ async fn a_soundcloud_north_star_reads_the_soundcloud_series()
     );
     Ok(())
 }
+
+/// Counting activity must not be mistaken for counting places.
+///
+/// Both pipeline counters were `COUNT(*)` over a LEFT JOIN onto
+/// `community_posts`, so every extra post added another join row and another
+/// phantom community or outreach target. The error was invisible while the
+/// tables were empty and grew with exactly the activity the brain generates.
+///
+/// The direction is what makes it worse than an off-by-one: `discovered_communities`
+/// is evidence that the brain already has reach, so posting more made the brain
+/// believe it needed to find fewer places — the opposite of the truth.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("pipeline-counts-{suffix}"))
+        .bind("Pipeline counts")
+        .execute(&pool)
+        .await?;
+
+    // Three communities. Only the first will carry any posts.
+    for (name, url) in [
+        ("r/Test", "https://reddit.com/r/Test"),
+        ("r/Quiet", "https://reddit.com/r/Quiet"),
+        ("Some Discord", "https://discord.example/server"),
+    ] {
+        sqlx::query(
+            "INSERT INTO discovery_places
+               (workspace_id, place_kind, platform, name, url)
+             VALUES ($1, 'subreddit', 'reddit', $2, $3)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(name)
+        .bind(url)
+        .execute(&pool)
+        .await?;
+    }
+
+    // Two outreach targets, both still proposed.
+    let mut target_ids = Vec::new();
+    for name in ["Loud Blog", "Quiet Blog"] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO agent_outreach_targets
+               (id, workspace_id, target_kind, display_name, status)
+             VALUES ($1, $2, 'press', $3, 'proposed')",
+        )
+        .bind(id)
+        .bind(workspace_id.into_uuid())
+        .bind(name)
+        .execute(&pool)
+        .await?;
+        target_ids.push(id);
+    }
+
+    // `community_posts.action_id` is a real foreign key, so the post rows need
+    // a decision and an action above them before they can exist at all.
+    let decision_id = Uuid::now_v7();
+    let subject_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation)
+         VALUES ($1, $2, $3, 'outreach', 'discovery_place', $4,
+                 'community.post', 5000, 'require_approval', 'fixture',
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)",
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("pipeline-counts-{suffix}"))
+    .bind(subject_id)
+    .execute(&pool)
+    .await?;
+
+    // Four posts, all in one subreddit and all against one target. Under the
+    // old queries this read as four communities and four proposed targets.
+    // `community_posts.action_id` is unique, so each post needs its own action.
+    for index in 0..4 {
+        // A partial unique index forbids two in-flight actions on the same
+        // subject, so each post targets its own.
+        let action_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO viryaos_autopilot_actions
+               (id, workspace_id, decision_id, context, action_kind,
+                subject_kind, subject_id, idempotency_key, payload, status)
+             VALUES ($1, $2, $3, 'outreach', 'community.post',
+                     'discovery_place', $4, $5, '{}'::jsonb, 'queued')",
+        )
+        .bind(action_id)
+        .bind(workspace_id.into_uuid())
+        .bind(decision_id)
+        .bind(Uuid::now_v7())
+        .bind(format!("pipeline-counts-{suffix}-{index}"))
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO community_posts
+               (workspace_id, action_id, target_id, subreddit, title, body,
+                status, posted_at)
+             VALUES ($1, $2, $3, 'r/Test', $4, 'body', 'posted', now())",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .bind(target_ids[0])
+        .bind(format!("post {index}"))
+        .execute(&pool)
+        .await?;
+    }
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    assert_eq!(
+        world.discovered_communities, 3,
+        "three places exist; four posts in one of them must not read as more places"
+    );
+    assert_eq!(
+        world.active_communities, 1,
+        "one of the three places has recent posts"
+    );
+    assert_eq!(
+        world.pending_outreach_targets, 2,
+        "two targets are proposed; posts against one must not multiply it"
+    );
+
+    // No teardown. A trigger mirrors every action into `viryaos_action_ledger`,
+    // which is append-only (DELETE raises) and holds an ON DELETE RESTRICT key
+    // back to the workspace — so once a workspace has recorded an action, it
+    // cannot be deleted. That is the audit guarantee working as intended; the
+    // test database is disposable, so the row is simply left behind.
+    Ok(())
+}
