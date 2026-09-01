@@ -33,6 +33,41 @@ pub struct BrandSettingsResponse {
     pub editable_keys: Vec<&'static str>,
 }
 
+/// The north stars a tenant may choose, derived from the domain vocabulary.
+///
+/// Served rather than hard-coded in the operator UI because the list is a
+/// domain fact: it is every platform that reports an audience size, plus the
+/// two first-party metrics. The control plane used to keep its own copy of
+/// four options, which silently stopped matching the day the vocabulary grew —
+/// a tenant measured on SoundCloud could not pick SoundCloud because a
+/// TypeScript literal had never heard of it.
+///
+/// `requiresSignal` lets the UI hide the Signal north star from a tenant that
+/// has Signal switched off, without the UI needing to know why.
+pub async fn list_north_star_options(headers: HeaderMap) -> Response {
+    use crowdrelay_domain::growth_metrics::NorthStarMetric;
+
+    let options: Vec<serde_json::Value> = NorthStarMetric::all()
+        .into_iter()
+        .map(|metric| {
+            serde_json::json!({
+                "value": metric.as_str(),
+                "label": metric.display_name(),
+                "requiresSignal": metric == NorthStarMetric::SignalInstalls,
+                "isAggregate": metric.is_total_audience(),
+                "platform": metric.platform().map(|platform| platform.as_str()),
+            })
+        })
+        .collect();
+    let _ = request_id(&headers);
+    (
+        StatusCode::OK,
+        [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+        Json(serde_json::json!({ "options": options })),
+    )
+        .into_response()
+}
+
 pub async fn get_brand_settings(
     State(state): State<crate::AppState>,
     headers: HeaderMap,

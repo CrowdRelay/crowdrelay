@@ -168,6 +168,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::portfolio::decide_amplification),
         )
         .route(
+            "/v1/control-plane/tenant-settings/north-stars",
+            get(crate::tenant_settings_http::list_north_star_options),
+        )
+        .route(
             "/v1/control-plane/tenant-settings",
             get(crate::tenant_settings_http::get_brand_settings),
         )

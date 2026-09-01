@@ -32,42 +32,67 @@ const RATE_SCALE: i64 = 1_000;
 pub enum NorthStarMetric {
     #[default]
     SignalInstalls,
-    YoutubeSubscribers,
-    SpotifyFollowers,
-    BandsintownTrackers,
+    /// Every connected platform's audience, summed.
+    ///
+    /// The right north star for a tenant whose reach is spread across many
+    /// accounts rather than concentrated in one — which is most of them. A
+    /// single-platform north star answers "is YouTube growing"; this answers
+    /// "is the audience growing", which is the question the product is for.
+    TotalAudience,
+    /// One platform's audience-size metric.
+    ///
+    /// Previously only YouTube, Spotify and Bandsintown could be a north star,
+    /// so a DJ measured on SoundCloud or a pop act measured on TikTok had no
+    /// way to say what they were optimizing and silently fell back to Signal
+    /// installs — a metric that means nothing to a tenant who does not use
+    /// Signal. Every platform carrying an audience-size key now qualifies.
+    Platform(MetricPlatform),
 }
 
 impl NorthStarMetric {
+    /// Stored form. Platform north stars read `{platform}_{audience_key}`,
+    /// which is what the three original values already were — so
+    /// `youtube_subscribers`, `spotify_followers` and `bandsintown_trackers`
+    /// keep parsing to the same thing they always did.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SignalInstalls => "signal_installs",
-            Self::YoutubeSubscribers => "youtube_subscribers",
-            Self::SpotifyFollowers => "spotify_followers",
-            Self::BandsintownTrackers => "bandsintown_trackers",
+            Self::TotalAudience => "total_audience",
+            Self::Platform(platform) => platform.north_star_key(),
         }
     }
 
+    /// Every north star a tenant may choose: the two first-party metrics, plus
+    /// one per platform that reports an audience size.
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        let mut options = vec![Self::SignalInstalls, Self::TotalAudience];
+        options.extend(
+            MetricPlatform::ALL
+                .into_iter()
+                .filter(|platform| platform.audience_metric_key().is_some())
+                .map(Self::Platform),
+        );
+        options
+    }
+
+    /// Derived from `as_str` over `all`, so a platform gaining an audience key
+    /// becomes selectable without a second list to remember.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "signal_installs" => Some(Self::SignalInstalls),
-            "youtube_subscribers" => Some(Self::YoutubeSubscribers),
-            "spotify_followers" => Some(Self::SpotifyFollowers),
-            "bandsintown_trackers" => Some(Self::BandsintownTrackers),
-            _ => None,
-        }
+        Self::all()
+            .into_iter()
+            .find(|metric| metric.as_str() == value)
     }
 
-    /// The growth-metric platform this north star corresponds to, if any.
-    /// `SignalInstalls` has no platform (it's a first-party metric).
+    /// The growth-metric platform this north star reads, if any. The
+    /// first-party metrics have none: they are counted from our own tables.
     #[must_use]
     pub const fn platform(self) -> Option<MetricPlatform> {
         match self {
-            Self::SignalInstalls => None,
-            Self::YoutubeSubscribers => Some(MetricPlatform::YouTube),
-            Self::SpotifyFollowers => Some(MetricPlatform::Spotify),
-            Self::BandsintownTrackers => Some(MetricPlatform::Bandsintown),
+            Self::SignalInstalls | Self::TotalAudience => None,
+            Self::Platform(platform) => Some(platform),
         }
     }
 
@@ -77,10 +102,25 @@ impl NorthStarMetric {
     #[must_use]
     pub const fn metric_key(self) -> Option<&'static str> {
         match self {
-            Self::SignalInstalls => None,
-            Self::YoutubeSubscribers => Some("subscribers"),
-            Self::SpotifyFollowers => Some("followers"),
-            Self::BandsintownTrackers => Some("trackers"),
+            Self::SignalInstalls | Self::TotalAudience => None,
+            Self::Platform(platform) => platform.audience_metric_key(),
+        }
+    }
+
+    /// Whether this north star is the sum across every connected platform
+    /// rather than one platform or a first-party count.
+    #[must_use]
+    pub const fn is_total_audience(self) -> bool {
+        matches!(self, Self::TotalAudience)
+    }
+
+    /// Human-readable label for operator surfaces.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::SignalInstalls => "Signal installs",
+            Self::TotalAudience => "Total audience",
+            Self::Platform(platform) => platform.display_name(),
         }
     }
 }
@@ -179,6 +219,63 @@ impl MetricPlatform {
             .iter()
             .copied()
             .find(|platform| platform.as_str() == value)
+    }
+
+    /// Stored key when this platform is the tenant's north star:
+    /// `{platform}_{audience_key}`.
+    ///
+    /// Spelled out per platform rather than concatenated because `as_str`
+    /// returns `&'static str` and the pair has to be one literal. The three
+    /// values that predate this — `youtube_subscribers`, `spotify_followers`,
+    /// `bandsintown_trackers` — are unchanged, so stored settings keep parsing.
+    /// Platforms with no audience size return `""`, which `parse` never yields
+    /// because `all` filters them out first.
+    #[must_use]
+    pub const fn north_star_key(self) -> &'static str {
+        match self {
+            Self::Website | Self::Ticketing | Self::Signal | Self::Merch => "",
+            Self::Spotify => "spotify_followers",
+            Self::YouTube => "youtube_subscribers",
+            Self::Bandsintown => "bandsintown_trackers",
+            Self::Social => "social_subscribers",
+            Self::TikTok => "tiktok_followers",
+            Self::SoundCloud => "soundcloud_followers",
+            Self::Instagram => "instagram_followers",
+            Self::Facebook => "facebook_followers",
+            Self::Discord => "discord_members",
+            Self::Telegram => "telegram_subscribers",
+            Self::LastFm => "lastfm_listeners",
+            Self::Deezer => "deezer_fans",
+            Self::Discogs => "discogs_in_collection",
+            Self::Bluesky => "bluesky_followers",
+            Self::Bandcamp => "bandcamp_supporters",
+        }
+    }
+
+    /// Human-readable label for operator surfaces.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Spotify => "Spotify followers",
+            Self::YouTube => "YouTube subscribers",
+            Self::Bandsintown => "Bandsintown trackers",
+            Self::Social => "Reddit subscribers",
+            Self::Website => "Website",
+            Self::Ticketing => "Ticketing",
+            Self::Signal => "Signal",
+            Self::Merch => "Merch",
+            Self::TikTok => "TikTok followers",
+            Self::SoundCloud => "SoundCloud followers",
+            Self::Instagram => "Instagram followers",
+            Self::Facebook => "Facebook followers",
+            Self::Discord => "Discord members",
+            Self::Telegram => "Telegram subscribers",
+            Self::LastFm => "Last.fm listeners",
+            Self::Deezer => "Deezer fans",
+            Self::Discogs => "Discogs collectors",
+            Self::Bluesky => "Bluesky followers",
+            Self::Bandcamp => "Bandcamp supporters",
+        }
     }
 
     /// Whether the platform is somewhere the agent has to be *given* sight —
@@ -880,15 +977,62 @@ mod tests {
 
     #[test]
     fn north_star_metric_round_trip_is_total() {
-        for metric in [
-            NorthStarMetric::SignalInstalls,
-            NorthStarMetric::YoutubeSubscribers,
-            NorthStarMetric::SpotifyFollowers,
-            NorthStarMetric::BandsintownTrackers,
-        ] {
+        for metric in NorthStarMetric::all() {
             assert_eq!(NorthStarMetric::parse(metric.as_str()), Some(metric));
         }
         assert_eq!(NorthStarMetric::parse("unknown"), None);
+    }
+
+    #[test]
+    fn the_three_original_north_stars_still_parse() {
+        // These are live in `tenant_settings`. Widening the vocabulary must not
+        // silently reset a tenant to the default by failing to parse what is
+        // already stored.
+        for (stored, expected) in [
+            ("youtube_subscribers", MetricPlatform::YouTube),
+            ("spotify_followers", MetricPlatform::Spotify),
+            ("bandsintown_trackers", MetricPlatform::Bandsintown),
+        ] {
+            assert_eq!(
+                NorthStarMetric::parse(stored),
+                Some(NorthStarMetric::Platform(expected)),
+                "stored north star `{stored}` no longer parses"
+            );
+        }
+        assert_eq!(
+            NorthStarMetric::parse("signal_installs"),
+            Some(NorthStarMetric::SignalInstalls)
+        );
+    }
+
+    #[test]
+    fn every_platform_with_an_audience_can_be_a_north_star() {
+        // The point of the widening: a DJ measured on SoundCloud or a pop act
+        // measured on TikTok must be able to say so.
+        for platform in MetricPlatform::ALL {
+            let selectable = NorthStarMetric::all().contains(&NorthStarMetric::Platform(platform));
+            assert_eq!(
+                selectable,
+                platform.audience_metric_key().is_some(),
+                "{} is selectable as a north star iff it reports an audience",
+                platform.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_north_star_key_is_platform_and_audience_key() {
+        for platform in MetricPlatform::ALL {
+            let Some(audience_key) = platform.audience_metric_key() else {
+                assert_eq!(platform.north_star_key(), "");
+                continue;
+            };
+            assert_eq!(
+                platform.north_star_key(),
+                format!("{}_{audience_key}", platform.as_str()),
+                "north star key must stay {{platform}}_{{audience_key}}"
+            );
+        }
     }
 
     #[test]
@@ -899,17 +1043,14 @@ mod tests {
     #[test]
     fn north_star_platform_mapping() {
         assert_eq!(NorthStarMetric::SignalInstalls.platform(), None);
+        assert_eq!(NorthStarMetric::TotalAudience.platform(), None);
         assert_eq!(
-            NorthStarMetric::YoutubeSubscribers.platform(),
-            Some(MetricPlatform::YouTube)
+            NorthStarMetric::Platform(MetricPlatform::SoundCloud).platform(),
+            Some(MetricPlatform::SoundCloud)
         );
         assert_eq!(
-            NorthStarMetric::SpotifyFollowers.platform(),
-            Some(MetricPlatform::Spotify)
-        );
-        assert_eq!(
-            NorthStarMetric::BandsintownTrackers.platform(),
-            Some(MetricPlatform::Bandsintown)
+            NorthStarMetric::Platform(MetricPlatform::TikTok).metric_key(),
+            Some("followers")
         );
     }
 

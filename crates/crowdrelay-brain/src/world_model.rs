@@ -339,7 +339,11 @@ mod tests {
 
     #[test]
     fn growth_target_for_youtube_north_star_uses_subscriber_count() {
-        let target = GrowthTarget::from_fan_count(500, NorthStarMetric::YoutubeSubscribers, 1000);
+        let target = GrowthTarget::from_fan_count(
+            500,
+            NorthStarMetric::Platform(crowdrelay_domain::growth_metrics::MetricPlatform::YouTube),
+            1000,
+        );
         assert_eq!(target.north_star_target_per_month, 100); // 10% of 1000
     }
 
@@ -428,7 +432,7 @@ mod tests {
             target,
             10,
             2,
-            NorthStarMetric::YoutubeSubscribers,
+            NorthStarMetric::Platform(crowdrelay_domain::growth_metrics::MetricPlatform::YouTube),
             50,
         );
         assert_eq!(progress.north_star_progress_bps, 5_000);

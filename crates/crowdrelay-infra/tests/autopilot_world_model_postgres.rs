@@ -206,3 +206,173 @@ async fn connected_platforms_reach_the_brain_as_audience_and_north_star()
         .await?;
     Ok(())
 }
+
+/// A tenant whose reach is spread across platforms can name the whole
+/// portfolio as its north star.
+///
+/// Before the vocabulary widened, only YouTube, Spotify and Bandsintown could
+/// be a north star, so a DJ measured on SoundCloud or a pop act measured on
+/// TikTok silently fell back to Signal installs — a metric that means nothing
+/// to a tenant who does not use Signal, and one that would have reported them
+/// as having no growth at all.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn total_audience_north_star_reads_every_connected_platform()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("total-audience-{suffix}"))
+        .bind("Total audience")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'north_star_metric', 'total_audience')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let month_start =
+        sqlx::query_scalar::<_, OffsetDateTime>("SELECT date_trunc('month', now())::timestamptz")
+            .fetch_one(&pool)
+            .await?;
+    let before_month = month_start - time::Duration::days(2);
+    let recent = now - time::Duration::hours(1);
+
+    // A DJ's shape: SoundCloud and TikTok, no YouTube, no Signal.
+    seed_series(
+        &pool,
+        workspace_id,
+        "soundcloud",
+        "followers",
+        &[(before_month, 4_000), (recent, 4_600)],
+    )
+    .await?;
+    seed_series(
+        &pool,
+        workspace_id,
+        "tiktok",
+        "followers",
+        &[(before_month, 10_000), (recent, 10_400)],
+    )
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    assert_eq!(
+        world.north_star_current, 15_000,
+        "total-audience north star must be the sum across platforms"
+    );
+    assert_eq!(
+        world.north_star_this_month, 1_000,
+        "and its growth must be the summed delta, not one platform's"
+    );
+    assert_eq!(world.off_platform_audience, world.north_star_current);
+    Ok(())
+}
+
+/// A platform that was never selectable before is now a first-class north star.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_soundcloud_north_star_reads_the_soundcloud_series()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("soundcloud-ns-{suffix}"))
+        .bind("SoundCloud north star")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'north_star_metric', 'soundcloud_followers')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let month_start =
+        sqlx::query_scalar::<_, OffsetDateTime>("SELECT date_trunc('month', now())::timestamptz")
+            .fetch_one(&pool)
+            .await?;
+    seed_series(
+        &pool,
+        workspace_id,
+        "soundcloud",
+        "followers",
+        &[
+            (month_start - time::Duration::days(2), 900),
+            (now - time::Duration::hours(1), 1_150),
+        ],
+    )
+    .await?;
+    // A second platform must not leak into a single-platform north star.
+    seed_series(
+        &pool,
+        workspace_id,
+        "instagram",
+        "followers",
+        &[(now - time::Duration::hours(1), 50_000)],
+    )
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    assert_eq!(world.north_star_current, 1_150, "SoundCloud only");
+    assert_eq!(world.north_star_this_month, 250);
+    assert_eq!(
+        world.off_platform_audience, 51_150,
+        "the audience aggregate still spans both platforms"
+    );
+    Ok(())
+}

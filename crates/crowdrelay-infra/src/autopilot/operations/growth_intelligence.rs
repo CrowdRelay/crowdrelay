@@ -655,7 +655,9 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                     u32::try_from(metric_counts.1.max(0)).unwrap_or(u32::MAX),
                 )
             }
-            // SignalInstalls, and any future north star without a platform series.
+            // SignalInstalls, TotalAudience, and any future north star with no
+            // single platform series. TotalAudience is resolved below, once the
+            // aggregate it names has actually been summed.
             _ => (total_signal_installs, signal_installs_this_month),
         };
 
@@ -742,6 +744,15 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     let fresh_platforms = u32::try_from(audience_row.3.max(0)).unwrap_or(u32::MAX);
 
     // Growth target progress.
+    // A tenant whose north star is the whole portfolio reads the aggregate just
+    // computed rather than any one platform. Resolved here because the sum does
+    // not exist until the query above has run.
+    let (north_star_current, north_star_this_month) = if north_star.is_total_audience() {
+        (off_platform_audience, off_platform_audience_this_month)
+    } else {
+        (north_star_current, north_star_this_month)
+    };
+
     let growth_target = GrowthTarget::from_fan_count(total_fans, north_star, north_star_current);
     let growth_target_progress = GrowthTargetProgress::from_counts(
         growth_target,
