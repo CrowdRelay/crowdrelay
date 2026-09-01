@@ -97,7 +97,7 @@ signal-api.virya.music {
 		method GET HEAD OPTIONS
 	}
 }
-control.virya.music {
+control.virya.music, crowdrelay.music {
     encode zstd gzip
     import security_headers
 
