@@ -467,7 +467,16 @@ pub async fn internal_claim_invite_delivery_job(
         tracing::info!(job_id=%job_id, created=batch.created, requested=job.0.len(), "Latarnik invite claim lost eligibility race");
         return BeaconSignalError::Conflict.response(request_id_value);
     }
-    if let Err(error) = sqlx::query(
+    // The `status='queued'` predicate is the whole race guard, so its result
+    // has to be read.
+    //
+    // This only checked for an error. Two workers claiming the same job both
+    // got HTTP 200 and a claim token: the winner's UPDATE matched, the
+    // loser's matched nothing, and nobody noticed. The loser then delivered
+    // the same invites — the beacons receive them twice — and only discovered
+    // it had never held the claim when its report failed token validation,
+    // long after the mail had gone.
+    let claimed = match sqlx::query(
         r#"
         UPDATE viryaos_beacon_invite_delivery_jobs
         SET status='claimed',claim_token_hash=$3,claimed_by=$4,claimed_at=now(),
@@ -482,8 +491,21 @@ pub async fn internal_claim_invite_delivery_job(
     .execute(&mut *tx)
     .await
     {
-        tracing::warn!(%error, "Latarnik invite delivery claim persistence failed");
-        return BeaconSignalError::Unavailable.response(request_id_value);
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik invite delivery claim persistence failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
+    if claimed == 0 {
+        // Somebody else holds it, or it is no longer queued. Conflict is the
+        // honest answer and it stops this worker before it sends anything.
+        tracing::info!(
+            %job_id,
+            worker_id = %worker_id,
+            "Latarnik invite delivery claim lost the race; another worker holds this job"
+        );
+        return BeaconSignalError::Conflict.response(request_id_value);
     }
     if tx.commit().await.is_err() {
         return BeaconSignalError::Unavailable.response(request_id_value);
