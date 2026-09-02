@@ -165,6 +165,10 @@ impl SourceAdapter for RedditAdapter {
             .http_client
             .post(format!("{}/reddit/observe", self.agent_service_url))
             .header("Authorization", format!("Bearer {token}"))
+            // The service derives the expected token from this header, so a
+            // request without it is rejected before the bearer is even
+            // checked — a 401 that looks like a wrong key and is not.
+            .header("X-Workspace-Id", self.workspace_id.to_string())
             .json(&serde_json::json!({ "subreddit": subreddit, "limit": POST_SAMPLE }))
             .send()
             .await
