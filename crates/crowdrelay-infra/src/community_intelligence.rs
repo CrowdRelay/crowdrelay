@@ -77,6 +77,14 @@ pub struct PlaceWithLatestObservation {
     pub language: Option<String>,
     pub genres: Vec<String>,
     pub member_count: Option<i32>,
+    /// Our relationship with the place, not whether we observe it.
+    ///
+    /// The console listed 66 tracked communities with no way to record
+    /// "joined", so every visit started from zero and joining never became a
+    /// task anybody picked up.
+    pub membership_state: String,
+    pub membership_note: Option<String>,
+    pub membership_changed_at: Option<OffsetDateTime>,
     pub latest_observation_id: Option<Uuid>,
     pub latest_observed_at: Option<OffsetDateTime>,
     pub latest_source: Option<String>,
@@ -255,6 +263,44 @@ impl PostgresCommunityIntelligenceRepository {
         .map_err(CommunityIntelligenceError::unexpected)
     }
 
+    /// Records where we stand with a community.
+    ///
+    /// Joining is a human act — the operator opens the forum, reads its rules,
+    /// and asks to join under the band's own name. This is where they write
+    /// down what happened, so the next person does not repeat it.
+    ///
+    /// # Errors
+    /// Returns the underlying database error, or `NotFound` if the place does
+    /// not belong to this workspace.
+    pub async fn set_place_membership(
+        &self,
+        workspace_id: Uuid,
+        place_id: Uuid,
+        state: &str,
+        note: Option<&str>,
+        actor: &str,
+    ) -> Result<bool, CommunityIntelligenceError> {
+        let updated = sqlx::query(
+            r#"UPDATE discovery_places
+               SET membership_state = $3,
+                   membership_note = $4,
+                   membership_changed_at = now(),
+                   membership_changed_by = $5,
+                   updated_at = now()
+               WHERE workspace_id = $1 AND id = $2"#,
+        )
+        .bind(workspace_id)
+        .bind(place_id)
+        .bind(state)
+        .bind(note)
+        .bind(actor)
+        .execute(&self.pool)
+        .await
+        .map_err(CommunityIntelligenceError::unexpected)?
+        .rows_affected();
+        Ok(updated == 1)
+    }
+
     /// Returns all tracked places (forums) with their latest observation
     /// for a workspace. Uses a LEFT JOIN so places without observations
     /// still appear.
@@ -266,6 +312,8 @@ impl PostgresCommunityIntelligenceRepository {
             r#"SELECT dp.id AS place_id, dp.place_kind, dp.platform, dp.name,
                       dp.url, dp.country_code, dp.language, dp.genres,
                       dp.member_count,
+                      dp.membership_state, dp.membership_note,
+                      dp.membership_changed_at,
                       co.id AS latest_observation_id,
                       co.observed_at AS latest_observed_at,
                       co.source AS latest_source,
@@ -279,7 +327,17 @@ impl PostgresCommunityIntelligenceRepository {
                    LIMIT 1
                ) co ON true
                WHERE dp.workspace_id = $1
-               ORDER BY dp.name"#,
+               -- Unjoined and largest first: the page should open on the
+               -- community worth joining next, not on whichever name sorts
+               -- first alphabetically.
+               ORDER BY CASE dp.membership_state
+                            WHEN 'not_joined' THEN 0
+                            WHEN 'joining' THEN 1
+                            WHEN 'joined' THEN 2
+                            ELSE 3
+                        END,
+                        dp.member_count DESC NULLS LAST,
+                        dp.name"#,
         )
         .bind(workspace_id)
         .fetch_all(&self.pool)
