@@ -3400,8 +3400,11 @@ paths:
         '503': { $ref: '#/components/responses/PrivateProblem' }
     post:
       operationId: mutateBeaconNetworkAcquisition
-      summary: Request discovery, approve a reviewed candidate, preview a reviewed invite wave, or queue it
-      description: Discovery never grants outreach permission. Approving a discovered candidate requires explicit source verification and marketing-email consent evidence.
+      summary: Request discovery, import researched contacts, approve a reviewed candidate, preview a reviewed invite wave, or queue it
+      description: |
+        Discovery never grants outreach permission. Approving a discovered candidate requires explicit source verification and marketing-email consent evidence.
+
+        `import_researched` brings agent-proposed outreach targets and screened candidate routes onto the roster. Imported beacons arrive unverified and not accepting outreach, so they queue behind the same approval as anything discovery produces — research says a contact exists, not that they agreed to be contacted.
       security: [{ adminBearer: [] }]
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -3414,7 +3417,7 @@ paths:
               additionalProperties: false
               required: [action]
               properties:
-                action: { type: string, enum: [discover, approve, preview_invites, queue_invites] }
+                action: { type: string, enum: [discover, approve, preview_invites, queue_invites, import_researched] }
                 countryCode: { type: string, pattern: '^[A-Z]{2}$', default: PL }
                 targetCount: { type: integer, minimum: 1, maximum: 500, default: 100 }
                 beaconId: { type: string, format: uuid }
