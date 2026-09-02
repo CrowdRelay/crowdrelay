@@ -75,6 +75,21 @@ services:
       # `http://127.0.0.1:8095`, which resolves to the worker itself — so every
       # Reddit post the community executor tried would fail to connect.
       CROWDRELAY_AGENT_SERVICE_URL: ${CROWDRELAY_AGENT_SERVICE_URL:-http://agent-service:8095}
+      # This key is the switch between drafting and posting. Unset, the
+      # community executor runs in MANUAL MODE: it drafts the post and waits
+      # for a human to publish it and register the URL. Set, it publishes
+      # through the agents service's logged-in browser on its own.
+      #
+      # The empty default is deliberate. Letting software post to Reddit under
+      # the band's own account is a decision an operator should make on
+      # purpose, not something a deploy quietly turns on. It pairs with the
+      # agents service's own AGENT_SERVICE_AUTH_KEY.
+      CROWDRELAY_AGENT_SERVICE_AUTH_KEY: ${CROWDRELAY_AGENT_SERVICE_AUTH_KEY:-}
+      # Full auto. Off by default: holding a credential is not the same as
+      # being asked to publish under the band's own account, and a deploy
+      # should never turn that on by itself. Both this and the key above must
+      # be present before anything posts on its own.
+      CROWDRELAY_COMMUNITY_AUTO_POST: ${CROWDRELAY_COMMUNITY_AUTO_POST:-false}
     volumes:
       - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro

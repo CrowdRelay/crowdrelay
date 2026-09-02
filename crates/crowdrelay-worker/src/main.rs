@@ -374,13 +374,28 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         None
     };
     // Community engagement executor: posts approved community.engage.request
-    // actions to Reddit via the agents service browser session. When the
-    // agents service auth key is configured, posts automatically. When not
-    // configured, runs in manual mode: creates `community_posts` rows marked
-    // `awaiting_manual_post` — the operator posts manually and registers the
-    // URL via the API. Metrics polling works in both modes.
+    // actions to Reddit via the agents service browser session.
+    //
+    // Two independent questions decide the mode, and they used to be one:
+    // whether the executor *can* post (does it hold the agents service key)
+    // and whether it *may* (has an operator asked for automatic posting).
+    // Deriving "may" from "can" meant configuring a credential silently
+    // started publishing under the band's own Reddit account — a decision
+    // nobody made explicitly.
+    //
+    // Manual mode still drafts: it writes `community_posts` rows marked
+    // `awaiting_manual_post`, and an operator publishes and registers the URL.
+    // Metrics polling runs in both modes, so measurement never depends on who
+    // pressed the button.
     let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok();
-    let manual_mode = agent_service_auth_key.is_none();
+    let auto_post_requested = std::env::var("CROWDRELAY_COMMUNITY_AUTO_POST")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let has_agent_key = agent_service_auth_key.is_some();
+    let manual_mode = !auto_post_requested || !has_agent_key;
     let community_executor = match CommunityExecutorWorker::new(
         database.clone(),
         workspace_id,
@@ -391,9 +406,24 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         agent_service_auth_key,
     ) {
         Ok(worker) => {
+            // Say which of the two reasons put it in manual mode. "Not
+            // posting" with no cause is the kind of message an operator reads
+            // once and cannot act on.
             if manual_mode {
+                let reason = if !auto_post_requested {
+                    "CROWDRELAY_COMMUNITY_AUTO_POST is not enabled"
+                } else {
+                    "CROWDRELAY_AGENT_SERVICE_AUTH_KEY is missing"
+                };
                 tracing::info!(
-                    "community executor running in MANUAL MODE — posts will be drafted but not posted automatically; operator must post manually and register the URL via the API"
+                    auto_post_requested,
+                    has_agent_key,
+                    reason,
+                    "community executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them and register the URL"
+                );
+            } else {
+                tracing::info!(
+                    "community executor running in AUTOMATIC MODE — approved posts publish through the agents service browser session, bounded to one post per subreddit per 7 days and three per workspace per 24 hours"
                 );
             }
             Some(worker)
