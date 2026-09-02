@@ -257,8 +257,38 @@ pub(super) async fn schedule_effect_measurement(
         // is not. Phase 14 measures the play against its own pre-play baseline.
         | AutopilotActionPayload::RunPlayStep { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-        | AutopilotActionPayload::RequestAgentContent { .. }
-        | AutopilotActionPayload::RequestSignalPush { .. } => {}
+        | AutopilotActionPayload::RequestAgentContent { .. } => {}
+        // A Signal push exists to put the app in someone's hand, so measure
+        // exactly that: installs in the week after it went out.
+        //
+        // This sat in the bundled do-nothing arm above with 25 other variants,
+        // which is how production reached 108 succeeded actions and 9 measured
+        // ones. The metric and its observer already existed — only the
+        // scheduling was missing, so the brain kept pushing and never learned
+        // whether any of it worked.
+        //
+        // Baseline is the current install count, matching how an agent-run
+        // dispatch schedules the same kind: the observer counts endpoints
+        // created inside the window, so the delta is what moved.
+        AutopilotActionPayload::RequestSignalPush { .. } => {
+            let baseline_installs = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COUNT(*)::double precision
+                FROM fan_push_endpoints
+                WHERE workspace_id = $1 AND invalidated_at IS NULL
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            plans.push((
+                AutopilotMeasurementKind::AgentRunSignalInstalls7d,
+                action_id.into_uuid(),
+                baseline_installs,
+                now + time::Duration::days(7),
+            ));
+        }
         // Agent dispatches: measure whether the worker's intelligence
         // gathering actually grew fans. The baseline is the fan count at
         // dispatch time; the observation counts new fans in the 14-day
