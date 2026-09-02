@@ -34,6 +34,7 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, encrypt_value};
 
+mod connection_health;
 mod simple_platforms;
 use serde::Deserialize;
 use sqlx::{FromRow, PgPool, postgres::PgListener};
@@ -310,46 +311,11 @@ impl GrowthMetricSyncWorker {
                 // (e.g. Reddit proxy testing) from starving the cycle.
                 let per_conn = Duration::from_secs(20);
                 let result = timeout(per_conn, self.sync_connection(&conn)).await;
-                // Record the outcome on the connection, not only in the log.
-                //
-                // Five of production's connections — discord, telegram,
-                // lastfm, facebook, instagram — have failed on every cycle
-                // since they were created, and all five report `connected`.
-                // The cause existed only here, in a warning nobody reads,
-                // while the console showed green over channels that have
-                // never produced a metric point.
-                match result {
-                    Ok(Ok(())) => {
-                        if let Err(error) = self.record_sync_success(&conn).await {
-                            tracing::warn!(
-                                connection_id = %conn.id,
-                                error = %error,
-                                "could not record a successful sync on the connection"
-                            );
-                        }
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            connection_id = %conn.id,
-                            platform = %conn.platform,
-                            error = %error,
-                            "growth metric sync failed for connection"
-                        );
-                        self.record_sync_failure(&conn, &error.to_string()).await;
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            connection_id = %conn.id,
-                            platform = %conn.platform,
-                            "growth metric sync timed out for connection (20s)"
-                        );
-                        self.record_sync_failure(
-                            &conn,
-                            "sync timed out after 20s with no response from the provider",
-                        )
-                        .await;
-                    }
-                }
+                // Outcome goes on the connection, not only in the log: five
+                // of production's connections have failed every cycle since
+                // creation while all reporting `connected`. See
+                // connection_health.rs.
+                self.record_sync_outcome(&conn, &result).await;
             }
             Ok(())
         })
@@ -495,60 +461,6 @@ impl GrowthMetricSyncWorker {
 
     /// Syncs a single connection: fetches the metric from the provider and
     /// records the point.
-    /// Marks a connection as syncing cleanly, clearing any recorded failure.
-    async fn record_sync_success(&self, conn: &DueConnection) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            UPDATE fanbase_connections
-            SET last_sync_at = now(),
-                last_sync_error = NULL,
-                last_sync_failed_at = NULL,
-                updated_at = now()
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
-        .bind(conn.workspace_id)
-        .bind(conn.id)
-        .execute(&self.pool)
-        .await
-        .map(|_| ())
-    }
-
-    /// Records why a connection's sync failed.
-    ///
-    /// Never propagates: this runs inside the per-connection arm of the sweep,
-    /// and a bookkeeping write that fails must not stop the remaining
-    /// connections from syncing. It logs instead, which is strictly better
-    /// than the silence this replaces.
-    ///
-    /// `status` is left alone on purpose — it means "credentials are
-    /// present", and folding a provider outage into it would make a transient
-    /// failure look like a revoked credential.
-    async fn record_sync_failure(&self, conn: &DueConnection, error: &str) {
-        let trimmed: String = error.chars().take(500).collect();
-        let written = sqlx::query(
-            r#"
-            UPDATE fanbase_connections
-            SET last_sync_error = $3,
-                last_sync_failed_at = now(),
-                updated_at = now()
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
-        .bind(conn.workspace_id)
-        .bind(conn.id)
-        .bind(&trimmed)
-        .execute(&self.pool)
-        .await;
-        if let Err(write_error) = written {
-            tracing::warn!(
-                connection_id = %conn.id,
-                error = %write_error,
-                "could not record a sync failure on the connection"
-            );
-        }
-    }
-
     async fn sync_connection(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
         match conn.platform.as_str() {
             "youtube" => self.sync_youtube(conn).await,
