@@ -12,6 +12,11 @@ const TEAM_ASSIGNMENT_EMAIL_ACTION_KIND: &str = "team.assignment.email";
 /// executor-lag alerts.
 const NO_EXECUTOR_GRACE: time::Duration = time::Duration::hours(24);
 
+/// How long an execution claim may stay open before its executor is presumed
+/// gone. Well past the 15 minutes the claim path already treats as ambiguous,
+/// so a slow-but-alive executor is never settled out from under itself.
+const ABANDONED_CLAIM_GRACE: time::Duration = time::Duration::hours(2);
+
 impl PostgresAutopilotRepository {
     /// Cancels approved actions that waited out the grace window while no
     /// live executor advertised the capability their payload needs.
@@ -20,6 +25,76 @@ impl PostgresAutopilotRepository {
     /// create a second authority the claim path could disagree with. The
     /// cancel itself mirrors the expired-approval sweep: terminal status,
     /// honest error kind, no retry.
+    /// Settles execution claims whose executor never came back.
+    ///
+    /// A claim is opened when an executor takes an action and closed when it
+    /// reports. If the executor dies in between, the row sits in `claimed`
+    /// forever — production has one at 1 day 7 hours and climbing — and every
+    /// reading of "what is in flight" counts work that stopped a day ago.
+    ///
+    /// Nothing reaps these. The claim path treats a claim older than 15
+    /// minutes as ambiguous, but only when a *new* claim request arrives for
+    /// the same action, so an executor that never returns is never noticed.
+    ///
+    /// This does not guess. It reads the action's own terminal status and
+    /// makes the claim agree: the action is the authority on whether the work
+    /// happened, and a claim is only ever a record of who was doing it.
+    /// Claims whose action is still live are left alone — those are genuinely
+    /// in flight.
+    ///
+    /// # Errors
+    /// Returns the underlying `sqlx::Error` if the update cannot be applied.
+    pub async fn settle_abandoned_execution_claims(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<u64, RepositoryError> {
+        self.bounded(async move {
+            let settled = sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_execution_claims AS claim
+                SET status = CASE action.status
+                        WHEN 'succeeded' THEN 'succeeded'
+                        ELSE 'failed'
+                    END,
+                    error_kind = CASE action.status
+                        WHEN 'succeeded' THEN NULL
+                        ELSE 'executor_abandoned'
+                    END,
+                    completed_at = COALESCE(action.finished_at, $2),
+                    updated_at = $2
+                FROM viryaos_autopilot_actions AS action
+                WHERE claim.workspace_id = $1
+                  AND action.workspace_id = claim.workspace_id
+                  AND action.id = claim.action_id
+                  AND claim.status = 'claimed'
+                  AND claim.claimed_at <= $2 - $3
+                  -- Only once the action itself has stopped. A live action
+                  -- with an open claim is work in progress, not a leak.
+                  AND action.status IN ('succeeded', 'failed', 'cancelled')
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .bind(ABANDONED_CLAIM_GRACE)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx)?
+            .rows_affected();
+            if settled > 0 {
+                tracing::info!(
+                    settled,
+                    grace_minutes = ABANDONED_CLAIM_GRACE.whole_minutes(),
+                    "settled execution claims whose executor never reported; \
+                     status taken from the action, which is the authority on \
+                     whether the work happened"
+                );
+            }
+            Ok(settled)
+        })
+        .await
+    }
+
     pub async fn cancel_unexecutable_actions(
         &self,
         workspace_id: WorkspaceId,
@@ -162,18 +237,40 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // Close the attempt too, not only the action.
+            //
+            // This sweep reaps an action whose worker claimed it and then died:
+            // the claim wrote a `started` attempt, and nothing ever wrote its
+            // terminal row. Production carries 52 such orphans, so the ledger
+            // reports 108 succeeded against 141 failed when the real failure
+            // count is 193 — and anything deriving a success rate from
+            // attempts, which is what the brain calibrates against, reads its
+            // own reliability as better than it is.
+            //
+            // `INSERT ... SELECT` from the reaped rows keeps the two writes in
+            // one statement and one transaction, so the pair cannot separate
+            // the way it just did.
             sqlx::query(
                 r#"
-                UPDATE viryaos_autopilot_actions
-                SET status = 'failed',
-                    finished_at = $2,
-                    last_error_kind = 'stale_retry_exhausted'
-                WHERE workspace_id = $1
-                  AND status = 'processing'
-                  AND ($3::text IS NULL OR action_kind = $3)
-                  AND ($4::text IS NULL OR action_kind <> $4)
-                  AND started_at <= $2 - INTERVAL '15 minutes'
-                  AND attempt_count >= 5
+                WITH reaped AS (
+                    UPDATE viryaos_autopilot_actions
+                    SET status = 'failed',
+                        finished_at = $2,
+                        last_error_kind = 'stale_retry_exhausted'
+                    WHERE workspace_id = $1
+                      AND status = 'processing'
+                      AND ($3::text IS NULL OR action_kind = $3)
+                      AND ($4::text IS NULL OR action_kind <> $4)
+                      AND started_at <= $2 - INTERVAL '15 minutes'
+                      AND attempt_count >= 5
+                    RETURNING id, attempt_count
+                )
+                INSERT INTO viryaos_autopilot_action_attempts (
+                    workspace_id, action_id, attempt_number, outcome, error_kind, occurred_at
+                )
+                SELECT $1, reaped.id, reaped.attempt_count, 'failed',
+                       'stale_retry_exhausted', $2
+                FROM reaped
                 "#,
             )
             .bind(workspace_id.into_uuid())

@@ -170,6 +170,28 @@ pub async fn import_researched_beacons(
         });
     }
 
+    // Every source id already on the roster, in one query.
+    //
+    // This used to be a `SELECT count(*)` per contact inside the loop — 87
+    // round trips for the pools production carries, all to answer a question
+    // one query answers for every row at once. The set is small (the roster is
+    // hundreds, not millions) and it is read inside the same transaction as
+    // the inserts, so a concurrent import cannot make it stale: the roster's
+    // own uniqueness key still catches anything this set misses.
+    let already_imported: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT metadata -> 'imported_from' ->> 'source_id'
+        FROM viryaos_beacons
+        WHERE workspace_id = $1
+          AND metadata -> 'imported_from' ->> 'source_id' IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+
     let mut summary = BeaconImportSummary::default();
 
     for contact in contacts {
@@ -189,18 +211,7 @@ pub async fn import_researched_beacons(
         // Provenance first: it is what makes a second Import a no-op for rows
         // whose contact_email is NULL, where the roster's own uniqueness key
         // cannot tell two different contacts apart.
-        let already = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT count(*) FROM viryaos_beacons
-            WHERE workspace_id = $1
-              AND metadata -> 'imported_from' ->> 'source_id' = $2
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(contact.source_id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        if already > 0 {
+        if already_imported.contains(&contact.source_id.to_string()) {
             summary.already_present += 1;
             continue;
         }
