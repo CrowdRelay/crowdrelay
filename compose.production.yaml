@@ -90,6 +90,17 @@ services:
       # should never turn that on by itself. Both this and the key above must
       # be present before anything posts on its own.
       CROWDRELAY_COMMUNITY_AUTO_POST: ${CROWDRELAY_COMMUNITY_AUTO_POST:-false}
+      # Last.fm listener counts. The growth metric sync names this variable in
+      # its own failure message — "Last.fm API key not configured
+      # (CROWDRELAY_LASTFM_API_KEY)" — and compose never passed it through, so
+      # setting it in .env.production had no effect and the connection failed
+      # every cycle while telling the operator exactly what to set.
+      CROWDRELAY_LASTFM_API_KEY: ${CROWDRELAY_LASTFM_API_KEY:-}
+      # Comma-separated subreddit search queries for community discovery. The
+      # worker logs "reddit discovery is OFF — set
+      # CROWDRELAY_DISCOVERY_REDDIT_QUERIES" on every boot, which was
+      # unactionable while compose dropped the variable.
+      CROWDRELAY_DISCOVERY_REDDIT_QUERIES: ${CROWDRELAY_DISCOVERY_REDDIT_QUERIES:-}
     volumes:
       - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
