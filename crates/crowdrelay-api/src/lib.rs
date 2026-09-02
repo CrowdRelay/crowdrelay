@@ -408,6 +408,19 @@ fn is_control_plane_management_path(path: &str) -> bool {
             "/v1/control-plane/community-intelligence/communities/",
             "/entities",
         )
+        // Registering a route is not enough — a control-plane path missing
+        // from this list is unreachable, and answers 404 rather than saying
+        // it was refused. Both of these shipped that way for one deploy.
+        || one_segment_with_suffix(
+            path,
+            "/v1/control-plane/community-intelligence/communities/",
+            "/membership",
+        )
+        || one_segment_with_suffix(
+            path,
+            "/v1/control-plane/community-intelligence/communities/",
+            "/intro-draft",
+        )
         // Beacon management. The read surfaces were allowlisted long ago; the
         // writes never were, so the roster was observable and unchangeable.
         || path == "/v1/control-plane/autopilot/beacons"
