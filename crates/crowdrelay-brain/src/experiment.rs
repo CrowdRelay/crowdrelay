@@ -385,6 +385,18 @@ pub enum ExperimentStatus {
     /// The eligible population is too small. Candidates execute as normal
     /// actions with observational evidence quality — no holdout, no
     /// randomized causal claim. The North Star action is not sacrificed.
+    ///
+    /// This covers two situations that look identical here and are not.
+    /// One is transient — a young tenant that will randomise once it has more
+    /// units. The other is permanent: a design whose `unit_kind` is
+    /// `Workspace` has exactly one unit per workspace, so it can never hold
+    /// out a control arm no matter how much the tenant grows.
+    ///
+    /// Production is entirely the second kind. Every design except
+    /// `community-engager` uses `Workspace`, so all 26 assignments went to
+    /// treatment with `propensity=1` and `holdout=0` — the brain has never
+    /// run a randomised experiment and, as designed, never will. See
+    /// `is_structurally_unrandomisable`.
     InsufficientPower,
     /// The measurement window has closed and the experiment is resolved.
     /// Set by the measurement worker after outcomes are observed.
@@ -981,6 +993,24 @@ impl ExperimentDesign {
         };
         self.experiment_status = status;
         status
+    }
+
+    /// True when no amount of growth will let this design randomise.
+    ///
+    /// A `Workspace` unit has one member per workspace. Splitting one unit
+    /// into a treatment and a control arm is not a sample-size problem, it is
+    /// an arithmetic one, so `InsufficientPower` here does not mean "come back
+    /// later" — it means this design will produce observational evidence for
+    /// as long as it exists.
+    ///
+    /// Worth separating because the two readings call for opposite responses:
+    /// a young tenant should keep going, while this needs the design changed
+    /// to a unit there are many of — the fans, communities or cities the
+    /// intervention actually touches.
+    #[must_use]
+    pub fn is_structurally_unrandomisable(&self) -> bool {
+        self.unit_kind == ExperimentUnitKind::Workspace
+            && self.experiment_status == ExperimentStatus::InsufficientPower
     }
 }
 
@@ -1741,5 +1771,75 @@ mod tests {
             assert_eq!(ExecutionStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(ExecutionStatus::parse("invalid"), None);
+    }
+}
+
+#[cfg(test)]
+mod unrandomisable_tests {
+    use super::*;
+
+    fn design(unit_kind: ExperimentUnitKind, units: usize) -> ExperimentDesign {
+        let mut design = ExperimentDesign::new(
+            uuid::Uuid::nil(),
+            "test-intervention",
+            "cycle-1",
+            unit_kind,
+            (0..units).map(|i| format!("unit-{i}")).collect(),
+            OffsetDateTime::UNIX_EPOCH,
+            0.1,
+            "test-strategy",
+        );
+        // Ask for a control arm; the point is whether one is reachable.
+        let _ = design.check_power(1, 1, 1);
+        design
+    }
+
+    #[test]
+    fn a_workspace_unit_can_never_hold_out_a_control() {
+        // One workspace is one unit. Splitting it into two arms is not a
+        // sample-size problem, and reporting it as one tells an operator to
+        // wait for growth that will not help.
+        let design = design(ExperimentUnitKind::Workspace, 1);
+        assert_eq!(
+            design.experiment_status,
+            ExperimentStatus::InsufficientPower
+        );
+        assert!(design.is_structurally_unrandomisable());
+    }
+
+    #[test]
+    fn a_workspace_unit_stays_unrandomisable_however_many_decisions_it_batches() {
+        // Production batches several decision keys into one workspace design.
+        // That inflates `eligible_units` without creating a second workspace,
+        // so it can look powered while still being a single unit of
+        // randomisation.
+        let design = design(ExperimentUnitKind::Workspace, 50);
+        if design.experiment_status == ExperimentStatus::InsufficientPower {
+            assert!(design.is_structurally_unrandomisable());
+        }
+    }
+
+    #[test]
+    fn a_community_unit_with_too_few_members_is_only_transient() {
+        // Same status, opposite meaning: this one resolves as the tenant
+        // reaches more communities, so it must not be reported as permanent.
+        let design = design(ExperimentUnitKind::TargetCommunity, 1);
+        assert_eq!(
+            design.experiment_status,
+            ExperimentStatus::InsufficientPower
+        );
+        assert!(
+            !design.is_structurally_unrandomisable(),
+            "a community design is short of units today, not incapable of \
+             randomising; calling it permanent would stop someone fixing it",
+        );
+    }
+
+    #[test]
+    fn a_powered_design_is_not_flagged() {
+        let design = design(ExperimentUnitKind::TargetCommunity, 40);
+        if design.experiment_status == ExperimentStatus::Active {
+            assert!(!design.is_structurally_unrandomisable());
+        }
     }
 }

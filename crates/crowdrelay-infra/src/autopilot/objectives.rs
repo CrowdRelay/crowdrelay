@@ -78,7 +78,25 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
             // A series nobody is reading cannot carry a baseline. Zero would be
             // a claim about a number we have never seen, and every later
             // percentage would inherit it.
-            let baseline = observed.map(|(value, _)| value);
+            //
+            // Which is exactly what happened. The Spotify followers objective
+            // was declared on 2026-08-24 and that series' first point is
+            // 2026-08-31, so `unwrap_or(0)` below stored a baseline of 0
+            // against a channel that already had 183 followers. Progress then
+            // read 73% of the way to 250 while the true movement was zero —
+            // the number has been flat at 183 the whole time.
+            //
+            // Refusing is better than guessing. An objective is a claim about
+            // change, and there is no change to measure from a point nobody
+            // has observed; the caller can declare it again once the sync has
+            // produced one.
+            let Some((baseline_value, _)) = observed else {
+                return Err(RepositoryError::ConflictBecause(
+                    "this metric has never been measured, so an objective \
+                     declared now would take a baseline of zero and report \
+                     progress it did not make; wait for the first sync",
+                ));
+            };
             let inserted = sqlx::query_as::<_, (Uuid, i64)>(
                 r#"
                 INSERT INTO viryaos_growth_objectives (
@@ -97,7 +115,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
             .bind(command.scope.kind())
             .bind(command.scope.subject_id())
             .bind(command.direction.as_str())
-            .bind(baseline.unwrap_or(0))
+            .bind(baseline_value)
             .bind(command.target_value)
             .bind(command.deadline)
             .bind(command.declared_by.trim())
@@ -134,7 +152,7 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
             Ok(GrowthObjectiveMutation {
                 operation_id: Uuid::now_v7(),
                 objective_id,
-                baseline_value: baseline.map(|_| stored_baseline),
+                baseline_value: Some(stored_baseline),
                 replayed,
             })
         })

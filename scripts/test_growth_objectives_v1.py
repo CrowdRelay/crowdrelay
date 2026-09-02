@@ -89,8 +89,34 @@ class GrowthObjectivesContract(unittest.TestCase):
         )
 
     def test_a_series_with_no_observation_does_not_count_from_zero(self) -> None:
+        """Declaration is refused, not defaulted.
+
+        This used to check only that the *response* reported an absent
+        baseline, while the row still stored `baseline.unwrap_or(0)`. Anything
+        reading the table afterwards saw a real-looking zero, which is what
+        happened in production: the Spotify followers objective was declared on
+        2026-08-24, that series' first point is 2026-08-31, and the stored
+        baseline of 0 made a channel sitting flat at 183 followers report 73%
+        progress toward 250.
+
+        Refusing is the only version of this that holds, because the column is
+        `NOT NULL` and every reader of the row is entitled to trust it.
+        """
         declare = self.infra.split("async fn declare_growth_objective", 1)[1]
-        self.assertIn("baseline_value: baseline.map(", declare)
+        insert = declare.index("INSERT INTO viryaos_growth_objectives")
+        refusal = declare.index("RepositoryError::ConflictBecause")
+        self.assertLess(
+            refusal,
+            insert,
+            "an unmeasured series must be refused before the insert, not "
+            "defaulted into it",
+        )
+        self.assertNotIn(
+            "baseline.unwrap_or(0)",
+            declare,
+            "the zero fallback is back; it writes a baseline nobody observed "
+            "into a NOT NULL column that every later percentage inherits",
+        )
         self.assertIn("NoObservation", self.domain)
 
     def test_a_missed_deadline_is_reported_and_a_met_target_stays_met(self) -> None:

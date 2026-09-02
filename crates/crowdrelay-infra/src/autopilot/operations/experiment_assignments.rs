@@ -156,6 +156,26 @@ pub(in crate::autopilot) async fn get_or_create_experiment_design(
             min_expected_control,
             min_expected_treatment,
         );
+        // Say when the design can never randomise, not just that it did not.
+        //
+        // `insufficient_power` reads as "come back with more data", and for a
+        // Workspace unit that is wrong: there is one workspace, so there is one
+        // unit, so there is no arithmetic that yields a control arm. Production
+        // is entirely this case — every design but `community-engager` uses a
+        // Workspace unit, and all 26 assignments went to treatment with
+        // propensity 1. Nothing has ever been randomised and nothing will be
+        // until the design names a unit there are many of.
+        if design.is_structurally_unrandomisable() {
+            tracing::warn!(
+                intervention_key = %design.intervention_key,
+                unit_kind = design.unit_kind.as_str(),
+                eligible_units = design.eligible_units.len(),
+                "experiment design cannot randomise at this unit and never will: \
+                 a workspace has exactly one unit, so treatment and control \
+                 cannot both exist. Evidence stays observational until the \
+                 design targets fans, communities or cities instead"
+            );
+        }
         let computed_status_str = computed_status.as_str();
         sqlx::query(
             r#"
