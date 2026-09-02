@@ -198,7 +198,24 @@ verify_image() {
   local component="$1" digest="$2" repository ref image_id revision architecture host_architecture repo_digests
   repository="ghcr.io/crowdrelay/crowdrelay-${component}"
   ref="${repository}@${digest}"
-  docker pull "$ref" >/dev/null || fail "cannot pull immutable ${component} image: $ref"
+  # Retry: the link from this host to ghcr.io drops often enough that a single
+  # attempt loses whole deploys to "TLS handshake timeout" or "failed to fetch
+  # anonymous token". The digest is immutable, so retrying can only ever fetch
+  # the same bytes — there is nothing to race and nothing to get wrong.
+  local pull_attempt
+  for pull_attempt in 1 2 3 4 5; do
+    if docker pull "$ref" >/dev/null 2>&1; then
+      break
+    fi
+    if (( pull_attempt == 5 )); then
+      # Last word from the registry, rather than a bare failure line.
+      docker pull "$ref" >/dev/null \
+        || fail "cannot pull immutable ${component} image after 5 attempts: $ref"
+      break
+    fi
+    printf 'IMAGE_PULL=RETRY component=%s attempt=%d\n' "$component" "$pull_attempt" >&2
+    sleep $(( pull_attempt * 5 ))
+  done
   image_id="$(docker image inspect "$ref" --format '{{.Id}}')"
   revision="$(docker image inspect "$image_id" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
   architecture="$(docker image inspect "$image_id" --format '{{.Architecture}}')"
