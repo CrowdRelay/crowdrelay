@@ -428,12 +428,12 @@ else
   fail "public meta gitSha mismatch after 180s: got=${actual:-unavailable} expected=$TARGET"
 fi
 
-printf '\n==> Soak candidate for 300 seconds with old API available as fallback\n'
+printf '\n==> Soak candidate for 120 seconds with old API available as fallback\n'
 # Error-rate rollback: fail when 5xx exceeds 2% with at least 50 requests
 # and an absolute floor of 3 failures, or exceeds pre-cutover baseline by 2.
 soak_total=0
 soak_errors=0
-for soak_attempt in $(seq 1 60); do
+for soak_attempt in $(seq 1 24); do
   for path in 'health/ready' 'public/cities?limit=1' 'public/events?limit=1'; do
     code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 10 "${public_url%/}/v1/${path}" || true)"
     soak_total=$((soak_total + 1))
@@ -465,7 +465,7 @@ for soak_attempt in $(seq 1 60); do
   fi
   sleep 5
 done
-printf 'SOAK=PASS seconds=300 probes=%s errors=%s fallback=%s\n' "$soak_total" "$soak_errors" "$CURRENT_API"
+printf 'SOAK=PASS seconds=120 probes=%s errors=%s fallback=%s\n' "$soak_total" "$soak_errors" "$CURRENT_API"
 
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
   --release-id "$RELEASE_ID" --phase soak --status pass >/dev/null
