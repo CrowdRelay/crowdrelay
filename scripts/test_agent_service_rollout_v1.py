@@ -124,6 +124,50 @@ class AgentServiceRollout(unittest.TestCase):
             "arguments; exported env does not survive `ssh ... sudo bash`",
         )
 
+    def test_compose_is_pointed_at_the_resolved_tag(self) -> None:
+        """compose reads .env, not the argument the script was handed.
+
+        `compose.agents.yml` declares
+        `image: crowdrelay-agents:${AGENT_SERVICE_IMAGE_TAG:-latest}` and
+        resolves it from `.env` on the production host. Pulling the right
+        image and tagging it locally changes nothing if `.env` still says
+        `latest` — compose starts `latest`, which is a tag the publish
+        workflow has never pushed and which had sat unchanged on the host for
+        days.
+        """
+        if not SCRIPT.exists():
+            self.skipTest("control-plane checkout not present")
+        self.assertRegex(
+            SCRIPT.read_text(),
+            r'sed -i "s\|\^AGENT_SERVICE_IMAGE_TAG=\.\*\|AGENT_SERVICE_IMAGE_TAG=\$\{agent_tag\}\|" \.env',
+            "the rollout never points .env at the tag it resolved, so compose "
+            "recreates the container on whatever .env already named",
+        )
+
+    def test_the_running_image_is_verified_not_assumed(self) -> None:
+        """Healthy is not the same as running the right thing.
+
+        The old check inspected the image it had just pulled and tagged, then
+        reported PASS on a container that had been recreated from a different
+        one. Every agent release went out green while the service never moved.
+        """
+        if not SCRIPT.exists():
+            self.skipTest("control-plane checkout not present")
+        source = SCRIPT.read_text()
+        self.assertIn(
+            "AGENT_SERVICE=FAILED reason=wrong-image",
+            source,
+            "the rollout does not compare the container's actual image against "
+            "the one it pulled, so a recreate that picked up the wrong image "
+            "still reports PASS",
+        )
+        self.assertIn(
+            'running_agent_image="$(docker inspect "$agent_container" --format',
+            source,
+            "the running image should be read from the container itself, not "
+            "from the tag the script just created",
+        )
+
     def test_the_health_gate_survives(self) -> None:
         self.assertIn("AGENT_SERVICE=FAILED", self.source)
         self.assertIn(
