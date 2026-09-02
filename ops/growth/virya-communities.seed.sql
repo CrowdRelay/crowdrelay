@@ -213,4 +213,48 @@ CROSS JOIN (VALUES
 WHERE w.slug = current_setting('seed.slug')
 ON CONFLICT (workspace_id, display_name, target_kind) DO NOTHING;
 
+-- ---------------------------------------------------------------------------
+-- The same subreddits as community outreach targets.
+--
+-- `discovery_places` is what the world model counts; it is not what the
+-- community engager acts on. That path reads `agent_outreach_targets` where
+-- `target_kind = 'community'`, `subreddit IS NOT NULL` and `status =
+-- 'promoted'` — and with none of those rows existing, the brain never raised a
+-- single `community.engage.request`. Zero posts had ever been made.
+--
+-- Only the subreddits whose own rules permit posting your own music are
+-- promoted. The rest are proposed: visible, rankable, and requiring an operator
+-- to say yes, because posting promo into a community that forbids it costs the
+-- band its reputation there permanently.
+--
+-- Volume is bounded below this table regardless. The community executor allows
+-- one post per subreddit per 7 days and three per workspace per 24 hours, and
+-- the outreach policy caps actions at 2 per 24 hours.
+INSERT INTO agent_outreach_targets
+    (workspace_id, target_kind, display_name, subreddit, why_fit, verified, accepts_outreach, status)
+SELECT w.id, 'community', v.display_name, v.subreddit, v.why_fit, true, true, v.status
+FROM workspaces w
+CROSS JOIN (VALUES
+    -- Self-promotion is the point of these. Safe to act on unattended.
+    ('r/ShareYourMusic','ShareYourMusic','Dedicated to self-promotion — posting directly is what it is for.','promoted'),
+    ('r/ListenToThis','ListenToThis','Self-promo allowed with proper tags.','promoted'),
+    ('r/findnewmetal','findnewmetal','Built for discovery — post directly with genre tags.','promoted'),
+    ('r/headbangtothis','headbangtothis','Self-promo allowed. Smaller and engaged.','promoted'),
+    ('r/metalvideos','metalvideos','Self-promo allowed for music videos.','promoted'),
+
+    -- Genre fit, but promo is limited or forbidden. An operator decides.
+    ('r/metalcore','metalcore','1.0M members, exact genre. Limited self-promo — recommendation threads only.','proposed'),
+    ('r/progmetal','progmetal','296K members, exact genre. Recommendation threads only, no direct promo.','proposed'),
+    ('r/Djent','Djent','Direct genre fit.','proposed'),
+    ('r/ModernProg','ModernProg','Direct genre fit.','proposed'),
+    ('r/deathcore','deathcore','190K members. Limited self-promo, newcomer-friendly threads.','proposed'),
+    ('r/posthardcore','posthardcore','Limited self-promo, recommendation threads.','proposed'),
+    ('r/melodicdeathmetal','melodicdeathmetal','67K members, adjacent genre.','proposed'),
+    ('r/heavymind','heavymind','Thoughtful progressive metal discussion.','proposed'),
+    ('r/Metal','Metal','2.6M members. No direct promo — earn trust in discussions first.','proposed'),
+    ('r/Polska','Polska','Polish community. Concert announcements, never music spam.','proposed')
+) AS v(display_name, subreddit, why_fit, status)
+WHERE w.slug = current_setting('seed.slug')
+ON CONFLICT (workspace_id, display_name, target_kind) DO NOTHING;
+
 COMMIT;

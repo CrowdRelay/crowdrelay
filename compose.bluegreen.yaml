@@ -63,6 +63,11 @@ services:
       - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
     environment:
       TOKIO_WORKER_THREADS: ${CROWDRELAY_WORKER_TOKIO_THREADS:-1}
+      # The agents service runs its own compose project and is reachable on the
+      # shared network as `agent-service`. Without this the worker falls back to
+      # `http://127.0.0.1:8095`, which resolves to the worker itself — so every
+      # Reddit post the community executor tried would fail to connect.
+      CROWDRELAY_AGENT_SERVICE_URL: ${CROWDRELAY_AGENT_SERVICE_URL:-http://agent-service:8095}
     volumes:
       - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro

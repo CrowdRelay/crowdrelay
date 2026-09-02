@@ -93,7 +93,9 @@ const PROXY_POOL_EMPTY_RETRY: Duration = Duration::from_secs(5 * 60);
 /// feeds the social coverage bucket.
 const SYNCED_PLATFORMS: &[&str] = &[
     "tiktok",
-    "reddit",
+    // No "reddit": see `Platform::polled_by_growth_metric_sync`. The poll
+    // scraped community sizes through proxies Reddit blocks, and that number
+    // is not this artist's audience.
     "spotify",
     "youtube",
     "facebook",

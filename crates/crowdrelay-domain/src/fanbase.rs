@@ -158,8 +158,26 @@ impl Platform {
     pub const fn polled_by_growth_metric_sync(self) -> bool {
         match self {
             Self::Meta | Self::GoogleAds | Self::Bandsintown => false,
+            // Reddit is not polled. The poll existed to scrape one number —
+            // a subreddit's `subscribers` from `about.json` — through a pool
+            // of public proxies. Three things ended it:
+            //
+            // Reddit blocks the proxies, so the pool is empty and the fetch
+            // fails. Rebuilding it swept thousands of candidates per attempt,
+            // which is what stopped the worker finishing a cycle or honouring
+            // a shutdown, and killed it on every deploy.
+            //
+            // The number itself is a community's size, not this artist's
+            // audience, and no longer counts as either audience or a north
+            // star. It also barely moves: a static count from research on
+            // `discovery_places.member_count` is as good as a daily poll.
+            //
+            // Reaching people on Reddit does not need this. It needs the
+            // band's own logged-in account, which the community executor
+            // already drives through the agents service's browser session —
+            // a person posting, at one post per subreddit per seven days.
+            Self::Reddit => false,
             Self::Tiktok
-            | Self::Reddit
             | Self::Spotify
             | Self::Youtube
             | Self::Facebook
