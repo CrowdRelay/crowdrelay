@@ -97,58 +97,92 @@ pub(super) async fn mint_invite_batch_tx(
 
     let expires_at = OffsetDateTime::now_utc() + Duration::days(ttl_days);
     let mut invitations = Vec::with_capacity(eligible.len());
-    let mut invited_ids = Vec::with_capacity(eligible.len());
-    for (beacon_id, display_name, contact_email) in eligible {
+
+    // One statement for the whole batch.
+    //
+    // This was an INSERT per beacon, and bulk invite is the reason this
+    // endpoint exists — the roster console's own note says inviting a city's
+    // worth of beacons one form at a time is how it does not get done. The
+    // Import button now feeds it dozens at once, each previously costing a
+    // round trip inside the request's transaction.
+    //
+    // Tokens are generated up front because each beacon needs its own and SQL
+    // cannot mint them. `RETURNING beacon_id` then reports exactly which rows
+    // the `status <> 'active'` guard let through, which is the same fact the
+    // per-row `rows_affected() == 1` check was reading.
+    let mut beacon_ids: Vec<Uuid> = Vec::with_capacity(eligible.len());
+    let mut token_hashes: Vec<Vec<u8>> = Vec::with_capacity(eligible.len());
+    let mut tokens: std::collections::HashMap<Uuid, String> =
+        std::collections::HashMap::with_capacity(eligible.len());
+    for (beacon_id, _, _) in &eligible {
         let Some(invite_token) = random_token::<24>() else {
             return Err(BeaconSignalError::Unavailable);
         };
-        let result = sqlx::query(
-            r#"
-            INSERT INTO viryaos_beacon_signal_profiles (
-                workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
-                radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at,
-                paused_at, revoked_at, pending_invite_job_id
-            ) VALUES ($1,$2,'invited',$3,$4,$5,$6,true,1,now(),NULL,NULL,$7)
-            ON CONFLICT (workspace_id, beacon_id) DO UPDATE SET
-                status='invited', invite_token_hash=EXCLUDED.invite_token_hash,
-                invite_expires_at=EXCLUDED.invite_expires_at, radius_km=EXCLUDED.radius_km,
-                locale=EXCLUDED.locale, nearby_gigs_enabled=true,
-                invite_count=viryaos_beacon_signal_profiles.invite_count + 1,
-                last_invited_at=now(), paused_at=NULL, revoked_at=NULL,
-                pending_invite_job_id=EXCLUDED.pending_invite_job_id, updated_at=now()
-            WHERE viryaos_beacon_signal_profiles.status <> 'active'
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(beacon_id)
-        .bind(token_hash(&invite_token))
-        .bind(expires_at)
-        .bind(radius_km)
-        .bind(locale)
-        .bind(source_invite_job_id)
-        .execute(&mut **tx)
-        .await;
-        match result {
-            Ok(result) if result.rows_affected() == 1 => {
-                invited_ids.push(beacon_id);
-                let invite_url = brand.invite_url(locale, &invite_token);
-                let delivery = invite_delivery_copy(locale, &display_name, &invite_url);
-                invitations.push(BatchInviteItem {
-                    beacon_id,
-                    display_name,
-                    contact_email,
-                    invite_url,
-                    delivery,
-                    expires_at,
-                });
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, %beacon_id, "Beacon batch invite persistence failed");
-                return Err(BeaconSignalError::Unavailable);
-            }
-        }
+        beacon_ids.push(*beacon_id);
+        token_hashes.push(token_hash(&invite_token));
+        tokens.insert(*beacon_id, invite_token);
     }
+
+    let invited_ids: Vec<Uuid> = match sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO viryaos_beacon_signal_profiles (
+            workspace_id, beacon_id, status, invite_token_hash, invite_expires_at,
+            radius_km, locale, nearby_gigs_enabled, invite_count, last_invited_at,
+            paused_at, revoked_at, pending_invite_job_id
+        )
+        SELECT $1, batch.beacon_id, 'invited', batch.token_hash, $4,
+               $5, $6, true, 1, now(), NULL, NULL, $7
+        FROM UNNEST($2::uuid[], $3::bytea[]) AS batch(beacon_id, token_hash)
+        ON CONFLICT (workspace_id, beacon_id) DO UPDATE SET
+            status='invited', invite_token_hash=EXCLUDED.invite_token_hash,
+            invite_expires_at=EXCLUDED.invite_expires_at, radius_km=EXCLUDED.radius_km,
+            locale=EXCLUDED.locale, nearby_gigs_enabled=true,
+            invite_count=viryaos_beacon_signal_profiles.invite_count + 1,
+            last_invited_at=now(), paused_at=NULL, revoked_at=NULL,
+            pending_invite_job_id=EXCLUDED.pending_invite_job_id, updated_at=now()
+        WHERE viryaos_beacon_signal_profiles.status <> 'active'
+        RETURNING beacon_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&beacon_ids)
+    .bind(&token_hashes)
+    .bind(expires_at)
+    .bind(radius_km)
+    .bind(locale)
+    .bind(source_invite_job_id)
+    .fetch_all(&mut **tx)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "Beacon batch invite persistence failed");
+            return Err(BeaconSignalError::Unavailable);
+        }
+    };
+
+    // Build the invitation payloads for the rows that actually took effect,
+    // in the roster's order rather than whatever order the insert returned.
+    let invited: std::collections::HashSet<Uuid> = invited_ids.iter().copied().collect();
+    for (beacon_id, display_name, contact_email) in eligible {
+        if !invited.contains(&beacon_id) {
+            continue;
+        }
+        let Some(invite_token) = tokens.get(&beacon_id) else {
+            continue;
+        };
+        let invite_url = brand.invite_url(locale, invite_token);
+        let delivery = invite_delivery_copy(locale, &display_name, &invite_url);
+        invitations.push(BatchInviteItem {
+            beacon_id,
+            display_name,
+            contact_email,
+            invite_url,
+            delivery,
+            expires_at,
+        });
+    }
+
     if !invited_ids.is_empty()
         && let Err(error) = sqlx::query(
             r#"
