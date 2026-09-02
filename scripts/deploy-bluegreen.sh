@@ -189,30 +189,51 @@ oci_architecture="$(docker image inspect "ghcr.io/crowdrelay/crowdrelay-api@${AP
 blue_health="$(docker inspect "$BLUE_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
 green_health="$(docker inspect "$GREEN_API" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
 
-active_color="$(sed -n 's/^[[:space:]]*# CROWDRELAY_ACTIVE=//p' "$EDGE_CADDYFILE" | head -n1)"
-if [[ "$active_color" == "blue" ]]; then
-  [[ "$blue_health" == "healthy" ]] || fail "edge declares blue active but blue is not healthy: $blue_health"
-  DEPLOY_COLOR="green"
-  CURRENT_API="$BLUE_API"
-  CURRENT_WORKER="$BLUE_WORKER"
-  CURRENT_ALIAS="$BLUE_ALIAS"
-  NEW_API="$GREEN_API"
-  NEW_WORKER="$GREEN_WORKER"
-  NEW_ALIAS="$GREEN_ALIAS"
-  printf 'BASELINE=BLUE health=%s → deploying green\n' "$blue_health"
-elif [[ "$active_color" == "green" ]]; then
-  [[ "$green_health" == "healthy" ]] || fail "edge declares green active but green is not healthy: $green_health"
-  DEPLOY_COLOR="blue"
-  CURRENT_API="$GREEN_API"
-  CURRENT_WORKER="$GREEN_WORKER"
-  CURRENT_ALIAS="$GREEN_ALIAS"
-  NEW_API="$BLUE_API"
-  NEW_WORKER="$BLUE_WORKER"
-  NEW_ALIAS="$BLUE_ALIAS"
-  printf 'BASELINE=GREEN health=%s → deploying blue\n' "$green_health"
+# Which colour is live is a fact about the containers, not a claim in a comment.
+#
+# The marker used to be the authority and health only a veto, so any drift
+# between them wedged every future deploy with no way forward but hand-editing
+# production config. Drift is easy: a run interrupted between the marker flip
+# and the container coming up, a container removed by hand, a `git checkout` of
+# the Caddyfile. And with *neither* colour healthy the run failed outright —
+# the one state where a deploy is most needed was the one it refused.
+marker_color="$(sed -n 's/^[[:space:]]*# CROWDRELAY_ACTIVE=//p' "$EDGE_CADDYFILE" | head -n1)"
+blue_ok=false; [[ "$blue_health" == "healthy" ]] && blue_ok=true
+green_ok=false; [[ "$green_health" == "healthy" ]] && green_ok=true
+
+COLD_START=false
+if $blue_ok && $green_ok; then
+  case "$marker_color" in
+    blue|green) active_color="$marker_color" ;;
+    *) active_color="blue" ;;
+  esac
+  baseline_reason="both healthy, marker=${marker_color:-missing}"
+elif $blue_ok; then
+  active_color="blue"; baseline_reason="only blue healthy"
+elif $green_ok; then
+  active_color="green"; baseline_reason="only green healthy"
 else
-  fail "invalid edge active color: ${active_color:-missing}"
+  COLD_START=true
+  active_color="$([[ "$marker_color" == "green" ]] && echo green || echo blue)"
+  baseline_reason="COLD START — neither healthy (blue=${blue_health:-absent} green=${green_health:-absent})"
 fi
+
+if [[ "$active_color" == "blue" ]]; then
+  DEPLOY_COLOR="green"
+  CURRENT_API="$BLUE_API"; CURRENT_WORKER="$BLUE_WORKER"; CURRENT_ALIAS="$BLUE_ALIAS"
+  NEW_API="$GREEN_API"; NEW_WORKER="$GREEN_WORKER"; NEW_ALIAS="$GREEN_ALIAS"
+else
+  DEPLOY_COLOR="blue"
+  CURRENT_API="$GREEN_API"; CURRENT_WORKER="$GREEN_WORKER"; CURRENT_ALIAS="$GREEN_ALIAS"
+  NEW_API="$BLUE_API"; NEW_WORKER="$BLUE_WORKER"; NEW_ALIAS="$BLUE_ALIAS"
+fi
+printf 'BASELINE=%s reason=%s → deploying %s\n' \
+  "$(printf '%s' "$active_color" | tr '[:lower:]' '[:upper:]')" "$baseline_reason" "$DEPLOY_COLOR"
+if [[ "$marker_color" != "$active_color" ]]; then
+  printf 'EDGE_MARKER=RECONCILED was=%s now=%s reason=derived-from-container-health\n' \
+    "${marker_color:-missing}" "$active_color"
+fi
+$COLD_START && printf 'COLD_START=TRUE no-traffic-to-drain cutover-is-a-cold-bring-up\n'
 
 # Snapshot the current Caddyfile for rollback
 CADDY_BACKUP="$(mktemp -t caddyfile-blue.XXXXXX)"
@@ -326,17 +347,15 @@ python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
 
 printf '\n==> 4/7 — Gracefully switch Caddy preference to %s API\n' "$DEPLOY_COLOR"
 caddy_candidate="$(mktemp -t caddyfile-candidate.XXXXXX)"
-if [[ "$DEPLOY_COLOR" == "green" ]]; then
-  sed \
-    -e 's/# CROWDRELAY_ACTIVE=blue/# CROWDRELAY_ACTIVE=green/' \
-    -e 's|reverse_proxy crowdrelay-api-1:8080 crowdrelay-api-green-1:8080|reverse_proxy crowdrelay-api-green-1:8080 crowdrelay-api-1:8080|' \
-    "$EDGE_CADDYFILE" > "$caddy_candidate"
-else
-  sed \
-    -e 's/# CROWDRELAY_ACTIVE=green/# CROWDRELAY_ACTIVE=blue/' \
-    -e 's|reverse_proxy crowdrelay-api-green-1:8080 crowdrelay-api-1:8080|reverse_proxy crowdrelay-api-1:8080 crowdrelay-api-green-1:8080|' \
-    "$EDGE_CADDYFILE" > "$caddy_candidate"
-fi
+# Write the desired state rather than substituting the state we assumed. The
+# old expressions matched the *previous* value, so a stale marker left the
+# candidate unchanged and the run died on the "was not updated" guard below —
+# the same drift that wedged the decision also broke the rewrite. Matching
+# `.*` makes this idempotent and independent of the prior content.
+sed \
+  -e "s|^\([[:space:]]*\)# CROWDRELAY_ACTIVE=.*|\1# CROWDRELAY_ACTIVE=${DEPLOY_COLOR}|" \
+  -e "s|^\([[:space:]]*\)reverse_proxy crowdrelay-api.*|\1reverse_proxy ${NEW_API}:8080 ${CURRENT_API}:8080|" \
+  "$EDGE_CADDYFILE" > "$caddy_candidate"
 grep -Fq "# CROWDRELAY_ACTIVE=${DEPLOY_COLOR}" "$caddy_candidate" || fail 'candidate edge marker was not updated'
 grep -Fq "reverse_proxy ${NEW_API}:8080 ${CURRENT_API}:8080" "$caddy_candidate" || fail 'candidate edge upstream order was not updated'
 cat "$caddy_candidate" | docker exec -i "$EDGE_CONTAINER" caddy validate --config /dev/stdin --adapter caddyfile >/dev/null
