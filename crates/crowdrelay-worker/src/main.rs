@@ -34,7 +34,8 @@ use crowdrelay_worker::{
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     community_executor::CommunityExecutorWorker,
     community_intelligence::{
-        adapter::SourceAdapter, brutalland::BrutallandAdapter, worker::CommunityIntelligenceWorker,
+        adapter::SourceAdapter, brutalland::BrutallandAdapter, reddit::RedditAdapter,
+        worker::CommunityIntelligenceWorker,
     },
     discovery::{DiscoveryConfig, RedditDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
@@ -388,6 +389,9 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // Metrics polling runs in both modes, so measurement never depends on who
     // pressed the button.
     let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok();
+    // The community-intelligence Reddit adapter needs the same key, and the
+    // community executor takes ownership of it below.
+    let community_intel_agent_key = agent_service_auth_key.clone();
     let auto_post_requested = std::env::var("CROWDRELAY_COMMUNITY_AUTO_POST")
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
@@ -507,12 +511,29 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     .context("invalid growth metric sync worker configuration")?;
 
     // Community Intelligence worker — observation layer for community surfaces.
-    // Sprint A: one adapter (Brutalland). Sprint B will add more adapters.
+    //
+    // Adapters claim places by `platform = adapter.id()`. Registering only
+    // Brutalland meant the 28 active Reddit places matched nothing: every
+    // sweep found no work, recorded a success, and left
+    // `community_observations` empty while the worker looked healthy.
     let community_intel_repo = Arc::new(PostgresCommunityIntelligenceRepository::new(
         database.clone(),
     ));
-    let community_intel_adapters: Vec<Arc<dyn SourceAdapter>> =
+    let mut community_intel_adapters: Vec<Arc<dyn SourceAdapter>> =
         vec![Arc::new(BrutallandAdapter::new())];
+    match RedditAdapter::new(
+        config.agent_service_url.clone(),
+        community_intel_agent_key,
+        workspace_id.into_uuid(),
+    ) {
+        Some(adapter) => community_intel_adapters.push(Arc::new(adapter)),
+        // Say why rather than starting a source that 401s on every sweep.
+        None => tracing::warn!(
+            "Reddit community observation disabled: \
+             CROWDRELAY_AGENT_SERVICE_AUTH_KEY is not set; \
+             active Reddit discovery places will not be observed"
+        ),
+    }
     let community_intel_worker = CommunityIntelligenceWorker::new(
         community_intel_adapters,
         community_intel_repo,

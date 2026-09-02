@@ -16,4 +16,5 @@
 
 pub mod adapter;
 pub mod brutalland;
+pub mod reddit;
 pub mod worker;

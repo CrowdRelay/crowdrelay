@@ -201,6 +201,17 @@ impl CommunityIntelligenceWorker {
             })?;
 
         if places.is_empty() {
+            // A source that claims no places is not healthy, it is unused —
+            // and silence here is what hid a real gap for months. Production
+            // had 28 active Reddit places and only a `brutalland` adapter, so
+            // every sweep matched nothing, recorded a success, and wrote
+            // nothing. The dashboards stayed green over an empty
+            // `community_observations` table.
+            warn!(
+                adapter = adapter_id,
+                "no active discovery_places match this adapter's platform; \
+                 the source will observe nothing until a place is added"
+            );
             source_health.record_success(adapter.recommended_interval());
             return Ok(());
         }
