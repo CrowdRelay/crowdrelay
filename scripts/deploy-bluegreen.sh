@@ -41,7 +41,14 @@ GREEN_ALIAS="crowdrelay-api-green"
 BLUE_ALIAS="crowdrelay-api"
 ACTIVE_ALIAS="crowdrelay-api-active"
 RELEASE_STATE_DIR="/var/lib/crowdrelay/releases"
-RECEIPT_HELPER="${REPO_DIR}/scripts/release_receipt.py"
+# The receipt helper is scp'd to /tmp by deploy.sh alongside this script,
+# because the remote repo may be stale (the deploy itself is what updates it).
+# Fall back to the repo copy for direct invocation on the remote.
+if [[ -f /tmp/release_receipt.py ]]; then
+  RECEIPT_HELPER="/tmp/release_receipt.py"
+else
+  RECEIPT_HELPER="${REPO_DIR}/scripts/release_receipt.py"
+fi
 CROWDRELAY_DB_CONTAINER="${CROWDRELAY_DB_CONTAINER:-crowdrelay-db}"
 CADDY_BACKUP=""
 NEW_STARTED=false

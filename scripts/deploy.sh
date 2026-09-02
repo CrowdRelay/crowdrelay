@@ -298,11 +298,17 @@ if [[ "$blue_green_eligible" == "eligible" ]]; then
   python3 scripts/test_boring_production_deploy_contract.py
   printf 'SOURCE_CONTRACTS=PASS\n'
 
-  # Ship the blue-green script and area-management Caddyfile to the remote.
-  # The Caddyfile is scp'd so the blue-green script can detect drift and
-  # reload the area-management proxy without a separate manual step.
+  # Ship the blue-green script, receipt helper, and area-management Caddyfile
+  # to the remote. The Caddyfile is scp'd so the blue-green script can detect
+  # drift and reload the area-management proxy without a separate manual step.
+  # The receipt helper is scp'd because the remote repo may be stale — the
+  # deploy itself is what updates it, and the script runs before that happens.
+  scp -q "$ROOT_DIR/scripts/release_receipt.py" \
+       "$ORACLE:/tmp/release_receipt.py" \
+    || fail "could not copy release_receipt.py to $ORACLE"
   scp -q "$ROOT_DIR/deploy/area-management.Caddyfile" \
-       "$ORACLE:/tmp/crowdrelay-area-management.Caddyfile"
+       "$ORACLE:/tmp/crowdrelay-area-management.Caddyfile" \
+    || fail "could not copy area-management.Caddyfile to $ORACLE"
   ssh -T "$ORACLE" bash -s -- "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST" "$ORACLE_REPO" < "$BLUEGREEN"
   deploy_status=$?
 else
