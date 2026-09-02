@@ -30,7 +30,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT.parent / "crowdrelay-control-plane/scripts/deploy-bluegreen.sh"
+CP = ROOT.parent / "crowdrelay-control-plane/scripts"
+SCRIPT = CP / "deploy-bluegreen.sh"
+DEPLOY = CP / "deploy.sh"
 
 
 class AgentServiceRollout(unittest.TestCase):
@@ -90,6 +92,36 @@ class AgentServiceRollout(unittest.TestCase):
             self.source,
             r'docker tag "\$prev_agent_image"',
             "rollback should retag the previously running image ID",
+        )
+
+    def test_the_agent_version_is_resolved_not_named_by_hand(self) -> None:
+        """`latest` was never published; only `sha-<40 hex>` tags exist.
+
+        `crowdrelay-agents:latest` lived on the production host as a tag
+        someone built by hand once. No registry counterpart ever existed to
+        move it forward, so every pull of it 404s. Pinning a sha into `.env`
+        instead fixes one release and rots on the next.
+        """
+        if not DEPLOY.exists():
+            self.skipTest("control-plane checkout not present")
+        source = DEPLOY.read_text()
+        self.assertIn(
+            "resolve_agent_image",
+            source,
+            "deploy.sh no longer resolves the agent image from the agents "
+            "repo's newest published release; it is back to trusting whatever "
+            "tag production's .env happens to name",
+        )
+        self.assertIn(
+            "AGENT_SERVICE_IMAGE_DIGEST",
+            source,
+            "the resolved agent image should be pinned by digest",
+        )
+        self.assertRegex(
+            source,
+            r'"\$\{AGENT_SERVICE_IMAGE_TAG:-\}" "\$\{AGENT_SERVICE_IMAGE_DIGEST:-\}"',
+            "the resolved tag and digest must be passed to the remote script as "
+            "arguments; exported env does not survive `ssh ... sudo bash`",
         )
 
     def test_the_health_gate_survives(self) -> None:
