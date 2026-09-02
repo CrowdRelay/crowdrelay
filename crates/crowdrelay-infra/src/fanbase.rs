@@ -597,6 +597,14 @@ impl PostgresFanbaseRepository {
         Ok(())
     }
 
+    /// Records that a sync succeeded, clearing any previous failure.
+    ///
+    /// This had no callers at all, which is why `last_sync_at` was NULL for
+    /// every one of production's 41 connections while the console showed them
+    /// all as connected.
+    ///
+    /// # Errors
+    /// Returns the underlying database error if the update cannot be applied.
     pub async fn touch_connection_sync(
         &self,
         workspace_id: Uuid,
@@ -605,12 +613,54 @@ impl PostgresFanbaseRepository {
         sqlx::query(
             r#"
             UPDATE fanbase_connections
-            SET last_sync_at = now(), updated_at = now()
+            SET last_sync_at = now(),
+                last_sync_error = NULL,
+                last_sync_failed_at = NULL,
+                updated_at = now()
             WHERE workspace_id = $1 AND id = $2
             "#,
         )
         .bind(workspace_id)
         .bind(connection_id)
+        .execute(&self.pool)
+        .await
+        .map_err(Self::unexpected)?;
+        Ok(())
+    }
+
+    /// Records why a sync failed, so the console can say so.
+    ///
+    /// `status` is deliberately untouched: it means "credentials are present",
+    /// which is what the connect flow sets and the disconnect flow clears.
+    /// Folding a provider outage into it would make a transient failure
+    /// indistinguishable from a revoked credential, and the operator would go
+    /// looking for the wrong thing.
+    ///
+    /// The message is truncated to the column's limit rather than rejected —
+    /// a provider that returns a wall of HTML must not turn a reportable
+    /// failure into an unreportable one.
+    ///
+    /// # Errors
+    /// Returns the underlying database error if the update cannot be applied.
+    pub async fn record_connection_sync_failure(
+        &self,
+        workspace_id: Uuid,
+        connection_id: Uuid,
+        error: &str,
+    ) -> Result<(), FanbaseError> {
+        let trimmed: String = error.chars().take(500).collect();
+        sqlx::query(
+            r#"
+            UPDATE fanbase_connections
+            SET last_sync_error = $3,
+                last_sync_failed_at = now(),
+                updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(connection_id)
+        .bind(&trimmed)
         .execute(&self.pool)
         .await
         .map_err(Self::unexpected)?;
