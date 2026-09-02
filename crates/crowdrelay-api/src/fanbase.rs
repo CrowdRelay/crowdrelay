@@ -257,6 +257,12 @@ pub async fn list_fanbase_connections(
                         "label": c.label,
                         "status": c.status,
                         "last_sync_at": c.last_sync_at,
+                        // `status` reports whether credentials exist, not
+                        // whether the channel works. Five production
+                        // connections said `connected` while failing every
+                        // cycle, so the console needs both facts.
+                        "last_sync_error": c.last_sync_error,
+                        "last_sync_failed_at": c.last_sync_failed_at,
                         "created_at": c.created_at,
                     })
                 })

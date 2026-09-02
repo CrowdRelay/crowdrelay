@@ -500,6 +500,13 @@ pub struct ConnectionRow {
     pub status: String,
     pub label: String,
     pub last_sync_at: Option<time::OffsetDateTime>,
+    /// Why the most recent sync failed, verbatim from the provider adapter.
+    ///
+    /// Carried to the console because `status` cannot answer this: it says
+    /// credentials are present, which stayed true for five connections that
+    /// had never once succeeded.
+    pub last_sync_error: Option<String>,
+    pub last_sync_failed_at: Option<time::OffsetDateTime>,
     pub created_at: time::OffsetDateTime,
 }
 
@@ -511,7 +518,8 @@ impl PostgresFanbaseRepository {
         sqlx::query_as::<_, ConnectionRow>(
             r#"
             SELECT id, platform, external_account_ref, credential_ref,
-                   status, label, last_sync_at, created_at
+                   status, label, last_sync_at, last_sync_error,
+                   last_sync_failed_at, created_at
             FROM fanbase_connections
             WHERE workspace_id = $1
             ORDER BY created_at, label
