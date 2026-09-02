@@ -365,9 +365,14 @@ sed \
   "$EDGE_CADDYFILE" > "$caddy_candidate"
 grep -Fq "# CROWDRELAY_ACTIVE=${DEPLOY_COLOR}" "$caddy_candidate" || fail 'candidate edge marker was not updated'
 grep -Fq "reverse_proxy ${NEW_API}:8080 ${CURRENT_API}:8080" "$caddy_candidate" || fail 'candidate edge upstream order was not updated'
-cat "$caddy_candidate" | docker exec -i "$EDGE_CONTAINER" caddy validate --config /dev/stdin --adapter caddyfile >/dev/null
+# Write the candidate to the live file and validate in place. Validating
+# from /dev/stdin fails because the Caddyfile uses `import` snippets
+# (cp_upstream) that are resolved relative to the config file's directory,
+# not stdin. Set ALIAS_MOVED before validate so the ERR trap restores the
+# backup if validation rejects the candidate.
 ALIAS_MOVED=true
 cat "$caddy_candidate" > "$EDGE_CADDYFILE"
+docker exec "$EDGE_CONTAINER" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 rm -f "$caddy_candidate"
 docker exec "$EDGE_CONTAINER" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address 127.0.0.1:2019 >/dev/null
 cmp -s <(docker exec "$EDGE_CONTAINER" cat /etc/caddy/Caddyfile) "$EDGE_CADDYFILE" || fail 'edge runtime config differs after reload'
