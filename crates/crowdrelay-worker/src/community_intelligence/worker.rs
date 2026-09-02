@@ -52,12 +52,31 @@ struct SourceHealth {
 }
 
 impl SourceHealth {
-    fn new(interval: Duration) -> Self {
+    /// Seeds a source's schedule from how long ago it last observed anything.
+    ///
+    /// This used to be `now + interval` unconditionally, which put the first
+    /// sweep of every source a full interval after process start. Reddit is
+    /// observed every 12 hours, so a worker restarted more often than that —
+    /// which is to say on any day with a deploy — never reached its first
+    /// sweep at all, and `community_observations` stayed empty while the
+    /// worker reported healthy.
+    ///
+    /// The clock belongs to the data. `elapsed` is the age of the newest
+    /// observation for this source, or `None` if it has never produced one, in
+    /// which case it is due now.
+    fn new(interval: Duration, elapsed: Option<Duration>) -> Self {
+        let next_due_at = match elapsed {
+            // Never observed: go now, but stagger slightly so a worker with
+            // several adapters does not open every source at once.
+            None => Instant::now() + Duration::from_secs(10),
+            Some(elapsed) if elapsed >= interval => Instant::now() + Duration::from_secs(10),
+            Some(elapsed) => Instant::now() + jitter_interval(interval - elapsed),
+        };
         Self {
             last_success: None,
             last_error: None,
             consecutive_failures: 0,
-            next_due_at: Instant::now() + jitter_interval(interval),
+            next_due_at,
         }
     }
 
@@ -130,12 +149,32 @@ impl CommunityIntelligenceWorker {
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         info!("community intelligence worker starting");
 
-        // Per-source health state, keyed by adapter id.
+        // Per-source health state, keyed by adapter id, seeded from when each
+        // source last observed anything rather than from process start.
+        let last_seen: HashMap<String, Duration> =
+            match self.repo.seconds_since_last_observation().await {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter_map(|(source, seconds)| {
+                        (seconds >= 0.0).then(|| (source, Duration::from_secs_f64(seconds)))
+                    })
+                    .collect(),
+                Err(error) => {
+                    // Treat every source as never-observed: due soon rather than
+                    // silently postponed by a full interval.
+                    warn!(%error, "could not read last observation times; sources will sweep now");
+                    HashMap::new()
+                }
+            };
         let mut health: HashMap<String, SourceHealth> = HashMap::new();
         for adapter in &self.adapters {
+            let adapter_id = adapter.id();
             health.insert(
-                adapter.id().to_owned(),
-                SourceHealth::new(adapter.recommended_interval()),
+                adapter_id.to_owned(),
+                SourceHealth::new(
+                    adapter.recommended_interval(),
+                    last_seen.get(adapter_id).copied(),
+                ),
             );
         }
 
@@ -380,5 +419,80 @@ mod tests {
         // interval / 10 rounds to zero nanoseconds; no jitter is possible.
         let tiny = Duration::from_nanos(5);
         assert_eq!(jitter_interval(tiny), tiny);
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    /// How far in the future a source is scheduled, in whole seconds.
+    fn delay_secs(health: &SourceHealth) -> u64 {
+        health
+            .next_due_at
+            .saturating_duration_since(Instant::now())
+            .as_secs()
+    }
+
+    #[test]
+    fn a_source_that_never_observed_goes_almost_immediately() {
+        // The old code put this a full interval out. With Reddit at 12h and
+        // deploys more frequent than that, the first sweep never arrived and
+        // community_observations stayed empty while the worker looked healthy.
+        let health = SourceHealth::new(Duration::from_secs(12 * 3600), None);
+        assert!(
+            delay_secs(&health) <= 30,
+            "a source with no observations should sweep now, not in {}s",
+            delay_secs(&health),
+        );
+    }
+
+    #[test]
+    fn an_overdue_source_goes_almost_immediately() {
+        let health = SourceHealth::new(
+            Duration::from_secs(6 * 3600),
+            Some(Duration::from_secs(9 * 3600)),
+        );
+        assert!(
+            delay_secs(&health) <= 30,
+            "9h old against a 6h interval is overdue"
+        );
+    }
+
+    #[test]
+    fn a_freshly_observed_source_waits_out_the_remainder() {
+        // Restarting must not re-scrape something observed a minute ago; that
+        // is what makes a deploy loop hammer every source it owns.
+        let interval = Duration::from_secs(12 * 3600);
+        let health = SourceHealth::new(interval, Some(Duration::from_secs(600)));
+        let delay = delay_secs(&health);
+        assert!(
+            delay > 3600,
+            "observed 10 minutes ago against a 12h interval should wait hours, waited {delay}s",
+        );
+        // `jitter_interval` spreads ±10%, so the ceiling is the remaining
+        // window plus that, not the bare interval — asserting the interval
+        // itself made this fail whenever the jitter landed high.
+        let ceiling = (interval.as_secs() as f64 * 1.1) as u64;
+        assert!(
+            delay <= ceiling,
+            "the wait must stay within the interval plus jitter ({ceiling}s), got {delay}s",
+        );
+    }
+
+    #[test]
+    fn the_schedule_survives_a_restart() {
+        // Two consecutive restarts with the same observation age must produce
+        // the same window. If the clock came from process start instead, each
+        // restart would push the next sweep another full interval away.
+        let interval = Duration::from_secs(6 * 3600);
+        let elapsed = Some(Duration::from_secs(3600));
+        let first = delay_secs(&SourceHealth::new(interval, elapsed));
+        let second = delay_secs(&SourceHealth::new(interval, elapsed));
+        let drift = first.abs_diff(second);
+        assert!(
+            drift <= interval.as_secs() / 5,
+            "restarts drifted by {drift}s; the schedule is following the process, not the data",
+        );
     }
 }

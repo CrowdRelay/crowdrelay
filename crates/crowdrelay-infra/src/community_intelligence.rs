@@ -146,6 +146,30 @@ impl PostgresCommunityIntelligenceRepository {
 
     /// Returns the most recent observation per place for a workspace.
     /// Uses DISTINCT ON to get one row per place_id, ordered by observed_at DESC.
+    /// How long ago each source last produced an observation.
+    ///
+    /// The sweep used to schedule the first run of every source a full
+    /// interval after process start. Reddit is observed every 12 hours, so a
+    /// worker restarted more often than that — which is to say, on any day
+    /// with a deploy — would never reach its first sweep at all. The clock
+    /// belongs to the data, not to the process.
+    ///
+    /// A source absent from the result has never observed anything and is due
+    /// immediately.
+    pub async fn seconds_since_last_observation(
+        &self,
+    ) -> Result<Vec<(String, f64)>, CommunityIntelligenceError> {
+        sqlx::query_as::<_, (String, f64)>(
+            r#"SELECT source,
+                      EXTRACT(EPOCH FROM (now() - max(observed_at)))::double precision
+               FROM community_observations
+               GROUP BY source"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(CommunityIntelligenceError::unexpected)
+    }
+
     pub async fn latest_observations(
         &self,
         workspace_id: Uuid,
