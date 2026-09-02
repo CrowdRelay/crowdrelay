@@ -56,10 +56,29 @@ pub(in crate::autopilot) async fn record_evidence_audit_trail(
     // Best-effort event write — don't fail the dispatch if the event log
     // write fails. The evidence table is the source of truth; the event
     // log is the audit trail.
-    let _ = record_evidence_event(repo, workspace_id, &event).await;
+    //
+    // Best-effort, not silent. `let _ =` here would mean a write failing on
+    // every dispatch looks identical to one succeeding, and the only way to
+    // notice would be someone comparing row counts by hand. Three bugs found
+    // in this repository had exactly that shape.
+    if let Err(error) = record_evidence_event(repo, workspace_id, &event).await {
+        tracing::warn!(
+            %error,
+            opportunity_id = ?evidence.opportunity_id,
+            "evidence event log write failed; the evidence row itself was \
+             written, so this is an audit-trail gap rather than lost data"
+        );
+    }
 
     // Upsert the derived episode.
-    let _ = upsert_growth_episode(repo, workspace_id, evidence).await;
+    if let Err(error) = upsert_growth_episode(repo, workspace_id, evidence).await {
+        tracing::warn!(
+            %error,
+            opportunity_id = ?evidence.opportunity_id,
+            "growth episode upsert failed; the episode view will lag the \
+             evidence it is derived from"
+        );
+    }
 }
 
 /// Records the growth evidence row within an existing transaction.
