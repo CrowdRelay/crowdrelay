@@ -408,6 +408,13 @@ fn is_control_plane_management_path(path: &str) -> bool {
             "/v1/control-plane/community-intelligence/communities/",
             "/entities",
         )
+        // Beacon management. The read surfaces were allowlisted long ago; the
+        // writes never were, so the roster was observable and unchangeable.
+        || path == "/v1/control-plane/autopilot/beacons"
+        || path == "/v1/control-plane/autopilot/beacons/signal-invites/batch"
+        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/beacons/", "/signal-invites")
+        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/beacons/", "/signal-state")
+        || one_segment_with_suffix(path, "/v1/control-plane/autopilot/beacons/", "/reply")
         // Audience graph: registering communities was psql-only before this.
         || path == "/v1/control-plane/audience-graph/places"
         || path == "/v1/control-plane/audience-graph/places/import"

@@ -52,6 +52,8 @@
         /v1/control-plane/audience/segments/* \
         /v1/control-plane/community-intelligence/communities \
         /v1/control-plane/community-intelligence/communities/* \
+        /v1/control-plane/autopilot/beacons \
+        /v1/control-plane/autopilot/beacons/* \
         /v1/control-plane/audience-graph/places \
         /v1/control-plane/audience-graph/places/import \
         /v1/control-plane/community-posts \

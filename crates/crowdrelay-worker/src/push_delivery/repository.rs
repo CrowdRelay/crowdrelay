@@ -105,7 +105,31 @@ impl PushDeliveryRepository {
         sqlx::query(
             r#"
             UPDATE fan_push_deliveries delivery
+            -- The cause decides the code, and the two causes are different
+            -- facts about different things.
+            --
+            -- This used to report every sweep as `fan_or_consent_ineligible`,
+            -- including the case where the *endpoint* had gone away. A fan who
+            -- reinstalled the app eight times left seven dead registrations,
+            -- and the twenty-one deliveries queued against them were all
+            -- reported as though that person had withdrawn consent. It read as
+            -- a consent violation — messaging people who had said no — when
+            -- the fan was consenting throughout and two messages reached them
+            -- normally.
+            --
+            -- `endpoint_inactive` also says something operationally different:
+            -- there is nothing to fix and nothing to retry. A withdrawn
+            -- consent is a person's decision; a dead endpoint is a phone that
+            -- reinstalled.
             SET status = 'failed', error_code = CASE
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM fan_push_endpoints endpoint
+                        WHERE endpoint.workspace_id = delivery.workspace_id
+                          AND endpoint.id = delivery.endpoint_id
+                          AND endpoint.audience_kind = delivery.audience_kind
+                          AND endpoint.fan_id IS NOT DISTINCT FROM delivery.fan_id
+                          AND endpoint.active AND endpoint.invalidated_at IS NULL
+                    ) THEN 'endpoint_inactive'
                     WHEN delivery.audience_kind = 'fan' THEN 'fan_or_consent_ineligible'
                     WHEN delivery.audience_kind = 'beacon' THEN 'beacon_session_ineligible'
                     ELSE 'staff_endpoint_ineligible'

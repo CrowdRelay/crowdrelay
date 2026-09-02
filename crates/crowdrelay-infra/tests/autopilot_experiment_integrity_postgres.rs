@@ -2754,6 +2754,37 @@ async fn insert_executor_action_with_assignment(
     .await
     .expect("insert assignment");
 
+    // An action can only be claimed once it has actually been emitted:
+    // `claim_execution` requires an emission carrying an outbox event, because
+    // claiming the execution of something never dispatched is meaningless.
+    //
+    // That guard was added after this fixture was written, so every claim-based
+    // test here has been failing on `NotFound` ever since — reported honestly,
+    // and unread because it was one of twenty-six failures.
+    let outbox_event_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO outbox_events (id, workspace_id, event_type, payload)
+           VALUES ($1, $2, 'test.action.emitted', '{}'::jsonb)"#,
+    )
+    .bind(outbox_event_id)
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await
+    .expect("insert outbox event");
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_action_emissions
+           (workspace_id, action_id, emission_key, outbox_event_id, emitted_at)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(format!("test-emission:{action_id}"))
+    .bind(outbox_event_id)
+    .bind(OffsetDateTime::now_utc())
+    .execute(pool)
+    .await
+    .expect("insert action emission");
+
     action_id
 }
 
@@ -4211,6 +4242,7 @@ async fn insert_bare_assignment(
     unit_id: &str,
 ) {
     insert_experiment_design(pool, workspace_id, experiment_uuid).await;
+    insert_bare_action(pool, workspace_id, action_id).await;
     sqlx::query(
         r#"INSERT INTO viryaos_experiment_assignments
            (id, workspace_id, experiment_uuid, unit_id, unit_kind,
@@ -4231,6 +4263,47 @@ async fn insert_bare_assignment(
     .execute(pool)
     .await
     .expect("insert bare assignment");
+}
+
+/// Inserts the decision and action an assignment's `action_id` points at.
+///
+/// `viryaos_experiment_assignments_action_id_fkey` requires the action to
+/// exist. Fixtures used to mint a bare uuid, which was fine before the key
+/// existed and has been failing ever since — production never assigns a unit to
+/// an action it did not create.
+async fn insert_bare_action(pool: &sqlx::PgPool, workspace_id: WorkspaceId, action_id: uuid::Uuid) {
+    let decision_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+             (id, workspace_id, decision_key, context, subject_kind, subject_id,
+              decision_kind, confidence_basis_points, disposition, reason,
+              input_snapshot, policy_snapshot, recommendation)
+           VALUES ($1,$2,$3,'growth_intelligence','target_community',$4,
+                   'request_agent_run',5000,'require_approval','fixture',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fixture:{action_id}"))
+    .bind(uuid::Uuid::now_v7())
+    .execute(pool)
+    .await
+    .expect("insert fixture decision");
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+             (id, workspace_id, decision_id, context, action_kind,
+              subject_kind, subject_id, idempotency_key, payload, status)
+           VALUES ($1,$2,$3,'growth_intelligence','request_agent_run',
+                   'target_community',$4,$5,'{}'::jsonb,'queued')"#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(uuid::Uuid::now_v7())
+    .bind(format!("fixture-action:{action_id}"))
+    .execute(pool)
+    .await
+    .expect("insert fixture action");
 }
 
 /// Inserts the `viryaos_experiment_designs` parent row an assignment's

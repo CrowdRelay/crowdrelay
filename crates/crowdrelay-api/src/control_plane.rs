@@ -406,7 +406,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         // ── Release campaigns ─────────────────────────────────────────
         .route(
             "/v1/control-plane/autopilot/beacon-release-campaigns",
-            get(crate::beacon_signal::admin_list_release_campaigns),
+            // Create was registered on `/v1/admin` and never here, so the
+            // panel could list campaigns, launch them and close them — but the
+            // only route that makes one was unreachable. Its own empty state
+            // said "create one from the release plan"; no such surface existed.
+            get(crate::beacon_signal::admin_list_release_campaigns)
+                .post(crate::beacon_signal::admin_create_release_campaign),
         )
         .route(
             "/v1/control-plane/autopilot/beacon-release-campaigns/{campaign_id}/launch",
@@ -426,6 +431,32 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/autopilot/plays",
             get(crate::autopilot::play_ledger),
+        )
+        // ── Beacon management ─────────────────────────────────────────
+        // Beacons are the local-growth surface: people in a city who carry a
+        // release or a show to an audience we do not own. Six read endpoints
+        // were exposed and not one write, so the operator could watch the
+        // roster and change nothing in it — no adding a beacon, no inviting
+        // one, no recording that somebody replied.
+        .route(
+            "/v1/control-plane/autopilot/beacons",
+            post(crate::autopilot::upsert_beacon),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacons/signal-invites/batch",
+            post(crate::beacon_signal::create_invite_batch),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacons/{beacon_id}/signal-invites",
+            post(crate::beacon_signal::create_invite),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacons/{beacon_id}/signal-state",
+            post(crate::beacon_signal::admin_set_state),
+        )
+        .route(
+            "/v1/control-plane/autopilot/beacons/{beacon_id}/reply",
+            post(crate::autopilot::record_beacon_reply),
         )
         // ── Audience graph ────────────────────────────────────────────
         // Where fans already gather. Until now the only way to register a
