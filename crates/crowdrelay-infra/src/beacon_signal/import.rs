@@ -224,28 +224,60 @@ pub async fn import_researched_beacons(
             }
         });
 
-        let inserted = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO viryaos_beacons (
-              id, workspace_id, beacon_kind, display_name, contact_email,
-              destination_url, source_url, active, verified, accepts_outreach,
-              metadata
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,true,false,false,$8)
-            ON CONFLICT (workspace_id, beacon_kind, city_id, contact_email)
-              DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(workspace_id)
-        .bind(beacon_kind)
-        .bind(&contact.display_name)
-        .bind(contact.contact_email.as_deref())
-        .bind(contact.destination_url.as_deref())
-        .bind(contact.source_url.as_deref())
-        .bind(&metadata)
-        .fetch_optional(&mut *tx)
-        .await?;
+        // The roster has two partial unique indexes — one for email-routed
+        // beacons, one for URL-routed beacons — and ON CONFLICT must name the
+        // matching index columns *and* its WHERE predicate exactly. A single
+        // generic ON CONFLICT cannot match either partial index, so branch on
+        // which route the contact carries.
+        let inserted = if contact.contact_email.is_some() {
+            sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO viryaos_beacons (
+                  id, workspace_id, beacon_kind, display_name, contact_email,
+                  destination_url, source_url, active, verified, accepts_outreach,
+                  metadata
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,true,false,false,$8)
+                ON CONFLICT (workspace_id, beacon_kind, city_id, contact_email)
+                  WHERE contact_email IS NOT NULL
+                  DO NOTHING
+                RETURNING id
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace_id)
+            .bind(beacon_kind)
+            .bind(&contact.display_name)
+            .bind(contact.contact_email.as_deref())
+            .bind(contact.destination_url.as_deref())
+            .bind(contact.source_url.as_deref())
+            .bind(&metadata)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO viryaos_beacons (
+                  id, workspace_id, beacon_kind, display_name, contact_email,
+                  destination_url, source_url, active, verified, accepts_outreach,
+                  metadata
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,true,false,false,$8)
+                ON CONFLICT (workspace_id, beacon_kind, city_id, destination_url)
+                  WHERE contact_email IS NULL AND destination_url IS NOT NULL
+                  DO NOTHING
+                RETURNING id
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace_id)
+            .bind(beacon_kind)
+            .bind(&contact.display_name)
+            .bind(contact.contact_email.as_deref())
+            .bind(contact.destination_url.as_deref())
+            .bind(contact.source_url.as_deref())
+            .bind(&metadata)
+            .fetch_optional(&mut *tx)
+            .await?
+        };
 
         if inserted.is_some() {
             summary.imported += 1;
