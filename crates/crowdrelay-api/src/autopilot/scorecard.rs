@@ -68,6 +68,16 @@ pub struct TrackRecord {
     pub worsened: i64,
     /// Actions that executed but have no measured outcome.
     pub unmeasured: i64,
+    /// Executed actions whose measurement is scheduled and not yet due.
+    ///
+    /// Separated from `unmeasured` because they mean opposite things: one is
+    /// work nobody will ever be able to judge, the other is a 7, 14 or 30 day
+    /// horizon that has not elapsed. Collapsing them reported a healthy system
+    /// as 0% covered and told the operator nobody could tell if the work was
+    /// paying off, four days before the first result was due.
+    pub awaiting_measurement: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub next_measurement_due_at: Option<OffsetDateTime>,
     /// Share of executed actions that have a measured outcome, in basis
     /// points. Low coverage means the agent is busy but nobody can tell
     /// if the work is paying off.
@@ -136,7 +146,11 @@ struct TrackRecordRow {
     improved: i64,
     neutral: i64,
     worsened: i64,
+    /// Measurement scheduled, horizon not elapsed. Not a coverage failure.
+    awaiting_measurement: i64,
+    /// No measurement exists and none is coming. The real gap.
     unmeasured: i64,
+    next_measurement_due_at: Option<OffsetDateTime>,
 }
 
 async fn load_agent_scorecard(
@@ -278,7 +292,13 @@ async fn load_agent_scorecard(
             count(*) FILTER (WHERE outcome.effect_assessment = 'improved')::bigint AS improved,
             count(*) FILTER (WHERE outcome.effect_assessment = 'neutral')::bigint AS neutral,
             count(*) FILTER (WHERE outcome.effect_assessment = 'worsened')::bigint AS worsened,
-            count(*) FILTER (WHERE outcome.action_id IS NULL)::bigint AS unmeasured
+            count(*) FILTER (
+                WHERE outcome.action_id IS NULL AND pending.action_id IS NOT NULL
+            )::bigint AS awaiting_measurement,
+            count(*) FILTER (
+                WHERE outcome.action_id IS NULL AND pending.action_id IS NULL
+            )::bigint AS unmeasured,
+            min(pending.due_at) FILTER (WHERE outcome.action_id IS NULL) AS next_measurement_due_at
         FROM executed_actions AS action
         LEFT JOIN LATERAL (
             SELECT effect_assessment, action_id
@@ -287,15 +307,31 @@ async fn load_agent_scorecard(
               AND action_id = action.id
             LIMIT 1
         ) AS outcome ON true
+        -- An action whose measurement is scheduled but not yet due has not
+        -- failed to be measured; its horizon has not elapsed. Counting those
+        -- as `unmeasured` made a healthy system report 0% coverage and warn
+        -- that "nobody can tell if the work is paying off", when in fact every
+        -- one of them had a 7, 14 or 30 day measurement waiting on the clock.
+        LEFT JOIN LATERAL (
+            SELECT action_id, min(due_at) AS due_at
+            FROM viryaos_autopilot_measurements
+            WHERE workspace_id = $1
+              AND action_id = action.id
+              AND status IN ('pending', 'processing')
+            GROUP BY action_id
+        ) AS pending ON true
         "#,
     )
     .bind(workspace_id)
     .fetch_one(pool)
     .await?;
 
-    let total_executed =
-        track_row.improved + track_row.neutral + track_row.worsened + track_row.unmeasured;
+    // Coverage is measured-over-measurable. An action whose horizon has not
+    // elapsed is not yet answerable, so counting it as a miss would keep the
+    // figure near zero for as long as the system keeps working — the newer the
+    // action, the worse the score.
     let measured = track_row.improved + track_row.neutral + track_row.worsened;
+    let total_executed = measured + track_row.unmeasured;
     let coverage = if total_executed > 0 {
         Some(
             u32::try_from(
@@ -405,6 +441,8 @@ async fn load_agent_scorecard(
             neutral: track_row.neutral,
             worsened: track_row.worsened,
             unmeasured: track_row.unmeasured,
+            awaiting_measurement: track_row.awaiting_measurement,
+            next_measurement_due_at: track_row.next_measurement_due_at,
             measurement_coverage_basis_points: coverage,
         },
         by_context: contexts,
