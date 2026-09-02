@@ -401,7 +401,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         )
         .route(
             "/v1/control-plane/autopilot/beacon-network",
-            get(crate::beacon_signal::admin_beacon_network),
+            // The action side was registered on `/v1/admin` only, so the
+            // console could watch discovery and candidates and do nothing
+            // about either. Importing researched contacts, approving a
+            // candidate and queueing invites all arrive here.
+            get(crate::beacon_signal::admin_beacon_network)
+                .post(crate::beacon_signal::admin_beacon_network_action),
         )
         // ── Release campaigns ─────────────────────────────────────────
         .route(

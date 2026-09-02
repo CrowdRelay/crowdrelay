@@ -106,6 +106,12 @@ struct BeaconNetworkResponse {
     pending_candidates: Vec<DiscoveredBeaconView>,
     approved_candidates: Vec<DiscoveredBeaconView>,
     invite_jobs: Vec<InviteJobView>,
+    /// Researched contacts not yet on the roster.
+    ///
+    /// Without it the Import button is a dare: press it and find out. With it
+    /// the console can say how many contacts are waiting, and go quiet once
+    /// there are none left to bring over.
+    researched_available: i64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -32,7 +32,11 @@ pub async fn admin_beacon_network(
                verified,accepts_outreach,do_not_contact,metadata
         FROM viryaos_beacons
         WHERE workspace_id=$1
-          AND metadata ? 'network_discovery_run_id'
+          -- Discovery is one way onto this list; importing researched
+          -- contacts is the other. Both arrive unverified and both need the
+          -- same operator approval before the invite pipeline will touch them,
+          -- so both belong in the same queue.
+          AND (metadata ? 'network_discovery_run_id' OR metadata ? 'imported_from')
           AND active AND NOT do_not_contact
           AND (NOT verified OR NOT accepts_outreach)
         ORDER BY created_at DESC,id DESC
@@ -58,7 +62,7 @@ pub async fn admin_beacon_network(
         LEFT JOIN viryaos_beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         WHERE beacon.workspace_id=$1
-          AND beacon.metadata ? 'network_discovery_run_id'
+          AND (beacon.metadata ? 'network_discovery_run_id' OR beacon.metadata ? 'imported_from')
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
           AND COALESCE(profile.status,'') <> 'active'
@@ -178,6 +182,38 @@ pub async fn admin_beacon_network(
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
+    // Researched contacts that have not been imported yet. Counted the same
+    // way the import selects, so the number on the button matches what
+    // pressing it does.
+    let researched_available = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH researched AS (
+            SELECT id::text AS source_id, contact_email IS NOT NULL AS has_route
+            FROM agent_outreach_targets
+            WHERE workspace_id=$1 AND status <> 'discarded' AND NOT do_not_contact
+            UNION ALL
+            SELECT id::text, route_is_published
+            FROM viryaos_outreach_candidates
+            WHERE workspace_id=$1 AND status IN ('admitted','promoted')
+        )
+        SELECT count(*)
+        FROM researched
+        WHERE researched.has_route
+          AND NOT EXISTS (
+            SELECT 1 FROM viryaos_beacons beacon
+            WHERE beacon.workspace_id=$1
+              AND beacon.metadata -> 'imported_from' ->> 'source_id' = researched.source_id
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(state.ticketing.pool())
+    .await
+    .unwrap_or_else(|error| {
+        // A count that fails should hide the button, not blank the console.
+        tracing::warn!(%error, "Latarnik researched-contact count failed");
+        0
+    });
     private_json(
         StatusCode::OK,
         BeaconNetworkResponse {
@@ -185,6 +221,7 @@ pub async fn admin_beacon_network(
             pending_candidates,
             approved_candidates,
             invite_jobs,
+            researched_available,
         },
     )
 }
@@ -207,9 +244,52 @@ pub async fn admin_beacon_network_action(
     };
     match payload.action.as_str() {
         "discover" => request_discovery(&state, &headers, payload, idempotency_key).await,
+        "import_researched" => import_researched(&state, &headers, idempotency_key).await,
         "approve" => approve_candidate(&state, &headers, payload, idempotency_key).await,
         "queue_invites" => queue_invites(&state, &headers, payload, idempotency_key).await,
         _ => BeaconSignalError::BadRequest.response(request_id_value),
+    }
+}
+
+/// Turns researched contacts into roster rows awaiting approval.
+///
+/// The research existed and had nowhere to go: agents proposed targets and the
+/// candidate screener admitted routes read from published pages, while the
+/// roster held three beacons and the network's own `discover` path had never
+/// been run. This is the bridge.
+///
+/// The write lives in `crowdrelay-infra` — the HTTP layer holds no INSERT —
+/// and imported rows land unverified, so they queue behind the same operator
+/// approval as anything discovery produces.
+async fn import_researched(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    idempotency_key: String,
+) -> Response {
+    let request_id_value = request_id(headers);
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::beacon_signal::import::import_researched_beacons(
+        state.ticketing.pool(),
+        workspace_id,
+        &idempotency_key,
+        request_id_value.as_deref(),
+    )
+    .await
+    {
+        Ok(summary) => private_json(
+            StatusCode::OK,
+            json!({
+                "imported": summary.imported,
+                "alreadyPresent": summary.already_present,
+                "skippedNoRoute": summary.skipped_no_route,
+                "skippedDoNotContact": summary.skipped_do_not_contact,
+                "considered": summary.considered(),
+            }),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik researched beacon import failed");
+            BeaconSignalError::Unavailable.response(request_id_value)
+        }
     }
 }
 

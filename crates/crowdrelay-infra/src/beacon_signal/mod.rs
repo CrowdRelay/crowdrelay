@@ -7,6 +7,7 @@
 //! the port; this adapter executes the full transaction (reads + writes + audit).
 
 mod admin;
+pub mod import;
 mod signal;
 
 use sha2::{Digest, Sha256};
