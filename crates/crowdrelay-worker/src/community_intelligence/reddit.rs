@@ -119,7 +119,12 @@ impl RedditAdapter {
         agent_service_auth_key: Option<String>,
         workspace_id: Uuid,
     ) -> Option<Self> {
-        let agent_service_auth_key = agent_service_auth_key?;
+        // A blank key is not a key. Accepting one derives an HMAC from an
+        // empty secret and every request 401s, which looks like a wrong
+        // credential rather than an unset variable.
+        let agent_service_auth_key = agent_service_auth_key
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())?;
         let http_client = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             .user_agent("crowdrelay-community-intel/1")

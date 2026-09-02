@@ -388,7 +388,18 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // `awaiting_manual_post`, and an operator publishes and registers the URL.
     // Metrics polling runs in both modes, so measurement never depends on who
     // pressed the button.
-    let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok();
+    // Blank is absent, not present.
+    //
+    // Compose writes `CROWDRELAY_AGENT_SERVICE_AUTH_KEY: "${...:-}"`, so an
+    // unset variable arrives as an empty string and `env::var(..).ok()` hands
+    // back `Some("")`. Every consumer then believes it has a key, derives an
+    // HMAC from nothing, and gets 401 from the agents service — which reads as
+    // a wrong key rather than a missing one. That is exactly how the Reddit
+    // adapter reached production authenticating with an empty secret.
+    let agent_service_auth_key = std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY")
+        .ok()
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty());
     // The community-intelligence Reddit adapter needs the same key, and the
     // community executor takes ownership of it below.
     let community_intel_agent_key = agent_service_auth_key.clone();
