@@ -6223,7 +6223,7 @@ paths:
     post:
       operationId: createDiscordConnection
       summary: Register a Discord server connection for growth metric sync
-      description: Creates or updates a Discord server connection. The guild ID is stored and the growth metric sync worker fetches the member count from disdex.io (free, no API key).
+      description: Creates or updates a Discord server connection. The invite code is stored and the growth metric sync worker fetches the member count from Discord's own invite API (no API key needed).
       security:
       - adminBearer: []
       requestBody:
@@ -6232,14 +6232,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [guildId]
+              required: [inviteCode]
               properties:
-                guildId:
+                inviteCode:
                   type: string
-                  description: Discord server (guild) ID — a numeric snowflake.
+                  description: Discord invite code (e.g. `BBdDV6gVy` from `discord.gg/BBdDV6gVy`).
                 label:
                   type: string
-                  description: Optional display label. Defaults to "Discord — {guildId}".
+                  description: Optional display label. Defaults to "Discord — {inviteCode}".
       responses:
         '201':
           description: Connection created.

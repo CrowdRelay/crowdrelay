@@ -737,15 +737,16 @@ impl PostgresFanbaseRepository {
     }
 
     /// Registers a Discord server connection for growth metric sync.
-    /// The `guild_id` is the Discord server ID (snowflake). No encrypted
-    /// tokens are needed — disdex.io is a free public API.
+    /// The `invite_code` is the Discord invite code (e.g. `BBdDV6gVy`).
+    /// No encrypted tokens are needed — Discord's invite API is free and
+    /// requires no API key.
     pub async fn upsert_discord_connection(
         &self,
         workspace_id: Uuid,
-        guild_id: &str,
+        invite_code: &str,
         label: &str,
     ) -> Result<(), FanbaseError> {
-        let credential_ref = format!("discord:{guild_id}");
+        let credential_ref = format!("discord:{invite_code}");
         sqlx::query(
             r#"
             INSERT INTO fanbase_connections (
@@ -762,7 +763,7 @@ impl PostgresFanbaseRepository {
             "#,
         )
         .bind(workspace_id)
-        .bind(guild_id)
+        .bind(invite_code)
         .bind(&credential_ref)
         .bind(label)
         .execute(&self.pool)

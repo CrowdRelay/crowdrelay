@@ -3,7 +3,7 @@
 //! SoundCloud, and Reddit.
 //!
 //! Unlike TikTok (which uses OAuth), these platforms use simple credentials:
-//! - Discord: just a server ID (disdex.io is a free public API, no key needed)
+//! - Discord: just an invite code (Discord's own invite API, no key needed)
 //! - Telegram: a channel username + bot token (Bot API)
 //! - Last.fm: just an artist name (API key is a shared env var)
 //! - Deezer: just a numeric artist ID (free public API, no key needed)
@@ -72,15 +72,15 @@ fn account_id_is_acceptable(account_id: &str, platform: &str) -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateDiscordConnectionRequest {
-    /// Discord server (guild) ID — a numeric snowflake.
-    pub guild_id: String,
-    /// Optional display label. Defaults to "Discord — {guild_id}".
+    /// Discord invite code (e.g. `BBdDV6gVy` from `discord.gg/BBdDV6gVy`).
+    pub invite_code: String,
+    /// Optional display label. Defaults to "Discord — {invite_code}".
     pub label: Option<String>,
 }
 
 /// Creates or updates a Discord server connection for growth metric sync.
-/// The guild ID is stored in `provider_account_id`; the sync worker fetches
-/// the member count from disdex.io (free, no API key).
+/// The invite code is stored in `provider_account_id`; the sync worker fetches
+/// the member count from Discord's own invite API (no API key needed).
 pub async fn create_discord_connection(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
@@ -90,20 +90,21 @@ pub async fn create_discord_connection(
     let Ok(Json(body)) = payload else {
         return Problem::bad_request(request_id_value).into_response();
     };
-    // A guild ID is a snowflake: ASCII digits only. Anything else is a caller
-    // mistake that would otherwise surface as a 404 from disdex.io hours later.
-    let guild_id = body.guild_id.trim();
-    if !account_id_is_acceptable(guild_id, "discord")
-        || !guild_id.bytes().all(|byte| byte.is_ascii_digit())
+    // Discord invite codes are alphanumeric (case-sensitive). Strip a full
+    // `discord.gg/` URL if the user pastes one instead of the bare code.
+    let raw = body.invite_code.trim();
+    let invite_code = raw.rsplit("discord.gg/").next().unwrap_or(raw);
+    if !account_id_is_acceptable(invite_code, "discord")
+        || !invite_code.bytes().all(|b| b.is_ascii_alphanumeric())
     {
         return Problem::bad_request(request_id_value).into_response();
     }
-    let Some(label) = resolve_label(body.label, || format!("Discord — {guild_id}")) else {
+    let Some(label) = resolve_label(body.label, || format!("Discord — {invite_code}")) else {
         return Problem::bad_request(request_id_value).into_response();
     };
     let repo = repository(&state);
     match repo
-        .upsert_discord_connection(workspace(&state), guild_id, &label)
+        .upsert_discord_connection(workspace(&state), invite_code, &label)
         .await
     {
         Ok(()) => (

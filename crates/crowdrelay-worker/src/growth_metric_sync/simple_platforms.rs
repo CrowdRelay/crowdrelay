@@ -26,18 +26,19 @@ fn telegram_bot_aad(workspace_id: Uuid, channel: &str) -> Vec<u8> {
 }
 
 impl GrowthMetricSyncWorker {
-    /// Discord: fetch server member count from disdex.io (free, no API key).
-    /// The `provider_account_id` column stores the Discord guild ID.
+    /// Discord: fetch server member count from Discord's own invite API
+    /// (free, no API key). The `provider_account_id` column stores the
+    /// Discord invite code (e.g. `BBdDV6gVy`).
     pub(super) async fn sync_discord(
         &self,
         conn: &DueConnection,
     ) -> Result<(), GrowthMetricSyncError> {
-        let guild_id = &conn.provider_account_id;
-        let url = format!("https://disdex.io/api/v1/servers/{guild_id}");
+        let invite_code = &conn.provider_account_id;
+        let url = format!("https://discord.com/api/v9/invites/{invite_code}?with_counts=true");
         let response = self.http_client.get(&url).send().await?;
         if !response.status().is_success() {
             return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "disdex.io returned HTTP {} for Discord server {guild_id}",
+                "discord.com invite API returned HTTP {} for invite code {invite_code}",
                 response.status()
             )));
         }
@@ -46,15 +47,16 @@ impl GrowthMetricSyncWorker {
         // absolute level in the series and read as the server losing every
         // member. Same rule as every other platform in this worker.
         let member_count = body
-            .get("members")
+            .get("approximate_member_count")
             .and_then(serde_json::Value::as_i64)
             .ok_or_else(|| {
                 GrowthMetricSyncError::ProviderApi(format!(
-                    "disdex.io returned no member count for Discord server {guild_id}"
+                    "discord.com invite API returned no member count for invite code {invite_code}"
                 ))
             })?;
         let name = body
-            .get("name")
+            .get("guild")
+            .and_then(|g| g.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or("Discord server");
         record_metric_point(
@@ -70,7 +72,7 @@ impl GrowthMetricSyncWorker {
         .await?;
         tracing::info!(
             connection_id = %conn.id,
-            guild_id = %guild_id,
+            invite_code = %invite_code,
             members = member_count,
             "discord server member count recorded"
         );
