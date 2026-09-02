@@ -64,6 +64,24 @@ impl PostgresAutopilotRepository {
                 if live.iter().any(|advertised| advertised == capability) {
                     continue;
                 }
+                // Name the capability. Cancelling silently leaves
+                // `last_error_kind='no_executor'` in a table nobody reads and
+                // no way to learn *which* executor is missing, so the brain
+                // goes on deciding the same action, waiting out the same 24
+                // hours and cancelling it again. Production has done this for
+                // agent.content, beacon.outreach, outreach.send and
+                // beacon.discovery — every one a decision spent on work
+                // nothing could ever perform.
+                tracing::warn!(
+                    action_id = %id,
+                    action_kind = parsed.action_kind(),
+                    capability,
+                    grace_hours = NO_EXECUTOR_GRACE.whole_hours(),
+                    "cancelling autopilot action: no live executor advertises \
+                     this capability. Until one does, every action of this \
+                     kind will be decided, wait out the grace window, and be \
+                     cancelled unexecuted"
+                );
                 cancelled += sqlx::query(
                     r#"
                     UPDATE viryaos_autopilot_actions

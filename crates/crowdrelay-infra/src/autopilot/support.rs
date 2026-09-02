@@ -1,9 +1,28 @@
+/// Narrows a database failure to the repository's error vocabulary.
+///
+/// `RepositoryError` carries no payload, so this is the last place the real
+/// cause exists. It used to be dropped here without a word, and the effect was
+/// visible in production: 35 autopilot attempts recorded `error_kind` of
+/// `unexpected` with `metadata` of `{}` — a third of the brain's failures,
+/// every one undiagnosable, because the only description of what went wrong
+/// was discarded one stack frame from where it was needed.
+///
+/// Only the unclassified case logs. `Unavailable` during a database restart is
+/// expected and already retried; warning on it would bury the real signal in
+/// the noise it is meant to stand out from.
 fn map_sqlx(error: sqlx::Error) -> RepositoryError {
     match classify_sqlx_error(&error) {
         SqlxErrorClass::NotFound => RepositoryError::NotFound,
         SqlxErrorClass::Conflict => RepositoryError::Conflict,
         SqlxErrorClass::Unavailable => RepositoryError::Unavailable,
-        SqlxErrorClass::Unexpected => RepositoryError::Unexpected,
+        SqlxErrorClass::Unexpected => {
+            tracing::warn!(
+                error = %error,
+                "autopilot repository failure could not be classified; \
+                 this is what surfaces as error_kind=unexpected"
+            );
+            RepositoryError::Unexpected
+        }
     }
 }
 
@@ -69,8 +88,20 @@ fn pending_action(
     row: PendingActionRow,
     live_capabilities: &[String],
 ) -> Result<PendingAutopilotAction, RepositoryError> {
+    // A payload the worker cannot parse is a live action it will never run.
+    // Discarding the serde error made that indistinguishable from a database
+    // hiccup, so the shape mismatch stayed invisible while the action failed
+    // on every retry.
     let payload: AutopilotActionPayload =
-        serde_json::from_value(row.payload).map_err(|_| RepositoryError::Unexpected)?;
+        serde_json::from_value(row.payload).map_err(|error| {
+            tracing::warn!(
+                %error,
+                action_kind = %row.action_kind,
+                "autopilot action payload does not match its schema; \
+                 the action cannot be executed and will fail every attempt"
+            );
+            RepositoryError::Unexpected
+        })?;
     let required_capability = executor_capability_for_payload(&payload);
     let executor_ready = required_capability.is_none_or(|capability| {
         live_capabilities
