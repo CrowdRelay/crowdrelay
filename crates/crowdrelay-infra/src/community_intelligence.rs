@@ -124,16 +124,33 @@ impl PostgresCommunityIntelligenceRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        for entity in entities {
+        // One statement, not one per entity.
+        //
+        // An observation carries every genre its source mentioned — around
+        // twenty for a busy subreddit — and the Reddit adapter sweeps 28
+        // places, so a per-entity insert is roughly 560 round trips inside a
+        // single transaction that holds a lock the whole time.
+        if !entities.is_empty() {
+            let types: Vec<&str> = entities
+                .iter()
+                .map(|entity| entity.entity_type.as_db_str())
+                .collect();
+            let refs: Vec<&str> = entities
+                .iter()
+                .map(|entity| entity.entity_ref.as_str())
+                .collect();
+            let strengths: Vec<i32> = entities.iter().map(|entity| entity.strength).collect();
             sqlx::query(
                 r#"INSERT INTO community_entities
                      (observation_id, entity_type, entity_ref, strength)
-                   VALUES ($1, $2, $3, $4)"#,
+                   SELECT $1, entity_type, entity_ref, strength
+                   FROM UNNEST($2::text[], $3::text[], $4::int[])
+                     AS batch(entity_type, entity_ref, strength)"#,
             )
             .bind(row.id)
-            .bind(entity.entity_type.as_db_str())
-            .bind(&entity.entity_ref)
-            .bind(entity.strength)
+            .bind(&types)
+            .bind(&refs)
+            .bind(&strengths)
             .execute(&mut *tx)
             .await?;
         }

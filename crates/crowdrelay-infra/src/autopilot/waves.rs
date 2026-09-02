@@ -86,6 +86,11 @@ SELECT
           AND target.active
           AND target.verified
           AND target.accepts_outreach
+          -- The send path filters on this too. Counting a suppressed target
+          -- as eligible makes the plan promise reach the dispatch will not
+          -- deliver, and the gap only shows up as a wave that under-performs
+          -- its own forecast.
+          AND NOT target.do_not_contact
     ) AS eligible_targets
 FROM viryaos_outreach_waves AS wave
 WHERE wave.workspace_id = $1
@@ -132,6 +137,11 @@ SELECT
           AND target.active
           AND target.verified
           AND target.accepts_outreach
+          -- The send path filters on this too. Counting a suppressed target
+          -- as eligible makes the plan promise reach the dispatch will not
+          -- deliver, and the gap only shows up as a wave that under-performs
+          -- its own forecast.
+          AND NOT target.do_not_contact
     ) AS eligible_targets
 FROM anchors
 CROSS JOIN kinds
