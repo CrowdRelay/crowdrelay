@@ -68,6 +68,7 @@ pub struct ListPlacesQuery {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaceResponse {
     id: Uuid,
     place_kind: String,
@@ -86,6 +87,7 @@ struct PlaceResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaceRulesResponse {
     self_promo_ratio_percent: Option<i16>,
     contact_channel: Option<String>,
@@ -97,6 +99,7 @@ struct PlaceRulesResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OutreachResponse {
     stage: String,
     next_eligible_at: Option<time::OffsetDateTime>,
