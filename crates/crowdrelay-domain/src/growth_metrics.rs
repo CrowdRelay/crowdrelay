@@ -237,7 +237,9 @@ impl MetricPlatform {
             Self::Spotify => "spotify_followers",
             Self::YouTube => "youtube_subscribers",
             Self::Bandsintown => "bandsintown_trackers",
-            Self::Social => "social_subscribers",
+            // Not selectable: a community's size is not a goal this artist
+            // can move. See `audience_metric_key`.
+            Self::Social => "",
             Self::TikTok => "tiktok_followers",
             Self::SoundCloud => "soundcloud_followers",
             Self::Instagram => "instagram_followers",
@@ -317,9 +319,20 @@ impl MetricPlatform {
     pub const fn audience_metric_key(self) -> Option<&'static str> {
         match self {
             Self::Website | Self::Ticketing | Self::Signal | Self::Merch => None,
+            // `social` holds Reddit *community* sizes — how many people are in
+            // r/Metal, not how many follow this artist. That is reach we can
+            // address, not audience we have, and summing it into the audience
+            // total was catastrophic: 3,972,686 strangers against 2,837 real
+            // followers, so 99.93% of the number the brain optimised was other
+            // people's subscribers. Every target derived from it was scaled to
+            // an audience roughly 1,400 times larger than the real one.
+            //
+            // Community size is already modelled where it belongs, on
+            // `discovery_places.member_count`. The series stay — they are the
+            // right way to watch a community grow — they just are not audience.
+            Self::Social => None,
             Self::YouTube => Some("subscribers"),
-            // Reddit connections record under the `social` coverage bucket.
-            Self::Social | Self::Telegram => Some("subscribers"),
+            Self::Telegram => Some("subscribers"),
             Self::Spotify
             | Self::TikTok
             | Self::SoundCloud
@@ -1018,6 +1031,31 @@ mod tests {
                 platform.as_str()
             );
         }
+    }
+
+    /// Reddit community size is reach, never audience.
+    ///
+    /// `social` series hold how many people are in r/Metal, not how many
+    /// follow this artist. Counted as audience they were 3,972,686 against
+    /// 2,837 real followers — the brain optimised a number that was 99.93%
+    /// other people's subscribers, and every growth target derived from it was
+    /// scaled to an audience about 1,400 times too large.
+    #[test]
+    fn a_community_size_is_never_counted_as_audience() {
+        assert_eq!(
+            MetricPlatform::Social.audience_metric_key(),
+            None,
+            "subreddit member counts must not be summed into the audience total"
+        );
+        assert_eq!(
+            MetricPlatform::Social.north_star_key(),
+            "",
+            "the size of somebody else's community is not a growth goal"
+        );
+        assert!(
+            !NorthStarMetric::all().contains(&NorthStarMetric::Platform(MetricPlatform::Social)),
+            "social must not be offered as a north star"
+        );
     }
 
     #[test]

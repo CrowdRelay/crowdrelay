@@ -651,3 +651,79 @@ async fn the_world_model_reports_growth_per_platform() -> Result<(), Box<dyn std
     );
     Ok(())
 }
+
+/// A community's size must never reach the audience total.
+///
+/// `social` series hold how many people are in r/Metal, not how many follow
+/// this artist. Production carried 3,972,686 of them against 2,837 real
+/// followers, so 99.93% of the audience the brain optimised was other people's
+/// subscribers — and `GrowthTarget` scaled every goal off that number.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn community_size_never_reaches_the_audience_total() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("community-size-{suffix}"))
+        .bind("Community size")
+        .execute(&pool)
+        .await?;
+
+    let now = OffsetDateTime::now_utc();
+    // A huge subreddit, and a small real following.
+    seed_series(
+        &pool,
+        workspace_id,
+        "social",
+        "subscribers",
+        &[(now - time::Duration::hours(1), 2_600_000)],
+    )
+    .await?;
+    seed_series(
+        &pool,
+        workspace_id,
+        "spotify",
+        "followers",
+        &[(now - time::Duration::hours(1), 183)],
+    )
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    assert_eq!(
+        world.off_platform_audience, 183,
+        "only the real following counts; 2.6M subreddit members are reach, not audience"
+    );
+    assert!(
+        !world
+            .platform_growth
+            .iter()
+            .any(|entry| entry.platform == "social"),
+        "a community's size must not rank as a platform this artist grows on"
+    );
+    Ok(())
+}
