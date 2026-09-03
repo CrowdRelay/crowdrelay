@@ -11,7 +11,7 @@
 //! `ORDER BY` that drifts from it.
 
 use super::*;
-use crowdrelay_application::autopilot::{AutopilotActionPayload, NextBestAction};
+use crowdrelay_application::autopilot::{ActionBriefing, AutopilotActionPayload, NextBestAction};
 use crowdrelay_domain::plays::PlayKind;
 use crowdrelay_domain::{
     growth_metrics::MetricValueTier,
@@ -226,8 +226,17 @@ pub(in crate::autopilot) async fn load_next_best_actions(
             (row.subject_id, row.decision_kind.clone()),
             (row.decision_id, row.action_id),
         );
+        // The briefing is the human-readable rendering of the action payload.
+        // A payload this build cannot parse yields `None` rather than a guess:
+        // an invented briefing would be worse than none.
+        let briefing = row.payload.as_ref().and_then(|payload| {
+            serde_json::from_value::<AutopilotActionPayload>(payload.clone())
+                .ok()
+                .map(|parsed| parsed.briefing())
+        });
         candidates.push((
             row.due_at,
+            briefing,
             QueueCandidate {
                 context: context.as_str(),
                 decision_kind: row.decision_kind,
@@ -256,15 +265,24 @@ pub(in crate::autopilot) async fn load_next_best_actions(
 
     let due_at_by_subject: HashMap<(Uuid, String), OffsetDateTime> = candidates
         .iter()
-        .filter_map(|(due_at, candidate)| {
+        .filter_map(|(due_at, _, candidate)| {
             due_at.map(|at| ((candidate.subject_id, candidate.decision_kind.clone()), at))
+        })
+        .collect();
+
+    let briefing_by_subject: HashMap<(Uuid, String), ActionBriefing> = candidates
+        .iter()
+        .filter_map(|(_, briefing, candidate)| {
+            briefing
+                .clone()
+                .map(|b| ((candidate.subject_id, candidate.decision_kind.clone()), b))
         })
         .collect();
 
     let ranked = rank_next_best_actions(
         candidates
             .into_iter()
-            .map(|(_, candidate)| candidate)
+            .map(|(_, _, candidate)| candidate)
             .collect(),
     );
 
@@ -287,12 +305,16 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 ))
                 .copied()
                 .ok_or(RepositoryError::Unexpected)?;
+            let decision_kind = entry.candidate.decision_kind.clone();
+            let briefing = briefing_by_subject
+                .get(&(entry.candidate.subject_id, decision_kind.clone()))
+                .cloned();
             Ok(NextBestAction {
                 position: entry.position,
                 decision_id,
                 action_id,
                 context: super::parse_context(entry.candidate.context)?,
-                decision_kind: entry.candidate.decision_kind,
+                decision_kind,
                 subject_kind: entry.candidate.subject_kind,
                 subject_id: entry.candidate.subject_id,
                 authority: entry.candidate.authority,
@@ -304,6 +326,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 due_at,
                 value_tier: entry.candidate.value_tier,
                 deviation_basis_points: entry.candidate.deviation_basis_points,
+                briefing,
             })
         })
         .collect()

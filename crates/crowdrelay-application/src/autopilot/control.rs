@@ -404,6 +404,10 @@ pub struct NextBestAction {
     /// currency amount: the system does not know what a stalled channel is
     /// worth, and a plausible figure would be the most convincing lie here.
     pub deviation_basis_points: Option<u32>,
+    /// Human-readable briefing generated from the action payload: summary,
+    /// why it matters, concrete steps, and the content being approved.
+    /// `None` when the payload could not be parsed or carried no briefing.
+    pub briefing: Option<ActionBriefing>,
 }
 
 #[derive(Clone, Debug, Serialize)]
