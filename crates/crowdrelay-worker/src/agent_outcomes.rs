@@ -28,12 +28,32 @@ use uuid::Uuid;
 
 const BATCH_LIMIT: i64 = 32;
 
+/// The `agent_outreach_targets_target_kind_check` vocabulary (migration 0138).
+///
+/// Deliberately not `OutreachTargetKind`. That enum is the vocabulary of
+/// `viryaos_outreach_targets`, a different table in a different bounded
+/// context, and the two sets genuinely differ: this one accepts `community`
+/// and rejects `support_slot`, which is the reverse of the other. Reaching for
+/// the enum because the column names match would accept `support_slot` here
+/// and hand it straight to the CHECK that forbids it.
+const AGENT_TARGET_KINDS: [&str; 7] = [
+    "press",
+    "radio",
+    "playlist",
+    "media_patronage",
+    "endorsement",
+    "creator",
+    "community",
+];
+
 #[derive(Debug, Error)]
 enum AgentOutcomeError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("validation error: {0}")]
     Validation(#[from] crowdrelay_application::agent_outcomes::OutcomeValidationError),
+    #[error("agent proposed target_kind {0:?}, which agent_outreach_targets does not accept")]
+    UnknownTargetKind(String),
 }
 
 #[derive(Clone, Debug)]
@@ -685,6 +705,20 @@ impl AgentOutcomeWorker {
     /// targets (Reddit subreddits, forums) the row is auto-promoted to
     /// `promoted` because these are public spaces, not personal contacts —
     /// the growth loop can engage them without operator review.
+    ///
+    /// `target_kind` arrives from the agent's own JSON and goes into a
+    /// CHECK-constrained column, so it is checked here rather than left to
+    /// Postgres. `validate` gates the outcome's schema version, kind,
+    /// confidence and payload shape, but not this field, and an unaccepted
+    /// value therefore reached the INSERT and raised `check_violation` —
+    /// rolling back the decision and action rows written earlier in the same
+    /// transaction and rejecting the outcome with a raw database error instead
+    /// of a statement about the field.
+    ///
+    /// Rejecting is right; being unable to say why was not. The previous
+    /// `unwrap_or("press")` was the other half of the same gap: an agent that
+    /// omitted the field got its target filed as press, which is not a default
+    /// so much as a guess about which outreach playbook to run.
     async fn insert_outreach_target(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -694,7 +728,10 @@ impl AgentOutcomeWorker {
         let target_kind = item
             .get("target_kind")
             .and_then(Value::as_str)
-            .unwrap_or("press");
+            .unwrap_or_default();
+        if !AGENT_TARGET_KINDS.contains(&target_kind) {
+            return Err(AgentOutcomeError::UnknownTargetKind(target_kind.to_owned()));
+        }
         let display_name = item
             .get("display_name")
             .and_then(Value::as_str)
