@@ -347,12 +347,18 @@ pub(super) async fn schedule_effect_measurement(
             // The evidence quality is `Observational` — this is a
             // quasi-experimental estimate, not a randomized experiment.
             // The treatment-effect posterior weights it accordingly.
+            // The baseline counts fans the same way Y14 counts them:
+            // everything that arrived and was not suppressed. Counting all
+            // fans regardless of status would compare an outcome that
+            // excludes suppressed arrivals against a counterfactual that
+            // includes them.
             let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COUNT(*)::double precision / 14.0 FROM fans
                 WHERE workspace_id = $1
                   AND created_at >= $2 - INTERVAL '14 days'
                   AND created_at < $2
+                  AND status != 'suppressed'
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -369,15 +375,41 @@ pub(super) async fn schedule_effect_measurement(
             // Y30 durable fan growth (North Star): fans created in the
             // 14-day post-action window that are still active 30 days
             // after creation. The measurement window is 44 days (14-day
-            // observation + 30-day durability check). The baseline is
-            // the same pre-action daily rate, so Y30 is incremental —
-            // not a raw count. Previously this measurement kind existed
-            // but was never scheduled, so the Y30 treatment-effect
-            // posterior was never updated (conf_y30 was always 0).
+            // observation + 30-day durability check).
+            //
+            // Y30 needs its own baseline, and this is the whole point of the
+            // query below. It used to reuse `pre_action_daily_rate`, which
+            // counts every arrival — while the Y30 outcome counts only the
+            // arrivals that were still active thirty days later. Subtracting
+            // a counterfactual built from all arrivals from an outcome built
+            // from durable ones biases Y30 negative by exactly the churn
+            // rate: a workspace where ten fans arrive per fortnight and six
+            // stick would measure roughly -4 durable fans for an action that
+            // performed precisely at baseline. The brain would have learned
+            // that every action it takes is harmful.
+            //
+            // The matched comparison has to be aged, not just filtered: fans
+            // from the last fourteen days cannot have a thirty-day durability
+            // outcome yet. So the baseline window is the fourteen days ending
+            // thirty days ago — same width, old enough to have been observed.
+            let pre_action_durable_daily_rate = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COUNT(*)::double precision / 14.0 FROM fans
+                WHERE workspace_id = $1
+                  AND created_at >= $2 - INTERVAL '44 days'
+                  AND created_at < $2 - INTERVAL '30 days'
+                  AND status = 'active'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
             plans.push((
                 AutopilotMeasurementKind::DurableFanGrowth30d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                pre_action_durable_daily_rate,
                 now + time::Duration::days(44),
             ));
             let baseline_installs = sqlx::query_scalar::<_, f64>(
