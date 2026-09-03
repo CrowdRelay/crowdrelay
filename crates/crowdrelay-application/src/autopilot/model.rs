@@ -1455,6 +1455,7 @@ fn platform_label(platform: &MetricPlatform) -> String {
         MetricPlatform::Signal => "Signal".into(),
         MetricPlatform::Merch => "Merch".into(),
         MetricPlatform::YouTube => "YouTube".into(),
+        MetricPlatform::X => "X".into(),
     }
 }
 

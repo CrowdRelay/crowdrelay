@@ -78,10 +78,11 @@ pub enum Platform {
     Bandsintown,
     Spotify,
     Youtube,
+    X,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 7] = [
+    pub const ALL: [Platform; 8] = [
         Platform::Meta,
         Platform::Tiktok,
         Platform::GoogleAds,
@@ -89,6 +90,7 @@ impl Platform {
         Platform::Bandsintown,
         Platform::Spotify,
         Platform::Youtube,
+        Platform::X,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -100,6 +102,7 @@ impl Platform {
             Self::Bandsintown => "bandsintown",
             Self::Spotify => "spotify",
             Self::Youtube => "youtube",
+            Self::X => "x",
         }
     }
 
@@ -120,6 +123,7 @@ impl Platform {
             Self::Bandsintown => "Bandsintown",
             Self::Spotify => "Spotify",
             Self::Youtube => "YouTube",
+            Self::X => "X",
         }
     }
 }

@@ -31,7 +31,7 @@ use crowdrelay_worker::{
     autopilot::{AutopilotWorker, TeamEmailDispatchWorker},
     bootstrap::{BootstrapSpec, bootstrap, bootstrap_admission_access, bootstrap_team_operations},
     community_executor::CommunityExecutorWorker,
-    discovery::{DiscoveryConfig, RedditDiscoveryWorker},
+    discovery::{DiscoveryConfig, RedditDiscoveryWorker, XDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     growth_metric_sync::GrowthMetricSyncWorker,
@@ -380,7 +380,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         Some(RedditDiscoveryWorker::new(
             database.clone(),
             workspace_id,
-            discovery_config,
+            discovery_config.clone(),
             DISCOVERY_SWEEP_INTERVAL,
             config.database.operation_timeout,
             config.agent_service_url.clone(),
@@ -388,6 +388,20 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         )?)
     } else {
         tracing::info!("reddit discovery disabled; CROWDRELAY_DISCOVERY_REDDIT_QUERIES not set");
+        None
+    };
+    let x_discovery = if discovery_config.x_enabled() {
+        Some(XDiscoveryWorker::new(
+            database.clone(),
+            workspace_id,
+            discovery_config,
+            DISCOVERY_SWEEP_INTERVAL,
+            config.database.operation_timeout,
+            config.agent_service_url.clone(),
+            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
+        )?)
+    } else {
+        tracing::info!("x discovery disabled; CROWDRELAY_DISCOVERY_X_QUERIES not set");
         None
     };
     let ad_conversion_worker = if config.ad_conversion.any_enabled() {
@@ -441,6 +455,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
     let ops_watchdog_shutdown = shutdown_receiver.clone();
     let receipt_reconciliation_shutdown = shutdown_receiver.clone();
     let discovery_shutdown = shutdown_receiver.clone();
+    let x_discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
@@ -459,6 +474,7 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         push_delivery_enabled: push_delivery_worker.is_some(),
         community_executor_enabled: community_executor.is_some(),
         reddit_discovery_enabled: reddit_discovery.is_some(),
+        x_discovery_enabled: x_discovery.is_some(),
         ad_conversion_enabled: ad_conversion_worker.is_some(),
         random_draws_enabled: weighted_draw_worker.is_some(),
     };
@@ -524,6 +540,12 @@ async fn run(database: PgPool, config: &Config) -> Result<()> {
         runtime_tasks.spawn(async move {
             worker.run(discovery_shutdown).await;
             "reddit discovery"
+        });
+    }
+    if let Some(worker) = x_discovery {
+        runtime_tasks.spawn(async move {
+            worker.run(x_discovery_shutdown).await;
+            "x discovery"
         });
     }
     if let Some(worker) = ad_conversion_worker {
@@ -807,6 +829,9 @@ struct GrowthReadiness {
     /// Reddit subreddit discovery. Without this, the system can't find new
     /// communities to engage with. Env: CROWDRELAY_DISCOVERY_REDDIT_QUERIES
     reddit_discovery_enabled: bool,
+    /// X (Twitter) account discovery. Without this, the system can't find
+    /// X curators and communities. Env: CROWDRELAY_DISCOVERY_X_QUERIES
+    x_discovery_enabled: bool,
     /// Ad conversion tracking (Meta/Google/Bandsintown). Attribution, not
     /// fan creation. Env: CROWDRELAY_META_CAPI_ENABLED, etc.
     ad_conversion_enabled: bool,
@@ -825,6 +850,7 @@ impl GrowthReadiness {
             self.push_delivery_enabled,
             self.community_executor_enabled,
             self.reddit_discovery_enabled,
+            self.x_discovery_enabled,
             self.ad_conversion_enabled,
             self.random_draws_enabled,
         ]
@@ -834,15 +860,16 @@ impl GrowthReadiness {
 
         tracing::info!(
             active_components = active,
-            total_components = 7,
+            total_components = 8,
             autopilot = self.autopilot_enabled,
             agent_outcomes = self.agent_outcomes_enabled,
             push_delivery = self.push_delivery_enabled,
             community_executor = self.community_executor_enabled,
             reddit_discovery = self.reddit_discovery_enabled,
+            x_discovery = self.x_discovery_enabled,
             ad_conversion = self.ad_conversion_enabled,
             random_draws = self.random_draws_enabled,
-            "growth readiness: {}/7 fan-growth components active",
+            "growth readiness: {}/8 fan-growth components active",
             active,
         );
 
@@ -864,6 +891,11 @@ impl GrowthReadiness {
         if !self.reddit_discovery_enabled {
             tracing::warn!(
                 "growth readiness: reddit discovery is OFF — set CROWDRELAY_DISCOVERY_REDDIT_QUERIES to find new communities to engage with"
+            );
+        }
+        if !self.x_discovery_enabled {
+            tracing::info!(
+                "growth readiness: x discovery is OFF — set CROWDRELAY_DISCOVERY_X_QUERIES to find X curators and communities"
             );
         }
         if !self.push_delivery_enabled {
