@@ -159,3 +159,103 @@ async fn insert_community_post_with_error(
     .expect("insert community_post with error");
     post_id
 }
+
+/// Helper: insert a bare experiment assignment with a specific action_id.
+async fn insert_bare_assignment(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+    experiment_uuid: uuid::Uuid,
+    unit_id: &str,
+) {
+    insert_experiment_design(pool, workspace_id, experiment_uuid).await;
+    insert_bare_action(pool, workspace_id, action_id).await;
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (id, workspace_id, experiment_uuid, unit_id, unit_kind,
+            arm, intended_template_id, propensity, prediction, context, strategy,
+            eligibility_criteria, selection_context, interference_policy,
+            contamination_estimate, is_interference_controllable,
+            experiment_status, execution_status, action_id)
+           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
+                   '{}'::jsonb,'{}'::jsonb,'discovery',
+                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
+                   'active','dispatched',$5)"#,
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(workspace_id.into_uuid())
+    .bind(experiment_uuid)
+    .bind(unit_id)
+    .bind(action_id)
+    .execute(pool)
+    .await
+    .expect("insert bare assignment");
+}
+
+/// Inserts the decision and action an assignment's `action_id` points at.
+///
+/// `viryaos_experiment_assignments_action_id_fkey` requires the action to
+/// exist. Fixtures used to mint a bare uuid, which was fine before the key
+/// existed and has been failing ever since — production never assigns a unit to
+/// an action it did not create.
+async fn insert_bare_action(pool: &sqlx::PgPool, workspace_id: WorkspaceId, action_id: uuid::Uuid) {
+    let decision_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+             (id, workspace_id, decision_key, context, subject_kind, subject_id,
+              decision_kind, confidence_basis_points, disposition, reason,
+              input_snapshot, policy_snapshot, recommendation)
+           VALUES ($1,$2,$3,'growth_intelligence','target_community',$4,
+                   'request_agent_run',5000,'require_approval','fixture',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
+    )
+    .bind(decision_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fixture:{action_id}"))
+    .bind(uuid::Uuid::now_v7())
+    .execute(pool)
+    .await
+    .expect("insert fixture decision");
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+             (id, workspace_id, decision_id, context, action_kind,
+              subject_kind, subject_id, idempotency_key, payload, status)
+           VALUES ($1,$2,$3,'growth_intelligence','request_agent_run',
+                   'target_community',$4,$5,'{}'::jsonb,'queued')"#,
+    )
+    .bind(action_id)
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(uuid::Uuid::now_v7())
+    .bind(format!("fixture-action:{action_id}"))
+    .execute(pool)
+    .await
+    .expect("insert fixture action");
+}
+
+/// Inserts the `viryaos_experiment_designs` parent row an assignment's
+/// `experiment_uuid` foreign key points at.
+///
+/// Fixtures used to mint an `experiment_uuid` and insert the assignment
+/// directly, which `fk_assignment_experiment` rejects. Production always
+/// designs an experiment before assigning units to it, so the fixture has to
+/// do the same to exercise anything downstream.
+async fn insert_experiment_design(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    experiment_uuid: uuid::Uuid,
+) {
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_designs
+             (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
+              unit_kind, holdout_probability, interference_policy, experiment_status)
+           VALUES ($1, $2, 'reddit-scanner', $3, 'target_community', 0.5, 'none', 'active')
+           ON CONFLICT (experiment_uuid) DO NOTHING"#,
+    )
+    .bind(experiment_uuid)
+    .bind(workspace_id.into_uuid())
+    .bind(experiment_uuid.to_string())
+    .execute(pool)
+    .await
+    .expect("insert experiment design");
+}

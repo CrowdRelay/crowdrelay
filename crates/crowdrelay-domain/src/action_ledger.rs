@@ -43,6 +43,25 @@
 //! execution failure) or `unknown` (confirmation lost). This is the only
 //! non-terminal use of `SUCCEEDED`; it is not a normal transition.
 //!
+//! The invariant governing that correction:
+//!
+//! > A terminal failure observation may change `SUCCEEDED` to `FAILED` only
+//! > when the persisted `SUCCEEDED` is demonstrably premature — the action
+//! > required external execution and no provider-confirmed success exists for
+//! > the same attempt. Once success is provider-confirmed, a later
+//! > contradictory failure observation is `Conflict`, not a transition.
+//!
+//! The action status says what the system currently *believes* about
+//! execution; the provider report says whether that belief has external
+//! confirmation. [`SuccessEvidence`] is the derived fact that distinguishes
+//! them, and [`legal_transition`] takes it as an argument so no caller can
+//! decide this question by accident.
+//!
+//! This is about operational state, not claim semantics. `preserve_succeeded_claim`
+//! in the execution-report path is deliberately stricter and is unchanged by
+//! this: correcting a premature `SUCCEEDED` to `FAILED` fixes an inaccurate
+//! execution state, it does not reopen an emitted claim for re-execution.
+//!
 //! # UNKNOWN semantics
 //!
 //! `UNKNOWN` means "CrowdRelay cannot establish whether the external side
@@ -191,6 +210,40 @@ impl ActionState {
             "RECONCILING" => Some(Self::Reconciling),
             "CANCELLED" => Some(Self::Cancelled),
             "REVOKED" => Some(Self::Revoked),
+            _ => None,
+        }
+    }
+
+    /// Maps a `viryaos_autopilot_actions.status` value to a ledger state.
+    ///
+    /// [`parse`](Self::parse) reads the ledger's own vocabulary, which is
+    /// uppercase (`SUCCEEDED`). The action table uses a different, lowercase
+    /// one (`succeeded`), so feeding an action status to `parse` returns `None`
+    /// for every legal value — and a caller defaulting that to some state is
+    /// then deciding from a constant rather than from the row.
+    ///
+    /// That is not hypothetical. `record_execution_report` did exactly this and
+    /// saw every action as `Running`, which made
+    /// `legal_transition(Succeeded, Failed)` unreachable from the receipt path:
+    /// its `Conflict` branch could never fire, and what actually prevented a
+    /// confirmed success from regressing was an `AND status = 'unknown'` guard
+    /// on the UPDATE. The monotonicity was real but accidental, enforced in SQL
+    /// while the resolver believed it was enforcing it.
+    ///
+    /// The mapping mirrors `viryaos_action_ledger_sync` in migration 0190 and
+    /// covers every value the `viryaos_autopilot_actions` status CHECK allows,
+    /// so `None` means the vocabulary has drifted, not that a status is
+    /// unremarkable.
+    #[must_use]
+    pub fn from_action_status(value: &str) -> Option<Self> {
+        match value {
+            "awaiting_approval" => Some(Self::Authorized),
+            "queued" => Some(Self::Queued),
+            "processing" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            "unknown" => Some(Self::Unknown),
             _ => None,
         }
     }
@@ -373,6 +426,39 @@ pub enum ObservedResolution {
     Unknown,
 }
 
+/// Whether a persisted `Succeeded` has external confirmation behind it.
+///
+/// `Succeeded` means two different things depending on how it was written,
+/// and until this type existed nothing recorded which. `actions_execution.rs`
+/// sets `status = 'succeeded'` when the *local* execution step finishes
+/// (`WHERE status = 'processing'`). For an action that requires an external
+/// executor that means "handed off", not "the provider confirmed it". The
+/// provider's confirmation arrives later, as an execution report.
+///
+/// The two readings collided: [`legal_transition`] refused a late failure
+/// against `Succeeded` as a `Conflict`, reading it as provider-confirmed,
+/// while the ledger trigger permits `SUCCEEDED -> FAILED` precisely to correct
+/// a premature one. Both were deliberate; they disagreed because the state
+/// name carried no provenance.
+///
+/// This is a **derived** fact, not a persisted state — deliberately not a new
+/// `ActionState` variant and not a column. It is computed from evidence that
+/// already exists: whether the payload requires an executor at all, and
+/// whether a success report bound to the same attempt carries a provider
+/// reference. It is a parameter of [`legal_transition`] rather than something
+/// a caller can forget to consider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuccessEvidence {
+    /// The action requires external execution and no provider-confirmed
+    /// success exists for this attempt. The persisted `Succeeded` records
+    /// what the system believed at dispatch, and is correctable.
+    Premature,
+    /// Either the action completes locally — nothing external to confirm — or
+    /// a success report bound to this attempt carries a provider reference.
+    /// The persisted `Succeeded` is backed by the outside world.
+    ProviderConfirmed,
+}
+
 /// The legal state transition resulting from an observation + current
 /// state.
 ///
@@ -486,14 +572,40 @@ pub fn resolve_observation(evidence: ResolutionEvidence) -> ObservedResolution {
 /// - external fact = Confirmed, current state = Failed
 /// - external fact = DefinitiveFailure, current state = Succeeded
 #[must_use]
-pub fn legal_transition(current: ActionState, observed: ObservedResolution) -> LegalTransition {
+pub fn legal_transition(
+    current: ActionState,
+    observed: ObservedResolution,
+    success_evidence: SuccessEvidence,
+) -> LegalTransition {
     match (current, observed) {
-        // ── Succeeded: idempotent for Executed, Conflict for Failed ──
-        // A second success is a no-op. A late failure contradicts the
-        // persisted success — surface as Conflict, don't silently downgrade.
+        // ── Succeeded: evidence-dependent ──
         // A late unknown must not lose certainty.
-        (ActionState::Succeeded, ObservedResolution::Executed) => LegalTransition::NoChange,
-        (ActionState::Succeeded, ObservedResolution::Failed) => LegalTransition::Conflict,
+        //
+        // A success observation against a *premature* success is not a
+        // duplicate — it is the confirmation that success was waiting for, and
+        // the side effects that hang off it (the assignment reaching
+        // `executed`, the claim closing) still have to happen. Against an
+        // already-confirmed success it is genuinely idempotent. This matters in
+        // the normal case, not an exotic one: `actions_execution.rs` marks the
+        // action `succeeded` at dispatch, so in production every executor
+        // success receipt arrives against a `Succeeded` action.
+        //
+        // A late failure depends on what the persisted success is worth. If a
+        // provider confirmed it, the failure contradicts an established fact:
+        // surface Conflict, never silently downgrade — otherwise a stale or
+        // duplicated provider failure can rewrite settled reality and the state
+        // oscillates. If the success is merely premature — dispatched, never
+        // confirmed — then this receipt is the *first* external word on the
+        // matter, and correcting to Failed is not overturning evidence, it is
+        // supplying it. See [`SuccessEvidence`].
+        (ActionState::Succeeded, ObservedResolution::Executed) => match success_evidence {
+            SuccessEvidence::ProviderConfirmed => LegalTransition::NoChange,
+            SuccessEvidence::Premature => LegalTransition::Apply(ActionState::Succeeded),
+        },
+        (ActionState::Succeeded, ObservedResolution::Failed) => match success_evidence {
+            SuccessEvidence::ProviderConfirmed => LegalTransition::Conflict,
+            SuccessEvidence::Premature => LegalTransition::Apply(ActionState::Failed),
+        },
         (ActionState::Succeeded, ObservedResolution::Unknown) => LegalTransition::NoChange,
 
         // ── Failed: idempotent for Failed, Conflict for Executed ──
@@ -728,7 +840,11 @@ mod tests {
     #[test]
     fn legal_unknown_plus_executed_applies_succeeded() {
         assert_eq!(
-            legal_transition(ActionState::Unknown, ObservedResolution::Executed),
+            legal_transition(
+                ActionState::Unknown,
+                ObservedResolution::Executed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Apply(ActionState::Succeeded)
         );
     }
@@ -736,7 +852,11 @@ mod tests {
     #[test]
     fn legal_unknown_plus_failed_applies_failed() {
         assert_eq!(
-            legal_transition(ActionState::Unknown, ObservedResolution::Failed),
+            legal_transition(
+                ActionState::Unknown,
+                ObservedResolution::Failed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Apply(ActionState::Failed)
         );
     }
@@ -744,26 +864,95 @@ mod tests {
     #[test]
     fn legal_unknown_plus_unknown_is_no_change() {
         assert_eq!(
-            legal_transition(ActionState::Unknown, ObservedResolution::Unknown),
+            legal_transition(
+                ActionState::Unknown,
+                ObservedResolution::Unknown,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::NoChange
         );
     }
 
     #[test]
-    fn legal_succeeded_plus_failed_is_conflict() {
-        // A late failure contradicts a persisted success. This is NOT
-        // silently downgraded — it's surfaced as Conflict for operator
-        // visibility. The state machine does not pick the latest thing.
+    fn legal_succeeded_plus_failed_is_conflict_once_provider_confirmed() {
+        // A late failure contradicts a success the provider established. NOT
+        // silently downgraded — surfaced as Conflict for operator visibility.
+        // The state machine does not pick the latest thing, because a stale or
+        // duplicated provider failure would otherwise rewrite settled reality.
         assert_eq!(
-            legal_transition(ActionState::Succeeded, ObservedResolution::Failed),
+            legal_transition(
+                ActionState::Succeeded,
+                ObservedResolution::Failed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Conflict
         );
     }
 
     #[test]
+    fn legal_succeeded_plus_failed_corrects_a_premature_success() {
+        // The other half of the same invariant. `actions_execution.rs` marks an
+        // action `succeeded` at dispatch, before the external intervention is
+        // confirmed. A failure receipt against that is not overturning
+        // evidence — it is the first external word on the matter.
+        assert_eq!(
+            legal_transition(
+                ActionState::Succeeded,
+                ObservedResolution::Failed,
+                SuccessEvidence::Premature
+            ),
+            LegalTransition::Apply(ActionState::Failed)
+        );
+    }
+
+    #[test]
+    fn legal_succeeded_plus_executed_confirms_a_premature_success() {
+        // In production every executor success receipt arrives against an
+        // action already marked `succeeded` at dispatch. Treating that as a
+        // no-op would strand the side effects that hang off the confirmation,
+        // so the assignment would never reach `executed`.
+        assert_eq!(
+            legal_transition(
+                ActionState::Succeeded,
+                ObservedResolution::Executed,
+                SuccessEvidence::Premature
+            ),
+            LegalTransition::Apply(ActionState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn every_legal_action_status_maps_to_a_state() {
+        // The `viryaos_autopilot_actions` status CHECK vocabulary in full. A
+        // miss here is what made the resolver read every action as `Running`.
+        for (status, expected) in [
+            ("awaiting_approval", ActionState::Authorized),
+            ("queued", ActionState::Queued),
+            ("processing", ActionState::Running),
+            ("succeeded", ActionState::Succeeded),
+            ("failed", ActionState::Failed),
+            ("cancelled", ActionState::Cancelled),
+            ("unknown", ActionState::Unknown),
+        ] {
+            assert_eq!(
+                ActionState::from_action_status(status),
+                Some(expected),
+                "action status {status} must map to a ledger state"
+            );
+        }
+        // The ledger's own uppercase vocabulary is a different alphabet, and
+        // feeding it here must fail loudly rather than resolve to something.
+        assert_eq!(ActionState::from_action_status("SUCCEEDED"), None);
+    }
+
+    #[test]
     fn legal_succeeded_plus_executed_is_no_change_idempotent() {
         assert_eq!(
-            legal_transition(ActionState::Succeeded, ObservedResolution::Executed),
+            legal_transition(
+                ActionState::Succeeded,
+                ObservedResolution::Executed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::NoChange
         );
     }
@@ -772,7 +961,11 @@ mod tests {
     fn legal_succeeded_plus_unknown_is_no_change_no_certainty_loss() {
         // Don't lose certainty from a late ambiguous signal.
         assert_eq!(
-            legal_transition(ActionState::Succeeded, ObservedResolution::Unknown),
+            legal_transition(
+                ActionState::Succeeded,
+                ObservedResolution::Unknown,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::NoChange
         );
     }
@@ -783,7 +976,11 @@ mod tests {
         // silently revived — it's surfaced as Conflict for operator
         // visibility.
         assert_eq!(
-            legal_transition(ActionState::Failed, ObservedResolution::Executed),
+            legal_transition(
+                ActionState::Failed,
+                ObservedResolution::Executed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Conflict
         );
     }
@@ -791,7 +988,11 @@ mod tests {
     #[test]
     fn legal_failed_plus_failed_is_no_change_idempotent() {
         assert_eq!(
-            legal_transition(ActionState::Failed, ObservedResolution::Failed),
+            legal_transition(
+                ActionState::Failed,
+                ObservedResolution::Failed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::NoChange
         );
     }
@@ -799,7 +1000,11 @@ mod tests {
     #[test]
     fn legal_failed_plus_unknown_is_no_change_terminal() {
         assert_eq!(
-            legal_transition(ActionState::Failed, ObservedResolution::Unknown),
+            legal_transition(
+                ActionState::Failed,
+                ObservedResolution::Unknown,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::NoChange
         );
     }
@@ -807,7 +1012,11 @@ mod tests {
     #[test]
     fn legal_reconciling_plus_executed_applies_succeeded() {
         assert_eq!(
-            legal_transition(ActionState::Reconciling, ObservedResolution::Executed),
+            legal_transition(
+                ActionState::Reconciling,
+                ObservedResolution::Executed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Apply(ActionState::Succeeded)
         );
     }
@@ -815,7 +1024,11 @@ mod tests {
     #[test]
     fn legal_reconciling_plus_failed_applies_failed() {
         assert_eq!(
-            legal_transition(ActionState::Reconciling, ObservedResolution::Failed),
+            legal_transition(
+                ActionState::Reconciling,
+                ObservedResolution::Failed,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Apply(ActionState::Failed)
         );
     }
@@ -823,7 +1036,11 @@ mod tests {
     #[test]
     fn legal_running_plus_unknown_applies_unknown() {
         assert_eq!(
-            legal_transition(ActionState::Running, ObservedResolution::Unknown),
+            legal_transition(
+                ActionState::Running,
+                ObservedResolution::Unknown,
+                SuccessEvidence::ProviderConfirmed
+            ),
             LegalTransition::Apply(ActionState::Unknown)
         );
     }
@@ -837,7 +1054,11 @@ mod tests {
             ActionState::Queued,
         ] {
             assert_eq!(
-                legal_transition(state, ObservedResolution::Executed),
+                legal_transition(
+                    state,
+                    ObservedResolution::Executed,
+                    SuccessEvidence::ProviderConfirmed
+                ),
                 LegalTransition::NoChange,
                 "{state:?} + Executed should be NoChange"
             );

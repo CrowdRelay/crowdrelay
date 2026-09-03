@@ -59,8 +59,8 @@ use crate::community_executor::CRASH_POSTING_ERROR_PREFIX;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::action_ledger::{
-    ActionState, LegalTransition, ProviderDeliveryState, ResolutionEvidence, legal_transition,
-    resolve_observation,
+    ActionState, LegalTransition, ProviderDeliveryState, ResolutionEvidence, SuccessEvidence,
+    legal_transition, resolve_observation,
 };
 use crowdrelay_infra::autopilot::payload_requires_executor;
 use serde_json::Value;
@@ -310,7 +310,11 @@ impl ReceiptReconciliationWorker {
                     succeeded: receipt_status == "succeeded",
                 }
             };
-            match legal_transition(ActionState::Unknown, resolve_observation(evidence)) {
+            match legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ) {
                 LegalTransition::Apply(ActionState::Succeeded) => {
                     resolved += resolve_action(
                         self.workspace_id,
@@ -371,7 +375,11 @@ impl ReceiptReconciliationWorker {
         for (action_id, post_status, error_message) in rows {
             // Use the canonical resolver via the provider-specific adapter.
             let evidence = community_post_to_evidence(&post_status, error_message.as_deref());
-            match legal_transition(ActionState::Unknown, resolve_observation(evidence)) {
+            match legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ) {
                 LegalTransition::Apply(ActionState::Succeeded) => {
                     resolved += resolve_action(
                         self.workspace_id,
@@ -452,7 +460,11 @@ impl ReceiptReconciliationWorker {
         for (action_id, outbox_status, last_error_kind) in rows {
             // Route through the canonical resolver via the outbox adapter.
             let evidence = outbox_event_to_evidence(&outbox_status, last_error_kind.as_deref());
-            match legal_transition(ActionState::Unknown, resolve_observation(evidence)) {
+            match legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ) {
                 LegalTransition::Apply(ActionState::Succeeded) => {
                     resolved += resolve_action(
                         self.workspace_id,
@@ -696,7 +708,7 @@ mod tests {
     use crowdrelay_application::autopilot::AutopilotActionPayload;
     use crowdrelay_domain::FanId;
     use crowdrelay_domain::action_ledger::{
-        ActionState, LegalTransition, legal_transition, resolve_observation,
+        ActionState, LegalTransition, SuccessEvidence, legal_transition, resolve_observation,
     };
     use uuid::Uuid;
 
@@ -743,7 +755,11 @@ mod tests {
     fn posted_community_post_resolves_succeeded() {
         let evidence = community_post_to_evidence("posted", None);
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::Apply(ActionState::Succeeded)
         );
     }
@@ -758,7 +774,11 @@ mod tests {
         // Unknown, so legal_transition(Unknown, Unknown) → NoChange.
         // The action stays unknown — NoChange is correct.
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::NoChange
         );
     }
@@ -767,12 +787,20 @@ mod tests {
     fn definitive_community_failure_resolves_failed() {
         let evidence = community_post_to_evidence("failed", Some("no agents service configured"));
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::Apply(ActionState::Failed)
         );
         let evidence = community_post_to_evidence("failed", None);
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::Apply(ActionState::Failed)
         );
     }
@@ -784,7 +812,11 @@ mod tests {
             // InFlight → observation is Unknown. The action is already
             // Unknown, so NoChange — the action stays unknown.
             assert_eq!(
-                legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+                legal_transition(
+                    ActionState::Unknown,
+                    resolve_observation(evidence),
+                    SuccessEvidence::Premature,
+                ),
                 LegalTransition::NoChange,
                 "status {status} should stay unknown (NoChange from Unknown)"
             );
@@ -799,19 +831,31 @@ mod tests {
         let evidence =
             community_post_to_evidence("failed", Some("subreddit crashed during posting"));
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::Apply(ActionState::Failed)
         );
         let evidence = community_post_to_evidence("failed", Some("posting failed: rate limit"));
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::Apply(ActionState::Failed)
         );
         let evidence = community_post_to_evidence("failed", Some("worker crashed during posting"));
         // Crash marker → ConfirmationLost → Unknown observation.
         // Action already Unknown → NoChange (stays unknown).
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::NoChange
         );
     }
@@ -822,7 +866,11 @@ mod tests {
     fn delivered_outbox_resolves_executed() {
         let evidence = outbox_event_to_evidence("delivered", None);
         assert_eq!(
-            legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
             LegalTransition::Apply(ActionState::Succeeded)
         );
     }
@@ -839,7 +887,11 @@ mod tests {
         ] {
             let evidence = outbox_event_to_evidence("dead", Some(kind));
             assert_eq!(
-                legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+                legal_transition(
+                    ActionState::Unknown,
+                    resolve_observation(evidence),
+                    SuccessEvidence::Premature,
+                ),
                 LegalTransition::Apply(ActionState::Failed),
                 "permanent error kind {kind} must resolve to Failed"
             );
@@ -853,7 +905,11 @@ mod tests {
             // Ambiguous error → ConfirmationLost → Unknown observation.
             // Action already Unknown → NoChange (stays unknown).
             assert_eq!(
-                legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+                legal_transition(
+                    ActionState::Unknown,
+                    resolve_observation(evidence),
+                    SuccessEvidence::Premature,
+                ),
                 LegalTransition::NoChange,
                 "ambiguous error kind {kind} must stay unknown (NoChange from Unknown)"
             );
@@ -867,7 +923,11 @@ mod tests {
             // InFlight → Unknown observation. Action already Unknown →
             // NoChange (stays unknown).
             assert_eq!(
-                legal_transition(ActionState::Unknown, resolve_observation(evidence)),
+                legal_transition(
+                    ActionState::Unknown,
+                    resolve_observation(evidence),
+                    SuccessEvidence::Premature,
+                ),
                 LegalTransition::NoChange,
                 "in-flight status {status} should stay unknown (NoChange from Unknown)"
             );

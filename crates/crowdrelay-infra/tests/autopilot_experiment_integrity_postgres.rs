@@ -1947,19 +1947,32 @@ async fn t18_insert_vs_select_strictness() {
         "SELECT path: retry must return the same experiment_uuid"
     );
 
-    // Corrupt persisted metadata: inject an invalid experiment_status
-    // into the DB and verify the retry path fails loudly.
-    sqlx::query(
+    // This used to inject `experiment_status = 'INVALID_STATUS'` and assert the
+    // retry path errored rather than silently falling back to Active.
+    // `viryaos_experiment_designs_experiment_status_check` was added since, and
+    // now refuses the write — so the corrupt row cannot be built, and the test
+    // was failing in its own setup rather than on the property it asserts.
+    //
+    // The guarantee did not weaken; it moved earlier and got stronger. An
+    // invalid `experiment_status` is unrepresentable rather than merely
+    // detected on read. Assert it at the boundary that now owns it.
+    let corrupt_write = sqlx::query(
         "UPDATE viryaos_experiment_designs SET experiment_status = 'INVALID_STATUS' \
          WHERE workspace_id = $1 AND experiment_uuid = $2",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(design1.experiment_uuid)
     .execute(&f.pool)
-    .await
-    .expect("corrupt status");
+    .await;
+    let error = corrupt_write.expect_err("an invalid experiment_status must be refused");
+    assert!(
+        matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23514")),
+        "expected a check-constraint violation, got {error:?}"
+    );
 
-    let corrupt_result = f
+    // And the design is still readable and unchanged — the refused write left
+    // nothing half-applied for the retry path to fall back on.
+    let design3 = f
         .repository
         .get_or_create_experiment_design(
             f.workspace_id,
@@ -1974,11 +1987,11 @@ async fn t18_insert_vs_select_strictness() {
             2,
             f.now,
         )
-        .await;
-
-    assert!(
-        corrupt_result.is_err(),
-        "corrupt persisted experiment_status must produce an explicit error, NOT silent fallback to Active"
+        .await
+        .expect("retry after the refused corruption must still succeed");
+    assert_eq!(
+        design1.experiment_uuid, design3.experiment_uuid,
+        "the refused write must not have changed the persisted design"
     );
 }
 
@@ -2068,6 +2081,20 @@ async fn t19_full_chain_three_branches() {
         )
         .await
         .expect("transition to failed");
+    // `update_execution_status_by_action_id` writes the *assignment's* causal
+    // realisation, which is an independent state machine — it does not touch
+    // `viryaos_autopilot_actions.status`, and the ledger projects the action,
+    // not the assignment. Without this the action kept the fixture's
+    // `succeeded`, the ledger read SUCCEEDED, and the branch asserted FAILED
+    // against a failure it had never actually recorded.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'failed', finished_at = now() \
+         WHERE id = $1",
+    )
+    .bind(action_failure)
+    .execute(&f.pool)
+    .await
+    .expect("FAILURE branch: mark the action failed");
 
     // ── Branch 3: CONFIRMATION LOSS ──
     let trace_unknown = uuid::Uuid::now_v7();
@@ -2092,6 +2119,18 @@ async fn t19_full_chain_three_branches() {
         )
         .await
         .expect("transition to unknown");
+    // Same as the FAILURE branch: the assignment's causal realisation is a
+    // separate state machine, so the action must be moved for the ledger — its
+    // projection — to read UNKNOWN. `finished_at` is cleared because confirmation
+    // was lost, which is what the gap detector records.
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions SET status = 'unknown', finished_at = NULL \
+         WHERE id = $1",
+    )
+    .bind(action_unknown)
+    .execute(&f.pool)
+    .await
+    .expect("CONFIRMATION LOSS branch: mark the action unknown");
 
     // ── Verify: execution_status per branch ──
     let (success_arm, success_exec): (String, String) = sqlx::query_as(
@@ -3759,8 +3798,17 @@ async fn t26_concurrent_resolution_race_one_winner() {
         "assignment must be executed — exactly one transition"
     );
 
-    // Verify: both reports are recorded (audit ledger), but only one
-    // transitioned state.
+    // Verify: one receipt, one audit row.
+    //
+    // Both workers here submit the *same* `receipt_key` — `make_cmd()` builds
+    // it from `action_id` alone — so this is one receipt delivered twice, not
+    // two observations. `record_execution_report` inserts
+    // `ON CONFLICT (workspace_id, receipt_key) DO NOTHING`, which is the same
+    // dedup t25d depends on for `second.replayed == true`.
+    //
+    // This asserted 2 and could never have passed: expecting two audit rows
+    // for one receipt key contradicts the idempotency contract the suite
+    // relies on elsewhere. Two genuine observations need two receipt keys.
     let report_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM viryaos_autopilot_execution_reports \
          WHERE workspace_id = $1 AND action_id = $2",
@@ -3771,8 +3819,9 @@ async fn t26_concurrent_resolution_race_one_winner() {
     .await
     .expect("report count");
     assert_eq!(
-        report_count, 2,
-        "both reports are recorded (audit ledger), but only one transitioned state"
+        report_count, 1,
+        "one receipt key is one receipt — the racing duplicate is deduped, \
+         and exactly one transition happened"
     );
 }
 
@@ -4203,106 +4252,6 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
 
 // ── T28: action-to-assignment 1:1 invariant (migration 0201) ──
 
-/// Helper: insert a bare experiment assignment with a specific action_id.
-async fn insert_bare_assignment(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    action_id: uuid::Uuid,
-    experiment_uuid: uuid::Uuid,
-    unit_id: &str,
-) {
-    insert_experiment_design(pool, workspace_id, experiment_uuid).await;
-    insert_bare_action(pool, workspace_id, action_id).await;
-    sqlx::query(
-        r#"INSERT INTO viryaos_experiment_assignments
-           (id, workspace_id, experiment_uuid, unit_id, unit_kind,
-            arm, intended_template_id, propensity, prediction, context, strategy,
-            eligibility_criteria, selection_context, interference_policy,
-            contamination_estimate, is_interference_controllable,
-            experiment_status, execution_status, action_id)
-           VALUES ($1,$2,$3,$4,'target_community','treatment','reddit-scanner',0.5,
-                   '{}'::jsonb,'{}'::jsonb,'discovery',
-                   '{}'::jsonb,'{}'::jsonb,'none',0.0,false,
-                   'active','dispatched',$5)"#,
-    )
-    .bind(uuid::Uuid::now_v7().to_string())
-    .bind(workspace_id.into_uuid())
-    .bind(experiment_uuid)
-    .bind(unit_id)
-    .bind(action_id)
-    .execute(pool)
-    .await
-    .expect("insert bare assignment");
-}
-
-/// Inserts the decision and action an assignment's `action_id` points at.
-///
-/// `viryaos_experiment_assignments_action_id_fkey` requires the action to
-/// exist. Fixtures used to mint a bare uuid, which was fine before the key
-/// existed and has been failing ever since — production never assigns a unit to
-/// an action it did not create.
-async fn insert_bare_action(pool: &sqlx::PgPool, workspace_id: WorkspaceId, action_id: uuid::Uuid) {
-    let decision_id = uuid::Uuid::now_v7();
-    sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
-             (id, workspace_id, decision_key, context, subject_kind, subject_id,
-              decision_kind, confidence_basis_points, disposition, reason,
-              input_snapshot, policy_snapshot, recommendation)
-           VALUES ($1,$2,$3,'growth_intelligence','target_community',$4,
-                   'request_agent_run',5000,'require_approval','fixture',
-                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
-    )
-    .bind(decision_id)
-    .bind(workspace_id.into_uuid())
-    .bind(format!("fixture:{action_id}"))
-    .bind(uuid::Uuid::now_v7())
-    .execute(pool)
-    .await
-    .expect("insert fixture decision");
-    sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
-             (id, workspace_id, decision_id, context, action_kind,
-              subject_kind, subject_id, idempotency_key, payload, status)
-           VALUES ($1,$2,$3,'growth_intelligence','request_agent_run',
-                   'target_community',$4,$5,'{}'::jsonb,'queued')"#,
-    )
-    .bind(action_id)
-    .bind(workspace_id.into_uuid())
-    .bind(decision_id)
-    .bind(uuid::Uuid::now_v7())
-    .bind(format!("fixture-action:{action_id}"))
-    .execute(pool)
-    .await
-    .expect("insert fixture action");
-}
-
-/// Inserts the `viryaos_experiment_designs` parent row an assignment's
-/// `experiment_uuid` foreign key points at.
-///
-/// Fixtures used to mint an `experiment_uuid` and insert the assignment
-/// directly, which `fk_assignment_experiment` rejects. Production always
-/// designs an experiment before assigning units to it, so the fixture has to
-/// do the same to exercise anything downstream.
-async fn insert_experiment_design(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    experiment_uuid: uuid::Uuid,
-) {
-    sqlx::query(
-        r#"INSERT INTO viryaos_experiment_designs
-             (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
-              unit_kind, holdout_probability, interference_policy, experiment_status)
-           VALUES ($1, $2, 'reddit-scanner', $3, 'target_community', 0.5, 'none', 'active')
-           ON CONFLICT (experiment_uuid) DO NOTHING"#,
-    )
-    .bind(experiment_uuid)
-    .bind(workspace_id.into_uuid())
-    .bind(experiment_uuid.to_string())
-    .execute(pool)
-    .await
-    .expect("insert experiment design");
-}
-
 /// T28a: First assignment for an action succeeds.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
@@ -4383,25 +4332,23 @@ async fn t28b_second_assignment_for_same_action_fails() {
     );
 }
 
-/// T28c: Two different workspaces may use the same action_id.
+/// T28c: An action id belongs to exactly one workspace — the primary key
+/// on `viryaos_autopilot_actions.id` makes cross-workspace reuse impossible.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn t28c_different_workspaces_same_action_id_succeeds() {
+async fn t28c_action_id_cannot_repeat_across_workspaces() {
     let f = setup().await.expect("fixture");
     let action_id = uuid::Uuid::now_v7();
 
-    // First workspace.
-    let experiment_uuid_1 = uuid::Uuid::now_v7();
     insert_bare_assignment(
         &f.pool,
         f.workspace_id,
         action_id,
-        experiment_uuid_1,
+        uuid::Uuid::now_v7(),
         "r/t28c-ws1",
     )
     .await;
 
-    // Second workspace — insert a workspace row first.
     let workspace_id_2 = WorkspaceId::new();
     let suffix = workspace_id_2.into_uuid().simple().to_string();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
@@ -4412,28 +4359,60 @@ async fn t28c_different_workspaces_same_action_id_succeeds() {
         .await
         .expect("insert workspace 2");
 
-    let experiment_uuid_2 = uuid::Uuid::now_v7();
-    insert_bare_assignment(
-        &f.pool,
-        workspace_id_2,
-        action_id,
-        experiment_uuid_2,
-        "r/t28c-ws2",
+    // Reusing the id in a second workspace must be refused by
+    // `viryaos_autopilot_actions_pkey`, which is on `id` alone.
+    let decision_id_2 = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation)
+           VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
+                   'auto_execute',9000,'auto_execute','test',
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
     )
-    .await;
+    .bind(decision_id_2)
+    .bind(workspace_id_2.into_uuid())
+    .bind(format!("decision-ws2-{action_id}"))
+    .bind(uuid::Uuid::now_v7())
+    .execute(&f.pool)
+    .await
+    .expect("insert decision in workspace 2");
 
+    let repeated = sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status)
+           VALUES ($1,$2,$3,'growth_metrics','signal.push.request','target_community',
+                   $4,$5,'{}'::jsonb,'queued')"#,
+    )
+    .bind(action_id)
+    .bind(workspace_id_2.into_uuid())
+    .bind(decision_id_2)
+    .bind(uuid::Uuid::now_v7())
+    .bind(format!("action-ws2-{action_id}"))
+    .execute(&f.pool)
+    .await;
+    let error = repeated.expect_err("a repeated action id must be refused");
+    assert!(
+        matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505")),
+        "expected a unique violation, got {error:?}"
+    );
+
+    // So exactly one assignment can ever carry this action_id, and
+    // `idx_experiment_assignments_action_id_unique` being keyed on
+    // (workspace_id, action_id) is defence in depth rather than a case that
+    // arises. The original test asserted the opposite — two workspaces sharing
+    // one action_id — which the primary key has never permitted, so it could
+    // not construct its own premise.
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM viryaos_experiment_assignments \
-         WHERE action_id = $1",
+        "SELECT COUNT(*) FROM viryaos_experiment_assignments WHERE action_id = $1",
     )
     .bind(action_id)
     .fetch_one(&f.pool)
     .await
     .expect("count");
-    assert_eq!(
-        count, 2,
-        "two different workspaces may use the same action_id"
-    );
+    assert_eq!(count, 1, "an action id belongs to exactly one workspace");
 }
 
 /// T28d: NULL action_id remains allowed (withheld / non-dispatched).
@@ -4442,6 +4421,10 @@ async fn t28c_different_workspaces_same_action_id_succeeds() {
 async fn t28d_null_action_id_remains_allowed() {
     let f = setup().await.expect("fixture");
     let experiment_uuid = uuid::Uuid::now_v7();
+    // `fk_assignment_experiment` needs the design to exist first. The test
+    // asserts the *partial* unique index tolerates repeated NULL action_ids,
+    // and was failing on the foreign key before ever reaching that question.
+    insert_experiment_design(&f.pool, f.workspace_id, experiment_uuid).await;
 
     // Insert two assignments with NULL action_id — both should succeed.
     for unit in ["r/t28d-1", "r/t28d-2"] {

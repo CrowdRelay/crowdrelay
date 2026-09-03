@@ -22,6 +22,7 @@ mod plays;
 mod runtime;
 mod show_cost;
 mod state;
+mod success_evidence;
 mod team;
 mod terms;
 mod waves;
@@ -81,7 +82,8 @@ use crowdrelay_domain::{
     PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, TraceContext, WorkspaceId,
     action_class::ActionClass,
     action_ledger::{
-        ActionState, LegalTransition, ResolutionEvidence, legal_transition, resolve_observation,
+        ActionState, LegalTransition, ResolutionEvidence, SuccessEvidence, legal_transition,
+        resolve_observation,
     },
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::{AutonomyLevel, Confidence, PolicyDisposition},

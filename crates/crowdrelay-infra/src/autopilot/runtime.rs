@@ -1,5 +1,6 @@
 //! Closed-loop executor evidence, release ledger and first-party RUM storage.
 
+use super::success_evidence::success_evidence_for;
 use super::*;
 use time::{Duration as TimeDuration, format_description::well_known::Rfc3339};
 
@@ -450,15 +451,40 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .fetch_optional(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
+                        // `from_action_status`, not `parse`: this is the
+                        // action table's lowercase vocabulary, and `parse`
+                        // reads the ledger's uppercase one. `parse` here
+                        // returned None for every legal status, so the
+                        // fallback below was the resolver's only input.
                         let current_state = current_status
                             .as_deref()
-                            .and_then(ActionState::parse)
+                            .and_then(ActionState::from_action_status)
                             .unwrap_or(ActionState::Running);
+                        // Is the persisted `Succeeded` worth anything? Two
+                        // facts decide it, both of which already exist.
+                        //
+                        // An action that completes locally has nothing
+                        // external to confirm, so its success is final on its
+                        // own. An externally executed one is marked
+                        // `succeeded` at dispatch, so it is only confirmed
+                        // once a success report carries a provider reference.
+                        //
+                        // The confirming report is looked up per action, not
+                        // per executor: a success confirmed by anyone is
+                        // confirmed, and making `ProviderConfirmed` sticky
+                        // errs towards `Conflict` rather than towards
+                        // rewriting settled reality. Same-attempt binding is
+                        // enforced earlier and separately — a receipt whose
+                        // `claim_token` does not match the held claim is
+                        // already refused above.
+                        let success_evidence =
+                            success_evidence_for(&mut transaction, workspace_id, &command).await?;
                         let transition = legal_transition(
                             current_state,
                             resolve_observation(ResolutionEvidence::TerminalReceipt {
                                 succeeded: false,
                             }),
+                            success_evidence,
                         );
                         if transition == LegalTransition::NoChange {
                             // Late failure after prior success — do not regress.
@@ -495,11 +521,23 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // transition == Apply(Failed) — apply the
                         // transition atomically.
 
-                        // Resolve the action from unknown → failed (if it
-                        // was unknown — the gap detector may have marked it
-                        // unknown before this late receipt arrived). The
-                        // WHERE guard makes this idempotent: if the action
-                        // is already `failed` or `succeeded`, this is a no-op.
+                        // Apply the failure to the state the resolver actually
+                        // decided from.
+                        //
+                        // This was pinned to `AND status = 'unknown'`, which
+                        // was complete back when `Apply(Failed)` could only
+                        // arrive from Unknown — `Succeeded` always resolved to
+                        // Conflict. It can now also arrive from a *premature*
+                        // Succeeded, and that guard silently dropped the write:
+                        // the resolver decided Failed, the report was audited,
+                        // and the action stayed `succeeded`.
+                        //
+                        // Pinning the exact status we read under `FOR UPDATE`
+                        // keeps the write bound to the state the decision was
+                        // made on — optimistic concurrency, not a second
+                        // policy. Re-listing which states may become `failed`
+                        // here would put the decision in two places, and they
+                        // would drift.
                         sqlx::query(
                             r#"UPDATE viryaos_autopilot_actions
                                SET status = 'failed',
@@ -508,11 +546,12 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                    updated_at = now()
                                WHERE workspace_id = $1
                                  AND id = $2
-                                 AND status = 'unknown'"#,
+                                 AND status = $4"#,
                         )
                         .bind(workspace_id.into_uuid())
                         .bind(command.action_id.into_uuid())
                         .bind(command.error_kind.as_deref())
+                        .bind(current_status.as_deref())
                         .execute(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
@@ -682,15 +721,27 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .fetch_optional(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
+                        // `from_action_status`, not `parse`: this is the
+                        // action table's lowercase vocabulary, and `parse`
+                        // reads the ledger's uppercase one. `parse` here
+                        // returned None for every legal status, so the
+                        // fallback below was the resolver's only input.
                         let current_state = current_status
                             .as_deref()
-                            .and_then(ActionState::parse)
+                            .and_then(ActionState::from_action_status)
                             .unwrap_or(ActionState::Running);
+                        // Whether a *prior* confirmation already exists. If
+                        // not, this receipt is the one that confirms a success
+                        // marked at dispatch, and its side effects still have
+                        // to be applied; if one does, this is a duplicate.
+                        let success_evidence =
+                            success_evidence_for(&mut transaction, workspace_id, &command).await?;
                         let transition = legal_transition(
                             current_state,
                             resolve_observation(ResolutionEvidence::TerminalReceipt {
                                 succeeded: true,
                             }),
+                            success_evidence,
                         );
                         if transition == LegalTransition::NoChange {
                             // Already in a terminal state that shouldn't
