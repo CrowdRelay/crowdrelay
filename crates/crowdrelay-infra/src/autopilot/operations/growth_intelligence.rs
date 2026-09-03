@@ -100,6 +100,7 @@ const WORKER_TEMPLATES: &[&str] = &[
     "press-pitch",
     "social-post",
     "telegram-poster",
+    "discord-poster",
     "community-engager",
     "signal-inviter",
     "growth-strategist",

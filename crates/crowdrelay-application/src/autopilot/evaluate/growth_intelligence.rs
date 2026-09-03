@@ -335,6 +335,10 @@ pub fn evaluate_growth_intelligence(
         policy.telegram_poster_cooldown_hours,
         snapshot.standing,
     ));
+    let discord_poster_cd = apply_pref(effective_agent_cooldown(
+        policy.discord_poster_cooldown_hours,
+        snapshot.standing,
+    ));
     // community-engager cooldown is used by community_engager_candidates,
     // not by this function. This function handles direct-action templates
     // only (social-post, signal-inviter, growth-strategist, booking-finder).
@@ -583,7 +587,7 @@ pub fn evaluate_growth_intelligence(
                 social_post_cd
             },
             reason: "Social content cadence is due (2-day cycle)",
-            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            tier: effective_agent_tier(AgentTier::Premium, snapshot.standing),
             prediction: make_prediction(
                 "social-post",
                 expected_new_fans,
@@ -621,9 +625,47 @@ pub fn evaluate_growth_intelligence(
                 telegram_poster_cd
             },
             reason: "Telegram channel post cadence is due (2-day cycle)",
-            tier: effective_agent_tier(AgentTier::Basic, snapshot.standing),
+            tier: effective_agent_tier(AgentTier::Premium, snapshot.standing),
             prediction: make_prediction(
                 "telegram-poster",
+                expected_new_fans,
+                expected_signal_installs,
+                &dispatch_context,
+            ),
+            efe_score,
+            strategy_rank,
+            treatment_stats,
+        });
+    }
+
+    // Rule 3c: Post to the band's Discord channel on a 2-day cadence.
+    // This is a direct-action worker like telegram-poster, but targets the
+    // band's own Discord server — broadcasting announcements, release
+    // reminders, and show updates to existing members. The bot token is
+    // stored on the discord connection row; the executor posts via the
+    // Bot API POST /channels/{id}/messages endpoint.
+    if snapshot.template_id == "discord-poster"
+        && effective_hours >= discord_poster_cd
+        && retry_ready
+    {
+        let mut prompt = "Draft a Discord channel message for the band. Keep it concise (under 2000 characters), conversational, and engaging. Reference upcoming events, new releases, or behind-the-scenes content. Write in Polish for the primary audience. Use Discord markdown formatting (bold, italic, code blocks) where helpful.".to_owned();
+        if !insights.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&insights);
+        }
+        return Some(IntelligenceRequest {
+            template_id: "discord-poster",
+            priority: 2,
+            prompt,
+            key_window_hours: if is_retry {
+                retry_window
+            } else {
+                discord_poster_cd
+            },
+            reason: "Discord channel post cadence is due (2-day cycle)",
+            tier: effective_agent_tier(AgentTier::Premium, snapshot.standing),
+            prediction: make_prediction(
+                "discord-poster",
                 expected_new_fans,
                 expected_signal_installs,
                 &dispatch_context,
@@ -974,6 +1016,7 @@ fn template_post_format(template_id: &str) -> Option<String> {
         "community-engager" => Some("text_post".to_owned()),
         "social-post" => Some("social_post".to_owned()),
         "telegram-poster" => Some("telegram_post".to_owned()),
+        "discord-poster" => Some("discord_post".to_owned()),
         "press-pitch" => Some("email_pitch".to_owned()),
         "signal-inviter" => Some("direct_message".to_owned()),
         "growth-strategist" => Some("text_report".to_owned()),

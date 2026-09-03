@@ -37,6 +37,8 @@ use crowdrelay_worker::{
         adapter::SourceAdapter, brutalland::BrutallandAdapter, reddit::RedditAdapter,
         worker::CommunityIntelligenceWorker,
     },
+    community_join_executor::CommunityJoinExecutorWorker,
+    discord_executor::DiscordExecutorWorker,
     discovery::{DiscoveryConfig, RedditDiscoveryWorker, XDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
@@ -49,6 +51,8 @@ use crowdrelay_worker::{
     reminders::EventReminderScheduler,
     replay::{ReplayOptions, parse_replay_options, run_replay},
     retention::{RetentionWorker, RetentionWorkerConfig},
+    social_post_executor::SocialPostExecutorWorker,
+    telegram_executor::TelegramExecutorWorker,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -418,7 +422,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         manual_mode,
         config.reddit_proxy_url.clone(),
         config.agent_service_url.clone(),
-        agent_service_auth_key,
+        agent_service_auth_key.clone(),
     ) {
         Ok(worker) => {
             // Say which of the two reasons put it in manual mode. "Not
@@ -448,6 +452,133 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             None
         }
     };
+    // Telegram executor: posts LLM-drafted content to the band's Telegram
+    // channel via the Bot API. The bot token is stored encrypted on the
+    // telegram fanbase_connections row. In manual mode (default), posts are
+    // drafted and marked `awaiting_manual_post` — the operator posts manually.
+    // Enable with CROWDRELAY_TELEGRAM_AUTO_POST=true.
+    let telegram_auto_post = std::env::var("CROWDRELAY_TELEGRAM_AUTO_POST")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let telegram_executor = match TelegramExecutorWorker::new(
+        database.clone(),
+        workspace_id,
+        !telegram_auto_post,
+        config.response_encryption_key.clone(),
+    ) {
+        Ok(worker) => {
+            if !telegram_auto_post {
+                tracing::info!(
+                    "telegram executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
+                );
+            } else {
+                tracing::info!(
+                    "telegram executor running in AUTOMATIC MODE — approved posts publish via the Bot API, bounded to one post per channel per 12 hours and five per workspace per 24 hours"
+                );
+            }
+            Some(worker)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "telegram executor disabled: HTTP client build failed");
+            None
+        }
+    };
+    // Discord executor: posts LLM-drafted content to the band's Discord
+    // channel via the Bot API. The bot token is stored encrypted on the
+    // discord fanbase_connections row. In manual mode (default), posts are
+    // drafted and marked `awaiting_manual_post` — the operator posts manually.
+    // Enable with CROWDRELAY_DISCORD_AUTO_POST=true.
+    let discord_auto_post = std::env::var("CROWDRELAY_DISCORD_AUTO_POST")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let discord_executor = match DiscordExecutorWorker::new(
+        database.clone(),
+        workspace_id,
+        !discord_auto_post,
+        config.response_encryption_key.clone(),
+    ) {
+        Ok(worker) => {
+            if !discord_auto_post {
+                tracing::info!(
+                    "discord executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
+                );
+            } else {
+                tracing::info!(
+                    "discord executor running in AUTOMATIC MODE — approved posts publish via the Bot API, bounded to one post per channel per 12 hours and five per workspace per 24 hours"
+                );
+            }
+            Some(worker)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "discord executor disabled: HTTP client build failed");
+            None
+        }
+    };
+    // Social post executor: tracks LLM-drafted social posts for Instagram,
+    // Facebook, and X/Twitter. Currently runs in manual mode — posts are
+    // marked `awaiting_manual_post` and the operator publishes them
+    // manually. Auto-posting via Meta Graph API / X API will be added in a
+    // future phase. Env: CROWDRELAY_SOCIAL_AUTO_POST=true (enables auto mode
+    // when platform API integration is available).
+    let social_auto_post = std::env::var("CROWDRELAY_SOCIAL_AUTO_POST")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let social_post_executor =
+        SocialPostExecutorWorker::new(database.clone(), workspace_id, !social_auto_post);
+    if social_auto_post {
+        tracing::info!(
+            "social post executor running in AUTOMATIC MODE — not yet implemented for Instagram/Facebook/X, posts will fall back to awaiting_manual_post"
+        );
+    } else {
+        tracing::info!(
+            "social post executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
+        );
+    }
+    // Community join executor: auto-joins (subscribes to) Reddit communities
+    // that the discovery worker has found. Calls the agents service's
+    // /reddit/join endpoint which drives the logged-in browser session.
+    // In manual mode (default), places stay `not_joined` — the operator
+    // joins manually and records the result via the API.
+    // Enable with CROWDRELAY_COMMUNITY_AUTO_JOIN=true.
+    let community_auto_join = std::env::var("CROWDRELAY_COMMUNITY_AUTO_JOIN")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "true" | "1" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let community_join_executor = match CommunityJoinExecutorWorker::new(
+        database.clone(),
+        workspace_id,
+        config.agent_service_url.clone(),
+        agent_service_auth_key.clone(),
+        community_auto_join,
+    ) {
+        Ok(worker) => {
+            if community_auto_join {
+                tracing::info!(
+                    "community join executor running in AUTOMATIC MODE — subscribes to eligible subreddits via the agents service browser, bounded to 10 joins per 24 hours"
+                );
+            } else {
+                tracing::info!(
+                    "community join executor running in MANUAL MODE — places stay not_joined, operator joins manually"
+                );
+            }
+            Some(worker)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "community join executor disabled: HTTP client build failed");
+            None
+        }
+    };
     let audience_graph_sweeper = AudienceGraphSweeper::new(
         database.clone(),
         workspace_id,
@@ -465,7 +596,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             DISCOVERY_SWEEP_INTERVAL,
             config.database.operation_timeout,
             config.agent_service_url.clone(),
-            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
+            agent_service_auth_key.clone(),
         )?)
     } else {
         tracing::info!("reddit discovery disabled; CROWDRELAY_DISCOVERY_REDDIT_QUERIES not set");
@@ -479,7 +610,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             DISCOVERY_SWEEP_INTERVAL,
             config.database.operation_timeout,
             config.agent_service_url.clone(),
-            std::env::var("CROWDRELAY_AGENT_SERVICE_AUTH_KEY").ok(),
+            agent_service_auth_key.clone(),
         )?)
     } else {
         tracing::info!("x discovery disabled; CROWDRELAY_DISCOVERY_X_QUERIES not set");
@@ -581,6 +712,10 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
     let community_executor_shutdown = shutdown_receiver.clone();
+    let telegram_executor_shutdown = shutdown_receiver.clone();
+    let discord_executor_shutdown = shutdown_receiver.clone();
+    let social_post_executor_shutdown = shutdown_receiver.clone();
+    let community_join_executor_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let attribution_shutdown = shutdown_receiver.clone();
     let community_intel_shutdown = shutdown_receiver.clone();
@@ -595,6 +730,10 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         agent_outcomes_enabled: agent_outcome_worker.is_some(),
         push_delivery_enabled: push_delivery_worker.is_some(),
         community_executor_enabled: community_executor.is_some(),
+        telegram_executor_enabled: telegram_executor.is_some(),
+        discord_executor_enabled: discord_executor.is_some(),
+        social_post_executor_enabled: true,
+        community_join_executor_enabled: community_join_executor.is_some(),
         reddit_discovery_enabled: reddit_discovery.is_some(),
         x_discovery_enabled: x_discovery.is_some(),
         ad_conversion_enabled: ad_conversion_worker.is_some(),
@@ -687,6 +826,30 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         runtime_tasks.spawn(async move {
             worker.run(community_executor_shutdown).await;
             "community executor"
+        });
+    }
+    if let Some(worker) = telegram_executor {
+        runtime_tasks.spawn(async move {
+            worker.run(telegram_executor_shutdown).await;
+            "telegram executor"
+        });
+    }
+    if let Some(worker) = discord_executor {
+        runtime_tasks.spawn(async move {
+            worker.run(discord_executor_shutdown).await;
+            "discord executor"
+        });
+    }
+    runtime_tasks.spawn(async move {
+        social_post_executor
+            .run(social_post_executor_shutdown)
+            .await;
+        "social post executor"
+    });
+    if let Some(worker) = community_join_executor {
+        runtime_tasks.spawn(async move {
+            worker.run(community_join_executor_shutdown).await;
+            "community join executor"
         });
     }
     if let Some(worker) = growth_metric_sync {
@@ -956,6 +1119,25 @@ struct GrowthReadiness {
     /// Reddit posting executor. Without this, community engagement posts are
     /// drafted but never posted. Env: CROWDRELAY_AGENT_SERVICE_AUTH_KEY
     community_executor_enabled: bool,
+    /// Telegram channel posting executor. Without this, telegram-poster
+    /// drafts are emitted to the outbox but never posted. The bot token
+    /// must be stored on the telegram fanbase_connections row.
+    /// Env: CROWDRELAY_TELEGRAM_AUTO_POST=true
+    telegram_executor_enabled: bool,
+    /// Discord channel posting executor. Without this, discord-poster
+    /// drafts are emitted to the outbox but never posted. The bot token
+    /// must be stored on the discord fanbase_connections row.
+    /// Env: CROWDRELAY_DISCORD_AUTO_POST=true
+    discord_executor_enabled: bool,
+    /// Social post executor (Instagram, Facebook, X). Tracks LLM-drafted
+    /// social posts. Currently runs in manual mode — posts are marked
+    /// `awaiting_manual_post` and the operator publishes them manually.
+    /// Env: CROWDRELAY_SOCIAL_AUTO_POST=true
+    social_post_executor_enabled: bool,
+    /// Community join executor. Auto-joins Reddit communities found by the
+    /// discovery worker. In manual mode (default), places stay `not_joined`.
+    /// Env: CROWDRELAY_COMMUNITY_AUTO_JOIN=true
+    community_join_executor_enabled: bool,
     /// Reddit subreddit discovery. Without this, the system can't find new
     /// communities to engage with. Env: CROWDRELAY_DISCOVERY_REDDIT_QUERIES
     reddit_discovery_enabled: bool,
@@ -979,6 +1161,10 @@ impl GrowthReadiness {
             self.agent_outcomes_enabled,
             self.push_delivery_enabled,
             self.community_executor_enabled,
+            self.telegram_executor_enabled,
+            self.discord_executor_enabled,
+            self.social_post_executor_enabled,
+            self.community_join_executor_enabled,
             self.reddit_discovery_enabled,
             self.x_discovery_enabled,
             self.ad_conversion_enabled,

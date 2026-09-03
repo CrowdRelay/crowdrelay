@@ -73,14 +73,27 @@ fn account_id_is_acceptable(account_id: &str, platform: &str) -> bool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateDiscordConnectionRequest {
     /// Discord invite code (e.g. `BBdDV6gVy` from `discord.gg/BBdDV6gVy`).
+    /// Used for growth metric sync (member count from Discord's invite API).
     pub invite_code: String,
     /// Optional display label. Defaults to "Discord — {invite_code}".
     pub label: Option<String>,
+    /// Optional bot token from the Discord Developer Portal. When provided
+    /// alongside `channel_id`, the connection can post messages to the
+    /// channel via the Bot API. The token is encrypted and stored in
+    /// `encrypted_access_token`.
+    pub bot_token: Option<String>,
+    /// Optional Discord channel ID (numeric string). When provided alongside
+    /// `bot_token`, the executor posts messages to this channel. Stored in
+    /// `provider_account_id` (replacing the invite code, which remains in
+    /// `external_account_ref` for metric sync).
+    pub channel_id: Option<String>,
 }
 
 /// Creates or updates a Discord server connection for growth metric sync.
-/// The invite code is stored in `provider_account_id`; the sync worker fetches
+/// The invite code is stored in `external_account_ref`; the sync worker fetches
 /// the member count from Discord's own invite API (no API key needed).
+/// When `bot_token` and `channel_id` are provided, the connection also
+/// supports posting messages to the channel via the Discord Bot API.
 pub async fn create_discord_connection(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
@@ -102,9 +115,43 @@ pub async fn create_discord_connection(
     let Some(label) = resolve_label(body.label, || format!("Discord — {invite_code}")) else {
         return Problem::bad_request(request_id_value).into_response();
     };
+    // Optional bot token + channel ID for posting. Both must be provided
+    // together — a bot token without a channel ID has nothing to post to,
+    // and a channel ID without a bot token has no way to post.
+    let bot_token = body
+        .bot_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let channel_id = body
+        .channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    let posting_config = match (bot_token, channel_id) {
+        (Some(token), Some(channel)) => {
+            // Discord bot tokens are long alphanumeric strings; channel IDs
+            // are numeric strings (snowflake).
+            if token.len() < 20 || !channel.chars().all(|c| c.is_ascii_digit()) {
+                return Problem::bad_request(request_id_value).into_response();
+            }
+            Some((token.to_owned(), channel.to_owned()))
+        }
+        (None, None) => None,
+        _ => {
+            return Problem::bad_request(request_id_value).into_response();
+        }
+    };
     let repo = repository(&state);
     match repo
-        .upsert_discord_connection(workspace(&state), invite_code, &label)
+        .upsert_discord_connection(
+            workspace(&state),
+            invite_code,
+            &label,
+            posting_config
+                .as_ref()
+                .map(|(t, c)| (t.as_str(), c.as_str())),
+        )
         .await
     {
         Ok(()) => (
