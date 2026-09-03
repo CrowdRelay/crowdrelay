@@ -41,21 +41,16 @@ jobs:
           path: crowdrelay
 
       # Both consumers are public, so the default GITHUB_TOKEN reads them and no
-      # PAT is involved. These steps passed `token: ${{ secrets.CROWDRELAY_PAT }}`,
-      # a secret that does not exist in this repository. An unset secret is the
-      # empty string rather than an omitted input, so checkout received an
-      # explicitly blank token and failed the job outright:
-      #
-      #   ##[error]Input required and not supplied: token
-      #
-      # Asking for a credential that is not needed cannot succeed and can only
-      # fail; dropping the input is the fix, not creating the secret.
+      # PAT is involved. The cross-repository checkout still requires an explicit
+      # token input — `github.token` is automatically available and reads public
+      # repos without any secret configuration.
       - name: Check out Virya Signal consumer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: CrowdRelay/virya-signal
           ref: main
           path: virya-signal
+          token: ${{ github.token }}
           persist-credentials: false
 
       - name: Check out Synesthesia consumer
@@ -64,6 +59,7 @@ jobs:
           repository: CrowdRelay/synesthesia
           ref: main
           path: synesthesia
+          token: ${{ github.token }}
           persist-credentials: false
 
       - name: Verify current consumers against this CrowdRelay revision
