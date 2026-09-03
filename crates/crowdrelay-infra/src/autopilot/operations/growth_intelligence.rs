@@ -30,6 +30,7 @@
 use super::*;
 
 mod community_targets;
+mod worker_signals;
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
     GrowthTrend, RecentInsight, TenantPreferencePosterior, WorldModel, agent_standing_policy,
@@ -89,6 +90,20 @@ const AUDIENCE_WINDOW_CTE: &str = r#"
             LEFT JOIN first_in_month f ON f.series_id = l.series_id
         )
 "#;
+
+/// How far back operator feedback is read.
+///
+/// The preference posterior decays on a 90-day half-life, so a decision from
+/// a year ago carries about 6% of a fresh one's weight, and standing is a
+/// statement about recent behaviour. Reading without a bound made the cost of
+/// every autopilot cycle grow with the workspace's age, for signal that had
+/// already decayed to nothing.
+const OPERATOR_FEEDBACK_WINDOW_DAYS: u32 = 365;
+
+/// Ceiling on operator-feedback rows per cycle. A workspace that somehow
+/// produces more decisions than this in a year is one where the newest are
+/// the ones worth reading, which is the order the query returns.
+const OPERATOR_FEEDBACK_MAX_ROWS: i64 = 5_000;
 
 /// The worker templates the brain may dispatch, in the order the evaluator
 /// checks them.
@@ -310,145 +325,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         )
         .collect();
 
-    // Load agent standings from past measurement outcomes. The brain learns
-    // which worker templates produce fan growth and which don't, and adjusts
-    // dispatch cadence accordingly. We load raw outcomes ordered by
-    // observed_at DESC and compute the OutcomeRecord (with
-    // consecutive_worsened) in Rust — simpler and more testable than a
-    // window-function SQL approach.
-    let standing_rows: Vec<(String, String, OffsetDateTime)> = sqlx::query_as(
-        r#"
-        SELECT action.payload->>'template_id' AS template_id,
-               outcome.effect_assessment,
-               outcome.observed_at
-        FROM viryaos_autopilot_outcomes outcome
-        JOIN viryaos_autopilot_actions action ON action.id = outcome.action_id
-        WHERE action.workspace_id = $1
-          AND action.action_kind = 'agent.run.request'
-          AND outcome.effect_assessment IS NOT NULL
-        ORDER BY action.payload->>'template_id', outcome.observed_at DESC
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    // Build OutcomeRecord per template by iterating the ordered rows.
-    let policy = agent_standing_policy();
-
-    // Load operator feedback (approve/cancel verdicts) from operator_actions.
-    // This is the execution-quality signal: "would a human operator accept
-    // this draft?" — separate from the causal fan-growth signal above. We
-    // join operator_actions with autopilot_actions to get the template_id
-    // and time-to-decision (operator_action.created_at - action.created_at).
-    // Fast = within 1 hour (configurable via GrowthIntelligencePolicy).
-    let operator_feedback_rows: Vec<(String, String, f64)> = sqlx::query_as(
-        r#"
-        SELECT action.payload->>'template_id' AS template_id,
-               oa.action AS operator_action,
-               EXTRACT(EPOCH FROM (oa.created_at - action.created_at)) / 3600.0 AS hours_to_decision
-        FROM operator_actions oa
-        JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
-        WHERE action.workspace_id = $1
-          AND action.action_kind = 'agent.run.request'
-          AND oa.target_type = 'autopilot_action'
-          AND oa.action IN ('approve_autopilot_action', 'cancel_autopilot_action')
-        ORDER BY action.payload->>'template_id', oa.created_at DESC
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    let operator_fast_threshold_hours = 1.0_f64;
-
-    let standings: std::collections::HashMap<String, Standing> = {
-        let mut records: std::collections::HashMap<String, OutcomeRecord> =
-            std::collections::HashMap::new();
-        for (template_id, assessment, _observed_at) in &standing_rows {
-            let record = records.entry(template_id.clone()).or_default();
-            record.improved += u32::from(assessment == "improved");
-            record.neutral += u32::from(assessment == "neutral");
-            record.worsened += u32::from(assessment == "worsened");
-            // consecutive_worsened: count from the most recent (first in the
-            // DESC-ordered rows) until we hit a non-worsened outcome.
-            if assessment == "worsened" {
-                // Only increment if all prior rows (more recent) were also
-                // worsened. We check by seeing if improved+neutral is still 0.
-                if record.improved == 0 && record.neutral == 0 {
-                    record.consecutive_worsened += 1;
-                }
-            }
-            // else: the streak is broken — but we've already counted the
-            // improved/neutral, so the condition above naturally stops
-            // incrementing consecutive_worsened for any older worsened rows.
-        }
-        // Fold operator feedback into the records. Operator feedback does NOT
-        // update consecutive_worsened — only measured fan-growth outcomes can
-        // trigger retirement. Operator cancellations affect the weight (and
-        // thus cooldown) but cannot retire a worker on their own.
-        for (template_id, operator_action, hours_to_decision) in &operator_feedback_rows {
-            let record = records.entry(template_id.clone()).or_default();
-            let approved = operator_action == "approve_autopilot_action";
-            let fast = *hours_to_decision <= operator_fast_threshold_hours;
-            *record = (*record).observe_operator(approved, fast);
-        }
-        records
-            .into_iter()
-            .map(|(template_id, record)| (template_id, assess_standing(record, policy)))
-            .collect()
-    };
-
-    // ── Tenant operating preference ──
-    // Build a TenantPreferencePosterior from the same raw operator actions,
-    // but interpreted as "does this tenant prefer this template?" rather than
-    // "is this execution acceptable?". Uses exponentially decayed evidence
-    // (90-day half-life default) so preferences can shift over time.
-    //
-    // This is a SEPARATE belief from Standing. Both consume the same raw
-    // operator events but answer different questions:
-    //   Standing        → "Is this worker performing well?" → cooldown/tier
-    //   TenantPreference → "Does this tenant prefer this template?" → cadence
-    //
-    // The preference posterior MUST NOT modify DecisionValue or any economic
-    // value. It only influences cadence timing. Presentation metadata is
-    // derived brain-side but currently NOT persisted (TODO: wire to operator
-    // read path when the UI supports it).
-    let tenant_preference: TenantPreferencePosterior = {
-        let mut posterior = TenantPreferencePosterior::new();
-        // Reuse the operator_feedback_rows already loaded above, but compute
-        // age-based decay instead of fast/slow classification. We need the
-        // operator action timestamp for age computation — query it fresh
-        // since the existing rows only carry hours_to_decision, not age.
-        let preference_rows: Vec<(String, bool, f64)> = sqlx::query_as(
-            r#"
-            SELECT COALESCE(action.payload->>'template_id', 'unknown') AS template_id,
-                   (oa.action = 'approve_autopilot_action') AS approved,
-                   EXTRACT(EPOCH FROM (now() - oa.created_at)) / 86400.0 AS age_days
-            FROM operator_actions oa
-            JOIN viryaos_autopilot_actions action ON action.id = oa.target_id
-            WHERE action.workspace_id = $1
-              AND action.action_kind = 'agent.run.request'
-              AND oa.target_type = 'autopilot_action'
-              AND oa.action IN ('approve_autopilot_action', 'cancel_autopilot_action')
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .fetch_all(pool)
-        .await
-        .map_err(map_sqlx)?;
-        // The half-life matches TenantPreferencePolicy::default().half_life_days
-        // (90 days). The infra layer doesn't receive the GrowthIntelligencePolicy
-        // (it's loaded in the application layer), so we use the default here.
-        // Future: wire the policy through if per-workspace customization is needed.
-        let half_life = 90.0_f64;
-        for (template_id, approved, age_days) in &preference_rows {
-            posterior.observe(template_id, *approved, *age_days, half_life);
-        }
-        posterior
-    };
+    // Standings and tenant preference, both derived from the same bounded
+    // window of operator feedback and measurement outcomes.
+    let worker_signals::WorkerSignals {
+        standings,
+        tenant_preference,
+    } = worker_signals::load_worker_signals(pool, workspace_id).await?;
 
     // ── World Model data ──
     // The brain's belief about the world: fan counts, signal installs,
