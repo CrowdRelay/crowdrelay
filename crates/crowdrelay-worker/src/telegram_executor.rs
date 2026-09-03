@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::growth_metrics::MetricPlatform;
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -79,6 +80,13 @@ const CLAIM_BATCH: i64 = 5;
 fn telegram_bot_aad(workspace_id: Uuid, channel: &str) -> Vec<u8> {
     format!("crowdrelay.fanbase.oauth.telegram.v1\0{workspace_id}\0{channel}").into_bytes()
 }
+
+/// Reach filed when nothing has measured the audience yet.
+///
+/// Deliberately small. An unmeasured audience that turns out to be large
+/// under-credits one post; an unmeasured one guessed large over-credits every
+/// post until somebody notices.
+const UNMEASURED_AUDIENCE_REACH: i32 = 10;
 
 #[derive(Debug, Error)]
 pub enum TelegramExecutorError {
@@ -488,8 +496,14 @@ impl TelegramExecutorWorker {
         .execute(&self.pool)
         .await?;
 
-        // Reach ledger — estimated_reach is conservative; actual subscriber
-        // count is not available at this layer.
+        // Reach is what the credit allocator divides fan outcomes by, so a
+        // guess is a fabricated denominator. Fall back to a conservative
+        // constant only when nothing has measured the audience yet.
+        let estimated_reach = self
+            .measured_audience()
+            .await
+            .unwrap_or(UNMEASURED_AUDIENCE_REACH);
+        // Reach ledger.
         sqlx::query(
             r#"INSERT INTO viryaos_reach_events
                  (workspace_id, action_id, recipient_kind, recipient_id, channel,
@@ -503,7 +517,7 @@ impl TelegramExecutorWorker {
         .bind(self.workspace_id.into_uuid())
         .bind(action.action_id)
         .bind(target_channel)
-        .bind(50_i32)
+        .bind(estimated_reach)
         .bind(result.message_id)
         .bind(action.trace_id)
         .execute(&self.pool)
@@ -585,6 +599,46 @@ impl TelegramExecutorWorker {
         })?;
         Ok(TelegramSubmitResult {
             message_id: result.message_id,
+        })
+    }
+
+    /// The measured audience size for this platform, or `None` when nothing
+    /// has measured it yet.
+    ///
+    /// The reach ledger used a hard-coded 50 with the comment "actual
+    /// subscriber count is not available at this layer". It is: the growth
+    /// metric sync records the member count against this workspace on every
+    /// pass. Production's discord server has ten members, so every post was
+    /// filing five times the reach it achieved — into the ledger the credit
+    /// allocator divides fan outcomes by. A guessed denominator is worse than
+    /// an absent one.
+    async fn measured_audience(&self) -> Option<i32> {
+        // The metric key comes from the platform vocabulary, not a literal.
+        // Discord records `members` and telegram records `subscribers`, so a
+        // hard-coded key silently matches nothing for one of them and falls
+        // back to the constant while a real measurement sits in the table.
+        let platform = MetricPlatform::Telegram;
+        let metric_key = platform.audience_metric_key()?;
+        let value: Option<f64> = sqlx::query_scalar(
+            r#"SELECT point.value
+               FROM viryaos_growth_metric_points AS point
+               JOIN viryaos_growth_metric_series AS series ON series.id = point.series_id
+               WHERE point.workspace_id = $1
+                 AND series.platform = $2
+                 AND series.metric_key = $3
+               ORDER BY point.captured_at DESC
+               LIMIT 1"#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(platform.as_str())
+        .bind(metric_key)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        value.and_then(|v| {
+            let rounded = v.round();
+            (rounded >= 1.0).then(|| rounded.min(f64::from(i32::MAX)) as i32)
         })
     }
 
