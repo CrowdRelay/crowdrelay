@@ -261,43 +261,35 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          # autopilot_experiment_integrity_postgres is quarantined, not
-          # forgotten. It stands at 35 passing / 6 failing, up from 27/14, and
-          # the six that remain are one open question rather than eleven.
+          # autopilot_experiment_integrity_postgres ran quarantined for a while
+          # at 35 passing / 6 failing. The six shared one cause, and it was a
+          # question rather than a bug: a Treatment-arm assignment produces no
+          # growth evidence, because `record_experiment_assignment` writes
+          # evidence only for Control and Treatment evidence is written at
+          # dispatch. Whether a Treatment assignment constitutes an episode at
+          # assignment time was the open invariant.
           #
-          # Tracing each failure end to end — setup, trigger, resolver,
-          # reconciliation query, observed state — split them into four causes,
-          # three of which are now fixed:
+          # It does not. A control unit is never dispatched, so assignment is
+          # the only moment it can be observed; a treatment unit is dispatched,
+          # and that is when it is observed. Writing treatment evidence early
+          # would also be actively wrong: the evidence insert dedupes
+          # ON CONFLICT (workspace_id, action_id) DO NOTHING, so an early row
+          # makes the dispatch-time write a silent no-op and freezes the
+          # assignment-time prediction into the record.
           #
-          #   Fixture drift (t18, t19, t28c, t28d) and one test that
-          #   contradicted the receipt-key dedup contract by asserting two audit
-          #   rows for a single receipt key (t26).
-          #
-          #   A real write-path bug (north_star_a/b): the reconcile function
-          #   updated viryaos_action_ledger and never the action row it
-          #   projects, so the two diverged permanently. Fixed in migration 0218
-          #   by writing the source and letting the trigger project.
-          #
-          #   The success ontology (t25d). SUCCEEDED meant two things —
-          #   dispatched-and-presumed, and provider-confirmed — and nothing
-          #   recorded which. SuccessEvidence in crowdrelay-domain now derives
-          #   that from evidence which already existed, and legal_transition
-          #   takes it as an argument. A failure receipt corrects a premature
-          #   success and still Conflicts against a confirmed one.
-          #
-          # The six left all fail on the same thing: a Treatment-arm assignment
-          # produces no growth evidence, because experiment_assignments.rs
-          # records evidence at assignment only for Control and Treatment
-          # evidence is written at dispatch in persist.rs. Whether a Treatment
-          # assignment constitutes an episode at assignment time is its own
-          # invariant and deserves its own decision, not a fixture edit.
-          # Re-enable once that is settled.
-          quarantined="autopilot_experiment_integrity_postgres"
+          # So the six tests now dispatch through `persist_treatment_with_
+          # assignment` — the path production runs — instead of recording an
+          # assignment and expecting evidence to appear. The suite is at 41/41
+          # and back in CI. Two of the six were passing for the wrong reason
+          # before: one asserted an action status the fixture had set itself,
+          # and one decoded `observed_fans` as non-null on an unresolved
+          # dispatch.
+          quarantined=""
           targets=()
           for path in crates/*/tests/*_postgres.rs; do
             package="$(basename "$(dirname "$(dirname "$path")")")"
             target="$(basename "$path" .rs)"
-            if [ "$target" = "$quarantined" ]; then
+            if [ -n "$quarantined" ] && [ "$target" = "$quarantined" ]; then
               echo "::warning::skipping quarantined suite $target"
               continue
             fi

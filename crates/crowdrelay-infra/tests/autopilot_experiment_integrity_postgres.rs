@@ -54,14 +54,16 @@
 //!      and a retry can succeed without reviving the original.
 
 use crowdrelay_application::autopilot::{
-    AutopilotDecisionRepository, AutopilotRuntimeRepository, ClaimExecution, ExecutorReportStatus,
+    ActionSubject, AutopilotActionPayload, AutopilotContext, AutopilotDecisionRepository,
+    AutopilotRuntimeRepository, ClaimExecution, DecisionCandidate, ExecutorReportStatus,
     RecordExecutionReport,
 };
 use crowdrelay_brain::{
     DispatchContext, DispatchPrediction, ExecutionStatus, ExperimentAssignment, ExperimentStatus,
     ExperimentUnitKind, TreatmentAssignment,
 };
-use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::autonomy::{Confidence, PolicyDisposition};
+use crowdrelay_domain::{TraceContext, WorkspaceId};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -644,8 +646,6 @@ include!("autopilot_experiment_integrity_postgres/fixtures.rs");
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn t10_evidence_episodes_rebuildable() {
     let f = setup().await.expect("fixture");
-    let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
 
     let design = f
         .repository
@@ -665,19 +665,12 @@ async fn t10_evidence_episodes_rebuildable() {
         .await
         .expect("design creation");
 
-    let pred = make_prediction();
-    let assignment = ExperimentAssignment::from_design(
-        &design,
-        "r/t10treatment",
-        "r/t10treatment",
-        TreatmentAssignment::Treatment,
-        &pred,
-        Some(action_id),
-    );
-    f.repository
-        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
-        .await
-        .expect("treatment assignment recording");
+    // A treatment arm is observed when it is dispatched, not when it is
+    // assigned — see `persist_treatment_dispatch`. Going through the
+    // production path is what produces the evidence and episode this test
+    // is about.
+    let (action_id, _trace_id) =
+        persist_treatment_dispatch(&f, &design, "r/t10treatment", "cycle-t10").await;
 
     // Verify the episode was created.
     let episode_count: i64 = sqlx::query_scalar(
@@ -689,10 +682,14 @@ async fn t10_evidence_episodes_rebuildable() {
     .fetch_one(&f.pool)
     .await
     .expect("episode count");
-    assert_eq!(episode_count, 1, "episode must exist after assignment");
+    assert_eq!(episode_count, 1, "episode must exist after dispatch");
 
     // Capture the original episode state.
-    let original: (String, f64, f64, f64, f64, Option<i32>, bool) = sqlx::query_as(
+    // `observed_fans` is NULL until a measurement resolves — a dispatch
+    // records what was predicted, not what happened — so it is read as an
+    // Option. Typing it as `f64` made this row fail to decode, which is what
+    // the assertion above used to hide by failing first.
+    let original: (String, f64, f64, f64, Option<f64>, Option<i32>, bool) = sqlx::query_as(
         "SELECT treatment, propensity, predicted_fans, predicted_signal_installs, \
                 observed_fans, actual_reach, converted \
          FROM viryaos_growth_episodes \
@@ -729,7 +726,7 @@ async fn t10_evidence_episodes_rebuildable() {
     assert_eq!(rebuilt_count, 1, "rebuild must produce 1 episode");
 
     // Verify semantic equality.
-    let rebuilt: (String, f64, f64, f64, f64, Option<i32>, bool) = sqlx::query_as(
+    let rebuilt: (String, f64, f64, f64, Option<f64>, Option<i32>, bool) = sqlx::query_as(
         "SELECT treatment, propensity, predicted_fans, predicted_signal_installs, \
                 observed_fans, actual_reach, converted \
          FROM viryaos_growth_episodes \
@@ -754,10 +751,13 @@ async fn t10_evidence_episodes_rebuildable() {
         (rebuilt.3 - original.3).abs() < 1e-10,
         "predicted_signal_installs must match"
     );
-    assert!(
-        (rebuilt.4 - original.4).abs() < 1e-10,
-        "observed_fans must match"
-    );
+    // Both sides are Option: a rebuild of an unresolved dispatch must
+    // reproduce the absence, not invent a zero.
+    match (rebuilt.4, original.4) {
+        (Some(a), Some(b)) => assert!((a - b).abs() < 1e-10, "observed_fans must match"),
+        (None, None) => {}
+        (a, b) => panic!("observed_fans must match: rebuilt={a:?} original={b:?}"),
+    }
     assert_eq!(rebuilt.5, original.5, "actual_reach must match");
     assert_eq!(rebuilt.6, original.6, "converted must match");
 
@@ -773,7 +773,7 @@ async fn t10_evidence_episodes_rebuildable() {
         "second rebuild must also produce 1 episode"
     );
 
-    let rebuilt2: (String, f64, f64, f64, f64, Option<i32>, bool) = sqlx::query_as(
+    let rebuilt2: (String, f64, f64, f64, Option<f64>, Option<i32>, bool) = sqlx::query_as(
         "SELECT treatment, propensity, predicted_fans, predicted_signal_installs, \
                 observed_fans, actual_reach, converted \
          FROM viryaos_growth_episodes \
@@ -794,10 +794,11 @@ async fn t10_evidence_episodes_rebuildable() {
         (rebuilt2.2 - rebuilt.2).abs() < 1e-10,
         "idempotence: predicted_fans"
     );
-    assert!(
-        (rebuilt2.4 - rebuilt.4).abs() < 1e-10,
-        "idempotence: observed_fans"
-    );
+    match (rebuilt2.4, rebuilt.4) {
+        (Some(a), Some(b)) => assert!((a - b).abs() < 1e-10, "idempotence: observed_fans"),
+        (None, None) => {}
+        (a, b) => panic!("idempotence: observed_fans differs: {a:?} vs {b:?}"),
+    }
 }
 
 /// T11: Stale posting transitions to 'unknown', not 'failed'.
@@ -812,8 +813,6 @@ async fn t10_evidence_episodes_rebuildable() {
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn t11_stale_posting_transitions_to_unknown_not_failed() {
     let f = setup().await.expect("fixture");
-    let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
 
     let design = f
         .repository
@@ -833,19 +832,11 @@ async fn t11_stale_posting_transitions_to_unknown_not_failed() {
         .await
         .expect("design creation");
 
-    let pred = make_prediction();
-    let assignment = ExperimentAssignment::from_design(
-        &design,
-        "r/t11treatment",
-        "r/t11treatment",
-        TreatmentAssignment::Treatment,
-        &pred,
-        Some(action_id),
-    );
-    f.repository
-        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
-        .await
-        .expect("treatment assignment recording");
+    // Dispatch the treatment through the production path: the evidence this
+    // test reads is written at dispatch, not at assignment.
+    let (action_id, _trace_id) =
+        persist_treatment_dispatch(&f, &design, "r/t11treatment", "cycle-t11").await;
+    mark_action_succeeded(&f.pool, action_id).await;
 
     // Simulate a stale posting: community_posts in 'posting' with an old timestamp.
     let post_id =
@@ -1784,8 +1775,6 @@ async fn t16_trace_continuity_no_fake_continuity() {
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn t17_one_episode_per_action() {
     let f = setup().await.expect("fixture");
-    let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
 
     let design = f
         .repository
@@ -1805,19 +1794,12 @@ async fn t17_one_episode_per_action() {
         .await
         .expect("design creation");
 
-    let pred = make_prediction();
-    let assignment = ExperimentAssignment::from_design(
-        &design,
-        "r/t17treatment",
-        "r/t17treatment",
-        TreatmentAssignment::Treatment,
-        &pred,
-        Some(action_id),
-    );
-    f.repository
-        .record_experiment_assignment(f.workspace_id, &assignment, Some("discovery"))
-        .await
-        .expect("treatment assignment recording");
+    // A treatment arm is observed when it is dispatched, not when it is
+    // assigned — see `persist_treatment_dispatch`. Going through the
+    // production path is what produces the evidence and episode this test
+    // is about.
+    let (action_id, _trace_id) =
+        persist_treatment_dispatch(&f, &design, "r/t17treatment", "cycle-t17").await;
 
     // Verify: exactly one episode exists.
     let episode_count: i64 = sqlx::query_scalar(
@@ -2034,23 +2016,10 @@ async fn t19_full_chain_three_branches() {
         .await
         .expect("design creation");
 
-    let pred = make_prediction();
-
     // ── Branch 1: SUCCESS ──
-    let trace_success = uuid::Uuid::now_v7();
-    let action_success = insert_decision_and_action(&f.pool, f.workspace_id, trace_success).await;
-    let assignment_success = ExperimentAssignment::from_design(
-        &design,
-        "r/t19success",
-        "r/t19success",
-        TreatmentAssignment::Treatment,
-        &pred,
-        Some(action_success),
-    );
-    f.repository
-        .record_experiment_assignment(f.workspace_id, &assignment_success, Some("discovery"))
-        .await
-        .expect("success assignment");
+    let (action_success, trace_success) =
+        persist_treatment_dispatch(&f, &design, "r/t19success", "cycle-t19-success").await;
+    mark_action_succeeded(&f.pool, action_success).await;
     f.repository
         .update_execution_status_by_action_id(
             f.workspace_id,
@@ -2061,20 +2030,9 @@ async fn t19_full_chain_three_branches() {
         .expect("transition to executed");
 
     // ── Branch 2: FAILURE ──
-    let trace_failure = uuid::Uuid::now_v7();
-    let action_failure = insert_decision_and_action(&f.pool, f.workspace_id, trace_failure).await;
-    let assignment_failure = ExperimentAssignment::from_design(
-        &design,
-        "r/t19failure",
-        "r/t19failure",
-        TreatmentAssignment::Treatment,
-        &pred,
-        Some(action_failure),
-    );
-    f.repository
-        .record_experiment_assignment(f.workspace_id, &assignment_failure, Some("discovery"))
-        .await
-        .expect("failure assignment");
+    let (action_failure, trace_failure) =
+        persist_treatment_dispatch(&f, &design, "r/t19failure", "cycle-t19-failure").await;
+    mark_action_succeeded(&f.pool, action_failure).await;
     f.repository
         .update_execution_status_by_action_id(
             f.workspace_id,
@@ -2099,20 +2057,9 @@ async fn t19_full_chain_three_branches() {
     .expect("FAILURE branch: mark the action failed");
 
     // ── Branch 3: CONFIRMATION LOSS ──
-    let trace_unknown = uuid::Uuid::now_v7();
-    let action_unknown = insert_decision_and_action(&f.pool, f.workspace_id, trace_unknown).await;
-    let assignment_unknown = ExperimentAssignment::from_design(
-        &design,
-        "r/t19unknown",
-        "r/t19unknown",
-        TreatmentAssignment::Treatment,
-        &pred,
-        Some(action_unknown),
-    );
-    f.repository
-        .record_experiment_assignment(f.workspace_id, &assignment_unknown, Some("discovery"))
-        .await
-        .expect("unknown assignment");
+    let (action_unknown, trace_unknown) =
+        persist_treatment_dispatch(&f, &design, "r/t19unknown", "cycle-t19-unknown").await;
+    mark_action_succeeded(&f.pool, action_unknown).await;
     f.repository
         .update_execution_status_by_action_id(
             f.workspace_id,
@@ -3930,18 +3877,46 @@ async fn t27_contradictory_provider_facts_no_state_change() {
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn north_star_a_success_lost_unknown_recovery_one_effect() {
     let f = setup().await.expect("fixture");
-    let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
-
-    // 1. Insert assignment in 'dispatched' state.
-    insert_assignment_for_evidence_test(
-        &f.pool,
-        f.workspace_id,
-        action_id,
-        "r/north-star-a",
-        "dispatched",
-    )
-    .await;
+    // The dispatch is what produces the evidence this test counts, so it
+    // goes through the production path rather than a hand-inserted
+    // assignment: a Treatment arm is observed when it is dispatched, not
+    // when it is assigned.
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-ns-a",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/north-star-a".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+    let (action_id, trace_id) =
+        persist_treatment_dispatch(&f, &design, "r/north-star-a", "cycle-ns-a").await;
+    // The executor-report path only answers for an action it has claimed, and
+    // a claim only exists for an action that was emitted, so both are part of
+    // the lifecycle this test walks rather than setup noise.
+    record_action_emission(&f.pool, f.workspace_id, action_id).await;
+    let claim = f
+        .repository
+        .claim_execution(
+            f.workspace_id,
+            ClaimExecution {
+                action_id: action_id.into(),
+                executor_id: "test-executor".to_owned(),
+                occurred_at: f.now,
+            },
+        )
+        .await
+        .expect("claim");
+    let claim_token = claim.claim_token.expect("claim token");
 
     // 2. Executor reports success → action = succeeded, assignment = executed.
     f.repository
@@ -3952,7 +3927,7 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
                 receipt_key: format!("ns-a-success-{action_id}"),
                 executor_id: "test-executor".to_owned(),
                 status: ExecutorReportStatus::Succeeded,
-                claim_token: None,
+                claim_token: Some(claim_token),
                 provider_reference: Some("msg-ns-a".to_owned()),
                 error_kind: None,
                 metadata: serde_json::json!({}),
@@ -3961,6 +3936,29 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
         )
         .await
         .expect("success report");
+
+    // `record_execution_report` files the executor's receipt; it does not move
+    // `viryaos_autopilot_actions.status`, which the dispatcher and the
+    // reconciliation sweep own. This assertion used to read `succeeded` only
+    // because the fixture inserted the action already succeeded — it was true
+    // before the report was ever made. Assert what the report actually did,
+    // then advance the action the way the dispatcher does, so the
+    // confirmation-loss step below acts on a real success rather than a
+    // fixture constant.
+    let receipt_status: String = sqlx::query_scalar(
+        "SELECT status FROM viryaos_autopilot_execution_claims \
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("receipt status after success");
+    assert_eq!(
+        receipt_status, "succeeded",
+        "the executor's receipt must record the success it reported"
+    );
+    mark_action_succeeded(&f.pool, action_id).await;
 
     let status_after_success: String =
         sqlx::query_scalar("SELECT status FROM viryaos_autopilot_actions WHERE id = $1")
@@ -4092,18 +4090,31 @@ async fn north_star_a_success_lost_unknown_recovery_one_effect() {
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
     let f = setup().await.expect("fixture");
-    let trace_id_1 = uuid::Uuid::now_v7();
-    let action_id_1 = insert_decision_and_action(&f.pool, f.workspace_id, trace_id_1).await;
-
-    // 1. Insert assignment in 'dispatched' state.
-    insert_assignment_for_evidence_test(
-        &f.pool,
-        f.workspace_id,
-        action_id_1,
-        "r/north-star-b-original",
-        "dispatched",
-    )
-    .await;
+    // The dispatch is what produces the evidence this test counts, so it
+    // goes through the production path rather than a hand-inserted
+    // assignment: a Treatment arm is observed when it is dispatched, not
+    // when it is assigned.
+    let design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-ns-b",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/north-star-b-original".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("design creation");
+    let (action_id_1, _trace_id_1) =
+        persist_treatment_dispatch(&f, &design, "r/north-star-b-original", "cycle-ns-b").await;
+    record_action_emission(&f.pool, f.workspace_id, action_id_1).await;
+    mark_action_processing(&f.pool, action_id_1).await;
 
     // 2. Confirmation lost — action goes to unknown.
     sqlx::query(
@@ -4170,17 +4181,35 @@ async fn north_star_b_unknown_definitive_failure_safe_retry_one_effect() {
         "original action must be failed after definitive non-execution"
     );
 
-    // 6. Retry: create a NEW action for the same opportunity.
-    let trace_id_2 = uuid::Uuid::now_v7();
-    let action_id_2 = insert_decision_and_action(&f.pool, f.workspace_id, trace_id_2).await;
-    insert_assignment_for_evidence_test(
-        &f.pool,
-        f.workspace_id,
-        action_id_2,
+    // 6. Retry: dispatch a NEW action for the same opportunity. The retry is
+    //    a second dispatch, so it produces its own evidence — which is the
+    //    whole point of the count below.
+    let retry_design = f
+        .repository
+        .get_or_create_experiment_design(
+            f.workspace_id,
+            "community.engage",
+            "cycle-ns-b-retry",
+            ExperimentUnitKind::TargetCommunity,
+            vec!["r/north-star-b-retry".to_string()],
+            0.10,
+            "discovery",
+            10,
+            2,
+            2,
+            f.now,
+        )
+        .await
+        .expect("retry design creation");
+    let (action_id_2, _trace_id_2) = persist_treatment_dispatch(
+        &f,
+        &retry_design,
         "r/north-star-b-retry",
-        "dispatched",
+        "cycle-ns-b-retry",
     )
     .await;
+    record_action_emission(&f.pool, f.workspace_id, action_id_2).await;
+    mark_action_processing(&f.pool, action_id_2).await;
 
     // The retry succeeds.
     f.repository
