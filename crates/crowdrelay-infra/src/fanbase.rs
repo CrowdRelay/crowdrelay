@@ -738,37 +738,78 @@ impl PostgresFanbaseRepository {
 
     /// Registers a Discord server connection for growth metric sync.
     /// The `invite_code` is the Discord invite code (e.g. `BBdDV6gVy`).
-    /// No encrypted tokens are needed — Discord's invite API is free and
-    /// requires no API key.
+    /// When `posting_config` is provided, the bot token is encrypted and
+    /// stored in `encrypted_access_token`, and the channel ID is stored in
+    /// `provider_account_id` (replacing the invite code, which remains in
+    /// `external_account_ref` for metric sync). Without `posting_config`,
+    /// the connection only supports metric sync (invite code in both
+    /// `external_account_ref` and `provider_account_id`).
     pub async fn upsert_discord_connection(
         &self,
         workspace_id: Uuid,
         invite_code: &str,
         label: &str,
+        posting_config: Option<(&str, &str)>,
     ) -> Result<(), FanbaseError> {
         let credential_ref = format!("discord:{invite_code}");
-        sqlx::query(
-            r#"
-            INSERT INTO fanbase_connections (
-                workspace_id, platform, external_account_ref,
-                credential_ref, label, status, provider_account_id
-            )
-            VALUES ($1, 'discord', $2, $3, $4, 'connected', $2)
-            ON CONFLICT (workspace_id, platform, external_account_ref)
-            DO UPDATE SET
-                credential_ref = EXCLUDED.credential_ref,
-                label = EXCLUDED.label,
-                status = 'connected',
-                updated_at = now()
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(invite_code)
-        .bind(&credential_ref)
-        .bind(label)
-        .execute(&self.pool)
-        .await
-        .map_err(Self::unexpected)?;
+        match posting_config {
+            Some((bot_token, channel_id)) => {
+                let encrypted_token =
+                    self.encrypt_token(bot_token, workspace_id, "discord", channel_id)?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO fanbase_connections (
+                        workspace_id, platform, external_account_ref,
+                        credential_ref, label, status, provider_account_id,
+                        encrypted_access_token, token_type
+                    )
+                    VALUES ($1, 'discord', $2, $3, $4, 'connected', $5, $6, 'bearer')
+                    ON CONFLICT (workspace_id, platform, external_account_ref)
+                    DO UPDATE SET
+                        credential_ref = EXCLUDED.credential_ref,
+                        label = EXCLUDED.label,
+                        provider_account_id = EXCLUDED.provider_account_id,
+                        encrypted_access_token = EXCLUDED.encrypted_access_token,
+                        token_type = EXCLUDED.token_type,
+                        status = 'connected',
+                        updated_at = now()
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(invite_code)
+                .bind(&credential_ref)
+                .bind(label)
+                .bind(channel_id)
+                .bind(&encrypted_token)
+                .execute(&self.pool)
+                .await
+                .map_err(Self::unexpected)?;
+            }
+            None => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO fanbase_connections (
+                        workspace_id, platform, external_account_ref,
+                        credential_ref, label, status, provider_account_id
+                    )
+                    VALUES ($1, 'discord', $2, $3, $4, 'connected', $2)
+                    ON CONFLICT (workspace_id, platform, external_account_ref)
+                    DO UPDATE SET
+                        credential_ref = EXCLUDED.credential_ref,
+                        label = EXCLUDED.label,
+                        status = 'connected',
+                        updated_at = now()
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(invite_code)
+                .bind(&credential_ref)
+                .bind(label)
+                .execute(&self.pool)
+                .await
+                .map_err(Self::unexpected)?;
+            }
+        }
         sqlx::query("SELECT pg_notify('growth_metric_sync', 'discord-connected')")
             .execute(&self.pool)
             .await
