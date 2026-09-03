@@ -44,15 +44,33 @@ pub enum WorkerTemplate {
 
 /// What audience a template's dispatch reaches, which is what decides whether
 /// two dispatches compete for the same attention.
+///
+/// This is about *attention*, not budget. The portfolio's overlap penalty and
+/// fatigue decay both key on the audience, and they exist to model the same
+/// people being reached twice. How many dispatches a cycle affords is
+/// `max_dispatches`, which is a separate question.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TemplateAudience {
     /// One specific community. Two dispatches to different communities reach
     /// different people and do not overlap.
     Community,
     /// The band's own audience — its channels, its press list, its fans.
-    /// Every workspace-wide dispatch competes with every other one for the
-    /// same attention, which is what the portfolio's overlap penalty is for.
+    /// Every dispatch here competes with every other for the same attention,
+    /// which is what the overlap penalty is for.
     Workspace,
+    /// Reaches nobody. Scanners and the strategist read the world and write
+    /// notes; no human sees a scan.
+    ///
+    /// They were `Workspace`, on the reasoning that they consume the cycle's
+    /// budget — but the penalty is about fatigue, not budget, and the
+    /// arithmetic was brutal. Every workspace-wide candidate after the first
+    /// is worth 0.7 x 0.9, the third 0.4 x 0.81, the fourth 0.1 x 0.73;
+    /// meanwhile each community carries its own key and stays at full value.
+    /// So one Reddit scan being selected suppressed every posting template
+    /// behind it by 37%, then 68%, then 93%, and twenty-eight untouched
+    /// community candidates took the remaining slots. `discord-poster` and
+    /// `telegram-poster` have never once been selected in production.
+    Intelligence,
 }
 
 impl WorkerTemplate {
@@ -104,16 +122,14 @@ impl WorkerTemplate {
     pub const fn audience(self) -> TemplateAudience {
         match self {
             Self::CommunityEngager => TemplateAudience::Community,
-            // Scanners and the strategist gather intelligence rather than
-            // reaching anyone, but they still consume the workspace's own
-            // dispatch budget, so they share its key.
+            // Read the world, write notes. Nobody is reached.
             Self::RedditScanner
             | Self::TelegramScanner
             | Self::MetalArchivesScanner
             | Self::BandcampScanner
-            | Self::GrowthStrategist
-            // These write to the band's own audience.
-            | Self::PressPitch
+            | Self::GrowthStrategist => TemplateAudience::Intelligence,
+            // Write to the band's own audience.
+            Self::PressPitch
             | Self::SocialPost
             | Self::TelegramPoster
             | Self::DiscordPoster
@@ -145,13 +161,55 @@ mod tests {
 
     #[test]
     fn only_the_community_engager_targets_one_community() {
+        assert_eq!(
+            WorkerTemplate::CommunityEngager.audience(),
+            TemplateAudience::Community
+        );
         for template in WorkerTemplate::ALL {
-            let expected = if template == WorkerTemplate::CommunityEngager {
-                TemplateAudience::Community
-            } else {
-                TemplateAudience::Workspace
-            };
-            assert_eq!(template.audience(), expected, "{template:?}");
+            if template != WorkerTemplate::CommunityEngager {
+                assert_ne!(
+                    template.audience(),
+                    TemplateAudience::Community,
+                    "{template:?} is not community-scoped"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gathering_intelligence_reaches_nobody() {
+        // A scan fatigues no audience. Classing scanners as workspace-wide
+        // made one selected scan cut every posting template behind it by 37%,
+        // then 68%, then 93%.
+        for template in [
+            WorkerTemplate::RedditScanner,
+            WorkerTemplate::TelegramScanner,
+            WorkerTemplate::MetalArchivesScanner,
+            WorkerTemplate::BandcampScanner,
+            WorkerTemplate::GrowthStrategist,
+        ] {
+            assert_eq!(
+                template.audience(),
+                TemplateAudience::Intelligence,
+                "{template:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn everything_that_posts_shares_the_bands_own_audience() {
+        for template in [
+            WorkerTemplate::PressPitch,
+            WorkerTemplate::SocialPost,
+            WorkerTemplate::TelegramPoster,
+            WorkerTemplate::DiscordPoster,
+            WorkerTemplate::SignalInviter,
+        ] {
+            assert_eq!(
+                template.audience(),
+                TemplateAudience::Workspace,
+                "{template:?}"
+            );
         }
     }
 
