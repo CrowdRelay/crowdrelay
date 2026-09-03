@@ -99,6 +99,42 @@ class ActionStateParity(unittest.TestCase):
             "legal action status. Use ActionState::from_action_status",
         )
 
+    def test_no_success_side_effect_precedes_the_resolver(self) -> None:
+        """No execution-derived side effect may be committed for a Conflict.
+
+        The success side effects — outcome evidence, effect measurement,
+        show-growth surfaces, the team-opportunity completion edge — used to run
+        *before* `legal_transition` was consulted. A receipt the resolver then
+        refused had already written success evidence and flipped the opportunity
+        to `submitted` while the action stayed `failed`: an internally
+        contradictory history committed in one transaction.
+
+        They now live behind `apply_success_side_effects`, whose single call
+        site is the resolver's non-Conflict arm. Pin the ordering, because the
+        gate is only a gate while the call stays after the decision.
+        """
+        runtime = (ROOT / "crates/crowdrelay-infra/src/autopilot/runtime.rs").read_text()
+        call = "apply_success_side_effects(&mut transaction"
+        self.assertEqual(
+            runtime.count(call),
+            1,
+            "success side effects must have exactly one call site; the resolver "
+            "is only a gate while every path to them goes through it",
+        )
+        start = runtime.index("ExecutorReportStatus::Succeeded =>")
+        arm = runtime[start : runtime.index("ExecutorReportStatus::Accepted", start)]
+        self.assertTrue(
+            call in arm,
+            "the success side effects are no longer applied from the success "
+            "receipt's own arm, so the resolver there gates nothing",
+        )
+        self.assertLess(
+            arm.index("let transition = legal_transition("),
+            arm.index(call),
+            "success side effects are applied before the resolver decides, so a "
+            "Conflict receipt can still commit accepted-execution evidence",
+        )
+
     def test_the_trigger_permits_correcting_a_premature_success(self) -> None:
         self.assertIn(
             ("SUCCEEDED", "FAILED"),

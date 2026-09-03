@@ -67,6 +67,111 @@ fn receipt_count(value: &Value, key: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Everything a success receipt commits besides the action's own status:
+/// effect measurement, outcome evidence, show-growth surfaces and the
+/// team-opportunity completion edge.
+///
+/// Success side effects are committed only after the resolver accepts the
+/// observation; `Conflict` records contradictory evidence without mutating
+/// execution-derived state. Its own function so that acceptance is the only
+/// way to reach them — they used to run before the resolver was consulted, so
+/// a receipt the resolver refused still wrote outcome evidence and flipped the
+/// opportunity to `submitted` while the action stayed `failed`.
+async fn apply_success_side_effects(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    command: &RecordExecutionReport,
+) -> Result<(), RepositoryError> {
+    let payload_value = sqlx::query_scalar::<_, Value>(
+        "SELECT payload FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(command.action_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(RepositoryError::NotFound)?;
+    // `RepositoryError` carries no payload, so discarding this error is the
+    // same mistake `map_sqlx` documents: the report fails with
+    // `error_kind=unexpected` and nothing says the stored payload would not
+    // parse. Log the cause and the action, the only way to find the row.
+    let payload =
+        serde_json::from_value::<AutopilotActionPayload>(payload_value).map_err(|error| {
+            tracing::warn!(
+                error = %error,
+                action_id = %command.action_id.into_uuid(),
+                "stored autopilot action payload could not be parsed; \
+                 this is what surfaces as error_kind=unexpected"
+            );
+            RepositoryError::Unexpected
+        })?;
+    if let AutopilotActionPayload::RequestShowGrowth { event_id, .. } = &payload {
+        record_show_growth_receipt(
+            transaction,
+            workspace_id,
+            *event_id,
+            &command.metadata,
+            command.occurred_at,
+        )
+        .await?;
+    }
+    // Learning and outcome evidence for external actions is provider-confirmed,
+    // never merely outbox-confirmed.
+    if !payload_requires_executor(&payload) {
+        return Ok(());
+    }
+    schedule_effect_measurement(
+        transaction,
+        workspace_id,
+        command.action_id,
+        &payload,
+        command.occurred_at,
+    )
+    .await?;
+    record_execution_outcome(
+        transaction,
+        workspace_id,
+        command.action_id,
+        &payload,
+        command.occurred_at,
+    )
+    .await?;
+    // The provider receipt is also the canonical completion edge for
+    // team-opportunity state. This removes a second n8n -> CrowdRelay progress
+    // callback and its duplicate-send failure window. Replayed receipts never
+    // reach here.
+    match &payload {
+        AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, .. }
+        | AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
+            sqlx::query(
+                "UPDATE viryaos_team_opportunities \
+                 SET status='submitted', version=version+1 \
+                 WHERE workspace_id=$1 AND id=$2 AND status='submission_requested'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind((*opportunity_id).into_uuid())
+            .execute(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        AutopilotActionPayload::PrepareFundingPackage { opportunity_id } => {
+            sqlx::query(
+                "UPDATE viryaos_team_opportunities \
+                 SET package_status='ready', status='prepared', version=version+1 \
+                 WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' \
+                   AND package_status='requested'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind((*opportunity_id).into_uuid())
+            .execute(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 async fn record_show_growth_receipt(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
@@ -616,102 +721,10 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .map_err(map_sqlx)?;
                     }
                     ExecutorReportStatus::Succeeded => {
-                        // Learning and outcome evidence for external actions is
-                        // provider-confirmed, never merely outbox-confirmed.
-                        let payload_value = sqlx::query_scalar::<_, Value>(
-                            "SELECT payload FROM viryaos_autopilot_actions WHERE workspace_id=$1 AND id=$2",
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(command.action_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?
-                        .ok_or(RepositoryError::NotFound)?;
-                        // `RepositoryError` carries no payload, so discarding
-                        // this error is the same mistake `map_sqlx` documents:
-                        // the report fails with `error_kind=unexpected` and
-                        // empty metadata, and nothing anywhere says the action's
-                        // stored payload could not be parsed. Log the cause and
-                        // the action, which is the only way to find the row.
-                        let payload = serde_json::from_value::<AutopilotActionPayload>(payload_value)
-                            .map_err(|error| {
-                                tracing::warn!(
-                                    error = %error,
-                                    action_id = %command.action_id.into_uuid(),
-                                    "stored autopilot action payload could not be parsed; \
-                                     this is what surfaces as error_kind=unexpected"
-                                );
-                                RepositoryError::Unexpected
-                            })?;
-                        if let AutopilotActionPayload::RequestShowGrowth { event_id, .. } = &payload {
-                            record_show_growth_receipt(
-                                &mut transaction,
-                                workspace_id,
-                                *event_id,
-                                &command.metadata,
-                                command.occurred_at,
-                            )
-                            .await?;
-                        }
-                        if payload_requires_executor(&payload) {
-                            schedule_effect_measurement(
-                                &mut transaction,
-                                workspace_id,
-                                command.action_id,
-                                &payload,
-                                command.occurred_at,
-                            )
-                            .await?;
-                            record_execution_outcome(
-                                &mut transaction,
-                                workspace_id,
-                                command.action_id,
-                                &payload,
-                                command.occurred_at,
-                            )
-                            .await?;
-
-                            // The provider receipt is also the canonical completion
-                            // edge for team-opportunity state. This removes a second
-                            // n8n -> CrowdRelay progress callback and its duplicate-send
-                            // failure window. Replayed receipts never enter this branch.
-                            match &payload {
-                                AutopilotActionPayload::ApplyLiveOpportunity { opportunity_id, .. }
-                                | AutopilotActionPayload::SubmitFundingApplication { opportunity_id } => {
-                                    sqlx::query(
-                                        "UPDATE viryaos_team_opportunities \
-                                         SET status='submitted', version=version+1 \
-                                         WHERE workspace_id=$1 AND id=$2 AND status='submission_requested'",
-                                    )
-                                    .bind(workspace_id.into_uuid())
-                                    .bind((*opportunity_id).into_uuid())
-                                    .execute(&mut *transaction)
-                                    .await
-                                    .map_err(map_sqlx)?;
-                                }
-                                AutopilotActionPayload::PrepareFundingPackage { opportunity_id } => {
-                                    sqlx::query(
-                                        "UPDATE viryaos_team_opportunities \
-                                         SET package_status='ready', status='prepared', version=version+1 \
-                                         WHERE workspace_id=$1 AND id=$2 AND opportunity_kind='funding' \
-                                           AND package_status='requested'",
-                                    )
-                                    .bind(workspace_id.into_uuid())
-                                    .bind((*opportunity_id).into_uuid())
-                                    .execute(&mut *transaction)
-                                    .await
-                                    .map_err(map_sqlx)?;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // Canonical resolver: terminal success receipt.
-                        // Load the current action state within this transaction
-                        // so the resolver can enforce monotonicity and state-
-                        // machine legality. legal_transition(Unknown, Executed)
-                        // → Apply(Succeeded); legal_transition(Succeeded, Executed)
-                        // → NoChange (idempotent).
+                        // Resolve before mutating anything. The transition is
+                        // the gate: success side effects are committed only
+                        // after the resolver accepts the observation, and a
+                        // Conflict receipt stays audit-only.
                         let current_status: Option<String> = sqlx::query_scalar(
                             "SELECT status FROM viryaos_autopilot_actions \
                              WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
@@ -721,19 +734,14 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .fetch_optional(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
-                        // `from_action_status`, not `parse`: this is the
-                        // action table's lowercase vocabulary, and `parse`
-                        // reads the ledger's uppercase one. `parse` here
-                        // returned None for every legal status, so the
-                        // fallback below was the resolver's only input.
+                        // `from_action_status`, not `parse`: the action table's
+                        // lowercase vocabulary, where `parse` reads the ledger's
+                        // uppercase one and returned None for every legal
+                        // status, leaving the fallback to decide everything.
                         let current_state = current_status
                             .as_deref()
                             .and_then(ActionState::from_action_status)
                             .unwrap_or(ActionState::Running);
-                        // Whether a *prior* confirmation already exists. If
-                        // not, this receipt is the one that confirms a success
-                        // marked at dispatch, and its side effects still have
-                        // to be applied; if one does, this is a duplicate.
                         let success_evidence =
                             success_evidence_for(&mut transaction, workspace_id, &command).await?;
                         let transition = legal_transition(
@@ -743,16 +751,9 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             }),
                             success_evidence,
                         );
-                        if transition == LegalTransition::NoChange {
-                            // Already in a terminal state that shouldn't
-                            // be changed (e.g. Succeeded → NoChange).
-                            // Skip the SQL updates.
-                        } else if transition == LegalTransition::Conflict {
-                            // Contradictory observation: a success receipt
-                            // arrived for an action that is already Failed.
-                            // This is information, not a silent coercion.
-                            // Surface it to operator visibility and do not
-                            // change state.
+                        if transition == LegalTransition::Conflict {
+                            // The report row inserted above is the audit trail.
+                            // Nothing else moves.
                             tracing::warn!(
                                 action_id = %command.action_id,
                                 workspace_id = %workspace_id.into_uuid(),
@@ -762,11 +763,15 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 current_state
                             );
                         } else {
-                            // transition == Apply(Succeeded) — apply
-                            // the transition atomically.
-
-                            // Resolve the action from unknown → succeeded.
-                            // The WHERE guard makes this idempotent.
+                            apply_success_side_effects(&mut transaction, workspace_id, &command)
+                                .await?;
+                        }
+                        if matches!(transition, LegalTransition::Apply(_)) {
+                            // Bound to the state the resolver decided from.
+                            // `Apply(Succeeded)` does not arrive only from
+                            // Unknown: it arrives from `processing` on the
+                            // ordinary path, and from a premature Succeeded
+                            // when this receipt is the confirming one.
                             sqlx::query(
                                 r#"UPDATE viryaos_autopilot_actions
                                    SET status = 'succeeded',
@@ -774,20 +779,18 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                        updated_at = now()
                                    WHERE workspace_id = $1
                                      AND id = $2
-                                     AND status = 'unknown'"#,
+                                     AND status = $3"#,
                             )
                             .bind(workspace_id.into_uuid())
                             .bind(command.action_id.into_uuid())
+                            .bind(current_status.as_deref())
                             .execute(&mut *transaction)
                             .await
                             .map_err(map_sqlx)?;
-
-                            // The executor confirmed delivery — transition
-                            // the experiment assignment to executed so the
-                            // causal learner sees the correct treatment
-                            // realization (T). This covers both dispatched →
-                            // executed (normal path) and unknown → executed
-                            // (late receipt after gap detection).
+                            // Covers dispatched -> executed (normal path) and
+                            // unknown -> executed (late receipt after gap
+                            // detection), so the causal learner sees the
+                            // treatment realized.
                             sqlx::query(
                                 r#"UPDATE viryaos_experiment_assignments
                                    SET execution_status = 'executed'

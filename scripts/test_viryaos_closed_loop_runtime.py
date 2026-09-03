@@ -79,10 +79,17 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         self.assertIn('payload_requires_executor', execution)
         self.assertIn('if !payload_requires_executor(&action.payload)', actions)
         succeeded = runtime[runtime.index('ExecutorReportStatus::Succeeded =>'):runtime.index('ExecutorReportStatus::Accepted | ExecutorReportStatus::Executing')]
-        self.assertIn('schedule_effect_measurement', succeeded)
-        self.assertIn('record_execution_outcome', succeeded)
-        self.assertIn("SET status='submitted', version=version+1", succeeded)
-        self.assertIn("SET package_status='ready', status='prepared', version=version+1", succeeded)
+        # The success side effects still ride the provider receipt; they are now
+        # reached through `apply_success_side_effects`, whose single call site is
+        # the resolver's non-Conflict arm, so a receipt the resolver refuses no
+        # longer commits accepted-execution evidence. Assert both halves: the arm
+        # reaches them, and they are what the helper does.
+        self.assertIn('apply_success_side_effects', succeeded)
+        effects = runtime[runtime.index('async fn apply_success_side_effects'):runtime.index('async fn record_show_growth_receipt')]
+        self.assertIn('schedule_effect_measurement', effects)
+        self.assertIn('record_execution_outcome', effects)
+        self.assertIn("SET status='submitted', version=version+1", effects)
+        self.assertIn("SET package_status='ready', status='prepared', version=version+1", effects)
         self.assertIn("report.status = 'succeeded'", snapshots)
         self.assertIn("report.status IN ('succeeded','failed')", snapshots)
 
