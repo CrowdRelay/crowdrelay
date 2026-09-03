@@ -7,7 +7,7 @@
 use std::{cmp::Ordering, time::Duration};
 
 use getrandom::fill as fill_random;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};

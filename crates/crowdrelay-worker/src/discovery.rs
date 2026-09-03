@@ -13,7 +13,7 @@ use crowdrelay_infra::audience_graph::{
     EvidenceInput, PostgresAudienceGraphRepository, UpsertPlaceInput,
 };
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::{
@@ -32,7 +32,7 @@ const AGENT_AUTH_NAMESPACE: &[u8] = b"crowdrelay-control-plane-v1:";
 /// `token = hex(HMAC-SHA256(master_key, namespace + workspace_id))`
 pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String {
     // HMAC-SHA256 accepts any key length; this never fails.
-    let mut mac = match <Hmac<Sha256> as Mac>::new_from_slice(master_key.as_bytes()) {
+    let mut mac = match <Hmac<Sha256> as KeyInit>::new_from_slice(master_key.as_bytes()) {
         Ok(mac) => mac,
         Err(_) => return String::new(),
     };

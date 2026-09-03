@@ -5,7 +5,7 @@ use crowdrelay_worker::outbox::{
     CROWDRELAY_EVENT_ID, CROWDRELAY_EVENT_TYPE, CROWDRELAY_EVENT_VERSION, CROWDRELAY_SIGNATURE,
     CROWDRELAY_TIMESTAMP, MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretValue,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::{PgPool, postgres::PgPoolOptions};
