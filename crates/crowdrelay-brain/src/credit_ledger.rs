@@ -527,4 +527,96 @@ mod tests {
         assert_eq!(result.credits.len(), 1);
         assert!(!result.credits[0].is_causal_evidence);
     }
+
+    #[test]
+    fn observational_evidence_leaves_most_of_the_outcome_unattributed() {
+        // The residual is what "we don't know" looks like. Attribution mass
+        // is bounded by mean confidence, and confidence is now the evidence
+        // quality — so an action with no causal claim on a fan cannot take
+        // credit for one. It used to be a flat 0.7 for every action, which
+        // made the residual exactly 30% whatever the evidence said.
+        let outcome = make_outcome(10.0);
+        let weak = make_action(
+            uuid::Uuid::from_u128(1),
+            true,
+            1.0,
+            1.0,
+            EvidenceQuality::Observational.weight(),
+            0.0,
+        );
+        let result = ProportionalCreditAllocator.allocate(&outcome, &[weak]);
+        let credited: f64 = result
+            .credits
+            .iter()
+            .map(|c| c.credited_incremental_y14)
+            .sum();
+        assert!(
+            (credited - 1.0).abs() < 1e-9,
+            "observational evidence claims a tenth, not 70%: {credited}"
+        );
+        assert!((result.unattributed - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_randomized_holdout_claims_the_whole_outcome() {
+        let outcome = make_outcome(10.0);
+        let strong = make_action(
+            uuid::Uuid::from_u128(1),
+            true,
+            1.0,
+            1.0,
+            EvidenceQuality::RandomizedHoldout.weight(),
+            0.0,
+        );
+        let result = ProportionalCreditAllocator.allocate(&outcome, &[strong]);
+        let credited: f64 = result
+            .credits
+            .iter()
+            .map(|c| c.credited_incremental_y14)
+            .sum();
+        assert!((credited - 10.0).abs() < 1e-9, "{credited}");
+        assert!(result.unattributed.abs() < 1e-9);
+    }
+
+    #[test]
+    fn two_actions_of_unequal_evidence_still_leave_a_residual() {
+        let outcome = make_outcome(10.0);
+        let strong = make_action(
+            uuid::Uuid::from_u128(1),
+            true,
+            1.0,
+            1.0,
+            EvidenceQuality::RandomizedHoldout.weight(),
+            0.0,
+        );
+        let weak = make_action(
+            uuid::Uuid::from_u128(2),
+            true,
+            1.0,
+            1.0,
+            EvidenceQuality::Observational.weight(),
+            0.0,
+        );
+        let result = ProportionalCreditAllocator.allocate(&outcome, &[strong, weak]);
+        let credit_of = |id: u128| {
+            result
+                .credits
+                .iter()
+                .find(|c| c.action_id == uuid::Uuid::from_u128(id))
+                .map(|c| c.credited_incremental_y14)
+                .expect("credit")
+        };
+        assert!(
+            credit_of(1) > credit_of(2),
+            "stronger evidence must take the larger share: {} vs {}",
+            credit_of(1),
+            credit_of(2)
+        );
+        // Mean confidence is (1.0 + 0.1) / 2 = 0.55, so 45% stays unknown.
+        assert!(
+            (result.unattributed - 4.5).abs() < 1e-9,
+            "{}",
+            result.unattributed
+        );
+    }
 }
