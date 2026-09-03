@@ -259,3 +259,177 @@ async fn insert_experiment_design(
     .await
     .expect("insert experiment design");
 }
+
+/// A treatment-arm candidate for the community engager.
+///
+/// The six tests that use this once recorded a Treatment assignment and then
+/// asserted that evidence and an episode existed. They do not, and should not:
+/// `record_experiment_assignment` writes evidence only for the Control arm,
+/// because a control unit is never dispatched and assignment is the only
+/// moment it can be observed. A treatment unit *is* dispatched, and its
+/// evidence is written then, by `persist_treatment_with_assignment`, carrying
+/// the prediction the dispatch was made on.
+///
+/// Writing treatment evidence at assignment instead would be actively wrong.
+/// The evidence insert dedupes `ON CONFLICT (workspace_id, action_id) DO
+/// NOTHING`, so an early row makes the dispatch-time write a silent no-op and
+/// freezes the assignment-time prediction into the record — breaking the
+/// invariant that the prediction persisted in the initial evidence is the
+/// prediction the decision was made on.
+///
+/// So the tests exercise the dispatch path, which is what production runs.
+fn treatment_candidate(target_id: uuid::Uuid, decision_key: &str) -> DecisionCandidate {
+    DecisionCandidate {
+        context: AutopilotContext::GrowthIntelligence,
+        subject: ActionSubject::TargetCommunity(target_id),
+        decision_kind: "request_community_engagement",
+        confidence: Confidence::MAX,
+        disposition: PolicyDisposition::AutoExecute,
+        reason: "experiment integrity fixture",
+        input_snapshot: serde_json::json!({}),
+        policy_snapshot: serde_json::json!({}),
+        action: AutopilotActionPayload::RequestCommunityEngagement {
+            target_id,
+            platform: "reddit".to_owned(),
+            subreddit: Some("t_fixture".to_owned()),
+            title: "fixture".to_owned(),
+            body: "fixture".to_owned(),
+            smart_link: None,
+        },
+        decision_key: decision_key.to_owned(),
+        action_idempotency_key: format!("action-{decision_key}"),
+    }
+}
+
+/// Persists a treatment arm the way production does: decision, action,
+/// assignment, evidence and episode in one call.
+///
+/// Returns the action id the repository created and the trace it was created
+/// under. The trace comes back because the repository mints it — a test that
+/// compares the stored trace against one it made up itself is asserting
+/// against its own fixture, not against continuity.
+async fn persist_treatment_dispatch(
+    f: &Fixture,
+    design: &crowdrelay_brain::ExperimentDesign,
+    unit_id: &str,
+    decision_key: &str,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let target_id = uuid::Uuid::now_v7();
+    let prediction = make_prediction();
+    let assignment = ExperimentAssignment::from_design(
+        design,
+        unit_id,
+        unit_id,
+        TreatmentAssignment::Treatment,
+        &prediction,
+        None,
+    );
+    let candidate = treatment_candidate(target_id, decision_key);
+    let trace = TraceContext::root(f.workspace_id);
+    let persisted = f
+        .repository
+        .persist_treatment_with_assignment(
+            f.workspace_id,
+            &candidate,
+            &assignment,
+            &prediction,
+            Some("discovery"),
+            0.10,
+            &trace,
+        )
+        .await
+        .expect("treatment dispatch persistence");
+    (
+        persisted
+            .action_id
+            .expect("a persisted treatment must carry an action id"),
+        trace.trace_id().into_uuid(),
+    )
+}
+
+/// Moves a persisted action to `succeeded`, the state a real dispatch leaves
+/// it in once the executor has filed its outcome.
+///
+/// `persist_treatment_with_assignment` creates the action `queued`, which is
+/// correct — it has been decided, not yet executed. Tests about what happens
+/// *after* execution have to advance it, and the old fixtures did that by
+/// inserting the action already `succeeded`. Advancing it here keeps the
+/// dispatch itself going through the production path.
+/// Advances a persisted action to `processing` — the state an action is in
+/// once an executor has claimed it and before it reports back.
+///
+/// `persist_treatment_with_assignment` leaves the action `queued`, which is
+/// what a decided-but-not-yet-executed action is. The ledger refuses to jump
+/// from there to any terminal state, and the executor-report path will not
+/// find an unclaimed action at all, so a test about what happens during or
+/// after execution has to move it first.
+async fn mark_action_processing(pool: &sqlx::PgPool, action_id: uuid::Uuid) {
+    sqlx::query(
+        "UPDATE viryaos_autopilot_actions \
+         SET status = 'processing', approved_at = now(), started_at = now() \
+         WHERE id = $1",
+    )
+    .bind(action_id)
+    .execute(pool)
+    .await
+    .expect("mark action processing");
+}
+
+/// The ledger refuses QUEUED to SUCCEEDED directly — an action that never
+/// ran cannot have finished — so the transition goes through `processing`,
+/// which is the path a real execution takes. (`processing` is the column's
+/// vocabulary; the ledger calls the same state RUNNING.)
+async fn mark_action_succeeded(pool: &sqlx::PgPool, action_id: uuid::Uuid) {
+    for (status, finished) in [("processing", false), ("succeeded", true)] {
+        sqlx::query(
+            "UPDATE viryaos_autopilot_actions \
+             SET status = $2, approved_at = now(), started_at = now(), \
+                 finished_at = CASE WHEN $3 THEN now() ELSE finished_at END \
+             WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(status)
+        .bind(finished)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("mark action {status}: {error}"));
+    }
+}
+
+/// Records the outbox emission the dispatcher writes when it hands an action
+/// to an executor.
+///
+/// `claim_execution` refuses an action with no emission — an executor cannot
+/// claim work that was never handed out — so a test that walks the
+/// claim/report lifecycle has to supply it. `persist_treatment_with_assignment`
+/// writes the decision, action, assignment and evidence; the emission belongs
+/// to the dispatch step that follows.
+async fn record_action_emission(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: uuid::Uuid,
+) {
+    let outbox_event_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO outbox_events (id, workspace_id, event_type, payload)
+           VALUES ($1, $2, 'crowdrelay.community.engagement_requested', '{}'::jsonb)"#,
+    )
+    .bind(outbox_event_id)
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await
+    .expect("insert outbox event");
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_action_emissions
+           (workspace_id, action_id, emission_key, outbox_event_id, emitted_at)
+           VALUES ($1, $2, $3, $4, now())"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(format!("test-emission:{action_id}"))
+    .bind(outbox_event_id)
+    .execute(pool)
+    .await
+    .expect("insert action emission");
+}
+
