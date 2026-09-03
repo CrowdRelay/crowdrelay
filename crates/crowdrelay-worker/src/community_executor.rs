@@ -798,9 +798,18 @@ impl CommunityExecutorWorker {
             return Ok(0);
         }
 
-        // Metrics polling uses Reddit's public JSON endpoint — no OAuth
-        // token needed. This keeps the feedback loop working even when
-        // the Reddit API is unavailable for posting.
+        // Metrics are read through the agent service, falling back to
+        // Reddit's public JSON.
+        //
+        // That fallback no longer reaches anything. Reddit requires
+        // authentication for the JSON API now — `/comments/{id}.json` answers
+        // 403 from a datacenter host and from a residential connection alike —
+        // so the fallback exists for the day access is restored, not as a
+        // route that works today. This comment used to claim metrics polling
+        // "keeps the feedback loop working even when the Reddit API is
+        // unavailable for posting", which is exactly backwards: without a
+        // credential neither posting nor measuring works, and a manual post
+        // registered by an operator still records no engagement.
         let mut measured = 0;
         for target in posts_to_poll {
             match self

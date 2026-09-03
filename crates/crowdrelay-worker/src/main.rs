@@ -390,8 +390,11 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     //
     // Manual mode still drafts: it writes `community_posts` rows marked
     // `awaiting_manual_post`, and an operator publishes and registers the URL.
-    // Metrics polling runs in both modes, so measurement never depends on who
-    // pressed the button.
+    // Metrics polling runs in both modes, so measurement does not depend on
+    // who pressed the button — but it does depend on a working Reddit
+    // credential, because Reddit now requires authentication to read a post's
+    // score. An operator who publishes by hand and registers the URL still
+    // gets no engagement numbers until that credential works.
     // Blank is absent, not present.
     //
     // Compose writes `CROWDRELAY_AGENT_SERVICE_AUTH_KEY: "${...:-}"`, so an
@@ -830,6 +833,19 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     if community_executor.is_some() {
         in_process_capabilities.push("community.engage");
     }
+    // The telegram, discord and social-post executors all claim
+    // `agent.content.request` actions by direct SQL, so `agent.content` needs
+    // an advertiser for the same reason `community.engage` did. Nothing
+    // advertised it — n8n registers `content.artifact`, which is a different
+    // capability — so those actions parked with `awaiting_executor` while
+    // three executors polled for work the dispatcher would not release, and
+    // the older ones were eventually cancelled with `no_executor`.
+    //
+    // One capability covers all three because they share the action kind and
+    // split on the draft's `platform` field. The social-post executor is
+    // always constructed, so the capability always has at least one claimant
+    // and is advertised unconditionally.
+    in_process_capabilities.push("agent.content");
     if let Some(registrar) = crowdrelay_worker::executor_registry::ExecutorRegistrar::new(
         database.clone(),
         workspace_id,
