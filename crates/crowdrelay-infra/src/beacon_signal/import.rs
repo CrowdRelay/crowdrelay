@@ -309,6 +309,169 @@ pub async fn import_researched_beacons(
     Ok(summary)
 }
 
+// ── SubmitHub CSV import ──────────────────────────────────────────────
+
+/// Map a SubmitHub outlet type onto the roster's `beacon_kind`.
+///
+/// SubmitHub categorises curators by the platform they operate on; the
+/// roster asks what someone does for a release. A Spotify playlister and a
+/// YouTube channel both put a record in front of an audience the band does
+/// not own, so both are `creator`. A blog is `local_press`. Radio is radio.
+fn beacon_kind_for_submithub(outlet_type: &str) -> Option<&'static str> {
+    match outlet_type.trim().to_lowercase().as_str() {
+        "spotify playlister" | "youtube channel" | "instagram" | "tiktok" => Some("creator"),
+        "blog" => Some("local_press"),
+        "radio" => Some("radio"),
+        _ => None,
+    }
+}
+
+/// One row from a SubmitHub Activity CSV, flattened and filtered.
+///
+/// The CSV carries curator names and what they did, but no contact routes.
+/// Email addresses and submission URLs are exchanged in the SubmitHub chat
+/// after a curator approves — so imported beacons start with neither and
+/// the operator enriches them from the chat before approval.
+pub struct SubmithubImportInput {
+    pub outlet: String,
+    pub outlet_type: String,
+    pub action: String,
+    pub song: String,
+    pub country: String,
+    pub feedback: String,
+    pub action_timestamp: String,
+}
+
+/// Import SubmitHub curators as unverified beacons.
+///
+/// Only curators whose action was `approved` or `shared` are imported —
+/// these are warm contacts who engaged positively. Declined curators are
+/// real people too, but they have not signalled interest and importing
+/// them would launder a soft no into a roster row that looks fine.
+///
+/// Dedup is provenance-based: the roster's partial unique indexes require
+/// either `contact_email` or `destination_url` to be non-null, and
+/// SubmitHub imports have neither. So we check
+/// `metadata -> 'imported_from' ->> 'source' = 'submithub'` and a
+/// `display_name` match before INSERT, the same pattern
+/// `import_researched_beacons` uses for contacts with NULL email.
+///
+/// # Errors
+/// Returns the underlying `sqlx::Error` if the transaction cannot be
+/// committed; nothing is written in that case.
+pub async fn import_submithub_beacons(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    inputs: &[SubmithubImportInput],
+    idempotency_key: &str,
+    request_id: Option<&str>,
+) -> Result<BeaconImportSummary, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // Every SubmitHub-sourced beacon already on the roster, by display name.
+    let already_imported: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT display_name
+        FROM viryaos_beacons
+        WHERE workspace_id = $1
+          AND metadata -> 'imported_from' ->> 'source' = 'submithub'
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|name| name.to_lowercase())
+    .collect();
+
+    let mut summary = BeaconImportSummary::default();
+
+    for input in inputs {
+        // Only warm contacts: approved or shared.
+        let action = input.action.trim().to_lowercase();
+        if action != "approved" && action != "shared" {
+            continue;
+        }
+
+        let display_name = input.outlet.trim();
+        if display_name.is_empty() || display_name.len() > 240 {
+            summary.skipped_no_route += 1;
+            continue;
+        }
+
+        let Some(beacon_kind) = beacon_kind_for_submithub(&input.outlet_type) else {
+            summary.skipped_no_route += 1;
+            continue;
+        };
+
+        // Provenance-based dedup: same outlet name + already from SubmitHub.
+        if already_imported.contains(&display_name.to_lowercase()) {
+            summary.already_present += 1;
+            continue;
+        }
+
+        let metadata = serde_json::json!({
+            "imported_from": {
+                "source": "submithub",
+                "outlet_type": input.outlet_type.trim(),
+                "action": action,
+                "song": input.song.trim(),
+                "country": input.country.trim(),
+                "feedback": input.feedback.trim(),
+                "action_timestamp": input.action_timestamp.trim(),
+            }
+        });
+
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO viryaos_beacons (
+              id, workspace_id, beacon_kind, display_name, contact_email,
+              destination_url, source_url, active, verified, accepts_outreach,
+              metadata
+            ) VALUES ($1,$2,$3,$4,NULL,NULL,$5,true,false,false,$6)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(beacon_kind)
+        .bind(display_name)
+        .bind("https://submithub.com")
+        .bind(&metadata)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if inserted.is_some() {
+            summary.imported += 1;
+        } else {
+            summary.already_present += 1;
+        }
+    }
+
+    record_operator_action(
+        &mut tx,
+        workspace_id,
+        OperatorActionRecord {
+            action: "import_submithub_beacons",
+            target_type: "beacon_roster",
+            target_id: workspace_id,
+            idempotency_key,
+            request_id,
+            details: serde_json::json!({
+                "imported": summary.imported,
+                "alreadyPresent": summary.already_present,
+                "skippedNoRoute": summary.skipped_no_route,
+                "skippedDoNotContact": summary.skipped_do_not_contact,
+            }),
+        },
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +545,74 @@ mod tests {
             skipped_do_not_contact: 2,
         };
         assert_eq!(summary.considered(), 28);
+    }
+
+    #[test]
+    fn submithub_playlister_and_youtube_are_both_creators() {
+        assert_eq!(
+            beacon_kind_for_submithub("Spotify Playlister"),
+            Some("creator")
+        );
+        assert_eq!(
+            beacon_kind_for_submithub("YouTube Channel"),
+            Some("creator")
+        );
+        assert_eq!(beacon_kind_for_submithub("Instagram"), Some("creator"));
+        assert_eq!(beacon_kind_for_submithub("TikTok"), Some("creator"));
+    }
+
+    #[test]
+    fn submithub_blog_is_local_press() {
+        assert_eq!(beacon_kind_for_submithub("Blog"), Some("local_press"));
+    }
+
+    #[test]
+    fn submithub_radio_is_radio() {
+        assert_eq!(beacon_kind_for_submithub("Radio"), Some("radio"));
+    }
+
+    #[test]
+    fn submithub_unknown_outlet_type_is_skipped() {
+        assert_eq!(beacon_kind_for_submithub("Podcast"), None);
+        assert_eq!(beacon_kind_for_submithub(""), None);
+    }
+
+    #[test]
+    fn submithub_mapping_is_case_insensitive() {
+        assert_eq!(
+            beacon_kind_for_submithub("spotify playlister"),
+            Some("creator")
+        );
+        assert_eq!(beacon_kind_for_submithub("BLOG"), Some("local_press"));
+    }
+
+    #[test]
+    fn every_submithub_mapped_kind_is_a_kind_the_roster_accepts() {
+        const ROSTER_KINDS: [&str; 9] = [
+            "radio",
+            "local_press",
+            "television",
+            "reviewer",
+            "creator",
+            "photographer",
+            "promoter",
+            "patron",
+            "community",
+        ];
+        for outlet_type in [
+            "Spotify Playlister",
+            "YouTube Channel",
+            "Instagram",
+            "TikTok",
+            "Blog",
+            "Radio",
+        ] {
+            let mapped = beacon_kind_for_submithub(outlet_type)
+                .unwrap_or_else(|| panic!("{outlet_type} should map to a roster kind"));
+            assert!(
+                ROSTER_KINDS.contains(&mapped),
+                "{outlet_type} maps to {mapped}, which viryaos_beacons.beacon_kind rejects",
+            );
+        }
     }
 }

@@ -245,6 +245,7 @@ pub async fn admin_beacon_network_action(
     match payload.action.as_str() {
         "discover" => request_discovery(&state, &headers, payload, idempotency_key).await,
         "import_researched" => import_researched(&state, &headers, idempotency_key).await,
+        "import_submithub" => import_submithub(&state, &headers, payload, idempotency_key).await,
         "approve" => approve_candidate(&state, &headers, payload, idempotency_key).await,
         "queue_invites" => queue_invites(&state, &headers, payload, idempotency_key).await,
         _ => BeaconSignalError::BadRequest.response(request_id_value),
@@ -288,6 +289,67 @@ async fn import_researched(
         ),
         Err(error) => {
             tracing::warn!(%error, "Latarnik researched beacon import failed");
+            BeaconSignalError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
+/// Import SubmitHub curators as unverified beacons.
+///
+/// The control plane parses the Activity CSV and sends structured rows
+/// here. Only curators whose action was `approved` or `shared` are
+/// imported — warm contacts who engaged positively. The CSV carries no
+/// contact routes, so imported beacons start with no email or URL and
+/// the operator enriches them from the SubmitHub chat before approval.
+async fn import_submithub(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    payload: AdminNetworkActionRequest,
+    idempotency_key: String,
+) -> Response {
+    let request_id_value = request_id(headers);
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    let Some(csv_rows) = payload.csv_rows.as_deref() else {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    };
+    if csv_rows.is_empty() || csv_rows.len() > MAX_DISCOVERY_BATCH {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    }
+    let inputs: Vec<_> = csv_rows
+        .iter()
+        .map(
+            |row| crowdrelay_infra::beacon_signal::import::SubmithubImportInput {
+                outlet: row.outlet.clone(),
+                outlet_type: row.outlet_type.clone(),
+                action: row.action.clone(),
+                song: row.song.clone(),
+                country: row.country.clone(),
+                feedback: row.feedback.clone(),
+                action_timestamp: row.action_timestamp.clone(),
+            },
+        )
+        .collect();
+    match crowdrelay_infra::beacon_signal::import::import_submithub_beacons(
+        state.ticketing.pool(),
+        workspace_id,
+        &inputs,
+        &idempotency_key,
+        request_id_value.as_deref(),
+    )
+    .await
+    {
+        Ok(summary) => private_json(
+            StatusCode::OK,
+            json!({
+                "imported": summary.imported,
+                "alreadyPresent": summary.already_present,
+                "skippedNoRoute": summary.skipped_no_route,
+                "skippedDoNotContact": summary.skipped_do_not_contact,
+                "considered": summary.considered(),
+            }),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik SubmitHub beacon import failed");
             BeaconSignalError::Unavailable.response(request_id_value)
         }
     }

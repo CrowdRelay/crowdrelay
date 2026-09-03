@@ -128,6 +128,25 @@ pub struct AdminNetworkActionRequest {
     ttl_days: Option<i32>,
     radius_km: Option<i32>,
     locale: Option<String>,
+    /// Parsed rows from a SubmitHub Activity CSV. Only present when
+    /// `action` is `import_submithub`.
+    csv_rows: Option<Vec<SubmithubCsvRow>>,
+}
+
+/// One row from a SubmitHub Activity CSV export, parsed by the control
+/// plane and sent here as structured JSON. The CSV carries curator names
+/// and actions but no contact routes — those are exchanged in the
+/// SubmitHub chat after a curator approves.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SubmithubCsvRow {
+    pub outlet: String,
+    pub outlet_type: String,
+    pub action: String,
+    pub song: String,
+    pub country: String,
+    pub feedback: String,
+    pub action_timestamp: String,
 }
 
 #[derive(Debug, Deserialize)]
