@@ -27,13 +27,16 @@ fn telegram_bot_aad(workspace_id: Uuid, channel: &str) -> Vec<u8> {
 
 impl GrowthMetricSyncWorker {
     /// Discord: fetch server member count from Discord's own invite API
-    /// (free, no API key). The `provider_account_id` column stores the
-    /// Discord invite code (e.g. `BBdDV6gVy`).
+    /// (free, no API key). The `external_account_ref` column stores the
+    /// Discord invite code (e.g. `BBdDV6gVy`). When posting is configured,
+    /// `provider_account_id` holds the channel ID (a numeric snowflake),
+    /// so the sync reader must use `external_account_ref` — the one column
+    /// that always carries the invite code.
     pub(super) async fn sync_discord(
         &self,
         conn: &DueConnection,
     ) -> Result<(), GrowthMetricSyncError> {
-        let invite_code = &conn.provider_account_id;
+        let invite_code = &conn.external_account_ref;
         let url = format!("https://discord.com/api/v9/invites/{invite_code}?with_counts=true");
         let response = self.http_client.get(&url).send().await?;
         if !response.status().is_success() {

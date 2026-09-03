@@ -316,7 +316,8 @@ impl GrowthMetricSyncWorker {
         let rows = sqlx::query_as::<_, DueConnectionRow>(
             r#"
             SELECT
-                fc.id, fc.workspace_id, fc.platform, fc.provider_account_id
+                fc.id, fc.workspace_id, fc.platform, fc.provider_account_id,
+                fc.external_account_ref
             FROM fanbase_connections fc
             WHERE fc.status = 'connected'
               AND fc.platform = ANY($1)
@@ -364,6 +365,7 @@ impl GrowthMetricSyncWorker {
                 workspace_id: row.workspace_id,
                 platform: row.platform,
                 provider_account_id: row.provider_account_id,
+                external_account_ref: row.external_account_ref,
             })
             .collect())
     }
@@ -1188,6 +1190,7 @@ struct DueConnectionRow {
     workspace_id: Uuid,
     platform: String,
     provider_account_id: String,
+    external_account_ref: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1196,6 +1199,7 @@ struct DueConnection {
     workspace_id: Uuid,
     platform: String,
     provider_account_id: String,
+    external_account_ref: String,
 }
 
 // --- YouTube response types ---
