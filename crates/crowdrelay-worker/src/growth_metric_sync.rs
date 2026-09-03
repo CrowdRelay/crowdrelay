@@ -109,7 +109,6 @@ const SYNCED_PLATFORMS: &[&str] = &[
     "discogs",
     "bluesky",
     "bandcamp",
-    "tiktok",
     "x",
 ];
 
