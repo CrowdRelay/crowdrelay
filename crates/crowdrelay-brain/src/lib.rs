@@ -41,6 +41,7 @@
 //! and decides.
 
 pub mod bayesian;
+pub mod bridge;
 pub mod calibration;
 pub mod causal_model;
 pub mod context_effect;
@@ -60,13 +61,15 @@ pub mod standing;
 pub mod strategy;
 pub mod strategy_learning;
 pub mod tenant_preference;
+pub mod treatment_effect;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
 pub use bayesian::{
     HierarchicalNegBinPosterior, HierarchicalPosterior, NegBinPosterior, NormalPosterior,
-    TreatmentEffectPosterior, normal_cdf, normal_pdf,
+    normal_cdf, normal_pdf,
 };
+pub use bridge::Y14Y30Bridge;
 pub use calibration::{
     CalibrationByRegime, CalibrationReport, CalibrationTracker, PredictionRecord, ReliabilityBucket,
 };
@@ -113,6 +116,7 @@ pub use strategy_learning::{
 pub use tenant_preference::{
     PresentationMetadata, TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
 };
+pub use treatment_effect::TreatmentEffectPosterior;
 pub use world_model::{
     EventProximity, GrowthTarget, GrowthTargetProgress, GrowthTrend, TargetStatus, WorldModel,
 };

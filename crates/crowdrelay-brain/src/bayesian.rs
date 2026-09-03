@@ -202,6 +202,17 @@ pub struct HierarchicalPosterior {
     pub by_template: std::collections::HashMap<String, NormalPosterior>,
     /// Per-subreddit-type posteriors.
     pub by_subreddit_type: std::collections::HashMap<String, NormalPosterior>,
+    /// Per-target posteriors — one specific community, curator or contact.
+    ///
+    /// This is the level that answers "does *this* audience work", as
+    /// distinct from "does this kind of audience work". It is the last level
+    /// to earn data and the first one that matters: two communities in the
+    /// same genre bucket predicted identically before it existed.
+    ///
+    /// Defaulted on deserialize so a checkpoint written before the level
+    /// existed still loads; the level then refills from evidence replay.
+    #[serde(default)]
+    pub by_target: std::collections::HashMap<String, NormalPosterior>,
 }
 
 impl HierarchicalPosterior {
@@ -212,6 +223,7 @@ impl HierarchicalPosterior {
             global: global_prior,
             by_template: std::collections::HashMap::new(),
             by_subreddit_type: std::collections::HashMap::new(),
+            by_target: std::collections::HashMap::new(),
         }
     }
 
@@ -234,11 +246,41 @@ impl HierarchicalPosterior {
         observation: f64,
         observation_variance: f64,
     ) {
+        self.update_with_target(
+            template_id,
+            subreddit_type,
+            None,
+            observation,
+            observation_variance,
+        );
+    }
+
+    /// Updates the hierarchy including the per-target level.
+    ///
+    /// The target posterior's prior is the **pre-update** subreddit-type
+    /// posterior where one exists, and the pre-update global otherwise. A
+    /// target therefore starts life believing what its audience type
+    /// believes and moves away from it as its own evidence arrives, which is
+    /// the whole point of partial pooling: three observations on one
+    /// community should tilt the estimate, not replace it.
+    pub fn update_with_target(
+        &mut self,
+        template_id: Option<&str>,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+        observation: f64,
+        observation_variance: f64,
+    ) {
         // Snapshot the global posterior BEFORE updating it. The child's prior
         // must be the pre-update global — otherwise the observation is
         // counted once in the global (becoming the child's prior) and again
         // in the child's update, giving early observations extra weight.
         let global_prior = (self.global.mean, self.global.variance);
+        // The target's parent is its audience type, snapshotted for the same
+        // reason and before the same update.
+        let target_prior = subreddit_type
+            .and_then(|st| self.by_subreddit_type.get(st))
+            .map_or(global_prior, |p| (p.mean, p.variance));
 
         // Update global posterior.
         self.global.update(observation, observation_variance);
@@ -259,6 +301,13 @@ impl HierarchicalPosterior {
                 .or_insert_with(prior);
             entry.update(observation, observation_variance);
         }
+
+        // Update target posterior, using the PRE-update audience type as prior.
+        if let Some(tk) = target_key {
+            let prior = || NormalPosterior::prior(target_prior.0, target_prior.1);
+            let entry = self.by_target.entry(tk.to_owned()).or_insert_with(prior);
+            entry.update(observation, observation_variance);
+        }
     }
 
     /// Signed update — same as [`update`](Self::update) but allows negative
@@ -272,7 +321,29 @@ impl HierarchicalPosterior {
         observation: f64,
         observation_variance: f64,
     ) {
+        self.update_signed_with_target(
+            template_id,
+            subreddit_type,
+            None,
+            observation,
+            observation_variance,
+        );
+    }
+
+    /// Signed update including the per-target level. Same parent-prior rule
+    /// as [`update_with_target`](Self::update_with_target).
+    pub fn update_signed_with_target(
+        &mut self,
+        template_id: Option<&str>,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+        observation: f64,
+        observation_variance: f64,
+    ) {
         let global_prior = (self.global.mean, self.global.variance);
+        let target_prior = subreddit_type
+            .and_then(|st| self.by_subreddit_type.get(st))
+            .map_or(global_prior, |p| (p.mean, p.variance));
         self.global.update_signed(observation, observation_variance);
         if let Some(tid) = template_id {
             let prior = || NormalPosterior::prior(global_prior.0, global_prior.1);
@@ -285,6 +356,11 @@ impl HierarchicalPosterior {
                 .by_subreddit_type
                 .entry(st.to_owned())
                 .or_insert_with(prior);
+            entry.update_signed(observation, observation_variance);
+        }
+        if let Some(tk) = target_key {
+            let prior = || NormalPosterior::prior(target_prior.0, target_prior.1);
+            let entry = self.by_target.entry(tk.to_owned()).or_insert_with(prior);
             entry.update_signed(observation, observation_variance);
         }
     }
@@ -323,6 +399,34 @@ impl HierarchicalPosterior {
         }
     }
 
+    /// Predicts for a specific target, shrinking the target's own posterior
+    /// toward the (template, subreddit-type) prediction.
+    ///
+    /// A target with no observations predicts exactly what
+    /// [`predict`](Self::predict) predicts, so adding the level cannot move
+    /// an estimate the data does not support. Once the target has its own
+    /// evidence it pulls away from its audience type at the same shrinkage
+    /// rate every other level uses.
+    #[must_use]
+    pub fn predict_for_target(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+    ) -> (f64, f64) {
+        const SHRINKAGE_STRENGTH: f64 = 5.0;
+        let (parent_mean, parent_var) = self.predict(template_id, subreddit_type);
+        match target_key.and_then(|tk| self.by_target.get(tk)) {
+            Some(tp) if tp.n > 0 => {
+                let weight = tp.n as f64 / (tp.n as f64 + SHRINKAGE_STRENGTH);
+                let mean = weight * tp.mean + (1.0 - weight) * parent_mean;
+                let variance = weight * tp.variance + (1.0 - weight) * parent_var;
+                (mean, variance.max(0.01))
+            }
+            _ => (parent_mean, parent_var),
+        }
+    }
+
     /// Returns the posterior for a template, or the global posterior if
     /// the template has no data.
     #[must_use]
@@ -337,6 +441,12 @@ impl HierarchicalPosterior {
     #[must_use]
     pub fn confidence(&self, template_id: &str) -> u32 {
         self.by_template.get(template_id).map(|p| p.n).unwrap_or(0)
+    }
+
+    /// Returns the observation count for one target.
+    #[must_use]
+    pub fn target_confidence(&self, target_key: &str) -> u32 {
+        self.by_target.get(target_key).map(|p| p.n).unwrap_or(0)
     }
 }
 
@@ -467,6 +577,11 @@ pub struct HierarchicalNegBinPosterior {
     pub by_template: std::collections::HashMap<String, NegBinPosterior>,
     /// Per-subreddit-type posteriors.
     pub by_subreddit_type: std::collections::HashMap<String, NegBinPosterior>,
+    /// Per-target posteriors — the count-data analogue of
+    /// [`HierarchicalPosterior::by_target`]. Defaulted on deserialize so
+    /// checkpoints written before the level existed still load.
+    #[serde(default)]
+    pub by_target: std::collections::HashMap<String, NegBinPosterior>,
 }
 
 impl HierarchicalNegBinPosterior {
@@ -477,6 +592,7 @@ impl HierarchicalNegBinPosterior {
             global: global_prior,
             by_template: std::collections::HashMap::new(),
             by_subreddit_type: std::collections::HashMap::new(),
+            by_target: std::collections::HashMap::new(),
         }
     }
 
@@ -493,12 +609,29 @@ impl HierarchicalNegBinPosterior {
         subreddit_type: Option<&str>,
         observation: u32,
     ) {
+        self.update_with_target(template_id, subreddit_type, None, observation);
+    }
+
+    /// Updates the hierarchy including the per-target level. The target's
+    /// prior is the pre-update subreddit-type posterior where one exists and
+    /// the pre-update global otherwise — see
+    /// [`HierarchicalPosterior::update_with_target`].
+    pub fn update_with_target(
+        &mut self,
+        template_id: Option<&str>,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+        observation: u32,
+    ) {
         // Snapshot the global posterior BEFORE updating it. The child's prior
         // must be the pre-update global — otherwise the observation is
         // counted once in the global (becoming the child's prior) and again
         // in the child's update, giving early observations extra weight.
         let global_alpha = self.global.alpha;
         let global_beta = self.global.beta;
+        let (target_alpha, target_beta) = subreddit_type
+            .and_then(|st| self.by_subreddit_type.get(st))
+            .map_or((global_alpha, global_beta), |p| (p.alpha, p.beta));
 
         // Update global posterior.
         self.global.update(observation);
@@ -525,6 +658,17 @@ impl HierarchicalNegBinPosterior {
                 .by_subreddit_type
                 .entry(st.to_owned())
                 .or_insert_with(prior);
+            entry.update(observation);
+        }
+
+        // Update target posterior, using the PRE-update audience type as prior.
+        if let Some(tk) = target_key {
+            let prior = || NegBinPosterior {
+                alpha: target_alpha,
+                beta: target_beta,
+                n: 0,
+            };
+            let entry = self.by_target.entry(tk.to_owned()).or_insert_with(prior);
             entry.update(observation);
         }
     }
@@ -564,10 +708,42 @@ impl HierarchicalNegBinPosterior {
         }
     }
 
+    /// Predicts the expected count for a specific target, shrinking the
+    /// target's own posterior toward the (template, subreddit-type)
+    /// prediction. A target with no observations predicts exactly what
+    /// [`predict`](Self::predict) predicts.
+    #[must_use]
+    pub fn predict_for_target(
+        &self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+    ) -> (f64, f64) {
+        const SHRINKAGE_STRENGTH: f64 = 5.0;
+        let (parent_mean, parent_var) = self.predict(template_id, subreddit_type);
+        match target_key.and_then(|tk| self.by_target.get(tk)) {
+            Some(tp) if tp.n > 0 => {
+                let weight = tp.n as f64 / (tp.n as f64 + SHRINKAGE_STRENGTH);
+                let tp_mean = tp.mean();
+                let tp_var = tp.alpha / (tp.beta * tp.beta);
+                let mean = weight * tp_mean + (1.0 - weight) * parent_mean;
+                let variance = weight * tp_var + (1.0 - weight) * parent_var;
+                (mean, variance.max(0.01))
+            }
+            _ => (parent_mean, parent_var),
+        }
+    }
+
     /// Returns the confidence (observation count) for a template.
     #[must_use]
     pub fn confidence(&self, template_id: &str) -> u32 {
         self.by_template.get(template_id).map(|p| p.n).unwrap_or(0)
+    }
+
+    /// Returns the observation count for one target.
+    #[must_use]
+    pub fn target_confidence(&self, target_key: &str) -> u32 {
+        self.by_target.get(target_key).map(|p| p.n).unwrap_or(0)
     }
 
     /// Returns the posterior for a template, or the global posterior if
@@ -581,122 +757,10 @@ impl HierarchicalNegBinPosterior {
     }
 }
 
-/// Posterior over the treatment effect τ = Y(1) - Y(0) for a template.
-///
-/// Uses a Normal-Normal conjugate model on the **signed** treatment effect,
-/// with the same hierarchical partial pooling structure as the outcome model
-/// ([`HierarchicalPosterior`]). The key difference: τ can be negative (the
-/// action backfired), so updates use [`NormalPosterior::update_signed`].
-///
-/// # Prior
-///
-/// The prior is centered at 0.0 (no effect) with [`crate::PRIOR_VARIANCE`].
-/// This is a skeptical prior — the brain starts believing actions have no
-/// effect until evidence proves otherwise.
-///
-/// # Ranking
-///
-/// The brain ranks templates by `τ(x)` — the heterogeneous treatment effect
-/// for context `x`. A template with `τ = +5` produces 5 incremental fans on
-/// average; `τ = -3` means the action loses 3 fans. This is the causally
-/// correct ranking signal, unlike the outcome model which conflates
-/// correlation with causation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TreatmentEffectPosterior {
-    /// Hierarchical posterior for τ, same structure as the fan posterior.
-    pub effects: HierarchicalPosterior,
-}
-
-impl Default for TreatmentEffectPosterior {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TreatmentEffectPosterior {
-    /// Creates a treatment-effect posterior with a skeptical prior (mean=0,
-    /// variance=PRIOR_VARIANCE).
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            effects: HierarchicalPosterior::new(NormalPosterior::prior(0.0, crate::PRIOR_VARIANCE)),
-        }
-    }
-
-    /// Updates the treatment-effect posterior from an observed τ.
-    ///
-    /// `observed_tau` is the estimated treatment effect (e.g. from an IPW
-    /// estimator). It can be negative. `observation_variance` is the variance
-    /// of the estimate (from the IPW computation).
-    pub fn update(
-        &mut self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-        observed_tau: f64,
-        observation_variance: f64,
-    ) {
-        self.effects.update_signed(
-            Some(template_id),
-            subreddit_type,
-            observed_tau,
-            observation_variance,
-        );
-    }
-
-    /// Returns the confidence (observation count) for a template's treatment
-    /// effect.
-    #[must_use]
-    pub fn confidence(&self, template_id: &str) -> u32 {
-        self.effects.confidence(template_id)
-    }
-
-    /// Returns `(tau, std, confidence)` in a single hierarchical lookup.
-    /// This is the hot path for EFE scoring.
-    #[must_use]
-    pub fn predict_stats(
-        &self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-    ) -> (f64, f64, u32) {
-        let (mean, var) = self.effects.predict(template_id, subreddit_type);
-        let std = var.sqrt().max(0.1);
-        let confidence = self.effects.confidence(template_id);
-        (mean, std, confidence)
-    }
-
-    /// Returns P(τ > δ) — the probability that the treatment effect exceeds
-    /// a meaningful threshold δ. This is the **meaningful-effect probability**,
-    /// a more decision-relevant signal than just P(τ > 0).
-    ///
-    /// For example, if δ = 1.0 (we only care about effects that produce at
-    /// least 1 durable fan), then P(τ > 1.0) tells us the probability that
-    /// this template is worth dispatching at all.
-    ///
-    /// The posterior over τ is approximately Normal(μ, σ²), so:
-    ///
-    /// ```text
-    /// P(τ > δ) = 1 - Φ((δ - μ) / σ)
-    /// ```
-    ///
-    /// where Φ is the standard Normal CDF.
-    #[must_use]
-    pub fn p_meaningful_effect(
-        &self,
-        template_id: &str,
-        subreddit_type: Option<&str>,
-        delta: f64,
-    ) -> f64 {
-        let (mean, var) = self.effects.predict(template_id, subreddit_type);
-        let std = var.sqrt().max(0.1);
-        // Standard Normal CDF: Φ(z) = 0.5 * (1 + erf(z / sqrt(2)))
-        let z = (delta - mean) / std;
-        1.0 - normal_cdf(z)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::treatment_effect::TreatmentEffectPosterior;
 
     #[test]
     fn prior_has_correct_mean_and_variance() {
@@ -1106,5 +1170,100 @@ mod tests {
             template_post.beta
         );
         // If double-counted: alpha would be 22, beta would be 8/3.
+    }
+
+    // ── Per-target level ──
+
+    #[test]
+    fn target_with_no_data_predicts_exactly_what_the_template_predicts() {
+        // Adding the level must not move an estimate the data does not
+        // support: an unobserved target inherits its parent untouched.
+        let mut h = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(2.0, 1.0));
+        h.update(Some("community-engager"), Some("metal"), 4);
+        let parent = h.predict("community-engager", Some("metal"));
+        let target = h.predict_for_target("community-engager", Some("metal"), Some("community:x"));
+        assert!((parent.0 - target.0).abs() < 1e-12);
+        assert!((parent.1 - target.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn two_targets_in_one_genre_bucket_diverge_once_they_have_evidence() {
+        // This is the whole point of the level. Before it existed, r/good and
+        // r/bad shared a subreddit_type and therefore shared a prediction.
+        let mut h = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(2.0, 1.0));
+        for _ in 0..8 {
+            h.update_with_target(
+                Some("community-engager"),
+                Some("metal"),
+                Some("community:good"),
+                9,
+            );
+            h.update_with_target(
+                Some("community-engager"),
+                Some("metal"),
+                Some("community:bad"),
+                0,
+            );
+        }
+        let good = h
+            .predict_for_target("community-engager", Some("metal"), Some("community:good"))
+            .0;
+        let bad = h
+            .predict_for_target("community-engager", Some("metal"), Some("community:bad"))
+            .0;
+        assert!(
+            good > bad + 1.0,
+            "targets must separate: good={good} bad={bad}"
+        );
+    }
+
+    #[test]
+    fn target_shrinks_toward_its_audience_type_on_thin_evidence() {
+        // One observation must tilt the estimate, not replace it.
+        let mut h = HierarchicalNegBinPosterior::new(NegBinPosterior::prior(2.0, 1.0));
+        for _ in 0..20 {
+            h.update(Some("community-engager"), Some("metal"), 5);
+        }
+        let parent = h.predict("community-engager", Some("metal")).0;
+        h.update_with_target(
+            Some("community-engager"),
+            Some("metal"),
+            Some("community:new"),
+            0,
+        );
+        let target = h
+            .predict_for_target("community-engager", Some("metal"), Some("community:new"))
+            .0;
+        assert!(
+            target < parent,
+            "a zero-fan observation should pull the target down"
+        );
+        assert!(
+            target > parent / 2.0,
+            "one observation must not overwhelm the audience type: target={target} parent={parent}"
+        );
+    }
+
+    #[test]
+    fn target_confidence_counts_only_that_targets_observations() {
+        let mut h = HierarchicalPosterior::new(NormalPosterior::prior(0.0, 4.0));
+        h.update_signed_with_target(Some("t"), Some("metal"), Some("community:a"), 1.0, 1.0);
+        h.update_signed_with_target(Some("t"), Some("metal"), Some("community:b"), 1.0, 1.0);
+        h.update_signed_with_target(Some("t"), Some("metal"), Some("community:a"), 1.0, 1.0);
+        assert_eq!(h.target_confidence("community:a"), 2);
+        assert_eq!(h.target_confidence("community:b"), 1);
+        assert_eq!(h.target_confidence("community:missing"), 0);
+        // The template level still sees every observation.
+        assert_eq!(h.confidence("t"), 3);
+    }
+
+    #[test]
+    fn target_level_survives_a_checkpoint_written_without_it() {
+        // Old checkpoints must load, then refill from replay.
+        let json =
+            r#"{"global":{"alpha":2.0,"beta":1.0,"n":0},"by_template":{},"by_subreddit_type":{}}"#;
+        let h: HierarchicalNegBinPosterior =
+            serde_json::from_str(json).expect("legacy checkpoint should deserialize");
+        assert!(h.by_target.is_empty());
     }
 }

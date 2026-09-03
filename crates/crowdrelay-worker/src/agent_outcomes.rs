@@ -17,6 +17,9 @@ use std::time::Duration;
 
 use crowdrelay_application::agent_outcomes::{OutcomeKind, ValidatedOutcome, validate};
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::target_discovery::{
+    CommunityCandidateSnapshot, ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
+};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -54,6 +57,49 @@ enum AgentOutcomeError {
     Validation(#[from] crowdrelay_application::agent_outcomes::OutcomeValidationError),
     #[error("agent proposed target_kind {0:?}, which agent_outreach_targets does not accept")]
     UnknownTargetKind(String),
+}
+
+/// Row shape of the audience-graph lookup for a proposed community.
+type CommunityPlaceRow = (Uuid, Option<i32>, Option<i32>, String, String, Option<i16>);
+
+/// What the audience graph already knows about a proposed community.
+#[derive(Clone, Debug)]
+struct CommunityPlace {
+    id: Uuid,
+    member_count: Option<i32>,
+    activity_bp: Option<i32>,
+    status: String,
+    membership_state: String,
+    self_promo_ratio_percent: Option<i16>,
+}
+
+/// Builds the screening snapshot for a proposed community from the agent's
+/// evidence and whatever the audience graph has measured.
+///
+/// Reddit places are never sold placement through this path — the discovery
+/// adapters import public subreddits, not sponsorship inventory — so
+/// `sells_placement` stays false rather than being guessed from prose.
+fn community_snapshot(
+    evidence: &Value,
+    place: Option<&CommunityPlace>,
+) -> CommunityCandidateSnapshot {
+    let has_evidence = evidence
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| !item.is_null()));
+    let mut snapshot = CommunityCandidateSnapshot {
+        has_evidence,
+        ..CommunityCandidateSnapshot::default()
+    };
+    if let Some(place) = place {
+        snapshot.member_count = place.member_count.and_then(|v| u32::try_from(v).ok());
+        snapshot.activity_basis_points = place.activity_bp.and_then(|v| u16::try_from(v).ok());
+        snapshot.self_promo_ratio_percent = place
+            .self_promo_ratio_percent
+            .and_then(|v| u8::try_from(v).ok());
+        snapshot.refused_by_us_or_them = place.status == "blocked"
+            || matches!(place.membership_state.as_str(), "rejected" | "not_a_fit");
+    }
+    snapshot
 }
 
 #[derive(Clone, Debug)]
@@ -745,14 +791,37 @@ impl AgentOutcomeWorker {
         // Auto-promote them so the brain's community-engager can dispatch
         // without waiting for operator review. Personal-contact kinds keep
         // the proposed → promoted operator-approval flow.
+        //
+        // Auto-promotion is not the same as unscreened. A community an agent
+        // named still has to clear the screening policy — evidence, size,
+        // plausible activity, its own self-promo rules, and our recorded
+        // judgement about it — before the growth loop will post there.
+        // The verdict is recorded so a refusal survives the next scan
+        // instead of being rediscovered and re-proposed every week.
         let is_community = target_kind == "community";
         let initial_status = if is_community { "promoted" } else { "proposed" };
+        let (place_id, verdict, refusal) = if is_community {
+            let place = self
+                .community_place(tx, outcome.workspace_id, subreddit)
+                .await?;
+            let snapshot = community_snapshot(&evidence, place.as_ref());
+            match screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()) {
+                ScreeningVerdict::Admit { .. } => (place.map(|p| p.id), Some("admitted"), None),
+                ScreeningVerdict::Refuse(reason) => {
+                    (place.map(|p| p.id), Some("refused"), Some(reason.as_str()))
+                }
+            }
+        } else {
+            (None, None, None)
+        };
         sqlx::query(
             r#"
             INSERT INTO agent_outreach_targets
                 (workspace_id, target_kind, display_name, contact_email, contact_domain,
-                 why_fit, evidence, source_task_id, subreddit, status)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                 why_fit, evidence, source_task_id, subreddit, status,
+                 place_id, screening_verdict, refusal_reason, screened_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                    CASE WHEN $12::text IS NULL THEN NULL ELSE now() END)
             ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
                 subreddit = COALESCE(EXCLUDED.subreddit, agent_outreach_targets.subreddit),
                 status = CASE
@@ -760,6 +829,17 @@ impl AgentOutcomeWorker {
                     WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
                     ELSE agent_outreach_targets.status
                 END,
+                place_id = COALESCE(EXCLUDED.place_id, agent_outreach_targets.place_id),
+                -- A re-proposal is re-screened against whatever the audience
+                -- graph knows now, which is how a community that was refused
+                -- for being too small gets readmitted once it has grown. The
+                -- verdict is only overwritten when this pass produced one.
+                screening_verdict = COALESCE(EXCLUDED.screening_verdict, agent_outreach_targets.screening_verdict),
+                refusal_reason = CASE
+                    WHEN EXCLUDED.screening_verdict IS NULL THEN agent_outreach_targets.refusal_reason
+                    ELSE EXCLUDED.refusal_reason
+                END,
+                screened_at = COALESCE(EXCLUDED.screened_at, agent_outreach_targets.screened_at),
                 updated_at = now()
             "#,
         )
@@ -773,9 +853,57 @@ impl AgentOutcomeWorker {
         .bind(outcome.task_id)
         .bind(subreddit)
         .bind(initial_status)
+        .bind(place_id)
+        .bind(verdict)
+        .bind(refusal)
         .execute(&mut **tx)
         .await?;
         Ok(())
+    }
+
+    /// Looks up the audience-graph place for a proposed community, matching
+    /// on the subreddit slug in the place URL. Returns `None` when discovery
+    /// has not seen the community yet — that is common for a fresh proposal
+    /// and is not a refusal.
+    async fn community_place(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        workspace_id: Uuid,
+        subreddit: Option<&str>,
+    ) -> Result<Option<CommunityPlace>, AgentOutcomeError> {
+        let Some(subreddit) = subreddit.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        let row: Option<CommunityPlaceRow> = sqlx::query_as(
+            r#"
+                SELECT place.id, place.member_count, place.activity_bp,
+                       place.status, place.membership_state,
+                       rules.self_promo_ratio_percent
+                FROM discovery_places AS place
+                LEFT JOIN discovery_place_rules AS rules ON rules.place_id = place.id
+                WHERE place.workspace_id = $1
+                  AND place.place_kind = 'subreddit'
+                  AND lower(substring(place.url from '/r/([^/?#]+)')) = lower($2)
+                ORDER BY place.updated_at DESC
+                LIMIT 1
+                "#,
+        )
+        .bind(workspace_id)
+        .bind(subreddit)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(row.map(
+            |(id, member_count, activity_bp, status, membership_state, self_promo)| {
+                CommunityPlace {
+                    id,
+                    member_count,
+                    activity_bp,
+                    status,
+                    membership_state,
+                    self_promo_ratio_percent: self_promo,
+                }
+            },
+        ))
     }
 
     async fn reject_outcome(

@@ -247,6 +247,106 @@ pub fn screen_candidate(
     }
 }
 
+/// What is known about a public community an agent proposed engaging.
+///
+/// A community is not a personal contact, so the route rules do not apply to
+/// it: there is no address to read or infer, and posting in a public space
+/// costs nobody a first contact they only get once. Everything else the
+/// screening policy checks still applies, because the failure it prevents is
+/// the same one — posting into a space that is dead, bought, hostile to
+/// promotion, or not this band's audience.
+///
+/// Every measurement is optional because the agent that proposed the target
+/// may have found it before the audience graph did. Absent is not suspicious;
+/// implausible is. A community with no measured size is admitted and left to
+/// the causal model, not refused on a number nobody has.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CommunityCandidateSnapshot {
+    /// Whether the agent supplied any evidence for the proposal. Without it
+    /// no human can check why the community was ever engaged.
+    pub has_evidence: bool,
+    /// Members, where the audience graph has measured them.
+    pub member_count: Option<u32>,
+    /// Observed activity against that member count, in basis points.
+    pub activity_basis_points: Option<u16>,
+    /// The share of the community's content that may be self-promotion, as
+    /// the community's own rules state it. Zero means promotion is banned:
+    /// posting there is a removal and a moderator who remembers the band.
+    pub self_promo_ratio_percent: Option<u8>,
+    /// The community sells placement or promotion slots.
+    pub sells_placement: bool,
+    /// Our own recorded judgement: the community rejected us, or an operator
+    /// marked it as not a fit.
+    pub refused_by_us_or_them: bool,
+}
+
+/// Screens one public community. The refusal order matches
+/// [`screen_candidate`]: what is permanently wrong comes before what a policy
+/// threshold makes wrong, so tightening a threshold can never reclassify a
+/// community that sells placement as a merely small one.
+///
+/// Admission carries [`ActionClass::ThirdParty`] — a post in a public space
+/// is third-party contact, never spend. Confidence is what the evidence
+/// supports: measured size and activity raise it, an unmeasured community
+/// sits at the floor rather than borrowing confidence it has not earned.
+#[must_use]
+pub fn screen_community_candidate(
+    snapshot: &CommunityCandidateSnapshot,
+    policy: TargetDiscoveryPolicy,
+) -> ScreeningVerdict {
+    if !snapshot.has_evidence {
+        return ScreeningVerdict::Refuse(RefusalReason::EvidenceMissing);
+    }
+    if snapshot.sells_placement {
+        return ScreeningVerdict::Refuse(RefusalReason::SellsPlacement);
+    }
+    if snapshot.refused_by_us_or_them {
+        return ScreeningVerdict::Refuse(RefusalReason::PoorFit);
+    }
+    // A community that bans self-promotion outright is not a growth target at
+    // any size. Posting there costs a removal and a moderator who remembers.
+    if snapshot.self_promo_ratio_percent == Some(0) {
+        return ScreeningVerdict::Refuse(RefusalReason::PoorFit);
+    }
+    // Large membership is only believed with activity to match — that is
+    // where inflated subscriber counts live.
+    if let (Some(members), Some(activity)) = (snapshot.member_count, snapshot.activity_basis_points)
+        && members >= policy.engagement_scrutiny_follower_count
+        && u32::from(activity) < u32::from(policy.minimum_engagement_basis_points)
+    {
+        return ScreeningVerdict::Refuse(RefusalReason::ImplausibleEngagement);
+    }
+    if let Some(members) = snapshot.member_count
+        && members < policy.minimum_follower_count
+    {
+        return ScreeningVerdict::Refuse(RefusalReason::TooSmall);
+    }
+    ScreeningVerdict::Admit {
+        class: ActionClass::ThirdParty,
+        confidence: community_confidence(snapshot),
+    }
+}
+
+/// Confidence in a community proposal, from what has actually been measured.
+/// An unmeasured community earns the floor; a measured one earns more the
+/// larger and more active it is. This is deliberately coarse — it ranks
+/// proposals, it does not pretend to be a fit model.
+fn community_confidence(snapshot: &CommunityCandidateSnapshot) -> Confidence {
+    let mut basis_points: u16 = 3_000;
+    if let Some(members) = snapshot.member_count {
+        basis_points = basis_points.saturating_add(match members {
+            0..=999 => 0,
+            1_000..=9_999 => 1_000,
+            10_000..=99_999 => 2_000,
+            _ => 3_000,
+        });
+    }
+    if let Some(activity) = snapshot.activity_basis_points {
+        basis_points = basis_points.saturating_add(activity / 5);
+    }
+    Confidence::saturating_from_basis_points(basis_points.min(10_000))
+}
+
 /// Whether an admitted candidate can become a target as it stands.
 ///
 /// A target carries an address, so only an email route promotes today. A form
@@ -796,5 +896,150 @@ mod tests {
         };
         // 5 short of 25 is a fifth of the target missing.
         assert_eq!(confidence.basis_points(), 2_000);
+    }
+
+    // ── Community screening ──
+
+    fn community() -> CommunityCandidateSnapshot {
+        CommunityCandidateSnapshot {
+            has_evidence: true,
+            member_count: Some(40_000),
+            activity_basis_points: Some(5_000),
+            self_promo_ratio_percent: Some(10),
+            sells_placement: false,
+            refused_by_us_or_them: false,
+        }
+    }
+
+    fn community_refusal(verdict: ScreeningVerdict) -> Option<RefusalReason> {
+        match verdict {
+            ScreeningVerdict::Refuse(reason) => Some(reason),
+            ScreeningVerdict::Admit { .. } => None,
+        }
+    }
+
+    #[test]
+    fn healthy_community_is_admitted_as_third_party_contact() {
+        let verdict = screen_community_candidate(&community(), TargetDiscoveryPolicy::default());
+        match verdict {
+            ScreeningVerdict::Admit { class, confidence } => {
+                assert_eq!(class, ActionClass::ThirdParty);
+                assert!(confidence.basis_points() > 3_000);
+            }
+            ScreeningVerdict::Refuse(reason) => panic!("unexpected refusal: {reason:?}"),
+        }
+    }
+
+    #[test]
+    fn community_without_evidence_is_refused() {
+        let snapshot = CommunityCandidateSnapshot {
+            has_evidence: false,
+            ..community()
+        };
+        assert_eq!(
+            community_refusal(screen_community_candidate(
+                &snapshot,
+                TargetDiscoveryPolicy::default()
+            )),
+            Some(RefusalReason::EvidenceMissing)
+        );
+    }
+
+    #[test]
+    fn community_that_bans_self_promotion_is_refused_at_any_size() {
+        let snapshot = CommunityCandidateSnapshot {
+            self_promo_ratio_percent: Some(0),
+            member_count: Some(500_000),
+            ..community()
+        };
+        assert_eq!(
+            community_refusal(screen_community_candidate(
+                &snapshot,
+                TargetDiscoveryPolicy::default()
+            )),
+            Some(RefusalReason::PoorFit)
+        );
+    }
+
+    #[test]
+    fn large_community_with_no_activity_is_refused_as_implausible() {
+        let snapshot = CommunityCandidateSnapshot {
+            member_count: Some(200_000),
+            activity_basis_points: Some(10),
+            ..community()
+        };
+        assert_eq!(
+            community_refusal(screen_community_candidate(
+                &snapshot,
+                TargetDiscoveryPolicy::default()
+            )),
+            Some(RefusalReason::ImplausibleEngagement)
+        );
+    }
+
+    #[test]
+    fn community_below_the_size_floor_is_refused() {
+        let snapshot = CommunityCandidateSnapshot {
+            member_count: Some(40),
+            activity_basis_points: Some(2_000),
+            ..community()
+        };
+        assert_eq!(
+            community_refusal(screen_community_candidate(
+                &snapshot,
+                TargetDiscoveryPolicy::default()
+            )),
+            Some(RefusalReason::TooSmall)
+        );
+    }
+
+    #[test]
+    fn community_we_or_they_refused_is_refused() {
+        let snapshot = CommunityCandidateSnapshot {
+            refused_by_us_or_them: true,
+            ..community()
+        };
+        assert_eq!(
+            community_refusal(screen_community_candidate(
+                &snapshot,
+                TargetDiscoveryPolicy::default()
+            )),
+            Some(RefusalReason::PoorFit)
+        );
+    }
+
+    #[test]
+    fn unmeasured_community_is_admitted_at_the_confidence_floor() {
+        // Absent is not suspicious. A community discovery has not measured
+        // is a real candidate the causal model has to judge, not a refusal —
+        // but it earns no confidence it has not evidenced.
+        let snapshot = CommunityCandidateSnapshot {
+            has_evidence: true,
+            ..CommunityCandidateSnapshot::default()
+        };
+        match screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()) {
+            ScreeningVerdict::Admit { confidence, .. } => {
+                assert_eq!(confidence.basis_points(), 3_000);
+            }
+            ScreeningVerdict::Refuse(reason) => panic!("unexpected refusal: {reason:?}"),
+        }
+    }
+
+    #[test]
+    fn selling_placement_outranks_a_size_problem() {
+        // Order matters: a paid-placement community that is also tiny must
+        // refuse for the permanent reason, not the policy-threshold one.
+        let snapshot = CommunityCandidateSnapshot {
+            sells_placement: true,
+            member_count: Some(10),
+            ..community()
+        };
+        assert_eq!(
+            community_refusal(screen_community_candidate(
+                &snapshot,
+                TargetDiscoveryPolicy::default()
+            )),
+            Some(RefusalReason::SellsPlacement)
+        );
     }
 }

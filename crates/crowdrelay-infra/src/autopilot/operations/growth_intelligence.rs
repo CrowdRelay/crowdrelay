@@ -28,10 +28,12 @@
 //! intelligence and draft content — the brain decides strategy.
 
 use super::*;
+
+mod community_targets;
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
-    GrowthTrend, RecentInsight, TenantPreferencePosterior, UnengagedTarget, WorldModel,
-    agent_standing_policy, platform_yield::PlatformGrowth,
+    GrowthTrend, RecentInsight, TenantPreferencePosterior, WorldModel, agent_standing_policy,
+    platform_yield::PlatformGrowth,
 };
 use crowdrelay_domain::growth_metrics::{MetricPlatform, NorthStarMetric};
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
@@ -177,37 +179,13 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     .await
     .map_err(map_sqlx)?;
 
-    // Load the actual promoted community targets with a subreddit so the
-    // community-engager prompt can include concrete target_id + subreddit
-    // pairs. The LLM needs these to produce social_post outcomes that
-    // result in community.engage.request actions. The count of promoted
-    // targets is derived from this query's row count, so we don't need a
-    // separate count query.
-    let unengaged_target_rows: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, display_name, subreddit
-        FROM agent_outreach_targets
-        WHERE workspace_id = $1
-          AND status = 'promoted'
-          AND target_kind = 'community'
-          AND subreddit IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 20
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    let unengaged_targets: Vec<UnengagedTarget> = unengaged_target_rows
-        .into_iter()
-        .map(|(target_id, display_name, subreddit)| UnengagedTarget {
-            target_id,
-            display_name,
-            subreddit,
-        })
-        .collect();
+    // Load the communities the growth loop may engage, with the audience
+    // graph's measurements and each community's own promotion rules. See
+    // `community_targets` for why this is not three columns off
+    // `agent_outreach_targets` any more. The count of promoted targets is
+    // derived from this query's row count, so we don't need a separate
+    // count query.
+    let unengaged_targets = community_targets::load_community_targets(pool, workspace_id).await?;
 
     let next_event_time = upcoming_event.and_then(|(t,)| t);
     let has_upcoming_event = next_event_time
@@ -1034,6 +1012,12 @@ fn apply_evidence_to_model(
     for ev in evidence {
         let template = extract_template_from_opportunity(&ev.opportunity_id);
         let subreddit_type = ev.context.subreddit_type.as_deref();
+        // The per-target level of the hierarchy is rebuilt from here. Rows
+        // written before the column existed carry `None` and teach the
+        // template and audience type only, which is exactly what they used
+        // to teach — replaying old evidence cannot invent target knowledge
+        // it never recorded.
+        let target_key = ev.target_key.as_deref();
         // Scale the observation variance by the evidence quality multiplier.
         // Higher quality evidence (randomized holdout) gets a lower variance
         // → moves the posterior more. Lower quality evidence (observational)
@@ -1063,6 +1047,7 @@ fn apply_evidence_to_model(
                 expected_new_fans: ev.predicted_fans,
                 expected_signal_installs: ev.predicted_signal_installs,
                 context: ev.context.clone(),
+                target_key: ev.target_key.clone(),
             };
             let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
             model.update(&outcome);
@@ -1100,7 +1085,13 @@ fn apply_evidence_to_model(
         // regime tracker — separate from Y30Direct and OutcomeModel.
         if let Some(tau_y14) = ev.observed_incremental_fans {
             let obs_var = 2.0 * tau_y14.abs().max(1.0) * quality_multiplier;
-            model.update_treatment_effect(&template, subreddit_type, tau_y14, obs_var);
+            model.update_treatment_effect_for_target(
+                &template,
+                subreddit_type,
+                target_key,
+                tau_y14,
+                obs_var,
+            );
             // Record Y14Bridged calibration with the actual measurement-
             // determined evidence quality, not a synthesized one.
             model.calibration.record_by_regime(
@@ -1122,7 +1113,13 @@ fn apply_evidence_to_model(
             // Y30 treatment-effect update (North Star). Scaled by evidence
             // quality — same rationale as Y14.
             let obs_var = 2.0 * y30_fans.abs().max(1.0) * quality_multiplier;
-            model.update_treatment_effect_y30(&template, subreddit_type, y30_fans, obs_var);
+            model.update_treatment_effect_y30_for_target(
+                &template,
+                subreddit_type,
+                target_key,
+                y30_fans,
+                obs_var,
+            );
             // Y30Direct calibration — isolated from Y14Bridged and
             // OutcomeModel. A bad OutcomeModel calibration cannot distort
             // Y30Direct uncertainty. Uses the actual measurement-determined
@@ -1324,6 +1321,10 @@ async fn full_replay(
             expected_new_fans: expected_fans,
             expected_signal_installs: expected_signal,
             context,
+            // The legacy `viryaos_brain_evidence` view has no target
+            // column. This path is the pre-evidence-table fallback, so it
+            // teaches the template and audience type only.
+            target_key: None,
         };
         // The outcome model learns P(Y|action,context) from raw observed
         // fan counts, not from DiD estimates. Prefer observed_fans (raw)

@@ -322,6 +322,7 @@ fn make_prediction() -> DispatchPrediction {
         expected_new_fans: 5.0,
         expected_signal_installs: 1.0,
         context: DispatchContext::default(),
+        target_key: Some("community:test".to_owned()),
     }
 }
 

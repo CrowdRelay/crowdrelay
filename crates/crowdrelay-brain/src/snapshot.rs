@@ -45,12 +45,59 @@ pub struct GrowthIntelligenceSnapshot {
     pub tenant_preference: TenantPreferencePosterior,
 }
 
-/// A single unengaged outreach target.
+/// One community the brain may engage, with what is known about it.
+///
+/// The name is historical: the loader selects promoted, non-refused community
+/// targets and reports how long it has been since each was last posted to, so
+/// "unengaged" now means "engageable", not "never touched".
+///
+/// Everything after `subreddit` comes from the audience graph and is optional
+/// because discovery may not have measured the community yet. An unmeasured
+/// community is a real candidate with weak evidence, not a rejected one — the
+/// causal model is what decides its value, and the fields here are what let
+/// it decide anything at all.
 #[derive(Clone, Debug, Serialize)]
 pub struct UnengagedTarget {
     pub target_id: uuid::Uuid,
     pub display_name: String,
     pub subreddit: String,
+    /// Members, where discovery has measured them.
+    pub member_count: Option<u32>,
+    /// Observed activity against that member count, in basis points.
+    pub activity_basis_points: Option<u16>,
+    /// The community's own genre tags, used for context classification in
+    /// preference to guessing a genre from the subreddit name.
+    pub genres: Vec<String>,
+    /// The share of content the community's rules allow to be self-promotion.
+    pub self_promo_ratio_percent: Option<u8>,
+    /// The cooldown the community's own rules ask for, in days.
+    pub cooldown_days: Option<u16>,
+    /// Days since the last post to this community, or `None` if never posted.
+    pub days_since_last_engagement: Option<u32>,
+}
+
+impl UnengagedTarget {
+    /// The stable target identity used as the per-target level of the causal
+    /// hierarchy and as the portfolio's audience key. Derived from the
+    /// target id rather than the subreddit name so a rename does not split
+    /// the posterior in two.
+    #[must_use]
+    pub fn target_key(&self) -> String {
+        format!("community:{}", self.target_id)
+    }
+
+    /// Whether the community's own cooldown has elapsed. A community that
+    /// asks for 14 days between promotional posts is not a candidate on day
+    /// three, whatever its expected value says. Unknown cooldown falls back
+    /// to the caller's default.
+    #[must_use]
+    pub fn cooldown_elapsed(&self, default_cooldown_days: u16) -> bool {
+        let Some(days_since) = self.days_since_last_engagement else {
+            return true;
+        };
+        let required = self.cooldown_days.unwrap_or(default_cooldown_days);
+        days_since >= u32::from(required)
+    }
 }
 
 /// Aggregated performance of a single subreddit's recent community posts.

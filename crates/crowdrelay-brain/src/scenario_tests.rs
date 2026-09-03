@@ -682,6 +682,7 @@ fn make_exp_prediction(template: &str) -> crate::causal_model::DispatchPredictio
         expected_new_fans: 5.0,
         expected_signal_installs: 1.0,
         context: crate::causal_model::DispatchContext::default(),
+        target_key: None,
     }
 }
 

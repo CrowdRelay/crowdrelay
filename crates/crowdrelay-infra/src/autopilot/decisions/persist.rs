@@ -303,6 +303,7 @@ async fn record_prediction_and_evidence_tx(
         prediction.expected_new_fans,
         prediction.expected_signal_installs,
         prediction.context.clone(),
+        prediction.target_key.clone(),
         strategy.map(|s| s.to_owned()),
         evidence_quality,
     );

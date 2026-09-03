@@ -201,6 +201,14 @@ pub struct GrowthEvidence {
     // ── Reach ──
     /// The audience being targeted (subreddit name, platform, etc.).
     pub audience: Option<String>,
+    /// The specific target this dispatch was aimed at, e.g.
+    /// `community:<target_id>`. `None` for workspace-wide templates and for
+    /// rows written before the per-target level of the causal hierarchy
+    /// existed. Replay rebuilds that level from this field, so an outcome
+    /// without it teaches the template and the audience type but not the
+    /// community it actually came from.
+    #[serde(default)]
+    pub target_key: Option<String>,
     /// The specific recipient identifier (fan ID, subreddit name, etc.).
     pub recipient_id: String,
     /// The channel used to reach the recipient.
@@ -274,6 +282,7 @@ impl Default for GrowthEvidence {
             action_id: Some(uuid::Uuid::nil()),
             timestamp: OffsetDateTime::now_utc(),
             audience: None,
+            target_key: None,
             recipient_id: String::new(),
             channel: ReachChannel::default(),
             estimated_reach: 1,
@@ -317,6 +326,7 @@ impl GrowthEvidence {
         predicted_fans: f64,
         predicted_signal_installs: f64,
         context: DispatchContext,
+        target_key: Option<String>,
         strategy: Option<String>,
         evidence_quality: EvidenceQuality,
     ) -> Self {
@@ -326,6 +336,7 @@ impl GrowthEvidence {
             action_id,
             timestamp: OffsetDateTime::now_utc(),
             audience: context.subreddit_type.clone(),
+            target_key,
             recipient_id,
             channel,
             estimated_reach,
@@ -530,6 +541,7 @@ mod tests {
             0.2,
             DispatchContext::default(),
             None,
+            None,
             EvidenceQuality::default(),
         );
         assert!(!evidence.is_resolved());
@@ -552,6 +564,7 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
             None,
             EvidenceQuality::default(),
         );
@@ -577,6 +590,7 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
             None,
             EvidenceQuality::default(),
         );
@@ -604,6 +618,7 @@ mod tests {
             0.2,
             DispatchContext::default(),
             None,
+            None,
             EvidenceQuality::default(),
         );
         evidence.observed_incremental_fans = Some(8.0);
@@ -628,6 +643,7 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            Some("community:test".to_owned()),
             Some("aggressive_discovery".to_owned()),
             EvidenceQuality::RandomizedHoldout,
         );
@@ -661,6 +677,7 @@ mod tests {
             2.0,
             0.2,
             DispatchContext::default(),
+            None,
             None,
             EvidenceQuality::default(),
         );
@@ -720,6 +737,7 @@ mod tests {
                 subreddit_type: Some("r/test".to_owned()),
                 ..Default::default()
             },
+            target_key: None,
         };
         let evidence = GrowthEvidence::at_dispatch(
             uuid::Uuid::nil(),
@@ -733,6 +751,7 @@ mod tests {
             prediction.expected_new_fans,
             prediction.expected_signal_installs,
             prediction.context.clone(),
+            prediction.target_key.clone(),
             Some("discovery".to_owned()),
             EvidenceQuality::RandomizedHoldout,
         );
