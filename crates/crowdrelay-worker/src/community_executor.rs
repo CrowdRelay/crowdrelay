@@ -698,17 +698,64 @@ impl CommunityExecutorWorker {
     /// Builds the final post body, appending the smart link as a full URL
     /// if present. The smart_link stored in the action payload is a `/l/{slug}`
     /// path; Reddit needs a full URL for it to be clickable.
+    ///
+    /// An absolute URL is only appended when it points at this workspace's own
+    /// origin. The field is written by a drafting model, and the two drafts
+    /// production has produced so far carry `https://virya.com` and
+    /// `https://virya.com/smartlink` — the band is at `virya.music`, so both
+    /// are somebody else's domain, invented. Passing one through would send
+    /// fans to a stranger's site and put an unrelated outbound link in a
+    /// promotional post, which is the shape Reddit reads as spam. The account
+    /// carrying that risk is the only one this channel has.
+    ///
+    /// A link that fails the check is dropped rather than corrected: the post
+    /// still reads, and a guessed destination is not better than none.
     fn build_post_body<'a>(&'a self, body: &'a str, smart_link: Option<&str>) -> Cow<'a, str> {
         match smart_link {
-            Some(link) if !link.is_empty() => {
+            Some(link) if !link.trim().is_empty() => {
+                let link = link.trim();
                 let full_url = if link.starts_with("http") {
-                    link.to_owned()
+                    if self.is_own_origin(link) {
+                        link.to_owned()
+                    } else {
+                        tracing::warn!(
+                            link,
+                            origin = %self.public_origin,
+                            "dropping a smart link that points outside this workspace's origin"
+                        );
+                        return Cow::Borrowed(body);
+                    }
+                } else if let Some(path) = link.strip_prefix('/') {
+                    // A path is the shape this field is supposed to carry, and
+                    // it can only ever resolve to our own origin.
+                    format!("{}/{path}", self.public_origin.trim_end_matches('/'))
                 } else {
-                    format!("{}{link}", self.public_origin)
+                    tracing::warn!(
+                        link,
+                        "dropping a smart link that is neither an absolute URL nor a rooted path"
+                    );
+                    return Cow::Borrowed(body);
                 };
                 Cow::Owned(format!("{body}\n\n{full_url}"))
             }
             _ => Cow::Borrowed(body),
+        }
+    }
+
+    /// Whether an absolute URL belongs to this workspace's public origin.
+    ///
+    /// Compared on the origin, not with `starts_with`: `https://virya.music`
+    /// is a prefix of `https://virya.music.evil.example`, and a prefix test
+    /// would admit exactly the impersonation this guard exists to refuse.
+    fn is_own_origin(&self, link: &str) -> bool {
+        let origin = |url: &str| -> Option<String> {
+            let rest = url.split_once("://")?.1;
+            let host = rest.split(['/', '?', '#']).next()?;
+            Some(host.trim_end_matches('.').to_ascii_lowercase())
+        };
+        match (origin(link), origin(&self.public_origin)) {
+            (Some(link_host), Some(own_host)) => link_host == own_host,
+            _ => false,
         }
     }
 
@@ -1168,4 +1215,97 @@ struct RedditPostMetrics {
     upvotes: i32,
     num_comments: i32,
     upvote_ratio: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker(origin: &str) -> CommunityExecutorWorker {
+        CommunityExecutorWorker {
+            pool: PgPool::connect_lazy("postgres://invalid/invalid").expect("lazy pool"),
+            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::nil()),
+            http_client: Arc::new(RwLock::new(reqwest::Client::new())),
+            poll_interval: POLL_INTERVAL,
+            operation_timeout: Duration::from_secs(5),
+            public_origin: origin.to_owned(),
+            manual_mode: true,
+            agent_service_url: "http://agent-service:8095".to_owned(),
+            agent_service_auth_key: None,
+            env_proxy_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rooted_path_resolves_against_our_own_origin() {
+        let worker = worker("https://virya.music");
+        let body = worker.build_post_body("hello", Some("/l/spring-tour"));
+        assert_eq!(body.as_ref(), "hello\n\nhttps://virya.music/l/spring-tour");
+    }
+
+    #[tokio::test]
+    async fn a_trailing_slash_on_the_origin_does_not_double_up() {
+        let worker = worker("https://virya.music/");
+        let body = worker.build_post_body("hello", Some("/l/x"));
+        assert_eq!(body.as_ref(), "hello\n\nhttps://virya.music/l/x");
+    }
+
+    #[tokio::test]
+    async fn our_own_absolute_url_is_kept() {
+        let worker = worker("https://virya.music");
+        let body = worker.build_post_body("hello", Some("https://virya.music/l/x"));
+        assert_eq!(body.as_ref(), "hello\n\nhttps://virya.music/l/x");
+    }
+
+    #[tokio::test]
+    async fn a_hallucinated_domain_never_reaches_the_post() {
+        // Both drafts production has produced carry a domain the model made
+        // up. Sending fans to a stranger's site is the smaller half of the
+        // problem; an unrelated outbound link in a promo post is what gets
+        // the one account this channel has banned.
+        let worker = worker("https://virya.music");
+        for link in [
+            "https://virya.com",
+            "https://virya.com/smartlink",
+            "http://example.com/anything",
+        ] {
+            let body = worker.build_post_body("hello", Some(link));
+            assert_eq!(body.as_ref(), "hello", "{link} must not be appended");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lookalike_host_is_not_our_origin() {
+        // `starts_with` would admit this, which is why the check compares
+        // hosts rather than prefixes.
+        let worker = worker("https://virya.music");
+        let body = worker.build_post_body("hello", Some("https://virya.music.evil.example/l/x"));
+        assert_eq!(body.as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn a_link_that_is_neither_absolute_nor_rooted_is_dropped() {
+        let worker = worker("https://virya.music");
+        assert_eq!(
+            worker.build_post_body("hello", Some("l/x")).as_ref(),
+            "hello"
+        );
+        assert_eq!(
+            worker.build_post_body("hello", Some("   ")).as_ref(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_link_leaves_the_body_untouched() {
+        let worker = worker("https://virya.music");
+        assert_eq!(worker.build_post_body("hello", None).as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn host_comparison_ignores_case_and_a_trailing_dot() {
+        let worker = worker("https://virya.music");
+        let body = worker.build_post_body("hello", Some("https://VIRYA.MUSIC./l/x"));
+        assert_eq!(body.as_ref(), "hello\n\nhttps://VIRYA.MUSIC./l/x");
+    }
 }
