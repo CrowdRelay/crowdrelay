@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors two conditions:
+//! The watchdog monitors three conditions:
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
@@ -16,6 +16,35 @@
 //!   their outcomes cannot be established, and the receipt reconciliation
 //!   sweep could not resolve them. Operator action (check the provider,
 //!   re-file a receipt) is the only resolution path.
+//! - `execution.contradicted_outcome` — the newest terminal receipt for an
+//!   action says the opposite of the action's persisted status. This is what
+//!   `LegalTransition::Conflict` refused to coerce, and until now the
+//!   refusal existed only as a log line. See below.
+//!
+//! # Contradictions are the one condition nothing else can find
+//!
+//! `LegalTransition::Conflict` documents that the caller must surface a
+//! contradiction "to operator visibility (log + ops watchdog), not silently
+//! pick the latest thing". Every call site did the first half — `tracing::warn!`
+//! and return — and there was no watchdog condition for the second. A Conflict
+//! left no durable trace: the action kept its state, the report row landed in
+//! the ledger like any other, and the only record that two sources disagreed
+//! was a log line nobody alerts on.
+//!
+//! That was easy to miss because the branch could not fire. The receipt
+//! resolver fed an action status to `ActionState::parse`, which reads the
+//! ledger's uppercase vocabulary, so it saw every action as `Running` and no
+//! `Conflict` arm was reachable from that path. With
+//! `ActionState::from_action_status` in place it is reachable, and a
+//! provider-confirmed success contradicted by a later failure now stands
+//! unresolved with nothing sweeping it — unlike `unknown`, which
+//! reconciliation retries.
+//!
+//! The condition is derived from rows that already exist rather than from a
+//! counter the resolver would have to remember to increment: the latest
+//! terminal receipt per action, compared against that action's status. That
+//! also catches contradictions produced by any other path, including ones
+//! that happened while nobody was watching.
 //!
 //! All other conditions (outbox stalls, webhook dead, proof stalls,
 //! autopilot failure bursts) were removed because they are either internal
@@ -155,6 +184,11 @@ struct OpsSnapshot {
     /// to warrant operator attention. Transient unknowns (during active
     /// reconciliation) do not trigger the alert.
     stale_unknown_actions: i64,
+    /// Actions whose newest terminal receipt contradicts their persisted
+    /// status — the standing `LegalTransition::Conflict` population. No age
+    /// threshold: nothing sweeps these, so a contradiction is as unresolved
+    /// a minute after it appears as it is a day later.
+    contradicted_actions: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -193,7 +227,26 @@ async fn load_snapshot(
              WHERE a.workspace_id=$1 AND a.status='unknown'
                AND al.state='UNKNOWN'
                AND al.state_entered_at < now() - make_interval(secs => $2::double precision)
-            )::bigint AS stale_unknown_actions
+            )::bigint AS stale_unknown_actions,
+            -- contradicted_actions: the standing Conflict population. The
+            -- *newest* terminal receipt is the comparison, not any receipt —
+            -- an older failure followed by a success is an ordinary history,
+            -- not a contradiction. Both directions count: a failure receipt
+            -- refused against a provider-confirmed success, and a success
+            -- receipt refused against a persisted failure.
+            (SELECT count(*) FROM viryaos_autopilot_actions a
+             JOIN LATERAL (
+                 SELECT r.status
+                 FROM viryaos_autopilot_execution_reports r
+                 WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
+                   AND r.status IN ('succeeded', 'failed')
+                 ORDER BY r.occurred_at DESC, r.id DESC
+                 LIMIT 1
+             ) latest ON true
+             WHERE a.workspace_id=$1
+               AND ((a.status = 'succeeded' AND latest.status = 'failed')
+                 OR (a.status = 'failed' AND latest.status = 'succeeded'))
+            )::bigint AS contradicted_actions
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -223,6 +276,18 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             details: json!({
                 "unknown_actions": snapshot.unknown_actions,
                 "stale_unknown_actions": snapshot.stale_unknown_actions,
+            }),
+        },
+        Condition {
+            key: "execution.contradicted_outcome",
+            // Warning, not critical: the state machine already refused to
+            // act on the contradiction, so nothing is being corrupted. What
+            // is missing is a person deciding which source was right.
+            severity: "warning",
+            summary: "Autopilot action status contradicted by its newest executor receipt",
+            active: snapshot.contradicted_actions > 0,
+            details: json!({
+                "contradicted_actions": snapshot.contradicted_actions,
             }),
         },
     ]
@@ -322,6 +387,7 @@ mod tests {
             executor_active: 1,
             unknown_actions: 0,
             stale_unknown_actions: 0,
+            contradicted_actions: 0,
         }
     }
 
@@ -376,5 +442,34 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(active.contains(&"execution.unknown_outcome"));
         assert!(!active.contains(&"executor.offline"));
+    }
+
+    #[test]
+    fn contradicted_outcomes_are_detected_with_no_age_grace() {
+        // A contradiction has no sweep behind it — unlike `unknown`, nothing
+        // will resolve it on its own — so a single one alerts immediately
+        // rather than waiting out a staleness threshold.
+        let mut snapshot = healthy();
+        snapshot.contradicted_actions = 1;
+        let active = conditions(&snapshot)
+            .into_iter()
+            .filter(|condition| condition.active)
+            .map(|condition| condition.key)
+            .collect::<Vec<_>>();
+        assert!(active.contains(&"execution.contradicted_outcome"));
+        assert!(!active.contains(&"execution.unknown_outcome"));
+    }
+
+    #[test]
+    fn a_resolved_action_with_older_receipts_is_not_a_contradiction() {
+        // The snapshot query compares only the *newest* terminal receipt, so
+        // an ordinary failure-then-success history contributes nothing here.
+        // Guard the condition side of that: zero means silent.
+        let mut snapshot = healthy();
+        snapshot.unknown_actions = 3;
+        snapshot.contradicted_actions = 0;
+        assert!(conditions(&snapshot).iter().all(|condition| condition.key
+            != "execution.contradicted_outcome"
+            || !condition.active));
     }
 }
