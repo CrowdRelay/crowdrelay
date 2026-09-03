@@ -55,6 +55,14 @@ fn audience_key_for(candidate: &DecisionCandidate, workspace_id: WorkspaceId) ->
         Some(TemplateAudience::Workspace) => {
             format!("workspace:{}", workspace_id.into_uuid())
         }
+        // A scan reaches nobody, so it fatigues nobody. Its own key keeps it
+        // out of the band audience's overlap accounting in both directions:
+        // a scan does not suppress the posts behind it, and posts do not
+        // suppress a scan.
+        Some(TemplateAudience::Intelligence) => match template {
+            Some(t) => format!("intelligence:{}", t.as_str()),
+            None => format!("target:{}", candidate.decision_key),
+        },
         // Not a growth-intelligence template: each decision key is its own
         // target.
         None => format!("target:{}", candidate.decision_key),
@@ -191,4 +199,107 @@ pub(super) fn selected_keys(selection: &PortfolioSelection) -> HashSet<String> {
         .iter()
         .map(|c| c.opportunity_id.target.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::autopilot::model::{ActionSubject, AutopilotActionPayload, AutopilotContext};
+    use crowdrelay_brain::AgentTier;
+    use crowdrelay_domain::autonomy::{Confidence, PolicyDisposition};
+
+    fn candidate(decision_key: &str) -> DecisionCandidate {
+        DecisionCandidate {
+            context: AutopilotContext::GrowthIntelligence,
+            subject: ActionSubject::Workspace(WorkspaceId::from_uuid(uuid::Uuid::nil())),
+            decision_kind: "request_agent_run",
+            confidence: Confidence::MAX,
+            disposition: PolicyDisposition::AutoExecute,
+            reason: "fixture",
+            input_snapshot: serde_json::json!({}),
+            policy_snapshot: serde_json::json!({}),
+            action: AutopilotActionPayload::RequestAgentRun {
+                template_id: "fixture".to_owned(),
+                prompt: String::new(),
+                priority: 1,
+                tier: AgentTier::Basic,
+            },
+            decision_key: decision_key.to_owned(),
+            action_idempotency_key: decision_key.to_owned(),
+        }
+    }
+
+    fn key_for(template: &str) -> String {
+        let ws = WorkspaceId::from_uuid(uuid::Uuid::nil());
+        audience_key_for(
+            &candidate(&format!(
+                "decision:growth-intelligence:v1:{template}:target:0"
+            )),
+            ws,
+        )
+    }
+
+    #[test]
+    fn everything_that_posts_to_the_band_shares_one_audience() {
+        // The overlap penalty is what stops three posts to the same people on
+        // the same day counting as three separate reaches.
+        let expected = key_for("social-post");
+        for template in [
+            "press-pitch",
+            "telegram-poster",
+            "discord-poster",
+            "signal-inviter",
+        ] {
+            assert_eq!(key_for(template), expected, "{template}");
+        }
+        assert!(expected.starts_with("workspace:"));
+    }
+
+    #[test]
+    fn a_scan_does_not_share_an_audience_with_a_post() {
+        // Scanners reached nobody but carried the band's audience key, so one
+        // selected scan cut every posting template behind it by 37%, then
+        // 68%, then 93%, while community candidates kept full value.
+        let post = key_for("social-post");
+        for scanner in [
+            "reddit-scanner",
+            "telegram-scanner",
+            "metal-archives-scanner",
+            "bandcamp-scanner",
+            "growth-strategist",
+        ] {
+            assert_ne!(
+                key_for(scanner),
+                post,
+                "{scanner} must not fatigue the band"
+            );
+        }
+    }
+
+    #[test]
+    fn two_scanners_do_not_fatigue_each_other_either() {
+        assert_ne!(key_for("reddit-scanner"), key_for("telegram-scanner"));
+    }
+
+    #[test]
+    fn each_community_is_its_own_audience() {
+        let ws = WorkspaceId::from_uuid(uuid::Uuid::nil());
+        let a = audience_key_for(
+            &candidate("decision:growth-intelligence:v1:community-engager:aaa:0"),
+            ws,
+        );
+        let b = audience_key_for(
+            &candidate("decision:growth-intelligence:v1:community-engager:bbb:0"),
+            ws,
+        );
+        assert_eq!(a, "community:aaa");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_decision_key_from_another_context_is_its_own_target() {
+        let ws = WorkspaceId::from_uuid(uuid::Uuid::nil());
+        let key = audience_key_for(&candidate("decision:plays:v1:something:else"), ws);
+        assert!(key.starts_with("target:"), "{key}");
+    }
 }
