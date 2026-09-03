@@ -98,7 +98,19 @@ pub(super) async fn promote_community_places(
     .fetch_all(pool)
     .await?;
 
+    // Screening is pure and cheap; the write is one statement for the whole
+    // batch. This was an INSERT per place inside the loop — a hundred round
+    // trips a sweep to write at most a hundred small rows, on a connection
+    // the rest of the worker is also using. The arrays go over in one
+    // parameter each and Postgres unnests them.
+    let mut place_ids: Vec<Uuid> = Vec::with_capacity(places.len());
+    let mut names: Vec<String> = Vec::with_capacity(places.len());
+    let mut subreddits: Vec<String> = Vec::with_capacity(places.len());
+    let mut why_fits: Vec<String> = Vec::with_capacity(places.len());
+    let mut verdicts: Vec<String> = Vec::with_capacity(places.len());
+    let mut refusals: Vec<Option<String>> = Vec::with_capacity(places.len());
     let mut report = PromotionReport::default();
+
     for (id, name, subreddit, member_count, activity_bp, status, membership_state, self_promo) in
         places
     {
@@ -119,13 +131,13 @@ pub(super) async fn promote_community_places(
             refused_by_us_or_them: status == "blocked"
                 || matches!(membership_state.as_str(), "rejected" | "not_a_fit"),
         };
+        // A refused community is still written, as a refused row. Recording
+        // the refusal is what stops the next sweep rediscovering it.
         let (verdict, refusal) =
             match screen_community_candidate(&snapshot, TargetDiscoveryPolicy::default()) {
                 ScreeningVerdict::Admit { .. } => ("admitted", None),
-                ScreeningVerdict::Refuse(reason) => ("refused", Some(reason.as_str())),
+                ScreeningVerdict::Refuse(reason) => ("refused", Some(reason.as_str().to_owned())),
             };
-        // A refused community is still written, as a refused row. Recording
-        // the refusal is what stops the next sweep rediscovering it.
         let why_fit = match member_count {
             Some(members) => format!(
                 "Promoted from the audience graph: {members} members, discovered as a subreddit place."
@@ -133,44 +145,54 @@ pub(super) async fn promote_community_places(
             None => "Promoted from the audience graph: subreddit place, size not yet measured."
                 .to_owned(),
         };
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO agent_outreach_targets
-                (workspace_id, target_kind, display_name, why_fit, evidence,
-                 subreddit, status, place_id, screening_verdict, refusal_reason, screened_at)
-            SELECT $1, 'community', $2, $3,
-                   jsonb_build_array(place.url),
-                   $4,
-                   CASE WHEN $6::text = 'admitted' THEN 'promoted' ELSE 'proposed' END,
-                   $5, $6, $7, now()
-            FROM discovery_places AS place
-            WHERE place.id = $5
-            ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
-                place_id = COALESCE(agent_outreach_targets.place_id, EXCLUDED.place_id),
-                screening_verdict = EXCLUDED.screening_verdict,
-                refusal_reason = EXCLUDED.refusal_reason,
-                screened_at = EXCLUDED.screened_at,
-                subreddit = COALESCE(agent_outreach_targets.subreddit, EXCLUDED.subreddit),
-                updated_at = now()
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(&name)
-        .bind(&why_fit)
-        .bind(&subreddit)
-        .bind(id)
-        .bind(verdict)
-        .bind(refusal)
-        .execute(pool)
-        .await?;
-        if inserted.rows_affected() == 0 {
-            continue;
-        }
         if refusal.is_some() {
             report.refused += 1;
         } else {
             report.admitted += 1;
         }
+        place_ids.push(id);
+        names.push(name);
+        subreddits.push(subreddit);
+        why_fits.push(why_fit);
+        verdicts.push(verdict.to_owned());
+        refusals.push(refusal);
     }
+
+    if place_ids.is_empty() {
+        return Ok(report);
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO agent_outreach_targets
+            (workspace_id, target_kind, display_name, why_fit, evidence,
+             subreddit, status, place_id, screening_verdict, refusal_reason, screened_at)
+        SELECT $1, 'community', candidate.name, candidate.why_fit,
+               jsonb_build_array(place.url),
+               candidate.subreddit,
+               CASE WHEN candidate.verdict = 'admitted' THEN 'promoted' ELSE 'proposed' END,
+               candidate.place_id, candidate.verdict, candidate.refusal, now()
+        FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+             AS candidate(place_id, name, subreddit, why_fit, verdict, refusal)
+        JOIN discovery_places AS place ON place.id = candidate.place_id
+        ON CONFLICT (workspace_id, display_name, target_kind) DO UPDATE SET
+            place_id = COALESCE(agent_outreach_targets.place_id, EXCLUDED.place_id),
+            screening_verdict = EXCLUDED.screening_verdict,
+            refusal_reason = EXCLUDED.refusal_reason,
+            screened_at = EXCLUDED.screened_at,
+            subreddit = COALESCE(agent_outreach_targets.subreddit, EXCLUDED.subreddit),
+            updated_at = now()
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&place_ids)
+    .bind(&names)
+    .bind(&subreddits)
+    .bind(&why_fits)
+    .bind(&verdicts)
+    .bind(&refusals)
+    .execute(pool)
+    .await?;
+
     Ok(report)
 }
