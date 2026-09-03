@@ -205,8 +205,8 @@ pub(super) fn community_engager_candidates(
         // Per-community decision_key: includes target_id so each community
         // has its own idempotency, cooldown, and experiment assignment.
         let community_unit_id = format!("r/{}", target.subreddit);
-        candidates.push((
-            DecisionCandidate {
+        candidates.push(ScoredCandidate {
+            candidate: DecisionCandidate {
                 context: policy.context,
                 subject: ActionSubject::TargetCommunity(target.target_id),
                 decision_kind: "request_agent_run",
@@ -241,7 +241,9 @@ pub(super) fn community_engager_candidates(
             efe_score,
             strategy_rank,
             treatment_stats,
-        ));
+            information_gain: info_gain,
+            novelty: exploration_novelty,
+        });
         // The community_unit_id is used later as the experiment unit_id.
         // We store it in the decision_key's structure — the caller extracts
         // it from the candidate's decision_key or constructs it from the
