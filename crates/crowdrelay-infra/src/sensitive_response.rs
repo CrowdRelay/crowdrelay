@@ -103,9 +103,9 @@ impl SensitiveResponseCodec {
         }
 
         let associated_data = associated_data(workspace_id, scope, idempotency_key)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(self.key.expose()));
+        let cipher = XChaCha20Poly1305::new(&Key::from(*self.key.expose()));
         let encrypted = cipher.encrypt(
-            XNonce::from_slice(&nonce_bytes),
+            &XNonce::from(nonce_bytes),
             Payload {
                 msg: &plaintext,
                 aad: &associated_data,
@@ -151,8 +151,8 @@ impl SensitiveResponseCodec {
             .map_err(|_| SensitiveResponseError::Malformed)?;
         let associated_data = associated_data(workspace_id, scope, idempotency_key)?;
         let decrypt = |key: &SensitiveResponseKey| {
-            XChaCha20Poly1305::new(Key::from_slice(key.expose())).decrypt(
-                XNonce::from_slice(&nonce),
+            XChaCha20Poly1305::new(&Key::from(*key.expose())).decrypt(
+                &XNonce::from(nonce),
                 Payload {
                     msg: &ciphertext,
                     aad: &associated_data,
@@ -269,10 +269,10 @@ pub fn encrypt_value(
     if getrandom::fill(&mut nonce_bytes).is_err() {
         return Err(SensitiveResponseError::Randomness);
     }
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*key.expose()));
     let encrypted = cipher
         .encrypt(
-            XNonce::from_slice(&nonce_bytes),
+            &XNonce::from(nonce_bytes),
             Payload {
                 msg: plaintext,
                 aad: associated_data,
@@ -298,10 +298,10 @@ pub fn decrypt_value(
     let nonce: [u8; XCHACHA20_NONCE_BYTES] = nonce_bytes
         .try_into()
         .map_err(|_| SensitiveResponseError::Malformed)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*key.expose()));
     cipher
         .decrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: encrypted,
                 aad: associated_data,
