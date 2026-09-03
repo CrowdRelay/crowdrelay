@@ -588,8 +588,22 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .await
                         .map_err(map_sqlx)?
                         .ok_or(RepositoryError::NotFound)?;
+                        // `RepositoryError` carries no payload, so discarding
+                        // this error is the same mistake `map_sqlx` documents:
+                        // the report fails with `error_kind=unexpected` and
+                        // empty metadata, and nothing anywhere says the action's
+                        // stored payload could not be parsed. Log the cause and
+                        // the action, which is the only way to find the row.
                         let payload = serde_json::from_value::<AutopilotActionPayload>(payload_value)
-                            .map_err(|_| RepositoryError::Unexpected)?;
+                            .map_err(|error| {
+                                tracing::warn!(
+                                    error = %error,
+                                    action_id = %command.action_id.into_uuid(),
+                                    "stored autopilot action payload could not be parsed; \
+                                     this is what surfaces as error_kind=unexpected"
+                                );
+                                RepositoryError::Unexpected
+                            })?;
                         if let AutopilotActionPayload::RequestShowGrowth { event_id, .. } = &payload {
                             record_show_growth_receipt(
                                 &mut transaction,

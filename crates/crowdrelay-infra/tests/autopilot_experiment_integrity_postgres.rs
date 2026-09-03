@@ -76,6 +76,18 @@ struct Fixture {
 }
 
 async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
+    // `RepositoryError` carries no payload, so a failure here reads only as
+    // `Err(Unexpected)` and says nothing about what the database refused.
+    // `map_sqlx` already logs the real cause — it just had no subscriber to log
+    // to, which is a large part of why this suite became unreadable enough to
+    // quarantine. `try_init` is the idempotent form; every test calls `setup`.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_test_writer()
+        .try_init();
     let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|e| {
         format!("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {e}")
     })?;
@@ -621,104 +633,7 @@ async fn t9_execution_status_monotonic() {
     );
 }
 
-/// Helper: insert a minimal autopilot decision + action for test setup.
-async fn insert_decision_and_action(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    trace_id: uuid::Uuid,
-) -> uuid::Uuid {
-    let decision_id = uuid::Uuid::now_v7();
-    let action_id = uuid::Uuid::now_v7();
-    sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_decisions
-           (id, workspace_id, decision_key, context, subject_kind, subject_id,
-            decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation, trace_id)
-           VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
-                   'auto_execute',9000,'auto_execute','test',
-                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)"#,
-    )
-    .bind(decision_id)
-    .bind(workspace_id.into_uuid())
-    .bind(format!("decision-{decision_id}"))
-    .bind(uuid::Uuid::now_v7())
-    .bind(trace_id)
-    .execute(pool)
-    .await
-    .expect("insert decision");
-
-    sqlx::query(
-        r#"INSERT INTO viryaos_autopilot_actions
-           (id, workspace_id, decision_id, context, action_kind, subject_kind,
-            subject_id, idempotency_key, payload, status, approved_at, available_at,
-            finished_at, trace_id)
-           VALUES ($1,$2,$3,'growth_metrics','community.engage.request','target_community',
-                   $4,$5,$6,'succeeded',now(),now(),now(),$7)"#,
-    )
-    .bind(action_id)
-    .bind(workspace_id.into_uuid())
-    .bind(decision_id)
-    .bind(uuid::Uuid::now_v7())
-    .bind(format!("action-{action_id}"))
-    .bind(serde_json::json!({"kind":"community.engage.request"}))
-    .bind(trace_id)
-    .execute(pool)
-    .await
-    .expect("insert action");
-    action_id
-}
-
-/// Helper: insert a community_posts row for a given action.
-async fn insert_community_post(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    action_id: uuid::Uuid,
-    status: &str,
-    subreddit: &str,
-) -> uuid::Uuid {
-    let post_id = uuid::Uuid::now_v7();
-    sqlx::query(
-        r#"INSERT INTO community_posts
-           (id, workspace_id, action_id, subreddit, title, body, smart_link, status)
-           VALUES ($1,$2,$3,$4,'Test post','Test body',NULL,$5)"#,
-    )
-    .bind(post_id)
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .bind(subreddit)
-    .bind(status)
-    .execute(pool)
-    .await
-    .expect("insert community_post");
-    post_id
-}
-
-/// Helper: insert a community_posts row with an error_message.
-async fn insert_community_post_with_error(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    action_id: uuid::Uuid,
-    status: &str,
-    subreddit: &str,
-    error_message: &str,
-) -> uuid::Uuid {
-    let post_id = uuid::Uuid::now_v7();
-    sqlx::query(
-        r#"INSERT INTO community_posts
-           (id, workspace_id, action_id, subreddit, title, body, smart_link, status, error_message)
-           VALUES ($1,$2,$3,$4,'Test post','Test body',NULL,$5,$6)"#,
-    )
-    .bind(post_id)
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .bind(subreddit)
-    .bind(status)
-    .bind(error_message)
-    .execute(pool)
-    .await
-    .expect("insert community_post with error");
-    post_id
-}
+include!("autopilot_experiment_integrity_postgres/fixtures.rs");
 
 /// T10: Evidence projection rebuildability — growth_episodes can be
 /// rebuilt from growth_evidence with semantic equality, and the rebuild
@@ -2520,7 +2435,15 @@ async fn t21_ambiguous_outcome_transitions_action_to_unknown() {
 async fn t22_outbox_reconciliation_resolves_unknown_to_succeeded() {
     let f = setup().await.expect("fixture");
     let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+    // Not a community action: reconcile resolves this kind through the
+    // outbox event's delivery status, which is what this test is about.
+    let action_id = insert_decision_and_action_with_kind(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "signal.push.request",
+    )
+    .await;
 
     // Transition action to unknown first
     sqlx::query(
@@ -2571,7 +2494,15 @@ async fn t22_outbox_reconciliation_resolves_unknown_to_succeeded() {
 async fn t23_outbox_reconciliation_stays_unknown_for_ambiguous_dead() {
     let f = setup().await.expect("fixture");
     let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+    // Not a community action: reconcile resolves this kind through the
+    // outbox event's delivery status, which is what this test is about.
+    let action_id = insert_decision_and_action_with_kind(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "signal.push.request",
+    )
+    .await;
 
     // Transition action to unknown first
     sqlx::query(
@@ -2621,7 +2552,15 @@ async fn t23_outbox_reconciliation_stays_unknown_for_ambiguous_dead() {
 async fn t24_outbox_reconciliation_resolves_unknown_to_failed_for_permanent() {
     let f = setup().await.expect("fixture");
     let trace_id = uuid::Uuid::now_v7();
-    let action_id = insert_decision_and_action(&f.pool, f.workspace_id, trace_id).await;
+    // Not a community action: reconcile resolves this kind through the
+    // outbox event's delivery status, which is what this test is about.
+    let action_id = insert_decision_and_action_with_kind(
+        &f.pool,
+        f.workspace_id,
+        trace_id,
+        "signal.push.request",
+    )
+    .await;
 
     // Transition action to unknown first
     sqlx::query(
@@ -3594,6 +3533,37 @@ async fn insert_assignment_for_evidence_test(
     .execute(pool)
     .await
     .expect("insert assignment");
+
+    // Same guard `insert_executor_action_with_assignment` already documents:
+    // `record_execution_report` inserts its receipt only
+    // `WHERE EXISTS (SELECT 1 FROM viryaos_autopilot_action_emissions ...)`,
+    // because reporting the outcome of something never dispatched is
+    // meaningless. This helper was never given an emission, so every test that
+    // reports an outcome through it failed with `NotFound` — the repository was
+    // right and the fixture was incomplete.
+    let outbox_event_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO outbox_events (id, workspace_id, event_type, payload)
+           VALUES ($1, $2, 'test.action.emitted', '{}'::jsonb)"#,
+    )
+    .bind(outbox_event_id)
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await
+    .expect("insert outbox event");
+    sqlx::query(
+        r#"INSERT INTO viryaos_autopilot_action_emissions
+           (workspace_id, action_id, emission_key, outbox_event_id, emitted_at)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(format!("test-evidence-emission:{action_id}"))
+    .bind(outbox_event_id)
+    .bind(OffsetDateTime::now_utc())
+    .execute(pool)
+    .await
+    .expect("insert action emission");
 }
 
 /// T25i: UNKNOWN evidence excluded from causal learner even with resolved_at set.

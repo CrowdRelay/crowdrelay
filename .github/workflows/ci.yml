@@ -262,16 +262,24 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           # autopilot_experiment_integrity_postgres is quarantined, not
-          # forgotten. Its fixture drift is fixed (column names per migration
-          # 0179, the NOT NULL intended_template_id, and the experiment_designs
-          # parent row its foreign key needs), which took it from 14 passing to
-          # 15. The remaining 26 are not drift: they assert that recording a
-          # *treatment* assignment creates a viryaos_growth_episodes row, while
-          # experiment_assignments.rs records evidence only for the Control arm
-          # and derives episodes from evidence. That is a disagreement about
-          # intended behavior between the suite and the implementation, and
-          # picking a side is a design decision, not a fixture edit. Re-enable
-          # once that is settled.
+          # forgotten. It stands at 30 passing / 11 failing, up from 27/14.
+          #
+          # The fixture drift that remained has been fixed: the outbox
+          # reconciliation tests were building community-kind actions, so
+          # viryaos_action_ledger_reconcile took its community_posts branch and
+          # never read the outbox event they inserted — which failed two of them
+          # and silently passed a third for the wrong reason. The evidence
+          # fixture never emitted its action, so reports came back NotFound, and
+          # its payload used the action_kind string as the payload tag, which
+          # the repository could not deserialize.
+          #
+          # What is left is not drift. Those tests assert that a later failure
+          # receipt overturns a recorded success and that reconciliation moves
+          # an action out of UNKNOWN, while the implementation deliberately
+          # preserves a confirmed success (preserve_succeeded_claim) and treats
+          # the ledger as authoritative. Two coherent designs disagree; picking
+          # a side is a design decision, not a fixture edit. Re-enable once that
+          # is settled.
           quarantined="autopilot_experiment_integrity_postgres"
           targets=()
           for path in crates/*/tests/*_postgres.rs; do
