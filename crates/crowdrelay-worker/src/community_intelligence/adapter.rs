@@ -87,4 +87,14 @@ pub enum AdapterError {
     StructureChanged,
     #[error("timeout after {0:?}")]
     Timeout(Duration),
+    /// The source itself cannot work right now — a missing or rejected
+    /// credential, a dead upstream — so no place it holds can be observed.
+    ///
+    /// Distinct from a per-place failure on purpose. Production sat with
+    /// invalid Reddit credentials and the sweep asked the agent service about
+    /// all 28 subreddits every cycle, collecting 28 identical instant 503s
+    /// and 28 identical warnings. The retry told us nothing the first answer
+    /// had not, and the volume buried the one line that mattered.
+    #[error("source unavailable: {0}")]
+    SourceUnavailable(String),
 }

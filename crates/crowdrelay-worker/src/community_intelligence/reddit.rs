@@ -187,6 +187,28 @@ impl SourceAdapter for RedditAdapter {
 
         let status = response.status();
         if !status.is_success() {
+            // 503 from this endpoint means the agent service has no usable
+            // Reddit credential — no account stored, or one Reddit rejected.
+            // That is a fact about the source, not about this subreddit, and
+            // every other place in the sweep will get the same answer.
+            //
+            // 401/403 are the same shape of problem one layer up: the worker
+            // cannot authenticate to the agent service at all.
+            if is_source_level_failure(status.as_u16()) {
+                let detail = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| {
+                        body.get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                return Err(AdapterError::SourceUnavailable(format!(
+                    "reddit is unusable until this is fixed: {detail}"
+                )));
+            }
             return Err(AdapterError::HttpStatus {
                 status: status.as_u16(),
                 url: format!("{}/reddit/observe", self.agent_service_url),
@@ -200,6 +222,20 @@ impl SourceAdapter for RedditAdapter {
 
         parse_observation(&observed, &place.url)
     }
+}
+
+/// Whether an HTTP status from the agent service means the Reddit source
+/// itself is unusable, as opposed to this one request having failed.
+///
+/// 503 is the agent service saying it has no usable Reddit credential; 401
+/// and 403 are the worker failing to authenticate to the agent service at
+/// all. None of those get better by asking about a different subreddit, and
+/// asking anyway produced one identical warning per place per cycle.
+///
+/// Everything else — a 404 for a subreddit that moved, a 429, a 500 — is
+/// about this request, so the sweep carries on to the next place.
+const fn is_source_level_failure(status: u16) -> bool {
+    matches!(status, 401 | 403 | 503)
 }
 
 /// Extracts the subreddit name from a place URL.
@@ -467,5 +503,27 @@ mod tests {
         assert!(
             RedditAdapter::new("http://agent-service:8095".to_owned(), None, Uuid::nil()).is_none(),
         );
+    }
+
+    #[test]
+    fn a_credentials_failure_is_a_source_failure_not_a_place_failure() {
+        // 503 from /reddit/observe means the agent service has no usable
+        // Reddit credential. Every other place in the sweep gets the same
+        // answer, so reporting it per place produced 28 identical warnings a
+        // cycle and buried the one line that said what to fix.
+        for status in [401u16, 403, 503] {
+            assert!(
+                is_source_level_failure(status),
+                "status {status} must abandon the sweep"
+            );
+        }
+        // A 404 or a 500 is about this subreddit or this request, and the
+        // sweep should carry on to the next place.
+        for status in [404u16, 429, 500, 502] {
+            assert!(
+                !is_source_level_failure(status),
+                "status {status} must stay a per-place failure"
+            );
+        }
     }
 }
