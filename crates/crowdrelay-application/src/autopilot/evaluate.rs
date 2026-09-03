@@ -85,6 +85,7 @@ use commercial::{
     booking_candidate, booking_followup_candidate, campaign_lifecycle_candidate, funding_candidate,
     merch_candidate, merch_price_candidate,
 };
+use crowdrelay_domain::worker_template::WorkerTemplate;
 use growth_debt::growth_debt_candidate;
 use growth_intelligence::{
     ScoredCandidate, build_dispatch_context, cooldown_window, growth_intelligence_candidate,

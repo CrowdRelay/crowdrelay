@@ -17,6 +17,7 @@ use crowdrelay_brain::{
     ResourceCost, WaitCandidateValue, context_hash,
 };
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
 
 use crate::autopilot::evaluate::growth_intelligence::ScoredCandidate;
 use crate::autopilot::model::DecisionCandidate;
@@ -35,30 +36,29 @@ use crate::autopilot::model::DecisionCandidate;
 ///   is a unique target)
 fn audience_key_for(candidate: &DecisionCandidate, workspace_id: WorkspaceId) -> String {
     let parts: Vec<&str> = candidate.decision_key.split(':').collect();
-    // community-engager: decision:growth-intelligence:v{N}:community-engager:{target_id}:{bucket}
-    if parts.len() >= 5
-        && parts.get(3) == Some(&"community-engager")
-        && let Some(target_id) = parts.get(4)
-    {
-        return format!("community:{target_id}");
+    // decision:growth-intelligence:v{N}:{template}:{target_id}:{bucket}
+    let template = parts.get(3).and_then(|id| WorkerTemplate::parse(id));
+    match template.map(WorkerTemplate::audience) {
+        Some(TemplateAudience::Community) => match parts.get(4) {
+            Some(target_id) => format!("community:{target_id}"),
+            // A community template with no target in its key is malformed.
+            // Falling back to the decision key keeps it uniquely identified
+            // rather than pooling it with an unrelated community.
+            None => format!("target:{}", candidate.decision_key),
+        },
+        // Every workspace-wide dispatch reaches the same audience — the
+        // band's own — so they share a key and the overlap penalty applies
+        // between them. This used to be seven string literals, and
+        // `discord-poster` was not among them: a discord post would have
+        // counted as reaching different people than the telegram and social
+        // posts going to the same channels on the same day.
+        Some(TemplateAudience::Workspace) => {
+            format!("workspace:{}", workspace_id.into_uuid())
+        }
+        // Not a growth-intelligence template: each decision key is its own
+        // target.
+        None => format!("target:{}", candidate.decision_key),
     }
-    // Workspace-wide templates (reddit-scanner, telegram-scanner,
-    // metal-archives-scanner, bandcamp-scanner, press-pitch, social-post,
-    // telegram-poster) all hit the same audience — the workspace itself.
-    if matches!(
-        parts.get(3),
-        Some(&"reddit-scanner")
-            | Some(&"telegram-scanner")
-            | Some(&"metal-archives-scanner")
-            | Some(&"bandcamp-scanner")
-            | Some(&"press-pitch")
-            | Some(&"social-post")
-            | Some(&"telegram-poster")
-    ) {
-        return format!("workspace:{}", workspace_id.into_uuid());
-    }
-    // Fallback: each decision_key is a unique target.
-    format!("target:{}", candidate.decision_key)
 }
 
 /// Returns the operator-configured resource cost for a template, as a

@@ -65,6 +65,19 @@ const CLAIM_BATCH: i64 = 5;
 /// AAD for Discord bot token encryption. Must match the AAD used in
 /// `PostgresFanbaseRepository::encrypt_token` when the connection was
 /// created, or the token will not decrypt.
+/// Whether a string is a Discord snowflake — the only shape a channel id
+/// takes.
+///
+/// Discord snowflakes are decimal timestamps: 17 to 20 digits today, and
+/// nothing else. Checking the shape is what turns "posted into the void" into
+/// a refusal with a reason, and it is the specific guard against putting an
+/// invite code where a channel belongs, which is the mistake this executor
+/// shipped with.
+fn is_discord_snowflake(value: &str) -> bool {
+    let value = value.trim();
+    (17..=20).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn discord_bot_aad(workspace_id: Uuid, channel_id: &str) -> Vec<u8> {
     format!("crowdrelay.fanbase.oauth.discord.v1\0{workspace_id}\0{channel_id}").into_bytes()
 }
@@ -356,9 +369,28 @@ impl DiscordExecutorWorker {
     /// Processes a single claimed action: checks anti-spam guardrails,
     /// posts to Discord via the Bot API, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), DiscordExecutorError> {
-        // Anti-spam: check channel cooldown.
-        if self.channel_on_cooldown(&action.channel_id).await? {
-            tracing::info!(channel_id = %action.channel_id, "channel on 12h cooldown, skipping");
+        // The cooldown is about the channel actually posted in, so the
+        // connection is resolved before anything is checked against it.
+        //
+        // This used to check `action.channel_id`, which comes from the draft
+        // and is almost always empty — and `channel_on_cooldown` returns
+        // false for an empty string, so the twelve-hour limit never applied
+        // to anything. The same empty value was written into
+        // `discord_posts.channel_id`, so even a correct check would have had
+        // nothing to count. Two halves of one hole, both invisible until the
+        // first post.
+        //
+        // In manual mode there is no connection to resolve and no post to
+        // rate-limit; the draft is written and an operator decides.
+        let posting_target = if self.manual_mode {
+            None
+        } else {
+            Some(self.load_bot_token().await?)
+        };
+        if let Some((ref channel_id, _)) = posting_target
+            && self.channel_on_cooldown(channel_id).await?
+        {
+            tracing::info!(channel_id = %channel_id, "channel on 12h cooldown, skipping");
             self.mark_failed(action.id, "channel on 12h cooldown")
                 .await?;
             return Ok(());
@@ -393,16 +425,32 @@ impl DiscordExecutorWorker {
             return Ok(());
         }
 
-        // Load the bot token + channel ID from the discord connection.
-        let (channel_id, bot_token) = self.load_bot_token().await?;
-
-        // Use the channel_id from the connection if the action payload
-        // didn't carry one.
-        let target_channel = if action.channel_id.is_empty() {
-            &channel_id
-        } else {
-            &action.channel_id
+        // Resolved above, before the cooldown check that depends on it.
+        // Manual mode returned above, so automatic mode always resolved one.
+        // Saying so with an error rather than a panic keeps a future edit to
+        // the mode logic from taking the worker down.
+        let Some((channel_id, bot_token)) = posting_target else {
+            return Err(DiscordExecutorError::NoConnection);
         };
+
+        // The connection's channel is the only posting target. The action
+        // payload also carries a `channel_id`, written by the drafting model,
+        // and it used to win whenever it was non-empty — so a model could
+        // name any channel on any server the bot can see and the bot would
+        // post there. An operator configures where the bot may speak; a
+        // draft does not get to redirect it.
+        //
+        // A payload channel that disagrees is worth saying out loud once: it
+        // means the prompt is producing a field nothing should act on.
+        if !action.channel_id.is_empty() && action.channel_id != channel_id {
+            tracing::warn!(
+                action_id = %action.action_id,
+                drafted_channel = %action.channel_id,
+                configured_channel = %channel_id,
+                "ignoring the channel the draft named; posting to the configured channel"
+            );
+        }
+        let target_channel = &channel_id;
 
         let body = action.body.as_deref().unwrap_or("");
         if body.is_empty() {
@@ -420,6 +468,10 @@ impl DiscordExecutorWorker {
             UPDATE discord_posts
             SET status = 'posted',
                 message_id = $2,
+                -- The row was inserted with the draft's channel, which is
+                -- normally empty. Recording the channel actually posted in is
+                -- what makes the twelve-hour cooldown able to count anything.
+                channel_id = $3,
                 posted_at = now(),
                 updated_at = now(),
                 error_message = NULL,
@@ -429,6 +481,7 @@ impl DiscordExecutorWorker {
         )
         .bind(action.id)
         .bind(&result.message_id)
+        .bind(target_channel)
         .execute(&self.pool)
         .await?;
 
@@ -525,10 +578,18 @@ impl DiscordExecutorWorker {
 
     /// Loads the Discord bot token and channel ID from `fanbase_connections`.
     /// Returns (channel_id, decrypted_bot_token).
+    ///
+    /// The channel comes from `posting_target_ref`, not `provider_account_id`.
+    /// That column holds whatever the platform's *read* API needs, and for
+    /// discord it is the invite code the member-count endpoint takes. This
+    /// function used to read it as the channel, so a post would have gone to
+    /// `POST /channels/BBdDV6gVy/messages` — an invite code where a snowflake
+    /// belongs. It never failed out loud because no discord post has ever
+    /// been attempted.
     async fn load_bot_token(&self) -> Result<(String, String), DiscordExecutorError> {
         let ws = self.workspace_id.into_uuid();
-        let row: (String, Option<String>) = sqlx::query_as(
-            r#"SELECT provider_account_id, encrypted_access_token
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            r#"SELECT posting_target_ref, encrypted_access_token
                FROM fanbase_connections
                WHERE workspace_id = $1 AND platform = 'discord' AND status = 'connected'
                  AND encrypted_access_token IS NOT NULL
@@ -539,7 +600,21 @@ impl DiscordExecutorWorker {
         .await?
         .ok_or(DiscordExecutorError::NoConnection)?;
 
-        let channel_id = row.0;
+        let channel_id = row.0.ok_or_else(|| {
+            DiscordExecutorError::DiscordApi(
+                "Discord connection has no posting_target_ref — set it to the numeric \
+                 channel id the bot should post in (Developer Mode, right-click the \
+                 channel, Copy Channel ID). provider_account_id holds the invite code \
+                 the member-count sync reads and is not a channel."
+                    .to_owned(),
+            )
+        })?;
+        if !is_discord_snowflake(&channel_id) {
+            return Err(DiscordExecutorError::DiscordApi(format!(
+                "Discord posting_target_ref {channel_id:?} is not a channel id. A channel \
+                 id is 17 to 20 digits; this looks like an invite code or a name."
+            )));
+        }
         let encrypted_token = row.1.ok_or_else(|| {
             DiscordExecutorError::DiscordApi(
                 "Discord connection missing encrypted_access_token (bot token)".to_owned(),
@@ -659,6 +734,38 @@ struct DiscordMessageResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_channel_id_is_a_snowflake_and_an_invite_code_is_not() {
+        // Production holds `provider_account_id = 'BBdDV6gVy'`, the invite
+        // code the member-count sync reads. It was also what this executor
+        // would have posted to. A snowflake is 17-20 digits; nothing else is
+        // a channel.
+        assert!(is_discord_snowflake("1234567890123456789"));
+        assert!(is_discord_snowflake("12345678901234567"));
+        assert!(is_discord_snowflake("12345678901234567890"));
+        assert!(is_discord_snowflake("  1234567890123456789  "));
+
+        assert!(!is_discord_snowflake("BBdDV6gVy"), "an invite code");
+        assert!(!is_discord_snowflake("general"), "a channel name");
+        assert!(!is_discord_snowflake(""), "nothing at all");
+        assert!(
+            !is_discord_snowflake("1234567890123456"),
+            "16 digits, too short"
+        );
+        assert!(
+            !is_discord_snowflake("123456789012345678901"),
+            "21 digits, too long"
+        );
+        assert!(
+            !is_discord_snowflake("12345678901234567x"),
+            "digits with a stray character"
+        );
+        assert!(
+            !is_discord_snowflake("#1234567890123456789"),
+            "a channel mention, not an id"
+        );
+    }
 
     #[test]
     fn discord_bot_aad_is_deterministic() {

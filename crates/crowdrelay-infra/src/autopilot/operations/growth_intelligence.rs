@@ -37,6 +37,7 @@ use crowdrelay_brain::{
 };
 use crowdrelay_domain::growth_metrics::{MetricPlatform, NorthStarMetric};
 use crowdrelay_domain::learning::{OutcomeRecord, Standing, assess_standing};
+use crowdrelay_domain::worker_template::WorkerTemplate;
 
 /// The month-over-month audience arithmetic, shared by the total and the
 /// per-platform breakdown.
@@ -90,21 +91,15 @@ const AUDIENCE_WINDOW_CTE: &str = r#"
 "#;
 
 /// The worker templates the brain may dispatch, in the order the evaluator
-/// checks them. Adding a new worker template means adding it here and to the
-/// evaluator's rules.
-const WORKER_TEMPLATES: &[&str] = &[
-    "reddit-scanner",
-    "telegram-scanner",
-    "metal-archives-scanner",
-    "bandcamp-scanner",
-    "press-pitch",
-    "social-post",
-    "telegram-poster",
-    "discord-poster",
-    "community-engager",
-    "signal-inviter",
-    "growth-strategist",
-];
+/// checks them.
+///
+/// Derived from [`WorkerTemplate::ALL`] rather than retyped. This was a
+/// hand-written `&[&str]`, one of three such lists across three crates, and
+/// `discord-poster` reached production present in this one and missing from
+/// the other two.
+fn worker_templates() -> Vec<&'static str> {
+    WorkerTemplate::ALL.iter().map(|t| t.as_str()).collect()
+}
 
 pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     repo: &PostgresAutopilotRepository,
@@ -828,8 +823,9 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     };
 
     // Build one snapshot per worker template.
-    let mut snapshots = Vec::with_capacity(WORKER_TEMPLATES.len());
-    for template_id in WORKER_TEMPLATES {
+    let templates = worker_templates();
+    let mut snapshots = Vec::with_capacity(templates.len());
+    for template_id in &templates {
         let (hours_since_last_run, hours_since_last_effective_run) = last_runs
             .iter()
             .find(|(tid, _, _)| tid == template_id)
