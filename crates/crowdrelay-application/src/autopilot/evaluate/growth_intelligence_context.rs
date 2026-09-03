@@ -109,8 +109,26 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // EFE decides what is worth learning about (candidate generation).
         // DecisionValue decides what is worth doing (portfolio ranking).
         // The optimizer must never combine EFE with DecisionValue.total().
-        scored_candidates
-            .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        //
+        // Strategy rank comes first, then EFE — which is what the module's
+        // own description says ("strategy -> template priority -> EFE
+        // tie-break") and what nothing did. `strategy_rank` was computed by
+        // both candidate producers, carried on every candidate, and read by
+        // no one; the tuple it lived in hid that until it became a struct and
+        // the compiler said the field was never read. So the strategy layer
+        // has had no effect on ordering at all.
+        //
+        // It still cannot change what a candidate is worth: the portfolio
+        // re-sorts by `DecisionValue.total()` and selects greedily from
+        // there. This decides the order equals are offered in, which today —
+        // with most candidates sitting on the same prior — is most of them.
+        scored_candidates.sort_by(|a, b| {
+            a.strategy_rank.cmp(&b.strategy_rank).then_with(|| {
+                a.efe_score
+                    .partial_cmp(&b.efe_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
 
         // ── Tenant operating preference ──
         //
@@ -167,10 +185,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         type ExperimentGroup = (String, Vec<(usize, DecisionCandidate, DispatchPrediction)>);
         let mut experiment_groups: Vec<ExperimentGroup> = Vec::new();
         let mut non_experiment_indices: Vec<usize> = Vec::new();
-        for (i, (candidate, prediction, _efe, _rank, _stats)) in
+        for (i, scored) in
             scored_candidates.iter().enumerate()
         {
-            let template_id = match &candidate.action {
+            let template_id = match &scored.candidate.action {
                 AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
                     template_id.as_str()
                 }
@@ -186,11 +204,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 continue;
             }
             if let Some(group) = experiment_groups.iter_mut().find(|(t, _)| t == template_id) {
-                group.1.push((i, candidate.clone(), prediction.clone()));
+                group
+                    .1
+                    .push((i, scored.candidate.clone(), scored.prediction.clone()));
             } else {
                 experiment_groups.push((
                     template_id.to_owned(),
-                    vec![(i, candidate.clone(), prediction.clone())],
+                    vec![(i, scored.candidate.clone(), scored.prediction.clone())],
                 ));
             }
         }
@@ -334,11 +354,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let mut dispatched_count = 0usize;
         // Dispatch non-experiment candidates (scanner, strategist).
         for i in &non_experiment_indices {
-            let Some((candidate, prediction, _efe, _rank, _stats)) = scored_candidates.get(*i)
-            else {
+            let Some(scored) = scored_candidates.get(*i) else {
                 continue;
             };
-            if selection.do_nothing || !selected_keys.contains(&candidate.decision_key) {
+            if selection.do_nothing || !selected_keys.contains(&scored.candidate.decision_key) {
                 continue;
             }
             // P1: persist candidate + prediction + initial evidence
@@ -349,8 +368,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 .repository
                 .persist_candidate_with_evidence(
                     self.workspace_id,
-                    candidate,
-                    prediction,
+                    &scored.candidate,
+                    &scored.prediction,
                     Some(strategy.as_str()),
                     0.0,
                     &TraceContext::root(self.workspace_id),

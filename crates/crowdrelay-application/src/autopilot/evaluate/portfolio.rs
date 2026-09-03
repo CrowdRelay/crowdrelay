@@ -105,7 +105,13 @@ pub(super) fn select_portfolio(
 ) -> PortfolioSelection {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
-        .map(|(c, p, efe, _, stats)| {
+        .map(|scored| {
+            let (c, p, efe, stats) = (
+                &scored.candidate,
+                &scored.prediction,
+                scored.efe_score,
+                &scored.treatment_stats,
+            );
             // P1-e: audience_key is target-only, not template+target.
             // Two different templates hitting the same community share
             // an audience_key, so the overlap penalty applies correctly.
@@ -135,10 +141,16 @@ pub(super) fn select_portfolio(
                 // EFE is a candidate-generation signal, NOT an economic
                 // value. The optimizer ignores generation_signal for
                 // ranking — DecisionValue.total() is the sole authority.
+                // The exploration trail. Both halves were hard-coded 0.0
+                // with a note saying they would be wired later, which left
+                // every candidate claiming it had learned nothing and been
+                // nowhere — so no exploration decision could be explained
+                // after the fact. They are carried from where EFE computes
+                // them. The optimizer still ignores all three for ranking.
                 generation_signal: Some(EfeSignal {
-                    information_gain: 0.0, // Wired when EFE carries this
-                    novelty: 0.0,
-                    efe_score: *efe,
+                    information_gain: scored.information_gain,
+                    novelty: scored.novelty,
+                    efe_score: efe,
                 }),
                 audience_key,
                 source_context: c.decision_kind.to_string(),

@@ -66,6 +66,10 @@ pub struct IntelligenceRequest {
     /// optimizer to rank candidates by Y30 durable fans (North Star) when
     /// the treatment-effect confidence is sufficient.
     pub treatment_stats: crowdrelay_brain::TreatmentAwareStats,
+    /// The two halves of the EFE exploration term, carried so the candidate
+    /// can say why it was worth learning from rather than reporting 0.0.
+    pub information_gain: f64,
+    pub novelty: f64,
 }
 
 /// Formats the unengaged outreach targets into a context block for the
@@ -420,6 +424,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -454,6 +460,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -492,6 +500,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -530,6 +540,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -571,6 +583,8 @@ pub fn evaluate_growth_intelligence(
                 efe_score,
                 strategy_rank,
                 treatment_stats,
+                information_gain: info_gain,
+                novelty: exploration_novelty,
             });
         }
     }
@@ -602,6 +616,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -640,6 +656,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -678,6 +696,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -729,6 +749,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -780,6 +802,8 @@ pub fn evaluate_growth_intelligence(
             efe_score,
             strategy_rank,
             treatment_stats,
+            information_gain: info_gain,
+            novelty: exploration_novelty,
         });
     }
 
@@ -788,13 +812,28 @@ pub fn evaluate_growth_intelligence(
 
 /// A scored growth intelligence candidate: (decision, prediction, EFE score,
 /// strategy rank, treatment-aware stats). Used by the portfolio optimizer.
-pub(super) type ScoredCandidate = (
-    DecisionCandidate,
-    DispatchPrediction,
-    f64,
-    usize,
-    crowdrelay_brain::TreatmentAwareStats,
-);
+/// A growth-intelligence candidate with everything the portfolio needs to
+/// rank it and everything the audit trail needs to explain it.
+///
+/// This was a five-element tuple. The exploration signals below make it
+/// seven, and seven positional fields is a shape nobody reads correctly.
+#[derive(Clone)]
+pub(super) struct ScoredCandidate {
+    pub(super) candidate: DecisionCandidate,
+    pub(super) prediction: DispatchPrediction,
+    /// Expected Free Energy — lower is better. A generation signal, never an
+    /// economic value: the optimizer ranks on `DecisionValue`.
+    pub(super) efe_score: f64,
+    pub(super) strategy_rank: usize,
+    pub(super) treatment_stats: crowdrelay_brain::TreatmentAwareStats,
+    /// How much the brain would learn from this dispatch's outcome. Recorded
+    /// on the candidate so an exploration decision can be explained after the
+    /// fact; both this and `novelty` were hard-coded 0.0 on the way into
+    /// `EfeSignal`, which left the exploration trail blank.
+    pub(super) information_gain: f64,
+    /// How unexplored this (template, context) pair is.
+    pub(super) novelty: f64,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn growth_intelligence_candidate(
@@ -876,8 +915,8 @@ fn candidate_from_request(
         priority: request.priority,
         tier: request.tier,
     };
-    Ok((
-        DecisionCandidate {
+    Ok(ScoredCandidate {
+        candidate: DecisionCandidate {
             context: policy.context,
             subject: ActionSubject::Workspace(workspace_id),
             decision_kind: "request_agent_run",
@@ -906,7 +945,9 @@ fn candidate_from_request(
         efe_score,
         strategy_rank,
         treatment_stats,
-    ))
+        information_gain: request.information_gain,
+        novelty: request.novelty,
+    })
 }
 
 /// Index of the cooldown window `now` falls in. Gives the action key a coarse
