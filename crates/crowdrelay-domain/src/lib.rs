@@ -107,6 +107,7 @@ pub mod tour_economics;
 pub mod trace;
 pub mod value_tier;
 pub mod values;
+pub mod worker_template;
 
 pub use acquisition::{
     CitySignal, CitySignalError, ClickEvent, ClickEventError, FanSignup, FanSignupEmailKind,

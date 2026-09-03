@@ -377,9 +377,27 @@ impl TelegramExecutorWorker {
     /// Processes a single claimed action: checks anti-spam guardrails,
     /// posts to Telegram via the Bot API, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), TelegramExecutorError> {
-        // Anti-spam: check channel cooldown.
-        if self.channel_on_cooldown(&action.channel).await? {
-            tracing::info!(channel = %action.channel, "channel on 12h cooldown, skipping");
+        // The cooldown is about the channel actually posted in, so the
+        // connection is resolved before anything is checked against it.
+        //
+        // This used to check `action.channel`, which comes from the draft and
+        // is normally empty — and `channel_on_cooldown` returns false for an
+        // empty string, so the twelve-hour limit never applied. The same
+        // empty value was written into `telegram_posts.channel`, so even a
+        // correct check would have had nothing to count. Identical to the
+        // hole in the discord executor; both shipped from the same template.
+        //
+        // In manual mode there is no connection to resolve and no post to
+        // rate-limit; the draft is written and an operator decides.
+        let posting_target = if self.manual_mode {
+            None
+        } else {
+            Some(self.load_bot_token().await?)
+        };
+        if let Some((ref channel, _)) = posting_target
+            && self.channel_on_cooldown(channel).await?
+        {
+            tracing::info!(channel = %channel, "channel on 12h cooldown, skipping");
             self.mark_failed(action.id, "channel on 12h cooldown")
                 .await?;
             return Ok(());
@@ -414,16 +432,28 @@ impl TelegramExecutorWorker {
             return Ok(());
         }
 
-        // Load the bot token from the telegram connection.
-        let (channel, bot_token) = self.load_bot_token().await?;
-
-        // Use the channel from the connection if the action payload didn't
-        // carry one (it may be empty if the outcome didn't include it).
-        let target_channel = if action.channel.is_empty() {
-            &channel
-        } else {
-            &action.channel
+        // Resolved above, before the cooldown check that depends on it.
+        // Manual mode returned above, so automatic mode always resolved one.
+        // Saying so with an error rather than a panic keeps a future edit to
+        // the mode logic from taking the worker down.
+        let Some((channel, bot_token)) = posting_target else {
+            return Err(TelegramExecutorError::NoConnection);
         };
+
+        // The connection's channel is the only posting target. The draft also
+        // carries one, and it used to win whenever it was non-empty — so a
+        // model could name any chat the bot can reach and the bot would post
+        // there. An operator configures where the bot may speak; a draft does
+        // not get to redirect it.
+        if !action.channel.is_empty() && action.channel != channel {
+            tracing::warn!(
+                action_id = %action.action_id,
+                drafted_channel = %action.channel,
+                configured_channel = %channel,
+                "ignoring the channel the draft named; posting to the configured channel"
+            );
+        }
+        let target_channel = &channel;
 
         let body = action.body.as_deref().unwrap_or("");
         if body.is_empty() {
@@ -441,6 +471,10 @@ impl TelegramExecutorWorker {
             UPDATE telegram_posts
             SET status = 'posted',
                 message_id = $2,
+                -- The row was inserted with the draft's channel, which is
+                -- normally empty. Recording the channel actually posted in is
+                -- what makes the twelve-hour cooldown able to count anything.
+                channel = $3,
                 posted_at = now(),
                 updated_at = now(),
                 error_message = NULL,
@@ -450,6 +484,7 @@ impl TelegramExecutorWorker {
         )
         .bind(action.id)
         .bind(result.message_id)
+        .bind(target_channel)
         .execute(&self.pool)
         .await?;
 

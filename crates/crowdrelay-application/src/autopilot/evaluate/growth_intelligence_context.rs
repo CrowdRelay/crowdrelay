@@ -522,18 +522,32 @@ fn unit_id_from_decision_key(decision_key: &str) -> String {
 /// the logical_cycle_key. This must match the key_window_hours used in
 /// the candidate's decision_key so the experiment identity aligns with
 /// the idempotency identity.
+/// The cooldown window a template's idempotency and logical-cycle keys are
+/// bucketed by.
+///
+/// Exhaustive on [`WorkerTemplate`] rather than a string match with a
+/// default. The default was 24 hours, and `discord-poster` fell into it while
+/// its policy cooldown was 48 — so its key would have rotated twice inside
+/// one cooldown, letting the same dispatch be raised again while it was still
+/// meant to be resting. A missing arm is now a compile error instead of a
+/// number that happens to be wrong.
 fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str) -> u32 {
-    match template_id {
-        "reddit-scanner" => policy.reddit_scanner_cooldown_hours,
-        "telegram-scanner" => policy.telegram_scanner_cooldown_hours,
-        "metal-archives-scanner" => policy.metal_archives_scanner_cooldown_hours,
-        "bandcamp-scanner" => policy.bandcamp_scanner_cooldown_hours,
-        "press-pitch" => policy.press_pitch_cooldown_hours,
-        "social-post" => policy.social_post_cooldown_hours,
-        "telegram-poster" => policy.telegram_poster_cooldown_hours,
-        "community-engager" => policy.community_engager_cooldown_hours,
-        "signal-inviter" => policy.signal_inviter_cooldown_hours,
-        "growth-strategist" => policy.growth_strategist_cooldown_hours,
-        _ => 24, // sensible default for unknown templates
+    let Some(template) = WorkerTemplate::parse(template_id) else {
+        // Not a growth-intelligence template. A day is a safe bucket for a
+        // question this function was never meant to answer.
+        return 24;
+    };
+    match template {
+        WorkerTemplate::RedditScanner => policy.reddit_scanner_cooldown_hours,
+        WorkerTemplate::TelegramScanner => policy.telegram_scanner_cooldown_hours,
+        WorkerTemplate::MetalArchivesScanner => policy.metal_archives_scanner_cooldown_hours,
+        WorkerTemplate::BandcampScanner => policy.bandcamp_scanner_cooldown_hours,
+        WorkerTemplate::PressPitch => policy.press_pitch_cooldown_hours,
+        WorkerTemplate::SocialPost => policy.social_post_cooldown_hours,
+        WorkerTemplate::TelegramPoster => policy.telegram_poster_cooldown_hours,
+        WorkerTemplate::DiscordPoster => policy.discord_poster_cooldown_hours,
+        WorkerTemplate::CommunityEngager => policy.community_engager_cooldown_hours,
+        WorkerTemplate::SignalInviter => policy.signal_inviter_cooldown_hours,
+        WorkerTemplate::GrowthStrategist => policy.growth_strategist_cooldown_hours,
     }
 }
