@@ -712,6 +712,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
     let community_executor_shutdown = shutdown_receiver.clone();
+    let executor_registrar_shutdown = shutdown_receiver.clone();
     let telegram_executor_shutdown = shutdown_receiver.clone();
     let discord_executor_shutdown = shutdown_receiver.clone();
     let social_post_executor_shutdown = shutdown_receiver.clone();
@@ -822,6 +823,33 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         }
         "agent outcome worker"
     });
+    // Advertise what this process executes in-process, so the action
+    // dispatcher stops parking work the executors a few threads away are
+    // sitting idle waiting for. Only capabilities whose executor actually
+    // started are advertised: unparking an action nothing will claim is worse
+    // than leaving it visibly parked.
+    let mut in_process_capabilities: Vec<&'static str> = Vec::new();
+    if community_executor.is_some() {
+        in_process_capabilities.push("community.engage");
+    }
+    if let Some(registrar) = crowdrelay_worker::executor_registry::ExecutorRegistrar::new(
+        database.clone(),
+        workspace_id,
+        in_process_capabilities.clone(),
+    ) {
+        tracing::info!(
+            capabilities = ?in_process_capabilities,
+            "advertising in-process executor capabilities"
+        );
+        runtime_tasks.spawn(async move {
+            registrar.run(executor_registrar_shutdown).await;
+            "executor registrar"
+        });
+    } else {
+        tracing::info!(
+            "no in-process executor capabilities to advertise; actions needing one stay parked"
+        );
+    }
     if let Some(worker) = community_executor {
         runtime_tasks.spawn(async move {
             worker.run(community_executor_shutdown).await;
