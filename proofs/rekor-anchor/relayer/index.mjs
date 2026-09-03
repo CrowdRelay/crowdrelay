@@ -144,7 +144,18 @@ async function ensureDependenciesReady(force = false) {
   lastDependencyCheckAt = checkedAt
   lastDependencyCheckMs = now
   ready = next.crowdrelay.ready && next.rekor.ready
-  if (!ready) throw new Error("dependency readiness failed")
+  if (!ready) {
+    // Name which dependency failed and why. Both causes are already in `next`;
+    // throwing a bare "dependency readiness failed" discarded them, so the
+    // only signal left was an unhealthy container with an error log that said
+    // nothing. This ran 797 failing health checks over three days against a
+    // hostname that no longer resolves, and the log never once said so.
+    const causes = Object.entries(next)
+      .filter(([, state]) => !state.ready)
+      .map(([name, state]) => `${name}: ${state.error ?? "not ready"}`)
+      .join("; ")
+    throw new Error(`dependency readiness failed (${causes})`)
+  }
 }
 
 async function processOne() {

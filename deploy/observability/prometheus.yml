@@ -14,7 +14,14 @@ scrape_configs:
   - job_name: crowdrelay-api
     metrics_path: /metrics
     static_configs:
-      - targets: ["crowdrelay-api:8080"]
+      # `crowdrelay-api` is the *blue* alias (BLUE_ALIAS in
+      # scripts/deploy-bluegreen.sh), not a colour-independent name. Scraping it
+      # meant that whenever green was the live colour this job scraped a
+      # hostname that does not resolve — so `up{job="crowdrelay-api"} == 0` in
+      # alerts.yml would fire on the deploy rather than on a real outage, and
+      # the monitoring was blind exactly when it was needed. `-active` follows
+      # the live colour.
+      - targets: ["crowdrelay-api-active:8080"]
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

@@ -87,7 +87,19 @@ class RekorInventoryV12Tests(unittest.TestCase):
         installer = (ROOT / "ops/rekor/install-anchor.sh").read_text()
         env_example = (ROOT / "deploy/rekor-anchor.env.example").read_text()
         self.assertIn("^sha-[0-9a-f]{40,64}$", installer)
-        self.assertIn("CROWDRELAY_INTERNAL_URL=http://crowdrelay-api:8080", env_example)
+        # The anchor must target the alias that follows the live colour. This
+        # asserted the bare `crowdrelay-api` alias, which compose.bluegreen.yaml
+        # does not publish — so the gate held the anchor on a hostname that
+        # stopped resolving at the first blue-green deploy, and it spent three
+        # days unable to reach the API while CI stayed green.
+        self.assertIn(
+            "CROWDRELAY_INTERNAL_URL=http://crowdrelay-api-active:8080",
+            env_example,
+        )
+        self.assertNotIn(
+            "CROWDRELAY_INTERNAL_URL=http://crowdrelay-api:8080",
+            env_example,
+        )
         self.assertIn("private Docker API endpoint", installer)
 
     def test_inventory_ready_is_atomic(self):
