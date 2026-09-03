@@ -282,6 +282,20 @@ impl CommunityIntelligenceWorker {
                     );
                     fail_count += 1;
                 }
+                Err(AdapterError::SourceUnavailable(reason)) => {
+                    // The source cannot serve any place, so asking it about
+                    // the remaining ones learns nothing and buries the
+                    // reason under a wall of identical warnings. Stop the
+                    // sweep, back the source off, and say once why.
+                    warn!(
+                        adapter = adapter_id,
+                        reason = %reason,
+                        remaining = places.len() - success_count as usize - fail_count as usize,
+                        "source unavailable — abandoning this sweep"
+                    );
+                    source_health.record_failure(reason, backoff_max);
+                    return Ok(());
+                }
                 Err(e) => {
                     warn!(
                         adapter = adapter_id,
