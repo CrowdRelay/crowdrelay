@@ -95,6 +95,24 @@ wait_for_image_release() {
     if [[ -n "$run_id" ]]; then
       IMAGE_RUN_ID="$run_id"
       run_identity="$(gh run view "$IMAGE_RUN_ID" --repo "$REPO" --json workflowName,headSha,conclusion --jq '[.workflowName,.headSha,.conclusion] | join("|")')"
+      # The artifact is visible through the API before the run it belongs to
+      # is marked complete, so `conclusion` is empty for a stretch of seconds
+      # around every release. Treating that as a mismatch aborted the deploy
+      # of a run that then finished green moments later — twice — and the
+      # only remedy was to run the whole thing again. An unfinished run is
+      # not a wrong run: keep waiting for it.
+      #
+      # Only the empty conclusion is tolerated. A run that finished failed or
+      # cancelled, or one whose workflow or SHA does not match, is still a
+      # hard stop: those are the substitutions this check exists to catch.
+      if [[ "$run_identity" == "Publish container images|${TARGET}|" ]]; then
+        if (( SECONDS - last_notice >= 15 )); then
+          printf '... image digest artifact is published; waiting for run %s to be marked complete\n' "$IMAGE_RUN_ID"
+          last_notice=$SECONDS
+        fi
+        sleep "$POLL_SECONDS"
+        continue
+      fi
       [[ "$run_identity" == "Publish container images|${TARGET}|success" ]] || fail "image artifact run identity mismatch: $run_identity"
       printf 'IMAGES_RUN=%s\n' "$IMAGE_RUN_ID"
       printf 'IMAGES_ARTIFACT=%s\n' "$artifact_name"
