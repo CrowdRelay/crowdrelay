@@ -637,9 +637,6 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let facebook_page_access_token = std::env::var("CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let reddit_proxy_url = std::env::var("CROWDRELAY_REDDIT_PROXY_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
     let tiktok_client_key = std::env::var("CROWDRELAY_TIKTOK_CLIENT_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty());
@@ -656,7 +653,8 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         database.clone(),
         youtube_api_key,
         facebook_page_access_token,
-        reddit_proxy_url,
+        config.agent_service_url.clone(),
+        agent_service_auth_key.clone(),
         tiktok_client_key,
         tiktok_client_secret,
         lastfm_api_key,
