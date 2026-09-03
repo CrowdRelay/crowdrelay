@@ -632,7 +632,18 @@ pub(in crate::autopilot) async fn load_team_routing(
                ) skill
            ) per_skill ON true
            WHERE profile.workspace_id=$1 AND profile.active AND member.status='active'
-           GROUP BY profile.member_id, profile.member_key, member.display_name,
+           -- `profile.workspace_id` is grouped because the follow-through
+           -- subquery correlates on it. Postgres only infers functional
+           -- dependency from a grouped primary key, and this table's key is
+           -- (workspace_id, member_id) — grouping half of it left the other
+           -- half ungrouped, and the scalar subquery in the SELECT list is
+           -- evaluated after grouping, so the planner refused the whole
+           -- statement with "subquery uses ungrouped column
+           -- profile.workspace_id from outer query". Every autopilot cycle
+           -- then reported a failed phase and no human handoff was ever
+           -- assigned. The WHERE clause already pins the column to one value,
+           -- so grouping by it changes no result.
+           GROUP BY profile.workspace_id, profile.member_id, profile.member_key, member.display_name,
                     member.normalized_email, profile.active, profile.skills, profile.capacity_basis_points,
                     per_skill.skills, per_skill.scores
            ORDER BY profile.member_key"#,

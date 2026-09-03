@@ -27,8 +27,6 @@
 //! on (workspace_id, series_id, captured_at). A crash mid-sync leaves no
 //! partial state — the next wake reclaims the work.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -41,7 +39,7 @@ use sqlx::{FromRow, PgPool, postgres::PgListener};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::{
-    sync::{Mutex, watch},
+    sync::watch,
     time::{Instant, sleep, timeout},
 };
 use uuid::Uuid;
@@ -59,26 +57,6 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS_PER_CYCLE: usize = 10;
 
 const USER_AGENT: &str = "CrowdRelay/1.0 (growth metric sync)";
-
-/// Free proxy list sources. Fetched at startup and when the pool is
-/// exhausted. Each returns a newline-separated list of `host:port` entries.
-const PROXY_SOURCES: &[&str] = &[
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all",
-    "https://www.proxy-list.download/api/v1/get?type=http",
-];
-
-/// How many proxies to test concurrently when refreshing the pool.
-const PROXY_TEST_CONCURRENCY: usize = 20;
-/// Timeout for a single proxy test (connect + fetch Reddit about.json).
-const PROXY_TEST_TIMEOUT: Duration = Duration::from_secs(8);
-/// Maximum number of working proxies to keep in the pool.
-const PROXY_POOL_MAX: usize = 10;
-/// How long to keep a proxy in the pool before forcing a refresh.
-const PROXY_POOL_TTL: Duration = Duration::from_secs(30 * 60);
-/// Cooldown before rebuilding a pool that came back empty. Was effectively
-/// zero, which cost a full candidate sweep per connection.
-const PROXY_POOL_EMPTY_RETRY: Duration = Duration::from_secs(5 * 60);
 
 /// Platforms this worker polls.
 ///
@@ -135,13 +113,11 @@ pub struct GrowthMetricSyncWorker {
     youtube_api_key: Option<String>,
     /// Facebook Page access token for Graph API calls.
     facebook_page_access_token: Option<String>,
-    /// Static proxy override. If set, the worker uses this single proxy
-    /// for all Reddit requests instead of the free proxy pool.
-    reddit_static_proxy: Option<String>,
-    /// Rotating free-proxy pool for Reddit. Lazily populated on first
-    /// Reddit sync and refreshed when exhausted or stale.
-    reddit_proxy_pool: Arc<Mutex<RedditProxyPool>>,
-    /// TikTok Display API credentials for OAuth token refresh.
+    /// Where the agent service lives, and the key used to derive its
+    /// per-workspace bearer. Reddit is the only platform here that cannot be
+    /// read without a credential somebody else holds.
+    agent_service_url: String,
+    agent_service_auth_key: Option<String>,
     tiktok_client_key: Option<String>,
     tiktok_client_secret: Option<String>,
     /// Encryption key for decrypting OAuth tokens stored in
@@ -171,7 +147,8 @@ impl GrowthMetricSyncWorker {
         pool: PgPool,
         youtube_api_key: Option<String>,
         facebook_page_access_token: Option<String>,
-        reddit_proxy_url: Option<String>,
+        agent_service_url: String,
+        agent_service_auth_key: Option<String>,
         tiktok_client_key: Option<String>,
         tiktok_client_secret: Option<String>,
         lastfm_api_key: Option<String>,
@@ -209,18 +186,18 @@ impl GrowthMetricSyncWorker {
             .user_agent(USER_AGENT)
             .build()
             .map_err(GrowthMetricSyncError::ClientBuild)?;
-        if let Some(ref url) = reddit_proxy_url {
-            tracing::info!("growth metric sync: using static Reddit proxy: {url}");
-        } else {
-            tracing::info!("growth metric sync: using free proxy pool for Reddit");
+        if agent_service_auth_key.is_none() {
+            tracing::warn!(
+                "growth metric sync: no agent service key; reddit connections cannot be read"
+            );
         }
         Ok(Some(Self {
             pool,
             http_client,
             youtube_api_key,
             facebook_page_access_token,
-            reddit_static_proxy: reddit_proxy_url,
-            reddit_proxy_pool: Arc::new(Mutex::new(RedditProxyPool::new())),
+            agent_service_url,
+            agent_service_auth_key,
             tiktok_client_key,
             tiktok_client_secret,
             response_encryption_key,
@@ -1109,31 +1086,80 @@ impl GrowthMetricSyncWorker {
         Ok(())
     }
 
-    /// Reddit: fetch subreddit subscriber count via public JSON (no auth).
-    /// Recorded under platform='social' because the MetricPlatform enum has
-    /// no 'reddit' variant — Reddit feeds the social coverage bucket.
+    /// Reddit: subscriber count for one subreddit, read through the agent
+    /// service. Recorded under platform='social' because the MetricPlatform
+    /// enum has no 'reddit' variant — Reddit feeds the social coverage bucket.
     ///
-    /// Reddit blocks datacenter IPs. The worker tries:
-    ///   1. A static proxy if `CROWDRELAY_REDDIT_PROXY_URL` is set.
-    ///   2. The free rotating proxy pool (fetched from public proxy lists,
-    ///      tested against Reddit, cached for 30 minutes).
-    ///   3. Direct connection as a last resort (may work from non-datacenter
-    ///      IPs; logs a warning if it fails).
+    /// This used to fetch `https://www.reddit.com/r/{sub}/about.json` directly,
+    /// through a static proxy, then a rotating free-proxy pool, then a direct
+    /// connection — three tiers of fallback built on the premise that Reddit
+    /// blocks datacenter IPs and a different IP would get through.
+    ///
+    /// The premise is false. Measured against Reddit today, from a datacenter
+    /// host and a residential connection, with a curl and a browser
+    /// User-Agent:
+    ///
+    /// ```text
+    /// GET https://www.reddit.com/r/Metal/about.json   403   (both)
+    /// GET https://old.reddit.com/r/Metal/about.json   302 to /login
+    /// GET https://www.reddit.com/r/Metal/             200, but the body is a
+    ///                                                 JavaScript proof-of-work
+    ///                                                 challenge, not the
+    ///                                                 subreddit
+    /// ```
+    ///
+    /// Reddit requires authentication for the JSON API now, from everywhere.
+    /// No proxy reaches around an auth requirement, so every tier of that
+    /// fallback was guaranteed to fail and the failure was silent: production
+    /// carries 29 connected Reddit connections and not one of them has ever
+    /// recorded a data point.
+    ///
+    /// The agent service is the only route that holds a credential, so this
+    /// asks it, exactly as the community-intelligence adapter does. The moment
+    /// Reddit access is restored — through the browser session or a script
+    /// app — all 29 connections start syncing without another change here.
     async fn sync_reddit(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
         let subreddit = &conn.provider_account_id;
-        let url = format!("https://www.reddit.com/r/{subreddit}/about.json");
-
-        let response = self.fetch_reddit(&url).await?;
+        let Some(auth_key) = self.agent_service_auth_key.as_deref() else {
+            return Err(GrowthMetricSyncError::ProviderApi(
+                "reddit needs the agent service to read a subreddit and                  CROWDRELAY_AGENT_SERVICE_AUTH_KEY is not set"
+                    .to_owned(),
+            ));
+        };
+        let url = format!("{}/reddit/observe", self.agent_service_url);
+        let token = crate::discovery::derive_agent_token(auth_key, conn.workspace_id);
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Workspace-Id", conn.workspace_id.to_string())
+            .json(&serde_json::json!({ "subreddit": subreddit, "limit": 1 }))
+            .send()
+            .await?;
         if !response.status().is_success() {
+            let status = response.status();
+            let detail = response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
             return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "Reddit API returned HTTP {} for r/{subreddit}",
-                response.status()
+                "agent service could not read r/{subreddit}: {detail}"
             )));
         }
-        let body: RedditAboutResponse = response.json().await?;
-        let subscriber_count = body.data.subscribers;
+        let body: RedditObserveResponse = response.json().await?;
+        let Some(subscriber_count) = body.subscribers else {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "agent service returned no subscriber count for r/{subreddit}"
+            )));
+        };
 
-        let display_name = body.data.display_name.as_deref().unwrap_or(subreddit);
+        let display_name = body.title.as_deref().unwrap_or(subreddit);
         record_metric_point(
             &self.pool,
             conn.workspace_id,
@@ -1154,330 +1180,6 @@ impl GrowthMetricSyncWorker {
         );
         Ok(())
     }
-
-    /// Fetches a Reddit URL, trying the static proxy, then the proxy pool,
-    /// then a direct connection.
-    async fn fetch_reddit(&self, url: &str) -> Result<reqwest::Response, GrowthMetricSyncError> {
-        // 1. Static proxy (if configured).
-        if let Some(ref proxy_url) = self.reddit_static_proxy
-            && let Ok(client) = self.build_proxied_client(proxy_url)
-        {
-            match client.get(url).send().await {
-                Ok(resp) => return Ok(resp),
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    proxy = %proxy_url,
-                    "reddit static proxy failed, falling back to pool"
-                ),
-            }
-        }
-
-        // 2. Free proxy pool.
-        if let Some(proxy_url) = self.get_pool_proxy().await
-            && let Ok(client) = self.build_proxied_client(&proxy_url)
-        {
-            match client.get(url).send().await {
-                Ok(resp) => return Ok(resp),
-                Err(e) => tracing::debug!(
-                    error = %e,
-                    proxy = %proxy_url,
-                    "reddit pool proxy failed"
-                ),
-            }
-            self.mark_proxy_failed(&proxy_url).await;
-        }
-
-        // 3. Direct connection (last resort — usually blocked from datacenter).
-        tracing::debug!("reddit: trying direct connection (no proxy)");
-        let resp = self.http_client.get(url).send().await?;
-        if resp.status().is_success() {
-            tracing::warn!(
-                "reddit direct connection succeeded — datacenter IP not blocked \
-                 (unexpected). Consider setting CROWDRELAY_REDDIT_PROXY_URL for reliability."
-            );
-        }
-        Ok(resp)
-    }
-
-    /// Builds a reqwest client that routes through the given proxy.
-    fn build_proxied_client(&self, proxy_url: &str) -> Result<reqwest::Client, reqwest::Error> {
-        reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(proxy_url)?)
-            .connect_timeout(PROXY_TEST_TIMEOUT)
-            .timeout(HTTP_TIMEOUT)
-            .user_agent(USER_AGENT)
-            .build()
-    }
-
-    /// Gets a working proxy from the pool, refreshing if stale or empty.
-    async fn get_pool_proxy(&self) -> Option<String> {
-        let mut pool = self.reddit_proxy_pool.lock().await;
-        pool.get_proxy(&self.http_client).await
-    }
-
-    /// Marks a proxy as failed in the pool.
-    async fn mark_proxy_failed(&self, proxy_url: &str) {
-        let mut pool = self.reddit_proxy_pool.lock().await;
-        pool.mark_failed(proxy_url);
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Reddit proxy pool
-// ──────────────────────────────────────────────────────────────────────────
-
-/// A rotating pool of free HTTP proxies for Reddit requests.
-///
-/// Reddit blocks datacenter IPs from accessing its public JSON API. The
-/// pool fetches proxy lists from public sources, tests each proxy against
-/// Reddit, and caches the working ones. When a proxy fails, it's evicted.
-/// The pool refreshes when stale (30 min TTL) or empty.
-struct RedditProxyPool {
-    /// Working proxies, in order of discovery.
-    working: Vec<String>,
-    /// Round-robin index into `working`.
-    next_idx: AtomicUsize,
-    /// When the pool was last refreshed.
-    last_refresh: Option<Instant>,
-}
-
-/// Whether the Reddit proxy pool may be rebuilt now.
-///
-/// The empty case is the point: `is_empty()` used to be checked before any
-/// clock, so an unfillable pool rebuilt itself on every call — thousands of
-/// candidates per connection, each sweep outliving the 20s timeout, so no
-/// cycle ever finished and shutdown never landed.
-fn needs_proxy_refresh(age: Option<Duration>, pool_is_empty: bool) -> bool {
-    match age {
-        None => true,
-        Some(age) if age > PROXY_POOL_TTL => true,
-        Some(age) => pool_is_empty && age > PROXY_POOL_EMPTY_RETRY,
-    }
-}
-
-impl RedditProxyPool {
-    fn new() -> Self {
-        Self {
-            working: Vec::new(),
-            next_idx: AtomicUsize::new(0),
-            last_refresh: None,
-        }
-    }
-
-    /// Returns a working proxy, refreshing the pool if stale or empty.
-    /// Returns `None` if no working proxy can be found.
-    ///
-    /// See [`needs_proxy_refresh`] for when a rebuild is allowed.
-    async fn get_proxy(&mut self, direct_client: &reqwest::Client) -> Option<String> {
-        let needs_refresh = needs_proxy_refresh(
-            self.last_refresh.map(|instant| instant.elapsed()),
-            self.working.is_empty(),
-        );
-
-        if needs_refresh {
-            self.refresh(direct_client).await;
-        }
-
-        if self.working.is_empty() {
-            return None;
-        }
-
-        let idx = self.next_idx.fetch_add(1, Ordering::Relaxed) % self.working.len();
-        self.working.get(idx).cloned()
-    }
-
-    /// Evicts a proxy that failed during a Reddit request.
-    fn mark_failed(&mut self, proxy_url: &str) {
-        let before = self.working.len();
-        self.working.retain(|p| p != proxy_url);
-        if self.working.len() < before {
-            tracing::debug!(
-                proxy = %proxy_url,
-                remaining = self.working.len(),
-                "evicted failed proxy from pool"
-            );
-        }
-    }
-
-    /// Fetches proxy lists from public sources, tests each proxy against
-    /// Reddit's about.json, and keeps the ones that work (up to PROXY_POOL_MAX).
-    async fn refresh(&mut self, direct_client: &reqwest::Client) {
-        tracing::info!("reddit proxy pool: refreshing from public sources");
-
-        // Fetch candidate proxies from all sources.
-        let candidates = self.fetch_proxy_candidates(direct_client).await;
-        if candidates.is_empty() {
-            tracing::warn!("reddit proxy pool: no candidates from any source");
-            self.last_refresh = Some(Instant::now());
-            return;
-        }
-
-        tracing::info!(
-            candidates = candidates.len(),
-            "reddit proxy pool: testing candidates against Reddit"
-        );
-
-        // Test candidates concurrently.
-        let working = test_proxies_concurrently(&candidates).await;
-
-        tracing::info!(
-            working = working.len(),
-            candidates = candidates.len(),
-            "reddit proxy pool: refresh complete"
-        );
-
-        self.working = working;
-        self.next_idx.store(0, Ordering::Relaxed);
-        self.last_refresh = Some(Instant::now());
-    }
-
-    /// Fetches proxy lists from all public sources concurrently and
-    /// deduplicates. Each source is fetched independently — a failing
-    /// source does not cancel the others. Worst-case latency is the
-    /// timeout of a single source (~10s), not the sum of all sources.
-    async fn fetch_proxy_candidates(&self, client: &reqwest::Client) -> Vec<String> {
-        use tokio::task::JoinSet;
-
-        let mut join_set: JoinSet<Option<Vec<String>>> = JoinSet::new();
-        for source in PROXY_SOURCES {
-            let client = client.clone();
-            join_set.spawn(async move {
-                match client
-                    .get(*source)
-                    .timeout(Duration::from_secs(10))
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        let text = resp.text().await.ok()?;
-                        Some(
-                            text.lines()
-                                .map(str::trim)
-                                .filter(|l| is_valid_proxy_line(l))
-                                .map(|l| format!("http://{l}"))
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, source = *source, "proxy source fetch failed");
-                        None
-                    }
-                    _ => None,
-                }
-            });
-        }
-
-        let mut all: Vec<String> = Vec::new();
-        while let Some(res) = join_set.join_next().await {
-            if let Ok(Some(proxies)) = res {
-                all.extend(proxies);
-            }
-        }
-        all.sort();
-        all.dedup();
-        all
-    }
-}
-
-/// Tests proxies concurrently against Reddit, returns the ones that work.
-/// Stops spawning and aborts remaining in-flight tasks once PROXY_POOL_MAX
-/// working proxies are found, avoiding wasted network/CPU.
-async fn test_proxies_concurrently(candidates: &[String]) -> Vec<String> {
-    use tokio::task::JoinSet;
-
-    let mut join_set: JoinSet<Option<String>> = JoinSet::new();
-    let mut working: Vec<String> = Vec::new();
-
-    for proxy_url in candidates.iter().take(200) {
-        // Stop spawning if we already have enough working proxies.
-        if working.len() >= PROXY_POOL_MAX {
-            break;
-        }
-        let proxy = proxy_url.clone();
-        join_set.spawn(async move {
-            if test_single_proxy(&proxy).await {
-                Some(proxy)
-            } else {
-                None
-            }
-        });
-        // Throttle: don't have more than PROXY_TEST_CONCURRENCY in flight.
-        while join_set.len() >= PROXY_TEST_CONCURRENCY {
-            if let Some(res) = join_set.join_next().await
-                && let Ok(Some(proxy)) = res
-            {
-                working.push(proxy);
-                if working.len() >= PROXY_POOL_MAX {
-                    join_set.abort_all();
-                    return working;
-                }
-            }
-        }
-    }
-
-    // Drain remaining tasks (if we didn't early-exit above).
-    while let Some(res) = join_set.join_next().await
-        && let Ok(Some(proxy)) = res
-    {
-        working.push(proxy);
-        if working.len() >= PROXY_POOL_MAX {
-            join_set.abort_all();
-            break;
-        }
-    }
-    working
-}
-
-/// Tests a single proxy by fetching Reddit's about.json for r/Metal.
-async fn test_single_proxy(proxy_url: &str) -> bool {
-    let proxy = match reqwest::Proxy::all(proxy_url) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let client = match reqwest::Client::builder()
-        .proxy(proxy)
-        .connect_timeout(PROXY_TEST_TIMEOUT)
-        .timeout(PROXY_TEST_TIMEOUT)
-        .user_agent(USER_AGENT)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    let url = "https://www.reddit.com/r/Metal/about.json";
-    match client.get(url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            // Verify it's actually JSON (not a block page).
-            let content_type = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            content_type.contains("json")
-        }
-        _ => false,
-    }
-}
-
-/// Checks if a line from a proxy list looks like a valid `host:port` entry.
-fn is_valid_proxy_line(line: &str) -> bool {
-    if line.is_empty() || line.starts_with('#') {
-        return false;
-    }
-    // Expect format: host:port (e.g. "192.0.2.1:8080")
-    let mut parts = line.rsplitn(2, ':');
-    let port_str = parts.next().unwrap_or("");
-    let host = parts.next().unwrap_or("");
-    let port: u16 = match port_str.parse() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    if port == 0 {
-        return false;
-    }
-    // Host part should not contain spaces.
-    !host.contains(' ')
 }
 
 #[derive(Debug, FromRow)]
@@ -1758,15 +1460,14 @@ fn urlencode(s: &str) -> String {
 
 // --- Reddit response types ---
 
+/// The subset of `POST /reddit/observe` this worker reads. The endpoint
+/// reports far more about a community; a subscriber count is all a metric
+/// point needs, and naming only that keeps the two from drifting into a
+/// shared shape neither owns.
 #[derive(Debug, Deserialize)]
-struct RedditAboutResponse {
-    data: RedditAboutData,
-}
-
-#[derive(Debug, Deserialize)]
-struct RedditAboutData {
-    subscribers: i64,
-    display_name: Option<String>,
+struct RedditObserveResponse {
+    subscribers: Option<i64>,
+    title: Option<String>,
 }
 
 /// Accepts a count only where it is a whole, non-negative number. YouTube
@@ -1839,35 +1540,6 @@ async fn record_metric_point(
 mod tests {
     use super::*;
     use crowdrelay_domain::fanbase::Platform as ConnectionPlatform;
-
-    #[test]
-    fn an_unfillable_proxy_pool_backs_off_instead_of_sweeping_every_call() {
-        // Never refreshed, or older than the TTL: rebuild.
-        assert!(needs_proxy_refresh(None, true));
-        assert!(needs_proxy_refresh(None, false));
-        assert!(needs_proxy_refresh(
-            Some(PROXY_POOL_TTL + Duration::from_secs(1)),
-            false
-        ));
-
-        // The regression: an empty pool just refreshed must NOT refresh again.
-        // This was `true`, so every connection triggered a full candidate
-        // sweep, no cycle finished, and the worker was SIGKILLed on deploy.
-        assert!(!needs_proxy_refresh(Some(Duration::from_secs(1)), true));
-        assert!(!needs_proxy_refresh(Some(PROXY_POOL_EMPTY_RETRY), true));
-
-        // Past the cooldown an empty pool is worth another attempt.
-        assert!(needs_proxy_refresh(
-            Some(PROXY_POOL_EMPTY_RETRY + Duration::from_secs(1)),
-            true
-        ));
-
-        // A working pool inside its TTL is left alone.
-        assert!(!needs_proxy_refresh(
-            Some(PROXY_POOL_EMPTY_RETRY + Duration::from_secs(1)),
-            false
-        ));
-    }
 
     #[test]
     fn synced_platforms_match_the_domain() {
@@ -2013,63 +1685,23 @@ mod tests {
     }
 
     #[test]
-    fn reddit_about_response_parses_subscribers() {
-        let json = br#"{"kind":"t5","data":{"subscribers":1983452,"display_name":"Metal"}}"#;
-        let response: RedditAboutResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(response.data.subscribers, 1983452);
-        assert_eq!(response.data.display_name.as_deref(), Some("Metal"));
+    fn reddit_observe_response_parses_subscribers() {
+        let json = br#"{"subreddit":"Metal","title":"Metal","subscribers":1983452,"posts":[]}"#;
+        let response: RedditObserveResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(response.subscribers, Some(1983452));
+        assert_eq!(response.title.as_deref(), Some("Metal"));
     }
 
     #[test]
-    fn reddit_about_response_without_display_name() {
-        let json = br#"{"kind":"t5","data":{"subscribers":42}}"#;
-        let response: RedditAboutResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(response.data.subscribers, 42);
-        assert!(response.data.display_name.is_none());
-    }
-
-    #[test]
-    fn is_valid_proxy_line_accepts_host_port() {
-        assert!(is_valid_proxy_line("192.0.2.1:8080"));
-        assert!(is_valid_proxy_line("198.51.100.1:3128"));
-        assert!(is_valid_proxy_line("example.com:80"));
-    }
-
-    #[test]
-    fn is_valid_proxy_line_rejects_garbage() {
-        assert!(!is_valid_proxy_line(""));
-        assert!(!is_valid_proxy_line("# comment"));
-        assert!(!is_valid_proxy_line("not a proxy"));
-        assert!(!is_valid_proxy_line("no-port-here"));
-        assert!(!is_valid_proxy_line("192.0.2.1:0"));
-        assert!(!is_valid_proxy_line("192.0.2.1:999999"));
-    }
-
-    #[test]
-    fn reddit_proxy_pool_starts_empty() {
-        let pool = RedditProxyPool::new();
-        assert!(pool.working.is_empty());
-        assert!(pool.last_refresh.is_none());
-    }
-
-    #[test]
-    fn reddit_proxy_pool_mark_failed_evicts() {
-        let mut pool = RedditProxyPool::new();
-        pool.working = vec![
-            "http://192.0.2.1:8080".to_string(),
-            "http://198.51.100.1:8080".to_string(),
-        ];
-        pool.mark_failed("http://192.0.2.1:8080");
-        assert_eq!(pool.working.len(), 1);
-        assert_eq!(pool.working[0], "http://198.51.100.1:8080");
-    }
-
-    #[test]
-    fn reddit_proxy_pool_mark_failed_unknown_is_noop() {
-        let mut pool = RedditProxyPool::new();
-        pool.working = vec!["http://192.0.2.1:8080".to_string()];
-        pool.mark_failed("http://203.0.113.1:8080");
-        assert_eq!(pool.working.len(), 1);
+    fn reddit_observe_response_tolerates_a_missing_count() {
+        // The endpoint reports `subscribers: null` for a community it could
+        // read but whose size Reddit did not return. Recording a zero there
+        // would put a fabricated low point in the series and read as a
+        // collapse in audience.
+        let json = br#"{"subreddit":"Metal","title":null,"subscribers":null,"posts":[]}"#;
+        let response: RedditObserveResponse = serde_json::from_slice(json).unwrap();
+        assert!(response.subscribers.is_none());
+        assert!(response.title.is_none());
     }
 
     #[test]
