@@ -468,6 +468,23 @@ impl PgOutboxStore {
         // same transaction. This prevents a false SUCCEEDED/FAILED and
         // enters the action into the reconciliation queue. The action
         // ledger trigger (migration 0190) maps `unknown → UNKNOWN`.
+        //
+        // The guard is exactly the two statuses the ledger permits
+        // `UNKNOWN` from — `RUNNING` and `SUCCEEDED`. It used to read
+        // `('succeeded', 'processing', 'queued', 'running')`, and both extra
+        // values were wrong in a different way. `running` is not a value the
+        // `viryaos_autopilot_actions` status CHECK allows at all, so that arm
+        // never matched anything. `queued` matched, and matching was the
+        // damage: `QUEUED -> UNKNOWN` is not a legal ledger transition, so the
+        // trigger raised `check_violation` and took this whole transaction
+        // down with it — the attempt row and the lease update along with it.
+        //
+        // Nothing is lost by narrowing it. `emit_external_action` only runs
+        // after the action is claimed into `processing`, so the outbox event
+        // hanging off a `queued` action is the `approval_requested`
+        // notification, not an execution dispatch. A notification whose
+        // delivery went ambiguous says nothing about an external side effect,
+        // because none was attempted.
         if resolution.outcome == super::model::AttemptOutcome::Ambiguous
             && let Some(action_id) = claim.action_id
         {
@@ -478,7 +495,7 @@ impl PgOutboxStore {
                     updated_at = now()
                 WHERE id = $1
                   AND workspace_id = $2
-                  AND status IN ('succeeded', 'processing', 'queued', 'running')
+                  AND status IN ('succeeded', 'processing')
                 "#,
             )
             .bind(action_id)
@@ -552,6 +569,13 @@ async fn mark_exhausted_delivery_leases_dead(
         // Transition linked autopilot actions to unknown — the worker
         // crashed during the final attempt and we don't know if the
         // provider received the request.
+        //
+        // Same guard as `resolve_delivery_attempt`, for the same reasons, and
+        // it mattered more here: this is a sweep. One `queued` action in the
+        // batch raised the ledger trigger's `check_violation`, which rolled
+        // back the `webhook_deliveries` dead-lettering above it, so the same
+        // rows were re-selected on the next pass and dead-lettering stalled
+        // for every delivery — not just the one that poisoned it.
         sqlx::query(
             r#"
             UPDATE viryaos_autopilot_actions AS action
@@ -562,7 +586,7 @@ async fn mark_exhausted_delivery_leases_dead(
                 AND event.id = delivery.outbox_event_id
             WHERE delivery.id = ANY($1)
               AND event.action_id = action.id
-              AND action.status IN ('succeeded', 'processing', 'queued', 'running')
+              AND action.status IN ('succeeded', 'processing')
             "#,
         )
         .bind(&dead_delivery_ids)
