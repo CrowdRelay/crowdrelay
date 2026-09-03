@@ -33,6 +33,7 @@ pub mod discord_executor;
 pub mod discovery;
 pub mod draws;
 pub mod event_sync;
+pub mod executor_registry;
 pub mod growth_metric_sync;
 pub mod leadership;
 pub mod ops_watchdog;
