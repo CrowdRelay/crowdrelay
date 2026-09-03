@@ -40,6 +40,16 @@ jobs:
         with:
           path: crowdrelay
 
+      # Both consumers are public, so the default GITHUB_TOKEN reads them and no
+      # PAT is involved. These steps passed `token: ${{ secrets.CROWDRELAY_PAT }}`,
+      # a secret that does not exist in this repository. An unset secret is the
+      # empty string rather than an omitted input, so checkout received an
+      # explicitly blank token and failed the job outright:
+      #
+      #   ##[error]Input required and not supplied: token
+      #
+      # Asking for a credential that is not needed cannot succeed and can only
+      # fail; dropping the input is the fix, not creating the secret.
       - name: Check out Virya Signal consumer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,7 +57,6 @@ jobs:
           ref: main
           path: virya-signal
           persist-credentials: false
-          token: ${{ secrets.CROWDRELAY_PAT }}
 
       - name: Check out Synesthesia consumer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +65,6 @@ jobs:
           ref: main
           path: synesthesia
           persist-credentials: false
-          token: ${{ secrets.CROWDRELAY_PAT }}
 
       - name: Verify current consumers against this CrowdRelay revision
         run: python3 crowdrelay/scripts/test-ecosystem-contract-v2.py
