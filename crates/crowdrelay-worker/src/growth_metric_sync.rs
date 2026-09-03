@@ -109,6 +109,8 @@ const SYNCED_PLATFORMS: &[&str] = &[
     "discogs",
     "bluesky",
     "bandcamp",
+    "tiktok",
+    "x",
 ];
 
 #[derive(Debug, Error)]
@@ -477,6 +479,7 @@ impl GrowthMetricSyncWorker {
             "discogs" => self.sync_discogs(conn).await,
             "bluesky" => self.sync_bluesky(conn).await,
             "bandcamp" => self.sync_bandcamp(conn).await,
+            "x" => self.sync_x(conn).await,
             // The lease query filters on SYNCED_PLATFORMS, so reaching this arm
             // means that list and this match disagree. Returning Ok would mark
             // the connection synced and record nothing — the failure would look
@@ -789,6 +792,51 @@ impl GrowthMetricSyncWorker {
             artist = %display_name,
             followers = follower_count,
             "soundcloud follower count recorded"
+        );
+        Ok(())
+    }
+
+    /// X (Twitter): fetch profile follower count from the public profile page.
+    /// X server-renders profile data as schema.org JSON-LD (a `ProfilePage`
+    /// whose `mainEntity` is a `Person`) into the HTML. No API key or app
+    /// registration needed — same scraping approach as SoundCloud and Spotify.
+    async fn sync_x(&self, conn: &DueConnection) -> Result<(), GrowthMetricSyncError> {
+        let handle = &conn.provider_account_id;
+        let url = format!("https://x.com/{handle}");
+        let response = self.http_client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(GrowthMetricSyncError::ProviderApi(format!(
+                "X profile page returned HTTP {} for @{handle}",
+                response.status()
+            )));
+        }
+        let html = response.text().await?;
+        let profile = extract_x_profile_data(&html).ok_or_else(|| {
+            GrowthMetricSyncError::ProviderApi(format!(
+                "could not extract profile data from X page for @{handle}"
+            ))
+        })?;
+        let follower_count = profile.follower_count();
+        let display_name = profile.name;
+
+        record_metric_point(
+            &self.pool,
+            conn.workspace_id,
+            conn.id,
+            "x",
+            "followers",
+            &format!("X followers — {display_name} (@{handle})"),
+            follower_count,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+        tracing::info!(
+            connection_id = %conn.id,
+            handle = %handle,
+            name = %display_name,
+            followers = follower_count,
+            "x follower count recorded"
         );
         Ok(())
     }
@@ -1546,6 +1594,115 @@ struct SoundCloudUserData {
     followers_count: i64,
 }
 
+// --- X (Twitter) response types ---
+
+/// Subset of the schema.org `Person` entity that X server-renders as
+/// JSON-LD in the profile page HTML. We only need the follower count
+/// and display name for the growth metric series.
+#[derive(Debug, Deserialize)]
+struct XProfileData {
+    name: String,
+    #[serde(default, rename = "interactionStatistic")]
+    interaction_statistic: Vec<XInteractionStatistic>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XInteractionStatistic {
+    #[serde(rename = "interactionType")]
+    interaction_type: String,
+    #[serde(rename = "userInteractionCount")]
+    user_interaction_count: i64,
+}
+
+/// Extracts the profile data from X's server-rendered JSON-LD.
+/// X embeds a `<script type="application/ld+json">` block containing
+/// a `ProfilePage` whose `mainEntity` is a `Person` with
+/// `interactionStatistic` entries. The `Follow` interaction type
+/// carries the follower count.
+fn extract_x_profile_data(html: &str) -> Option<XProfileData> {
+    // Find all JSON-LD script blocks and look for the one containing
+    // a Person with interactionStatistic.
+    let marker = r#"type="application/ld+json">"#;
+    let mut remaining = html;
+    while let Some(rel_start) = remaining.find(marker) {
+        let after_marker = remaining.get(rel_start + marker.len()..)?;
+        let end = after_marker.find("</script>")?;
+        let json_str = after_marker.get(..end)?;
+        remaining = after_marker.get(end..).unwrap_or("");
+
+        // The JSON-LD can be a single object or an array of objects.
+        // X typically renders a ProfilePage with a mainEntity property.
+        // Try parsing as a flexible JSON value first, then navigate.
+        let parsed: serde_json::Value = serde_json::from_str(json_str.trim()).ok()?;
+
+        // Navigate: top-level could be the Person directly, or a
+        // ProfilePage wrapping it, or an array of either.
+        if let Some(person) = find_person_in_json_ld(&parsed) {
+            let profile: XProfileData = serde_json::from_value(person).ok()?;
+            return Some(profile);
+        }
+    }
+    None
+}
+
+/// Recursively searches a JSON-LD value for a `Person` typed object
+/// (by `@type` or schema.org type) and returns it.
+fn find_person_in_json_ld(value: &serde_json::Value) -> Option<serde_json::Value> {
+    // Check if this object is a Person.
+    if let Some(obj) = value.as_object() {
+        let type_field = obj.get("@type").or_else(|| obj.get("type"))?;
+        let is_person = type_field
+            .as_str()
+            .map(|t| t == "Person" || t.contains("Person"))
+            .unwrap_or(false)
+            || type_field.as_array().is_some_and(|arr| {
+                arr.iter().any(|v| {
+                    v.as_str()
+                        .is_some_and(|t| t == "Person" || t.contains("Person"))
+                })
+            });
+        if is_person {
+            return Some(value.clone());
+        }
+        // Check mainEntity (ProfilePage → Person).
+        if let Some(main_entity) = obj.get("mainEntity")
+            && let Some(person) = find_person_in_json_ld(main_entity)
+        {
+            return Some(person);
+        }
+        // Check about (some pages use this).
+        if let Some(about) = obj.get("about")
+            && let Some(person) = find_person_in_json_ld(about)
+        {
+            return Some(person);
+        }
+    }
+    // Search array elements.
+    if let Some(arr) = value.as_array() {
+        for element in arr {
+            if let Some(person) = find_person_in_json_ld(element) {
+                return Some(person);
+            }
+        }
+    }
+    None
+}
+
+/// Extracts the follower count from an `XProfileData` by finding the
+/// `Follow` interaction statistic entry.
+impl XProfileData {
+    fn follower_count(&self) -> i64 {
+        self.interaction_statistic
+            .iter()
+            .find(|stat| {
+                stat.interaction_type.ends_with("FollowAction")
+                    || stat.interaction_type.ends_with("Follow")
+            })
+            .map(|stat| stat.user_interaction_count)
+            .unwrap_or(0)
+    }
+}
+
 /// Extracts the user data JSON from SoundCloud's `window.__sc_hydration`
 /// array. The hydration data is an array of objects, each with a
 /// `hydratable` field and a `data` field. The user object has
@@ -2070,5 +2227,55 @@ mod tests {
             !html.contains(r#"class="supporters""#)
                 && !html.contains("community-recent-supporters")
         );
+    }
+
+    #[test]
+    fn x_profile_data_parses_followers() {
+        let json = r#"{"@type":"Person","name":"Virya","interactionStatistic":[{"@type":"InteractionCounter","interactionType":"https://schema.org/FollowAction","userInteractionCount":12345},{"@type":"InteractionCounter","interactionType":"https://schema.org/LikeAction","userInteractionCount":999}]}"#;
+        let profile: XProfileData = serde_json::from_str(json).unwrap();
+        assert_eq!(profile.name, "Virya");
+        assert_eq!(profile.follower_count(), 12345);
+    }
+
+    #[test]
+    fn x_profile_data_parses_without_followers() {
+        let json = r#"{"@type":"Person","name":"TestArtist"}"#;
+        let profile: XProfileData = serde_json::from_str(json).unwrap();
+        assert_eq!(profile.name, "TestArtist");
+        assert_eq!(profile.follower_count(), 0);
+    }
+
+    #[test]
+    fn extract_x_profile_data_finds_person_in_profile_page() {
+        let html = r#"<html><head><script type="application/ld+json">{"@type":"ProfilePage","mainEntity":{"@type":"Person","name":"Virya","interactionStatistic":[{"@type":"InteractionCounter","interactionType":"https://schema.org/FollowAction","userInteractionCount":5000}]}}</script></head><body></body></html>"#;
+        let profile = extract_x_profile_data(html);
+        assert!(profile.is_some());
+        let profile = profile.unwrap();
+        assert_eq!(profile.name, "Virya");
+        assert_eq!(profile.follower_count(), 5000);
+    }
+
+    #[test]
+    fn extract_x_profile_data_finds_standalone_person() {
+        let html = r#"<html><head><script type="application/ld+json">{"@type":"Person","name":"IndieArtist","interactionStatistic":[{"@type":"InteractionCounter","interactionType":"https://schema.org/FollowAction","userInteractionCount":42}]}</script></head></html>"#;
+        let profile = extract_x_profile_data(html);
+        assert!(profile.is_some());
+        let profile = profile.unwrap();
+        assert_eq!(profile.name, "IndieArtist");
+        assert_eq!(profile.follower_count(), 42);
+    }
+
+    #[test]
+    fn extract_x_profile_data_returns_none_when_missing() {
+        let html = r#"<html><body>no json-ld here</body></html>"#;
+        let profile = extract_x_profile_data(html);
+        assert!(profile.is_none());
+    }
+
+    #[test]
+    fn extract_x_profile_data_returns_none_when_no_person() {
+        let html = r#"<html><head><script type="application/ld+json">{"@type":"WebPage","name":"Not a profile"}</script></head></html>"#;
+        let profile = extract_x_profile_data(html);
+        assert!(profile.is_none());
     }
 }

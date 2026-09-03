@@ -13,7 +13,7 @@ use crowdrelay_infra::audience_graph::{
     EvidenceInput, PostgresAudienceGraphRepository, UpsertPlaceInput,
 };
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::{
@@ -32,7 +32,7 @@ const AGENT_AUTH_NAMESPACE: &[u8] = b"crowdrelay-control-plane-v1:";
 /// `token = hex(HMAC-SHA256(master_key, namespace + workspace_id))`
 pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String {
     // HMAC-SHA256 accepts any key length; this never fails.
-    let mut mac = match <Hmac<Sha256> as Mac>::new_from_slice(master_key.as_bytes()) {
+    let mut mac = match <Hmac<Sha256> as KeyInit>::new_from_slice(master_key.as_bytes()) {
         Ok(mac) => mac,
         Err(_) => return String::new(),
     };
@@ -92,6 +92,10 @@ pub struct DiscoveryConfig {
     pub reddit_queries: Vec<String>,
     /// Optional proxy URL for Reddit requests (bypasses IP-level 403 blocks).
     pub proxy_url: Option<String>,
+    /// X (Twitter) search queries for fan discovery — genre curators,
+    /// music communities, artist accounts. Relies on the agents service
+    /// for browser-based scraping (X has no free public search API).
+    pub x_queries: Vec<String>,
 }
 
 impl DiscoveryConfig {
@@ -110,15 +114,31 @@ impl DiscoveryConfig {
             .ok()
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty());
+        let x_queries = std::env::var("CROWDRELAY_DISCOVERY_X_QUERIES")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|query| !query.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Self {
             reddit_queries,
             proxy_url,
+            x_queries,
         }
     }
 
     #[must_use]
     pub fn enabled(&self) -> bool {
         !self.reddit_queries.is_empty()
+    }
+
+    #[must_use]
+    pub fn x_enabled(&self) -> bool {
+        !self.x_queries.is_empty()
     }
 }
 
@@ -621,6 +641,243 @@ impl NormalizedSubreddit {
     }
 }
 
+// ---------------------------------------------------------------------------
+// X (Twitter) discovery worker
+// ---------------------------------------------------------------------------
+
+/// Maximum accounts to import per query per sweep.
+const MAX_X_ACCOUNTS_PER_QUERY: usize = 10;
+/// Maximum queries to process per sweep.
+const MAX_X_QUERIES_PER_PASS: usize = 5;
+
+/// A row from the agents service's X scrape results, returned by
+/// `GET /x/scrape/results`. The agents service stores browser-scraped
+/// X search results; this struct deserializes them for normalization.
+#[derive(Debug, Deserialize)]
+pub(crate) struct XScrapeRow {
+    handle: String,
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    followers: Option<u64>,
+    url: String,
+}
+
+/// The normalized slice of an X account that becomes one graph place.
+#[derive(Debug)]
+pub struct NormalizedXAccount {
+    pub handle: String,
+    pub url: String,
+    pub display_name: String,
+    pub description: String,
+    pub followers: u64,
+    pub raw: serde_json::Value,
+    pub method: &'static str,
+}
+
+impl NormalizedXAccount {
+    pub(crate) fn from_scrape_row(row: XScrapeRow) -> Self {
+        let handle = row.handle.trim_start_matches('@').to_owned();
+        let url = if row.url.is_empty() {
+            format!("https://x.com/{handle}")
+        } else {
+            row.url
+        };
+        Self {
+            handle: format!("@{handle}"),
+            url,
+            display_name: row.display_name,
+            description: row.description,
+            followers: row.followers.unwrap_or(0),
+            raw: serde_json::Value::Null,
+            method: "agents_browser_scrape",
+        }
+    }
+
+    /// Activity heuristic in basis points, banded on follower count.
+    pub fn activity_bp(&self) -> i32 {
+        const BANDS: [(u64, i32); 6] = [
+            (1_000, 2_000),
+            (10_000, 3_500),
+            (50_000, 5_000),
+            (250_000, 6_500),
+            (1_000_000, 8_000),
+            (u64::MAX, 9_000),
+        ];
+        BANDS
+            .iter()
+            .find(|(threshold, _)| self.followers < *threshold)
+            .map(|(_, value)| *value)
+            .unwrap_or(2_000)
+    }
+
+    pub fn to_place_input<'a>(&'a self, workspace_id: Uuid) -> UpsertPlaceInput<'a> {
+        UpsertPlaceInput {
+            workspace_id,
+            place_kind: crowdrelay_domain::audience_graph::PlaceKind::XAccount,
+            platform: "x",
+            name: &self.display_name,
+            url: &self.url,
+            country_code: None,
+            language: None,
+            genres: &[],
+            member_count: Some(i32::try_from(self.followers).unwrap_or(i32::MAX)),
+            activity_bp: Some(self.activity_bp()),
+            notes: Some(self.description.as_str()),
+        }
+    }
+}
+
+pub struct XDiscoveryWorker {
+    pool: sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    client: reqwest::Client,
+    config: DiscoveryConfig,
+    poll_interval: Duration,
+    agent_service_url: String,
+    agent_service_auth_key: Option<String>,
+}
+
+impl XDiscoveryWorker {
+    pub fn new(
+        pool: sqlx::PgPool,
+        workspace_id: WorkspaceId,
+        config: DiscoveryConfig,
+        poll_interval: Duration,
+        operation_timeout: Duration,
+        agent_service_url: String,
+        agent_service_auth_key: Option<String>,
+    ) -> Result<Self, DiscoveryBuildError> {
+        let client = build_reddit_client(None, operation_timeout)?;
+        Ok(Self {
+            pool,
+            workspace_id,
+            client,
+            config,
+            poll_interval,
+            agent_service_url,
+            agent_service_auth_key,
+        })
+    }
+
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        if !self.config.x_enabled() {
+            tracing::info!("x discovery disabled; no queries configured");
+            return;
+        }
+        let client = self.client.clone();
+        let mut ticker = tokio::time::interval(self.poll_interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() { return; }
+                }
+                _ = ticker.tick() => {
+                    match timeout(SWEEP_WATCHDOG_TIMEOUT, self.run_once(&client)).await {
+                        Ok(Ok(imported)) if imported > 0 => {
+                            tracing::info!(imported, "x discovery imported new places");
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => tracing::warn!(error = %error, "x discovery sweep failed"),
+                        Err(_) => tracing::warn!("x discovery sweep timed out"),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_once(&self, client: &reqwest::Client) -> Result<usize, DiscoveryError> {
+        let repository = PostgresAudienceGraphRepository::new(self.pool.clone());
+        let mut imported = 0_usize;
+        for query in self.config.x_queries.iter().take(MAX_X_QUERIES_PER_PASS) {
+            let accounts = match self.search_x_accounts(client, query).await {
+                Ok(accounts) => accounts,
+                Err(error) => {
+                    tracing::warn!(query, error = %error, "x discovery query failed, skipping to next query");
+                    continue;
+                }
+            };
+            if accounts.is_empty() {
+                continue;
+            }
+            let inputs: Vec<UpsertPlaceInput> = accounts
+                .iter()
+                .map(|acc| acc.to_place_input(self.workspace_id.into_uuid()))
+                .collect();
+            let mut evidence_by_index = std::collections::HashMap::new();
+            for (index, acc) in accounts.iter().enumerate() {
+                evidence_by_index.insert(
+                    index,
+                    vec![EvidenceInput {
+                        evidence_kind: "scan",
+                        method: acc.method,
+                        confidence_bp: 6_000,
+                        payload: &acc.raw,
+                    }],
+                );
+            }
+            imported += repository
+                .import_scan_batch(&inputs, &evidence_by_index)
+                .await?
+                .len();
+            tokio::time::sleep(REQUEST_SPACING).await;
+        }
+        Ok(imported)
+    }
+
+    /// Searches X via the agents service browser scrape. X has no free
+    /// public search API, so all discovery goes through the agents service's
+    /// logged-in browser session. Returns an empty vec when the agents
+    /// service is unreachable or has no X scraping support yet.
+    async fn search_x_accounts(
+        &self,
+        client: &reqwest::Client,
+        query: &str,
+    ) -> Result<Vec<NormalizedXAccount>, DiscoveryError> {
+        let Some(auth_key) = self.agent_service_auth_key.as_deref() else {
+            return Ok(vec![]);
+        };
+        let ws = self.workspace_id.into_uuid();
+        let token = derive_agent_token(auth_key, ws);
+
+        // Read stored scrape results.
+        let url = format!("{}/x/scrape/results", self.agent_service_url);
+        let response = client
+            .get(&url)
+            .query(&[
+                ("query", query),
+                ("limit", &MAX_X_ACCOUNTS_PER_QUERY.to_string()),
+            ])
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Workspace-Id", ws.to_string())
+            .timeout(AGENTS_READ_TIMEOUT)
+            .send()
+            .await
+            .map_err(DiscoveryError::Network)?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            if status == 404 {
+                // Agents service doesn't support X scraping yet.
+                tracing::debug!("agents service has no x scrape endpoint yet, skipping");
+                return Ok(vec![]);
+            }
+            if status == 429 || status >= 500 {
+                return Err(DiscoveryError::Status(status));
+            }
+            return Ok(vec![]);
+        }
+
+        let rows: Vec<XScrapeRow> = response.json().await?;
+        Ok(rows
+            .into_iter()
+            .map(NormalizedXAccount::from_scrape_row)
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,12 +926,76 @@ mod tests {
         let config = DiscoveryConfig {
             reddit_queries: vec![],
             proxy_url: None,
+            x_queries: vec![],
         };
         assert!(!config.enabled());
+        assert!(!config.x_enabled());
         let config = DiscoveryConfig {
             reddit_queries: vec!["metal".to_owned()],
             proxy_url: None,
+            x_queries: vec![],
         };
         assert!(config.enabled());
+        assert!(!config.x_enabled());
+        let config = DiscoveryConfig {
+            reddit_queries: vec![],
+            proxy_url: None,
+            x_queries: vec!["metal curator".to_owned()],
+        };
+        assert!(!config.enabled());
+        assert!(config.x_enabled());
+    }
+
+    #[test]
+    fn x_account_normalization_maps_the_graph_shape() {
+        let row = XScrapeRow {
+            handle: "MetalCurator".to_owned(),
+            display_name: "Metal Curator".to_owned(),
+            description: "Curating the best metal".to_owned(),
+            followers: Some(42_000),
+            url: String::new(),
+        };
+        let normalized = NormalizedXAccount::from_scrape_row(row);
+        assert_eq!(normalized.handle, "@MetalCurator");
+        assert_eq!(normalized.url, "https://x.com/MetalCurator");
+        assert_eq!(normalized.followers, 42_000);
+        let input = normalized.to_place_input(Uuid::nil());
+        assert_eq!(input.place_kind, PlaceKind::XAccount);
+        assert_eq!(input.platform, "x");
+        assert_eq!(input.member_count, Some(42_000));
+    }
+
+    #[test]
+    fn x_account_normalization_strips_at_prefix() {
+        let row = XScrapeRow {
+            handle: "@AlreadyAt".to_owned(),
+            display_name: "Test".to_owned(),
+            description: String::new(),
+            followers: None,
+            url: "https://x.com/AlreadyAt".to_owned(),
+        };
+        let normalized = NormalizedXAccount::from_scrape_row(row);
+        assert_eq!(normalized.handle, "@AlreadyAt");
+        assert_eq!(normalized.url, "https://x.com/AlreadyAt");
+        assert_eq!(normalized.followers, 0);
+    }
+
+    #[test]
+    fn x_account_activity_bands_are_monotonic() {
+        let mut previous = 0;
+        for followers in [500u64, 5_000, 40_000, 200_000, 900_000, 5_000_000] {
+            let row = XScrapeRow {
+                handle: "test".to_owned(),
+                display_name: "Test".to_owned(),
+                description: String::new(),
+                followers: Some(followers),
+                url: String::new(),
+            };
+            let normalized = NormalizedXAccount::from_scrape_row(row);
+            let activity = normalized.activity_bp();
+            assert!(activity > previous, "{followers} must outrank {previous}");
+            assert!((0..=10_000).contains(&activity));
+            previous = activity;
+        }
     }
 }

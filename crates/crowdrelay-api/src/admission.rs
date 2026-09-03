@@ -20,7 +20,7 @@ use crowdrelay_domain::{
     AdmissionQrClaims, AdmissionQrError, EventSlug, NormalizedEmail, PassClaimToken,
     PassSessionToken, WorkspaceId,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use time::OffsetDateTime;

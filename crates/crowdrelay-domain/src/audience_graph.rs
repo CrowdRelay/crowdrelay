@@ -32,11 +32,12 @@ pub enum PlaceKind {
     Playlist,
     Zine,
     Festival,
+    XAccount,
     Other,
 }
 
 impl PlaceKind {
-    pub const ALL: [PlaceKind; 11] = [
+    pub const ALL: [PlaceKind; 12] = [
         PlaceKind::Subreddit,
         PlaceKind::Discord,
         PlaceKind::Forum,
@@ -47,6 +48,7 @@ impl PlaceKind {
         PlaceKind::Playlist,
         PlaceKind::Zine,
         PlaceKind::Festival,
+        PlaceKind::XAccount,
         PlaceKind::Other,
     ];
 
@@ -62,6 +64,7 @@ impl PlaceKind {
             PlaceKind::Playlist => "playlist",
             PlaceKind::Zine => "zine",
             PlaceKind::Festival => "festival",
+            PlaceKind::XAccount => "x_account",
             PlaceKind::Other => "other",
         }
     }

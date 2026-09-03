@@ -96,10 +96,11 @@ pub enum Platform {
     Discogs,
     Bluesky,
     Bandcamp,
+    X,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 17] = [
+    pub const ALL: [Platform; 18] = [
         Platform::Meta,
         Platform::Tiktok,
         Platform::GoogleAds,
@@ -117,6 +118,7 @@ impl Platform {
         Platform::Discogs,
         Platform::Bluesky,
         Platform::Bandcamp,
+        Platform::X,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -138,6 +140,7 @@ impl Platform {
             Self::Discogs => "discogs",
             Self::Bluesky => "bluesky",
             Self::Bandcamp => "bandcamp",
+            Self::X => "x",
         }
     }
 
@@ -189,7 +192,8 @@ impl Platform {
             | Self::Deezer
             | Self::Discogs
             | Self::Bluesky
-            | Self::Bandcamp => true,
+            | Self::Bandcamp
+            | Self::X => true,
         }
     }
 
@@ -230,6 +234,7 @@ impl Platform {
             Self::Discogs => "Discogs",
             Self::Bluesky => "Bluesky",
             Self::Bandcamp => "Bandcamp",
+            Self::X => "X",
         }
     }
 }
@@ -340,7 +345,8 @@ mod tests {
                 | Platform::Deezer
                 | Platform::Discogs
                 | Platform::Bluesky
-                | Platform::Bandcamp => {}
+                | Platform::Bandcamp
+                | Platform::X => {}
             }
         }
         let mut keys: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();

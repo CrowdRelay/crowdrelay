@@ -1466,6 +1466,7 @@ fn platform_label(platform: &MetricPlatform) -> String {
         MetricPlatform::Discogs => "Discogs".into(),
         MetricPlatform::Bluesky => "Bluesky".into(),
         MetricPlatform::Bandcamp => "Bandcamp".into(),
+        MetricPlatform::X => "X".into(),
     }
 }
 

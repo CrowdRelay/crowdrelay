@@ -159,6 +159,7 @@ pub enum MetricPlatform {
     Discogs,
     Bluesky,
     Bandcamp,
+    X,
 }
 
 impl MetricPlatform {
@@ -184,13 +185,14 @@ impl MetricPlatform {
             Self::Discogs => "discogs",
             Self::Bluesky => "bluesky",
             Self::Bandcamp => "bandcamp",
+            Self::X => "x",
         }
     }
 
     /// Every variant, in storage order. Kept in step with the enum by
     /// `all_covers_every_variant`, which stops compiling when a variant is
     /// added and left out.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Spotify,
         Self::YouTube,
         Self::Bandsintown,
@@ -210,6 +212,7 @@ impl MetricPlatform {
         Self::Discogs,
         Self::Bluesky,
         Self::Bandcamp,
+        Self::X,
     ];
 
     /// Derived from `as_str` so the two can never disagree.
@@ -251,6 +254,7 @@ impl MetricPlatform {
             Self::Discogs => "discogs_in_collection",
             Self::Bluesky => "bluesky_followers",
             Self::Bandcamp => "bandcamp_supporters",
+            Self::X => "x_followers",
         }
     }
 
@@ -277,6 +281,7 @@ impl MetricPlatform {
             Self::Discogs => "Discogs collectors",
             Self::Bluesky => "Bluesky followers",
             Self::Bandcamp => "Bandcamp supporters",
+            Self::X => "X followers",
         }
     }
 
@@ -302,7 +307,8 @@ impl MetricPlatform {
             | Self::Deezer
             | Self::Discogs
             | Self::Bluesky
-            | Self::Bandcamp => true,
+            | Self::Bandcamp
+            | Self::X => true,
         }
     }
 
@@ -338,7 +344,8 @@ impl MetricPlatform {
             | Self::SoundCloud
             | Self::Instagram
             | Self::Facebook
-            | Self::Bluesky => Some("followers"),
+            | Self::Bluesky
+            | Self::X => Some("followers"),
             Self::Bandsintown => Some("trackers"),
             Self::Discord => Some("members"),
             // `listeners` is people; `playcount` is plays. Only the former is
@@ -841,8 +848,8 @@ pub fn velocity_ratio_basis_points(
 // condition and `next` by the assert below, and a const-eval out-of-bounds is a
 // build error, not a runtime panic. Iterators are not available in const yet.
 #[allow(clippy::indexing_slicing)]
-pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 15] = {
-    let mut feeds = [MetricPlatform::Spotify; 15];
+pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 16] = {
+    let mut feeds = [MetricPlatform::Spotify; 16];
     let mut source = 0;
     let mut next = 0;
     while source < MetricPlatform::ALL.len() {
@@ -855,7 +862,7 @@ pub const OFF_PLATFORM_FEEDS: [MetricPlatform; 15] = {
     }
     // A length mismatch panics at compile time rather than silently truncating.
     assert!(
-        next == 15,
+        next == 16,
         "OFF_PLATFORM_FEEDS length must match the predicate"
     );
     feeds
@@ -947,7 +954,8 @@ mod tests {
                 | MetricPlatform::Deezer
                 | MetricPlatform::Discogs
                 | MetricPlatform::Bluesky
-                | MetricPlatform::Bandcamp => {}
+                | MetricPlatform::Bandcamp
+                | MetricPlatform::X => {}
             }
         }
         let mut seen: Vec<&str> = MetricPlatform::ALL.iter().map(|p| p.as_str()).collect();
