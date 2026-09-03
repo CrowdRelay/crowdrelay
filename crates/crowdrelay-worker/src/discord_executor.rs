@@ -623,8 +623,17 @@ impl DiscordExecutorWorker {
         .bind(metric_key)
         .fetch_optional(&self.pool)
         .await
-        .ok()
-        .flatten();
+        // A read failure here falls back to the constant, which is the right
+        // behaviour — a post should not be abandoned because a metric lookup
+        // failed. Saying so is what keeps a persistent failure from looking
+        // identical to an unmeasured audience.
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "could not read the measured discord audience; filing the fallback reach"
+            );
+            None
+        });
         value.and_then(|v| {
             let rounded = v.round();
             (rounded >= 1.0).then(|| rounded.min(f64::from(i32::MAX)) as i32)
