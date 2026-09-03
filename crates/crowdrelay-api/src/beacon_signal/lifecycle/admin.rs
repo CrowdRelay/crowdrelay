@@ -148,26 +148,34 @@ pub async fn admin_dashboard(State(state): State<crate::AppState>, headers: Head
             SELECT workspace_id,beacon_id,count(*)::bigint AS coverage_count
             FROM viryaos_beacon_signal_coverage GROUP BY workspace_id,beacon_id
         )
-        SELECT profile.beacon_id,beacon.display_name,beacon.beacon_kind,beacon.contact_email,
-               city.name AS city,profile.status,profile.radius_km,profile.locale,
-               profile.nearby_gigs_enabled,profile.invite_count,profile.last_invited_at,
-               profile.joined_at,profile.last_seen_at,
+        SELECT beacon.id AS beacon_id,beacon.display_name,beacon.beacon_kind,beacon.contact_email,
+               city.name AS city,
+               COALESCE(profile.status,'unverified') AS status,
+               COALESCE(profile.radius_km,0) AS radius_km,
+               COALESCE(profile.locale,'') AS locale,
+               COALESCE(profile.nearby_gigs_enabled,false) AS nearby_gigs_enabled,
+               COALESCE(profile.invite_count,0) AS invite_count,
+               profile.last_invited_at,
+               profile.joined_at,
+               profile.last_seen_at,
                COALESCE(session_counts.active_sessions,0)::bigint AS active_sessions,
                COALESCE(endpoint_counts.active_push_endpoints,0)::bigint AS active_push_endpoints,
                COALESCE(request_counts.open_press_requests,0)::bigint AS open_press_requests,
                COALESCE(engagement_counts.active_engagements,0)::bigint AS active_engagements,
                COALESCE(coverage_counts.coverage_count,0)::bigint AS coverage_count
-        FROM viryaos_beacon_signal_profiles profile
-        JOIN viryaos_beacons beacon
-          ON beacon.workspace_id=profile.workspace_id AND beacon.id=profile.beacon_id
+        FROM viryaos_beacons beacon
+        LEFT JOIN viryaos_beacon_signal_profiles profile
+          ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         LEFT JOIN cities city ON city.id=beacon.city_id
-        LEFT JOIN session_counts ON session_counts.workspace_id=profile.workspace_id AND session_counts.beacon_id=profile.beacon_id
-        LEFT JOIN endpoint_counts ON endpoint_counts.workspace_id=profile.workspace_id AND endpoint_counts.beacon_id=profile.beacon_id
-        LEFT JOIN request_counts ON request_counts.workspace_id=profile.workspace_id AND request_counts.beacon_id=profile.beacon_id
-        LEFT JOIN engagement_counts ON engagement_counts.workspace_id=profile.workspace_id AND engagement_counts.beacon_id=profile.beacon_id
-        LEFT JOIN coverage_counts ON coverage_counts.workspace_id=profile.workspace_id AND coverage_counts.beacon_id=profile.beacon_id
-        WHERE profile.workspace_id=$1
-        ORDER BY CASE profile.status WHEN 'active' THEN 0 WHEN 'invited' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
+        LEFT JOIN session_counts ON session_counts.workspace_id=beacon.workspace_id AND session_counts.beacon_id=beacon.id
+        LEFT JOIN endpoint_counts ON endpoint_counts.workspace_id=beacon.workspace_id AND endpoint_counts.beacon_id=beacon.id
+        LEFT JOIN request_counts ON request_counts.workspace_id=beacon.workspace_id AND request_counts.beacon_id=beacon.id
+        LEFT JOIN engagement_counts ON engagement_counts.workspace_id=beacon.workspace_id AND engagement_counts.beacon_id=beacon.id
+        LEFT JOIN coverage_counts ON coverage_counts.workspace_id=beacon.workspace_id AND coverage_counts.beacon_id=beacon.id
+        WHERE beacon.workspace_id=$1 AND beacon.active
+        ORDER BY CASE COALESCE(profile.status,'unverified')
+                   WHEN 'active' THEN 0 WHEN 'invited' THEN 1
+                   WHEN 'paused' THEN 2 WHEN 'revoked' THEN 3 ELSE 4 END,
                  beacon.relevance_basis_points DESC,beacon.relationship_score DESC,beacon.display_name,beacon.id
         LIMIT 500
         "#,
