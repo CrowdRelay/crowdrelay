@@ -579,17 +579,20 @@ impl DiscordExecutorWorker {
     /// Loads the Discord bot token and channel ID from `fanbase_connections`.
     /// Returns (channel_id, decrypted_bot_token).
     ///
-    /// The channel comes from `posting_target_ref`, not `provider_account_id`.
-    /// That column holds whatever the platform's *read* API needs, and for
-    /// discord it is the invite code the member-count endpoint takes. This
-    /// function used to read it as the channel, so a post would have gone to
-    /// `POST /channels/BBdDV6gVy/messages` — an invite code where a snowflake
-    /// belongs. It never failed out loud because no discord post has ever
-    /// been attempted.
+    /// The channel is `provider_account_id`; the invite code the member-count
+    /// sync reads lives in `external_account_ref`.
+    ///
+    /// One column used to hold both, and the two readers disagreed about
+    /// which: metrics read it as an invite code, this function read it as a
+    /// channel. Production held `BBdDV6gVy`, so a post would have gone to
+    /// `POST /channels/BBdDV6gVy/messages`. It never failed out loud because
+    /// no discord post had ever been attempted. Splitting the two meanings
+    /// across the two columns is what fixed it; the shape check below is what
+    /// keeps them from being swapped back.
     async fn load_bot_token(&self) -> Result<(String, String), DiscordExecutorError> {
         let ws = self.workspace_id.into_uuid();
         let row: (Option<String>, Option<String>) = sqlx::query_as(
-            r#"SELECT posting_target_ref, encrypted_access_token
+            r#"SELECT provider_account_id, encrypted_access_token
                FROM fanbase_connections
                WHERE workspace_id = $1 AND platform = 'discord' AND status = 'connected'
                  AND encrypted_access_token IS NOT NULL
@@ -602,17 +605,18 @@ impl DiscordExecutorWorker {
 
         let channel_id = row.0.ok_or_else(|| {
             DiscordExecutorError::DiscordApi(
-                "Discord connection has no posting_target_ref — set it to the numeric \
+                "Discord connection has no provider_account_id — set it to the numeric \
                  channel id the bot should post in (Developer Mode, right-click the \
-                 channel, Copy Channel ID). provider_account_id holds the invite code \
-                 the member-count sync reads and is not a channel."
+                 channel, Copy Channel ID). The invite code the member-count sync reads \
+                 belongs in external_account_ref."
                     .to_owned(),
             )
         })?;
         if !is_discord_snowflake(&channel_id) {
             return Err(DiscordExecutorError::DiscordApi(format!(
-                "Discord posting_target_ref {channel_id:?} is not a channel id. A channel \
-                 id is 17 to 20 digits; this looks like an invite code or a name."
+                "Discord provider_account_id {channel_id:?} is not a channel id. A channel \
+                 id is 17 to 20 digits; this looks like an invite code or a name, which \
+                 means the channel and the invite code have been swapped."
             )));
         }
         let encrypted_token = row.1.ok_or_else(|| {
