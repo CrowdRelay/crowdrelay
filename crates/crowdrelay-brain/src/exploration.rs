@@ -106,7 +106,34 @@ impl ExplorationMemory {
     }
 }
 
+/// The number of time-of-day buckets a context is folded into.
+///
+/// Four: night, morning, afternoon, evening. The hash used to carry
+/// `time_of_day_bps` raw, which is one bucket per hour, and nothing reads
+/// time of day as a feature — the context GLM does not have a coefficient for
+/// it. So it split the exploration memory twenty-four ways on a dimension no
+/// model learns from, and a posterior that never accumulates never leaves its
+/// prior.
+const TIME_OF_DAY_BUCKETS: u16 = 4;
+
 /// Computes a context hash from a DispatchContext for exploration tracking.
+///
+/// The hash is the key the exploration memory counts visits under, so what
+/// goes in it decides what "already explored" means. Two things that were in
+/// it are not any more:
+///
+/// - **Time of day**, at hour resolution. Folded to four buckets. Twenty-four
+///   keys per context, on a feature nothing learns from, is fragmentation
+///   rather than discrimination.
+/// - **Community novelty**, at eleven buckets. Novelty *is* what this memory
+///   computes; feeding it back in as part of the key means a context becomes
+///   a different context precisely because it was visited, so a visit never
+///   lands on the key the next lookup uses. Circular, and it made repeat
+///   visits look novel forever.
+///
+/// Together they split every real context up to 264 ways. Existing visit
+/// counts keyed the old way stop matching and decay out, which for a memory
+/// that was never accumulating is a reset rather than a loss.
 #[must_use]
 pub fn context_hash(context: &DispatchContext) -> String {
     use std::fmt::Write;
@@ -126,17 +153,14 @@ pub fn context_hash(context: &DispatchContext) -> String {
     };
     let sub = context.subreddit_type.as_deref().unwrap_or("");
     let fmt = context.post_format.as_deref().unwrap_or("");
-    let cap = 4 + trend.len() + sub.len() + fmt.len() + 3 + 6 + 6;
+    // 10_000 basis points over the day, folded into quarters.
+    let time_bucket =
+        (context.time_of_day_bps / (10_000 / TIME_OF_DAY_BUCKETS)).min(TIME_OF_DAY_BUCKETS - 1);
+    let cap = 4 + trend.len() + sub.len() + fmt.len() + 3 + 2;
     let mut s = String::with_capacity(cap);
     // Write directly into the pre-allocated String to avoid temporary
     // String allocations from .to_string() on each numeric field.
-    write!(s, "{event_bucket}:{trend}:{sub}:{fmt}").unwrap();
-    write!(
-        s,
-        ":{}:{}",
-        context.time_of_day_bps, context.community_novelty_bps
-    )
-    .unwrap();
+    write!(s, "{event_bucket}:{trend}:{sub}:{fmt}:{time_bucket}").unwrap();
     s
 }
 
@@ -276,5 +300,85 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(context_hash(&ctx), context_hash(&ctx));
+    }
+
+    #[test]
+    fn the_hash_folds_the_day_into_four_buckets_not_twenty_four() {
+        // Hour resolution split every context 24 ways on a feature the
+        // context GLM has no coefficient for, so no key ever accumulated
+        // enough visits to stop looking novel.
+        let at = |bps: u16| {
+            context_hash(&DispatchContext {
+                time_of_day_bps: bps,
+                ..Default::default()
+            })
+        };
+        // 10am and 11am are the same part of the day.
+        assert_eq!(at(4_167), at(4_583));
+        // Morning and evening are not.
+        assert_ne!(at(4_167), at(8_333));
+
+        let distinct: std::collections::HashSet<String> =
+            (0..24u32).map(|h| at(((h * 10_000) / 24) as u16)).collect();
+        assert_eq!(distinct.len(), 4, "a day is four buckets");
+    }
+
+    #[test]
+    fn novelty_is_not_part_of_the_key_that_measures_novelty() {
+        // Feeding novelty back into the key made a context become a different
+        // context precisely because it had been visited, so a recorded visit
+        // never landed on the key the next lookup used.
+        let with = |novelty: u16| {
+            context_hash(&DispatchContext {
+                community_novelty_bps: novelty,
+                ..Default::default()
+            })
+        };
+        assert_eq!(with(10_000), with(0));
+    }
+
+    #[test]
+    fn a_visit_is_found_again_by_a_later_lookup() {
+        // The property the circularity broke: record a visit, then look the
+        // same context up after its novelty has moved, and find it.
+        let mut mem = ExplorationMemory::default();
+        let first = DispatchContext {
+            community_novelty_bps: 10_000,
+            time_of_day_bps: 4_200,
+            ..Default::default()
+        };
+        mem.record_visit("community-engager", &context_hash(&first));
+        let later = DispatchContext {
+            community_novelty_bps: 9_000,
+            time_of_day_bps: 4_500,
+            ..Default::default()
+        };
+        assert!(
+            mem.novelty("community-engager", &context_hash(&later)) < 1.0,
+            "the visit must still be found once novelty and the hour move"
+        );
+    }
+
+    #[test]
+    fn the_hash_still_separates_what_the_model_reads() {
+        // Event proximity, trend and audience type are the features the
+        // context GLM actually has coefficients for; folding those would be
+        // the opposite mistake.
+        let base = DispatchContext::default();
+        let event = DispatchContext {
+            days_to_event: Some(3),
+            ..Default::default()
+        };
+        let trend = DispatchContext {
+            fan_growth_trend: GrowthTrend::Stagnant,
+            ..Default::default()
+        };
+        let sub = DispatchContext {
+            subreddit_type: Some("metal".to_owned()),
+            ..Default::default()
+        };
+        assert_ne!(context_hash(&base), context_hash(&event));
+        assert_ne!(context_hash(&base), context_hash(&trend));
+        assert_ne!(context_hash(&base), context_hash(&sub));
     }
 }
