@@ -98,7 +98,8 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
         r#"
         INSERT INTO viryaos_growth_evidence (
             workspace_id, action_id, opportunity_id, timestamp,
-            audience, target_key, recipient_id, channel, estimated_reach, actual_reach,
+            audience, target_key, creative_family, recipient_id, channel,
+            estimated_reach, actual_reach,
             treatment, propensity,
             observed_fans, observed_incremental_fans, durable_fans_30d,
             converted, converted_fan_id,
@@ -107,7 +108,7 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
             sample_size, contamination, measurement_delay_days,
             episode_id, resolved_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
         ON CONFLICT (workspace_id, action_id) DO NOTHING
         "#,
     )
@@ -117,6 +118,7 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
     .bind(evidence.timestamp)
     .bind(&evidence.audience)
     .bind(&evidence.target_key)
+    .bind(evidence.creative_family.map(|f| f.as_str()))
     .bind(&evidence.recipient_id)
     .bind(evidence.channel.as_str())
     .bind(evidence.estimated_reach as i32)
@@ -197,6 +199,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         timestamp: OffsetDateTime,
         audience: Option<String>,
         target_key: Option<String>,
+        creative_family: Option<String>,
         recipient_id: String,
         channel: String,
         estimated_reach: i32,
@@ -224,7 +227,7 @@ pub(in crate::autopilot) async fn load_growth_evidence(
     let rows: Vec<EvidenceRow> = sqlx::query_as(
         r#"
         SELECT ge.action_id, ge.opportunity_id, ge.timestamp, ge.audience, ge.target_key,
-               ge.recipient_id,
+               ge.creative_family, ge.recipient_id,
                ge.channel, ge.estimated_reach, ge.actual_reach, ge.treatment, ge.propensity,
                ea.execution_status,
                ge.observed_fans, ge.observed_incremental_fans, ge.durable_fans_30d,
@@ -295,6 +298,10 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 timestamp: row.timestamp,
                 audience: row.audience,
                 target_key: row.target_key,
+                creative_family: row
+                    .creative_family
+                    .as_deref()
+                    .and_then(crowdrelay_domain::creative::CreativeFamily::parse),
                 recipient_id: row.recipient_id,
                 channel,
                 estimated_reach: row.estimated_reach.max(1) as u32,

@@ -1049,6 +1049,7 @@ fn apply_evidence_to_model(
                 expected_signal_installs: ev.predicted_signal_installs,
                 context: ev.context.clone(),
                 target_key: ev.target_key.clone(),
+                creative_family: ev.creative_family,
             };
             let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
             model.update(&outcome);
@@ -1092,6 +1093,7 @@ fn apply_evidence_to_model(
                 target_key,
                 tau_y14,
                 obs_var,
+                ev.evidence_quality,
             );
             // Record Y14Bridged calibration with the actual measurement-
             // determined evidence quality, not a synthesized one.
@@ -1120,6 +1122,7 @@ fn apply_evidence_to_model(
                 target_key,
                 y30_fans,
                 obs_var,
+                ev.evidence_quality,
             );
             // Y30Direct calibration — isolated from Y14Bridged and
             // OutcomeModel. A bad OutcomeModel calibration cannot distort
@@ -1326,6 +1329,7 @@ async fn full_replay(
             // column. This path is the pre-evidence-table fallback, so it
             // teaches the template and audience type only.
             target_key: None,
+            creative_family: None,
         };
         // The outcome model learns P(Y|action,context) from raw observed
         // fan counts, not from DiD estimates. Prefer observed_fans (raw)

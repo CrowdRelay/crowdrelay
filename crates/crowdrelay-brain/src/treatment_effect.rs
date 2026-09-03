@@ -4,9 +4,12 @@
 //! outcome model: `bayesian` holds the conjugate families and the pooling
 //! machinery, this holds the one quantity the brain ranks actions by.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bayesian::{HierarchicalPosterior, NormalPosterior, normal_cdf};
+use crate::evidence::EvidenceQuality;
 
 /// Posterior over the treatment effect τ = Y(1) - Y(0) for a template.
 ///
@@ -28,10 +31,32 @@ use crate::bayesian::{HierarchicalPosterior, NormalPosterior, normal_cdf};
 /// average; `τ = -3` means the action loses 3 fans. This is the causally
 /// correct ranking signal, unlike the outcome model which conflates
 /// correlation with causation.
+/// # Confidence is quality-weighted
+///
+/// The switch from the outcome model to the treatment-effect model is a claim
+/// that the treatment effect is *identified*, and a raw observation count
+/// cannot support that claim. Counting rows meant five pre/post rows crossed
+/// [`crate::MIN_TREATMENT_CONFIDENCE`] and the brain started ranking by a
+/// "treatment effect" estimated with no control arm, labelling the result
+/// `DecisionMode::Exploit`. Downweighting the variance was not enough: the
+/// variance decides how far the estimate moves, the confidence decides
+/// whether we believe it at all.
+///
+/// So confidence accumulates [`EvidenceQuality::weight`] rather than rows. A
+/// randomized holdout contributes 1.0 and five of them still flip the switch;
+/// observational evidence contributes 0.1, so it takes fifty rows — which is
+/// the honest exchange rate between watching and experimenting.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TreatmentEffectPosterior {
     /// Hierarchical posterior for τ, same structure as the fan posterior.
     pub effects: HierarchicalPosterior,
+    /// Quality-weighted observation mass per template. Defaulted on
+    /// deserialize; a checkpoint written before this existed reports zero
+    /// confidence until evidence replay refills it, which is the safe
+    /// direction — the brain falls back to the outcome model rather than
+    /// trusting a treatment effect it cannot account for.
+    #[serde(default)]
+    pub effective_observations: HashMap<String, f64>,
 }
 
 impl Default for TreatmentEffectPosterior {
@@ -47,6 +72,7 @@ impl TreatmentEffectPosterior {
     pub fn new() -> Self {
         Self {
             effects: HierarchicalPosterior::new(NormalPosterior::prior(0.0, crate::PRIOR_VARIANCE)),
+            effective_observations: HashMap::new(),
         }
     }
 
@@ -84,6 +110,34 @@ impl TreatmentEffectPosterior {
         observed_tau: f64,
         observation_variance: f64,
     ) {
+        // No quality stated means the weakest one. An unlabelled observation
+        // must not buy the same confidence as a randomized holdout.
+        self.update_with_quality(
+            template_id,
+            subreddit_type,
+            target_key,
+            observed_tau,
+            observation_variance,
+            EvidenceQuality::Observational,
+        );
+    }
+
+    /// Updates the posterior and accumulates quality-weighted confidence.
+    ///
+    /// `quality` moves the confidence, `observation_variance` moves the
+    /// estimate. They are separate on purpose: strong evidence should both
+    /// shift the mean further and earn the right to be believed, and a caller
+    /// that already scaled its variance by quality has not thereby said
+    /// anything about identification.
+    pub fn update_with_quality(
+        &mut self,
+        template_id: &str,
+        subreddit_type: Option<&str>,
+        target_key: Option<&str>,
+        observed_tau: f64,
+        observation_variance: f64,
+        quality: EvidenceQuality,
+    ) {
         self.effects.update_signed_with_target(
             Some(template_id),
             subreddit_type,
@@ -91,12 +145,38 @@ impl TreatmentEffectPosterior {
             observed_tau,
             observation_variance,
         );
+        *self
+            .effective_observations
+            .entry(template_id.to_owned())
+            .or_insert(0.0) += quality.weight();
     }
 
-    /// Returns the confidence (observation count) for a template's treatment
-    /// effect.
+    /// Returns the quality-weighted confidence for a template's treatment
+    /// effect, floored to whole observations. Fifty observational rows read
+    /// as five; five randomized ones read as five.
     #[must_use]
     pub fn confidence(&self, template_id: &str) -> u32 {
+        let effective = self
+            .effective_observations
+            .get(template_id)
+            .copied()
+            .unwrap_or(0.0);
+        // A checkpoint predating `effective_observations` has the posterior
+        // but not the mass. Reporting zero is the safe reading: it falls back
+        // to the outcome model until replay re-establishes the weights.
+        //
+        // The epsilon is not decoration. Weights are floats, so fifty
+        // additions of 0.1 land on 4.999999999999998 and a bare floor reports
+        // four — the count would be short by one for no reason a reader could
+        // ever find.
+        (effective.max(0.0) + 1e-9).floor() as u32
+    }
+
+    /// The raw number of observations behind a template's posterior,
+    /// regardless of their quality. Reporting only — the decision path uses
+    /// [`confidence`](Self::confidence).
+    #[must_use]
+    pub fn observation_count(&self, template_id: &str) -> u32 {
         self.effects.confidence(template_id)
     }
 
@@ -160,5 +240,102 @@ impl TreatmentEffectPosterior {
         // Standard Normal CDF: Φ(z) = 0.5 * (1 + erf(z / sqrt(2)))
         let z = (delta - mean) / std;
         1.0 - normal_cdf(z)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MIN_TREATMENT_CONFIDENCE;
+
+    #[test]
+    fn observational_rows_cannot_buy_treatment_confidence() {
+        // The defect this exists to prevent: five pre/post rows crossing the
+        // switch and the brain ranking by a "treatment effect" with no
+        // control arm anywhere in it.
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..MIN_TREATMENT_CONFIDENCE {
+            tep.update_with_quality(
+                "community-engager",
+                Some("metal"),
+                None,
+                2.0,
+                1.0,
+                EvidenceQuality::Observational,
+            );
+        }
+        assert_eq!(tep.observation_count("community-engager"), 5);
+        assert!(
+            tep.confidence("community-engager") < MIN_TREATMENT_CONFIDENCE,
+            "observational evidence must not flip the treatment-effect switch"
+        );
+    }
+
+    #[test]
+    fn randomized_holdouts_reach_the_switch_at_the_stated_count() {
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..MIN_TREATMENT_CONFIDENCE {
+            tep.update_with_quality(
+                "community-engager",
+                Some("metal"),
+                None,
+                2.0,
+                1.0,
+                EvidenceQuality::RandomizedHoldout,
+            );
+        }
+        assert_eq!(
+            tep.confidence("community-engager"),
+            MIN_TREATMENT_CONFIDENCE
+        );
+    }
+
+    #[test]
+    fn fifty_observational_rows_read_as_five() {
+        // The exchange rate is the point: observational evidence is worth
+        // something, just an order of magnitude less.
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..50 {
+            tep.update_with_quality("t", None, None, 1.0, 1.0, EvidenceQuality::Observational);
+        }
+        assert_eq!(tep.confidence("t"), 5);
+    }
+
+    #[test]
+    fn unqualified_updates_are_treated_as_observational() {
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..5 {
+            tep.update("t", None, 1.0, 1.0);
+        }
+        assert_eq!(tep.confidence("t"), 0);
+        assert_eq!(tep.observation_count("t"), 5);
+    }
+
+    #[test]
+    fn confidence_is_per_template() {
+        let mut tep = TreatmentEffectPosterior::new();
+        for _ in 0..5 {
+            tep.update_with_quality(
+                "a",
+                None,
+                None,
+                1.0,
+                1.0,
+                EvidenceQuality::RandomizedHoldout,
+            );
+        }
+        assert_eq!(tep.confidence("a"), 5);
+        assert_eq!(tep.confidence("b"), 0);
+    }
+
+    #[test]
+    fn a_checkpoint_without_weights_reports_no_confidence() {
+        // Safe direction: fall back to the outcome model until replay
+        // re-establishes the weights, rather than trusting a treatment effect
+        // whose provenance was not recorded.
+        let json = r#"{"effects":{"global":{"mean":0.0,"variance":4.0,"n":9},"by_template":{},"by_subreddit_type":{}}}"#;
+        let tep: TreatmentEffectPosterior =
+            serde_json::from_str(json).expect("legacy checkpoint should deserialize");
+        assert_eq!(tep.confidence("anything"), 0);
     }
 }

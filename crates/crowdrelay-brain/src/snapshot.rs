@@ -136,8 +136,23 @@ pub struct GrowthIntelligencePolicy {
     ///
     /// Guardrails:
     /// - 0.0 = no holdout (all dispatches go through, DiD counterfactual only)
-    /// - 0.05 = 5% of dispatches are held out (recommended for high-volume)
     /// - Maximum 0.10 (10%) — higher values would waste too many opportunities
+    ///
+    /// The default is the maximum, which needs its arithmetic stated. The
+    /// power guard requires `min_expected_control_units` (2) expected
+    /// controls before an experiment starts, so the holdout rate has to clear
+    /// `2 / eligible_units`. With the 28 communities the audience graph
+    /// currently holds, 5% expects 1.4 controls and the guard turns the
+    /// experiment off entirely; 10% expects 2.8 and it runs. Any rate below
+    /// the maximum therefore means no randomized evidence at all at this
+    /// roster size, and the treatment-effect machinery stays a shape with
+    /// nothing in it.
+    ///
+    /// The cost is three communities per cycle not posted to. That is what
+    /// buys the only evidence that separates "posting there works" from
+    /// "communities we post to happen to grow". Small pools are still safe:
+    /// the guard marks the design `InsufficientPower` and drops the holdout
+    /// to zero rather than splitting an arm that cannot answer anything.
     ///
     /// The holdout only applies to direct-action workers (community-engager,
     /// social-post, signal-inviter). Scanner and strategist are never held
@@ -228,7 +243,7 @@ impl Default for GrowthIntelligencePolicy {
             press_pitch_event_lead_days: 30,
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,
-            randomized_holdout_probability: 0.0,
+            randomized_holdout_probability: 0.10,
             min_eligible_units_for_experiment: default_min_eligible_units_for_experiment(),
             experimental_dispatch_budget: default_experimental_dispatch_budget(),
             min_expected_control_units: default_min_expected_control_units(),

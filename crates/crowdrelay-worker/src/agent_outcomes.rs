@@ -6,8 +6,16 @@
 //! autopilot decision (+ action, for `require_approval` kinds) rows.
 //!
 //! Ownership: the agents service is the ONLY writer of `agent_outcomes`; this
-//! worker is the only reader/mapper. `agent_fan_segments` and
-//! `agent_outreach_targets` are written here too — single-writer per table.
+//! worker is the only reader/mapper. `agent_fan_segments` is written here too
+//! — single-writer per table.
+//!
+//! `agent_outreach_targets` has two writers, split by where the target came
+//! from: this path writes what an agent proposed, and
+//! `audience_graph::community_promotion` writes what discovery already found
+//! and the screening policy admitted. Both go through
+//! `screen_community_candidate` and both use the same
+//! `(workspace_id, display_name, target_kind)` conflict key, so whichever
+//! sees a community first wins the row and the other updates it.
 //!
 //! Idempotency: `agent_outcomes.idempotency_key` is unique per
 //! (workspace_id, key), and the autopilot decision_key mirrors it, so worker

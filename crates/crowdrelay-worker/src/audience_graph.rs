@@ -7,8 +7,14 @@
 //!
 //! This pass never contacts anyone. Contact is an operator action through the
 //! admin surface; the sweep only keeps the pipeline honest about time.
+//!
+//! It also promotes screened community places into candidates the brain can
+//! act on — see `community_promotion` for why that step exists here and not
+//! in a prompt.
 
 use std::time::Duration;
+
+mod community_promotion;
 
 use crowdrelay_domain::WorkspaceId;
 use sqlx::PgPool;
@@ -61,11 +67,15 @@ impl AudienceGraphSweeper {
                 }
                 _ = ticker.tick() => {
                     match timeout(self.operation_timeout, self.run_once()).await {
-                        Ok(Ok(report)) if report.decayed > 0 || report.discovered_never_researched > 0 => {
+                        Ok(Ok(report)) if report.decayed > 0
+                            || report.discovered_never_researched > 0
+                            || report.promotion.touched_anything() => {
                             tracing::info!(
                                 decayed = report.decayed,
                                 undiscovered = report.discovered_never_researched,
                                 contactable = report.contactable_places,
+                                promoted = report.promotion.admitted,
+                                refused = report.promotion.refused,
                                 "audience graph sweep retired silent pipelines"
                             );
                         }
@@ -112,10 +122,19 @@ impl AudienceGraphSweeper {
         .fetch_one(&self.pool)
         .await
         .map_err(CrowdError::Sqlx)?;
+        // Promotion runs after decay so a place archived this pass is not
+        // promoted in the same one.
+        let promotion = community_promotion::promote_community_places(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+        )
+        .await
+        .map_err(CrowdError::Sqlx)?;
         Ok(SweepReport {
             decayed,
             discovered_never_researched: supply.0,
             contactable_places: supply.1,
+            promotion,
         })
     }
 }
@@ -134,4 +153,5 @@ struct SweepReport {
     decayed: u64,
     discovered_never_researched: i64,
     contactable_places: i64,
+    promotion: community_promotion::PromotionReport,
 }

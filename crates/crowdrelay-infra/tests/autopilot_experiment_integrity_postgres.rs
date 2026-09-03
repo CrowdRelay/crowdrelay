@@ -323,6 +323,7 @@ fn make_prediction() -> DispatchPrediction {
         expected_signal_installs: 1.0,
         context: DispatchContext::default(),
         target_key: Some("community:test".to_owned()),
+        creative_family: None,
     }
 }
 

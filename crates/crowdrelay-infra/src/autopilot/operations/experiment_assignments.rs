@@ -441,6 +441,7 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
             assignment.prediction.expected_signal_installs,
             assignment.prediction.context.clone(),
             assignment.prediction.target_key.clone(),
+            assignment.prediction.creative_family,
             strategy.map(|s| s.to_owned()),
             evidence_quality,
         );

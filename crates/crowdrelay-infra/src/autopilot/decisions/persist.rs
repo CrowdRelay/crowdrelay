@@ -304,6 +304,7 @@ async fn record_prediction_and_evidence_tx(
         prediction.expected_signal_installs,
         prediction.context.clone(),
         prediction.target_key.clone(),
+        prediction.creative_family,
         strategy.map(|s| s.to_owned()),
         evidence_quality,
     );

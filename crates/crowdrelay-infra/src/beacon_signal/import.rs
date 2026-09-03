@@ -107,6 +107,12 @@ pub async fn import_researched_beacons(
         SELECT id, target_kind, display_name, contact_email, contact_domain, do_not_contact
         FROM agent_outreach_targets
         WHERE workspace_id = $1 AND status <> 'discarded'
+          -- A community is a public space the growth loop posts in, not a
+          -- person the roster can write to. It has no address and never
+          -- will, so importing one produces a beacon that can only ever sit
+          -- there un-contactable. This mattered the moment community targets
+          -- started existing: the audience graph carries dozens of them.
+          AND target_kind <> 'community'
         ORDER BY created_at
         "#,
         )

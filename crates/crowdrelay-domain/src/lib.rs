@@ -66,6 +66,7 @@ pub mod calendar_routing;
 pub mod campaign_lifecycle;
 pub mod community_intelligence;
 pub mod content_supply;
+pub mod creative;
 pub mod deliverability;
 pub mod events;
 pub mod experimentation;

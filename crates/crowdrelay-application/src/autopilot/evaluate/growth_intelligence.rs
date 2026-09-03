@@ -382,6 +382,11 @@ pub fn evaluate_growth_intelligence(
             // engager, which is the one with a target, is handled by
             // `community_engager_candidates`.
             target_key: None,
+            // Creative families are a community-post vocabulary. Posting to
+            // the band's own channels and pitching press have different
+            // angles, and labelling them with this enum would pool families
+            // that are not comparable.
+            creative_family: None,
         }
     }
 
