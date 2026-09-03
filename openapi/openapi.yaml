@@ -11239,6 +11239,45 @@ components:
           minimum: 0
           description: >
             Measured deviation or overdue ratio. Deliberately not a currency amount.
+        briefing:
+          nullable: true
+          $ref: '#/components/schemas/ActionBriefing'
+          description: >
+            Human-readable briefing generated from the action payload. Null when the
+            payload could not be parsed or carried no briefing.
+    ActionBriefing:
+      type: object
+      additionalProperties: false
+      required: [summary, why_it_matters, steps, content, deadline_note]
+      description: >
+        A human-readable briefing for a pending autopilot action: what to do,
+        why it matters, and the content being approved.
+      properties:
+        summary: { type: string, description: One-line summary of the action. }
+        why_it_matters: { type: string, description: Why this action matters and what happens if approved/rejected. }
+        steps:
+          type: array
+          items: { $ref: '#/components/schemas/BriefingStep' }
+          description: Ordered concrete steps the operator should take.
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/BriefingField' }
+          description: The actual content being approved, as key-value pairs.
+        deadline_note: { type: string, description: Human-readable deadline note. }
+    BriefingStep:
+      type: object
+      additionalProperties: false
+      required: [what_to_do, why_it_matters]
+      properties:
+        what_to_do: { type: string }
+        why_it_matters: { type: string }
+    BriefingField:
+      type: object
+      additionalProperties: false
+      required: [label, value]
+      properties:
+        label: { type: string }
+        value: { type: string }
     ChiefOfStaffOpportunity:
       type: object
       additionalProperties: false
