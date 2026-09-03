@@ -598,12 +598,29 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // it on workspace-wide fan count would credit it for fans
                 // acquired by other workers.
                 AutopilotMeasurementKind::ScannerDiscoveryQuality14d => {
+                    // Only targets an agent actually proposed count as a
+                    // scanner's discovery. `source_task_id` is what marks
+                    // them; a target promoted from the audience graph has no
+                    // task behind it, and the promotion sweep writes up to a
+                    // hundred a pass. Counting every row in the window would
+                    // have credited the next scanner dispatch with every
+                    // subreddit discovery had already found.
+                    //
+                    // What this still cannot do is attribute a target to
+                    // *this* dispatch rather than another run of the same
+                    // template: the `agent.run.request` payload carries no
+                    // task id, so the action and the task it started are not
+                    // linked. Two scanner runs a fortnight apart share their
+                    // discoveries. Narrowing the population is the part that
+                    // is a bug; splitting it between dispatches needs that
+                    // link to exist first.
                     sqlx::query_scalar::<_, f64>(
                         r#"
                         SELECT COUNT(*)::double precision FROM agent_outreach_targets
                         WHERE workspace_id = $1
                           AND created_at >= $2
                           AND created_at < $2 + INTERVAL '14 days'
+                          AND source_task_id IS NOT NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -617,13 +634,28 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // strategist's proximal outcome is intelligence production,
                 // not fan growth.
                 AutopilotMeasurementKind::StrategistInsightQuality14d => {
+                    // `campaign_insight` is not the strategist's alone. In
+                    // production fifteen came from `growth-strategist` and
+                    // four from `campaign-analysis`, and this counted all
+                    // nineteen — so the strategist's standing carried a
+                    // fifth of another template's output, and a run of
+                    // campaign-analysis raised the strategist's measured
+                    // quality without the strategist doing anything.
+                    //
+                    // Joining the task that produced the outcome is what
+                    // separates them. As with the scanner, this still cannot
+                    // split one dispatch from another of the same template:
+                    // the `agent.run.request` payload carries no task id.
                     sqlx::query_scalar::<_, f64>(
                         r#"
-                        SELECT COUNT(*)::double precision FROM agent_outcomes
-                        WHERE workspace_id = $1
-                          AND kind = 'campaign_insight'
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '14 days'
+                        SELECT COUNT(*)::double precision
+                        FROM agent_outcomes AS outcome
+                        JOIN agent_service_tasks AS task ON task.id = outcome.task_id
+                        WHERE outcome.workspace_id = $1
+                          AND outcome.kind = 'campaign_insight'
+                          AND task.template_id = 'growth-strategist'
+                          AND outcome.created_at >= $2
+                          AND outcome.created_at < $2 + INTERVAL '14 days'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
