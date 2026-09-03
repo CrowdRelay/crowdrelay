@@ -8,6 +8,7 @@
 //! model.
 
 use super::*;
+use crowdrelay_domain::creative::CreativeFamily;
 
 /// Produces one candidate per unengaged target community for the
 /// community-engager template.
@@ -152,6 +153,12 @@ pub(super) fn community_engager_candidates(
         );
         // 14-day feedback horizon for community-engager (Y14).
         let efe_score = raw_efe * 0.95;
+        // The angle this post takes, rotated per community so every family
+        // gets comparable exposure in each one. Recorded on the prediction
+        // and the evidence row; nothing ranks by it yet.
+        let posts_so_far = community_history.iter().map(|h| h.post_count).sum::<u32>();
+        let creative_family =
+            CreativeFamily::rotate_with_event(posts_so_far, snapshot.has_upcoming_event);
         // Per-community prompt: one post for this specific community.
         let mut prompt = format!(
             "Draft an authentic community post for r/{}. Write like a band member, not a marketer. Match this community's tone and language.",
@@ -172,6 +179,8 @@ pub(super) fn community_engager_candidates(
                 "\n- this community allows at most {ratio}% self-promotional content: lead with something worth reading on its own"
             ));
         }
+        prompt.push_str("\n\n");
+        prompt.push_str(creative_family.brief());
         if !community_history.is_empty() {
             push_engagement_history(&mut prompt, &community_history);
         }
@@ -185,6 +194,7 @@ pub(super) fn community_engager_candidates(
             expected_signal_installs,
             context: dispatch_context,
             target_key: Some(target_key.clone()),
+            creative_family: Some(creative_family),
         };
         let action = AutopilotActionPayload::RequestAgentRun {
             template_id: "community-engager".to_owned(),

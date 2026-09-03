@@ -74,6 +74,15 @@ pub struct DispatchPrediction {
     /// feature.
     #[serde(default)]
     pub target_key: Option<String>,
+    /// The angle the post was asked to take. `None` for dispatches that have
+    /// no creative surface (scanners, the strategist) and for rows written
+    /// before families existed.
+    ///
+    /// Recorded, not yet learned from: see
+    /// [`crowdrelay_domain::creative::CreativeFamily`] for why the estimator
+    /// waits for data rather than the other way round.
+    #[serde(default)]
+    pub creative_family: Option<crowdrelay_domain::creative::CreativeFamily>,
 }
 
 /// The measured outcome of a dispatch, paired with the prediction that
@@ -464,6 +473,7 @@ impl CausalModel {
             None,
             observed_tau,
             observation_variance,
+            crate::evidence::EvidenceQuality::Observational,
         );
     }
 
@@ -477,13 +487,15 @@ impl CausalModel {
         target_key: Option<&str>,
         observed_tau: f64,
         observation_variance: f64,
+        quality: crate::evidence::EvidenceQuality,
     ) {
-        self.treatment_effects.update_for_target(
+        self.treatment_effects.update_with_quality(
             template_id,
             subreddit_type,
             target_key,
             observed_tau,
             observation_variance,
+            quality,
         );
     }
 
@@ -506,6 +518,7 @@ impl CausalModel {
             None,
             observed_tau_y30,
             observation_variance,
+            crate::evidence::EvidenceQuality::Observational,
         );
     }
 
@@ -519,13 +532,15 @@ impl CausalModel {
         target_key: Option<&str>,
         observed_tau_y30: f64,
         observation_variance: f64,
+        quality: crate::evidence::EvidenceQuality,
     ) {
-        self.treatment_effects_y30.update_for_target(
+        self.treatment_effects_y30.update_with_quality(
             template_id,
             subreddit_type,
             target_key,
             observed_tau_y30,
             observation_variance,
+            quality,
         );
     }
 
@@ -1231,6 +1246,7 @@ mod tests {
             expected_signal_installs: 0.0,
             context: ctx.clone(),
             target_key: None,
+            creative_family: None,
         };
         let outcome_a = PredictionOutcome::from_observation(pred_a, 5.0, 0.0);
         assert!(
@@ -1245,6 +1261,7 @@ mod tests {
             expected_signal_installs: 0.0,
             context: ctx.clone(),
             target_key: None,
+            creative_family: None,
         };
         let outcome_b = PredictionOutcome::from_observation(pred_b, 5.0, 0.0);
         assert!(

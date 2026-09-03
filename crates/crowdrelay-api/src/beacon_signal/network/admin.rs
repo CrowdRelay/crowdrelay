@@ -191,6 +191,10 @@ pub async fn admin_beacon_network(
             SELECT id::text AS source_id, contact_email IS NOT NULL AS has_route
             FROM agent_outreach_targets
             WHERE workspace_id=$1 AND status <> 'discarded' AND NOT do_not_contact
+              -- Communities are excluded by the import for having no address
+              -- to import; the count has to exclude them for the same reason
+              -- or the button promises rows pressing it will not produce.
+              AND target_kind <> 'community'
             UNION ALL
             SELECT id::text, route_is_published
             FROM viryaos_outreach_candidates

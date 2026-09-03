@@ -1226,6 +1226,7 @@ mod tests {
             expected_signal_installs: 1.0,
             context: crate::causal_model::DispatchContext::default(),
             target_key: None,
+            creative_family: None,
         }
     }
 
