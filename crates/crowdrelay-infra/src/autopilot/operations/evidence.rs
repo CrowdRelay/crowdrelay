@@ -628,8 +628,26 @@ pub(in crate::autopilot) async fn discover_competing_actions(
                 audience_key,
                 exposure_delivered: true,
                 temporal_proximity,
-                audience_match: 0.5,
-                attribution_confidence: 0.7,
+                // Not modelled. Whether this action's audience is the one the
+                // fan actually came from needs the fan's provenance joined in,
+                // and nothing here has it.
+                //
+                // The value was 0.5, which reads as "half a match" and is not:
+                // every exposure carried it, so it cancelled in the weight
+                // normalisation and meant nothing at all. A constant that
+                // looks like a measurement is worse than a neutral one, so it
+                // is 1.0 and says what it is.
+                audience_match: 1.0,
+                // Confidence is the evidence quality, which was already
+                // loaded on this row and then ignored in favour of a flat
+                // 0.7. The credit allocator bounds total attribution mass by
+                // the mean confidence — that is the mechanism that preserves
+                // a genuine "we don't know" residual — so a constant made the
+                // residual exactly 30% by fiat whatever the evidence said,
+                // and let observational evidence claim 70% of every fan it
+                // had no causal claim on. Randomised holdout earns 1.0,
+                // observational 0.1.
+                attribution_confidence: evidence_quality.weight(),
                 treatment_effect_prior: row.predicted_fans,
                 evidence_quality,
             }
