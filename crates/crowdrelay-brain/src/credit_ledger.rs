@@ -236,10 +236,13 @@ impl CreditAllocator for ProportionalCreditAllocator {
                 credited_incremental_y14: credited_y14,
                 credited_incremental_y30: credited_y30,
                 attribution_confidence: action.attribution_confidence,
-                // Proportional attribution is NOT causal evidence.
-                // The attribution worker sets this to true only when
-                // the experiment assignment's final_evidence_quality
-                // = 'randomized_holdout' and final_contamination < 0.1.
+                // Proportional attribution is NOT causal evidence. The
+                // attribution worker upgrades this to true when the
+                // experiment assignment behind the action has
+                // `final_evidence_quality = 'randomized_holdout'` and
+                // `final_contamination < 0.1` — see `mark_causal_credits`.
+                // The allocator cannot know either fact: it sees exposures,
+                // not experiment state.
                 is_causal_evidence: false,
             });
         }
