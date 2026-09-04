@@ -12,7 +12,11 @@ def text(path: str) -> str:
 class AutopilotMeasurementContract(unittest.TestCase):
     def test_db_enum_parser_and_rust_serializer_stay_aligned(self) -> None:
         migration = text("migrations/0054_grassroots_distribution.sql")
-        ports = text("crates/crowdrelay-application/src/autopilot/ports.rs")
+        # The measurement kinds moved out of `ports.rs` into their own module
+        # when the signed/level distinction was added. This check follows the
+        # vocabulary rather than the filename — it caught the move, which is
+        # what it is for.
+        ports = text("crates/crowdrelay-application/src/autopilot/measurement_ports.rs")
         support = text("crates/crowdrelay-infra/src/autopilot/support.rs")
         check = re.search(
             r"viryaos_autopilot_measurements_measurement_kind_check CHECK \(measurement_kind IN \((.*?)\)\)",

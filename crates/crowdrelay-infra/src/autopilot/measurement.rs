@@ -2,6 +2,189 @@
 
 use super::*;
 
+/// Resolves the community an action's experiment unit refers to, but only
+/// once that community has actually been posted to.
+///
+/// Returns `Ok(None)` when the unit is not a community, which is the caller's
+/// signal to fall back to the workspace-level comparison.
+///
+/// Two things went wrong here before and both are guarded by the same
+/// function. The unit id on a community assignment is an
+/// `agent_outreach_targets` UUID, while `fan_provenance_events.community`
+/// holds the handle the smart link was tagged with — `r/metalmemes`. Querying
+/// the ledger with the UUID matched nothing, and `COUNT` answers "nothing"
+/// with a zero rather than a NULL, so the miss arrived looking exactly like a
+/// community that had genuinely converted no one. The handle lookup fixes the
+/// key; requiring a published post fixes the rest, because a community whose
+/// post is still a draft has no outcome to report and must say so instead of
+/// reporting zero.
+async fn observable_community(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+) -> Result<Option<String>, RepositoryError> {
+    let unit: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT unit_id, unit_kind
+        FROM viryaos_experiment_assignments
+        WHERE workspace_id = $1
+          AND action_id = $2
+          AND experiment_uuid IS NOT NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((unit_id, unit_kind)) = unit else {
+        return Ok(None);
+    };
+    if unit_kind != "target_community" {
+        return Ok(None);
+    }
+    let Ok(target_id) = uuid::Uuid::parse_str(&unit_id) else {
+        return Ok(None);
+    };
+    // The handle, and the evidence that the post reached the community.
+    // `posted_at` is stamped when the operator registers the published URL,
+    // so a row that is still `awaiting_manual_post` correctly yields nothing.
+    let community: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT target.display_name
+        FROM agent_outreach_targets AS target
+        WHERE target.workspace_id = $1
+          AND target.id = $2
+          AND EXISTS (
+              SELECT 1
+              FROM community_posts AS post
+              WHERE post.workspace_id = target.workspace_id
+                AND post.target_id = target.id
+                AND post.status = 'posted'
+                AND post.posted_at IS NOT NULL
+          )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    // The unit is a community, so the workspace-level fallback would answer a
+    // different question about a different population. Nothing published means
+    // no outcome exists, and that is not the same fact as an outcome of zero.
+    community.map_or(Err(RepositoryError::NotFound), |handle| Ok(Some(handle)))
+}
+
+/// Marks an action's evidence complete once every measurement it is waiting on
+/// has reached a terminal state.
+///
+/// `resolved_at` answers "is this row ready for the model", and only the
+/// measurement queue knows that. Each measurement used to stamp the column
+/// itself, which made the earliest arrival — signal installs at seven days —
+/// speak for outcomes that were still fourteen and forty-four days away. The
+/// row then looked finished while `observed_incremental_fans` and
+/// `durable_fans_30d` were still empty, and, because the delta cursor moves
+/// with it, it looked finished at the one moment it had the least to teach.
+///
+/// A failed measurement counts as terminal. An outcome that will never arrive
+/// must not hold the evidence open forever; the column stays NULL and the
+/// learner skips it, which is the honest reading of "we tried and could not
+/// find out".
+async fn refresh_evidence_readiness(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        UPDATE viryaos_growth_evidence AS evidence
+        SET resolved_at = $3
+        WHERE evidence.workspace_id = $1
+          AND evidence.action_id = $2
+          AND evidence.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_autopilot_measurements AS outstanding
+              WHERE outstanding.workspace_id = evidence.workspace_id
+                AND outstanding.action_id = evidence.action_id
+                AND outstanding.status IN ('pending', 'processing')
+          )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    sqlx::query(
+        r#"
+        UPDATE viryaos_dispatch_predictions AS prediction
+        SET resolved_at = $3
+        WHERE prediction.workspace_id = $1
+          AND prediction.action_id = $2
+          AND prediction.resolved_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_autopilot_measurements AS outstanding
+              WHERE outstanding.workspace_id = prediction.workspace_id
+                AND outstanding.action_id = prediction.action_id
+                AND outstanding.status IN ('pending', 'processing')
+          )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+/// The evidence quality this measurement actually earned.
+///
+/// A randomised assignment is a claim about how the unit was chosen. It only
+/// becomes randomised *evidence* when the outcome was read at the level the
+/// randomisation was performed at — here, from the community's own ledger. If
+/// the observation came from the workspace fallback instead, the design was
+/// randomised but the reading was not, and the row says so.
+async fn measured_evidence_quality(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    measurement: &ClaimedAutopilotMeasurement,
+    community: Option<&str>,
+) -> Result<&'static str, RepositoryError> {
+    if community.is_none() {
+        return Ok("matched_quasi_experiment");
+    }
+    let experiment_kind: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT experiment_kind
+        FROM viryaos_experiment_assignments
+        WHERE workspace_id = $1
+          AND action_id = $2
+          AND experiment_uuid IS NOT NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(measurement.action_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(
+        if experiment_kind.as_deref() == Some("randomized_holdout") {
+            "randomized_holdout"
+        } else {
+            "matched_quasi_experiment"
+        },
+    )
+}
+
 #[async_trait]
 impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
     async fn claim_due_measurements(
@@ -373,30 +556,17 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // that alienated the audience). The treatment-effect
                 // posterior supports negative τ via `update_signed`.
                 AutopilotMeasurementKind::IncrementalFanGrowth14d => {
-                    // Look up the experiment assignment for this action
-                    // to get unit_id and unit_kind.
-                    let exp_info: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
-                        r#"
-                        SELECT unit_id, unit_kind
-                        FROM viryaos_experiment_assignments
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND experiment_uuid IS NOT NULL
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(map_sqlx)?;
-                    // If this is a TargetCommunity experiment, try
-                    // community-level provenance measurement first.
-                    let mut community_outcome: Option<f64> = None;
-                    if let Some((unit_id, unit_kind)) = &exp_info
-                        && unit_kind == "target_community"
-                    {
-                        let community_fans: Option<f64> = sqlx::query_scalar::<_, Option<f64>>(
+                    let community =
+                        observable_community(&self.pool, workspace_id, measurement.action_id)
+                            .await?;
+                    let observed = if let Some(handle) = &community {
+                        // Community-level outcome: fans whose conversion was
+                        // attributed to this community's smart link inside the
+                        // window. The counterfactual is scoped to the same
+                        // community by `record_measurement_plans`, so both
+                        // sides of the subtraction count the same kind of
+                        // thing over the same width of time.
+                        sqlx::query_scalar::<_, f64>(
                             r#"
                             SELECT COUNT(DISTINCT fan_id)::double precision
                             FROM fan_provenance_events
@@ -409,22 +579,11 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                             "#,
                         )
                         .bind(workspace_id.into_uuid())
-                        .bind(unit_id)
+                        .bind(handle)
                         .bind(measurement.action_finished_at)
                         .fetch_one(&self.pool)
                         .await
-                        .map_err(map_sqlx)?;
-                        // Accept 0.0 as a real community outcome — a
-                        // community that produced zero conversions is
-                        // valid data, not missing data.
-                        if let Some(count) = community_fans {
-                            community_outcome = Some(count);
-                        }
-                    }
-                    // Use community-level outcome if available; otherwise
-                    // fall back to workspace-level DiD.
-                    let observed = if let Some(community_count) = community_outcome {
-                        community_count
+                        .map_err(map_sqlx)?
                     } else {
                         sqlx::query_scalar::<_, f64>(
                             r#"
@@ -441,11 +600,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         .await
                         .map_err(map_sqlx)?
                     };
-                    // The baseline_value stores the pre-action daily fan
-                    // arrival rate from a matched 14-day window.
-                    // Counterfactual = rate × 14 days = pre-period count.
-                    let counterfactual = measurement.baseline_value * 14.0;
-                    observed - counterfactual
+                    observed - measurement.counterfactual_value()
                 }
                 // Signal install growth after an agent dispatch: count new
                 // active push endpoints in the 7-day window. A push endpoint
@@ -521,56 +676,39 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // the query never actually verified the fan was still
                 // active — it only checked not-suppressed twice.
                 AutopilotMeasurementKind::DurableFanGrowth30d => {
-                    // Look up the experiment assignment for this action
-                    // to get unit_id and unit_kind.
-                    let exp_info: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
-                        r#"
-                        SELECT unit_id, unit_kind
-                        FROM viryaos_experiment_assignments
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND experiment_uuid IS NOT NULL
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(map_sqlx)?;
-                    // If this is a TargetCommunity experiment, try
-                    // community-level provenance measurement first.
-                    let mut community_outcome: Option<f64> = None;
-                    if let Some((unit_id, unit_kind)) = &exp_info
-                        && unit_kind == "target_community"
-                    {
-                        let community_durable: Option<f64> =
-                            sqlx::query_scalar::<_, Option<f64>>(
-                                r#"
-                                SELECT COUNT(DISTINCT fan_id)::double precision
-                                FROM fan_provenance_events
-                                WHERE workspace_id = $1
-                                  AND community = $2
-                                  AND event_kind = 'durability'
-                                  AND fan_id IS NOT NULL
-                                  AND occurred_at >= $3 + INTERVAL '30 days'
-                                  AND occurred_at < $3 + INTERVAL '44 days'
-                                "#,
-                            )
-                            .bind(workspace_id.into_uuid())
-                            .bind(unit_id)
-                            .bind(measurement.action_finished_at)
-                            .fetch_one(&self.pool)
-                            .await
-                            .map_err(map_sqlx)?;
-                        if let Some(count) = community_durable {
-                            community_outcome = Some(count);
-                        }
-                    }
-                    // Use community-level outcome if available; otherwise
-                    // fall back to workspace-level DiD.
-                    let observed = if let Some(community_count) = community_outcome {
-                        community_count
+                    let community =
+                        observable_community(&self.pool, workspace_id, measurement.action_id)
+                            .await?;
+                    let observed = if let Some(handle) = &community {
+                        // Durability is a state of the converted fan, not a
+                        // separate event: the fans this community converted
+                        // inside the window who are still active thirty days
+                        // after they arrived. Reading it from the conversion
+                        // ledger joined to the fan keeps one writer for the
+                        // provenance chain instead of requiring a second one
+                        // to stamp a durability event that nothing emits.
+                        sqlx::query_scalar::<_, f64>(
+                            r#"
+                            SELECT COUNT(DISTINCT fan.id)::double precision
+                            FROM fan_provenance_events AS conversion
+                            JOIN fans AS fan
+                              ON fan.workspace_id = conversion.workspace_id
+                             AND fan.id = conversion.fan_id
+                            WHERE conversion.workspace_id = $1
+                              AND conversion.community = $2
+                              AND conversion.event_kind = 'conversion'
+                              AND conversion.occurred_at >= $3
+                              AND conversion.occurred_at < $3 + INTERVAL '14 days'
+                              AND fan.created_at + INTERVAL '30 days' <= now()
+                              AND fan.status = 'active'
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(handle)
+                        .bind(measurement.action_finished_at)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(map_sqlx)?
                     } else {
                         sqlx::query_scalar::<_, f64>(
                             r#"
@@ -588,9 +726,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         .await
                         .map_err(map_sqlx)?
                     };
-                    // Counterfactual: pre-action daily rate × 14 days.
-                    let counterfactual = measurement.baseline_value * 14.0;
-                    observed - counterfactual
+                    observed - measurement.counterfactual_value()
                 }
                 // Scanner discovery quality: counts new outreach targets
                 // discovered in the 14-day post-action window. The scanner's
@@ -693,6 +829,14 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             if !observed_value.is_finite() {
                 return Err(RepositoryError::Unexpected);
             }
+            // Resolved before the transaction opens, from rows another writer
+            // committed. `Some` here means the observation above came from the
+            // community ledger rather than the workspace fallback, which is
+            // what the evidence quality has to reflect.
+            let community = observable_community(&self.pool, workspace_id, measurement.action_id)
+                .await
+                .ok()
+                .flatten();
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
@@ -769,12 +913,12 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
-                        -- Same shape as the growth-evidence write above: two
-                        -- measurements land on this row, signal installs at 7
-                        -- days and fan growth at 14, and gating on
-                        -- `resolved_at` let the first silence the second.
-                        SET observed_new_fans = COALESCE(observed_new_fans, $3),
-                            resolved_at = COALESCE(resolved_at, $4)
+                        -- Each measurement writes its own column and nothing
+                        -- else. `resolved_at` is set by
+                        -- `refresh_evidence_readiness` once the queue is empty,
+                        -- because readiness is a fact about the whole set of
+                        -- outcomes and no single measurement can speak for it.
+                        SET observed_new_fans = COALESCE(observed_new_fans, $3)
                         WHERE workspace_id = $1
                           AND action_id = $2
                           AND observed_new_fans IS NULL
@@ -783,7 +927,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
-                    .bind(now)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
@@ -791,18 +934,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
-                        -- `resolved_at` means "some outcome has landed", so it cannot also gate
-                        -- the write. Four measurements resolve against one evidence row —
-                        -- signal installs at 7 days, raw and incremental fans at 14, durable
-                        -- fans at 44 — and `AND resolved_at IS NULL` meant the first one to
-                        -- arrive stamped the row and silenced the other three. The 7-day
-                        -- measurement always arrives first, so `observed_incremental_fans`
-                        -- and `durable_fans_30d` would have stayed NULL forever and the Y14
-                        -- and Y30 posteriors would never have seen a single observation.
-                        -- Each measurement guards its own column instead: first write wins
-                        -- per column, which is what COALESCE already said about resolved_at.
-                        SET observed_fans = COALESCE(observed_fans, $3),
-                            resolved_at = COALESCE(resolved_at, $4)
+                        SET observed_fans = COALESCE(observed_fans, $3)
                         WHERE workspace_id = $1
                           AND action_id = $2
                           AND observed_fans IS NULL
@@ -811,7 +943,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
-                    .bind(now)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
@@ -820,87 +951,20 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // value. It is available to the brain via the evidence
                 // view's observed_incremental_fans column, so we don't
                 // write it to observed_new_fans (which holds the raw
-                // count only). We do mark the prediction as resolved.
+                // count only).
                 AutopilotMeasurementKind::IncrementalFanGrowth14d => {
-                    let _ = sqlx::query(
-                        r#"
-                        UPDATE viryaos_dispatch_predictions
-                        SET resolved_at = COALESCE(resolved_at, $3)
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND resolved_at IS NULL
-                        "#,
+                    let evidence_quality = measured_evidence_quality(
+                        &mut transaction,
+                        workspace_id,
+                        measurement,
+                        community.as_deref(),
                     )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                    // Determine evidence quality from the experiment
-                    // assignment. When the experiment is a randomized
-                    // holdout with community-level provenance measurement,
-                    // the evidence quality is `randomized_holdout`. When
-                    // falling back to workspace-level DiD (no provenance
-                    // available, or unit is workspace-level), the evidence
-                    // quality is downgraded to `matched_quasi_experiment`.
-                    let exp_info: Option<(String, String, String)> =
-                        sqlx::query_as::<_, (String, String, String)>(
-                            r#"
-                            SELECT experiment_kind, unit_id, unit_kind
-                            FROM viryaos_experiment_assignments
-                            WHERE workspace_id = $1
-                              AND action_id = $2
-                              AND experiment_uuid IS NOT NULL
-                            LIMIT 1
-                            "#,
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(measurement.action_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
-                    let evidence_quality = match &exp_info {
-                        Some((kind, unit_id, unit_kind))
-                            if kind == "randomized_holdout"
-                                && unit_kind == "target_community" =>
-                        {
-                            // Check if community-level provenance events
-                            // actually exist for this unit. If not, we
-                            // fell back to workspace DiD and must downgrade.
-                            let has_provenance: bool = sqlx::query_scalar::<_, i64>(
-                                r#"
-                                SELECT COUNT(*)::bigint
-                                FROM fan_provenance_events
-                                WHERE workspace_id = $1
-                                  AND community = $2
-                                  AND event_kind = 'conversion'
-                                  AND fan_id IS NOT NULL
-                                  AND occurred_at >= $3
-                                  AND occurred_at < $3 + INTERVAL '14 days'
-                                "#,
-                            )
-                            .bind(workspace_id.into_uuid())
-                            .bind(unit_id)
-                            .bind(measurement.action_finished_at)
-                            .fetch_one(&mut *transaction)
-                            .await
-                            .map_err(map_sqlx)?
-                            > 0;
-                            if has_provenance {
-                                "randomized_holdout"
-                            } else {
-                                "matched_quasi_experiment"
-                            }
-                        }
-                        _ => "matched_quasi_experiment",
-                    };
+                    .await?;
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
                         SET observed_incremental_fans = COALESCE(observed_incremental_fans, $3),
-                            evidence_quality = $5,
-                            resolved_at = COALESCE(resolved_at, $4)
+                            evidence_quality = $4
                         WHERE workspace_id = $1
                           AND action_id = $2
                           AND observed_incremental_fans IS NULL
@@ -909,7 +973,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
-                    .bind(now)
                     .bind(evidence_quality)
                     .execute(&mut *transaction)
                     .await
@@ -919,8 +982,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
-                        SET observed_signal_installs = COALESCE(observed_signal_installs, $3),
-                            resolved_at = COALESCE(resolved_at, $4)
+                        SET observed_signal_installs = COALESCE(observed_signal_installs, $3)
                         WHERE workspace_id = $1
                           AND action_id = $2
                           AND observed_signal_installs IS NULL
@@ -929,105 +991,28 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
-                    .bind(now)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    // Also mark the growth evidence as resolved.
-                    let _ = sqlx::query(
-                        r#"
-                        UPDATE viryaos_growth_evidence
-                        SET resolved_at = COALESCE(resolved_at, $3)
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND resolved_at IS NULL
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
+                    // Nothing else. The seven-day signal measurement has no
+                    // column on the evidence row and must not close it either
+                    // — Y14 is a week away and Y30 a month past that.
                 }
                 // DurableFanGrowth30d writes the durable fan count to the
-                // growth evidence table's durable_fans_30d column and marks
-                // the prediction as resolved.
+                // growth evidence table's durable_fans_30d column.
                 AutopilotMeasurementKind::DurableFanGrowth30d => {
-                    let _ = sqlx::query(
-                        r#"
-                        UPDATE viryaos_dispatch_predictions
-                        SET resolved_at = COALESCE(resolved_at, $3)
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND resolved_at IS NULL
-                        "#,
+                    let evidence_quality = measured_evidence_quality(
+                        &mut transaction,
+                        workspace_id,
+                        measurement,
+                        community.as_deref(),
                     )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                    // Determine evidence quality from the experiment
-                    // assignment (same logic as IncrementalFanGrowth14d).
-                    // Downgrade to matched_quasi_experiment when community
-                    // provenance is not available, even if the assignment
-                    // was classified as randomized_holdout.
-                    let exp_info: Option<(String, String, String)> =
-                        sqlx::query_as::<_, (String, String, String)>(
-                            r#"
-                            SELECT experiment_kind, unit_id, unit_kind
-                            FROM viryaos_experiment_assignments
-                            WHERE workspace_id = $1
-                              AND action_id = $2
-                              AND experiment_uuid IS NOT NULL
-                            LIMIT 1
-                            "#,
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(measurement.action_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
-                    let evidence_quality = match &exp_info {
-                        Some((kind, unit_id, unit_kind))
-                            if kind == "randomized_holdout"
-                                && unit_kind == "target_community" =>
-                        {
-                            let has_provenance: bool = sqlx::query_scalar::<_, i64>(
-                                r#"
-                                SELECT COUNT(*)::bigint
-                                FROM fan_provenance_events
-                                WHERE workspace_id = $1
-                                  AND community = $2
-                                  AND event_kind = 'durability'
-                                  AND fan_id IS NOT NULL
-                                  AND occurred_at >= $3 + INTERVAL '30 days'
-                                  AND occurred_at < $3 + INTERVAL '44 days'
-                                "#,
-                            )
-                            .bind(workspace_id.into_uuid())
-                            .bind(unit_id)
-                            .bind(measurement.action_finished_at)
-                            .fetch_one(&mut *transaction)
-                            .await
-                            .map_err(map_sqlx)?
-                            > 0;
-                            if has_provenance {
-                                "randomized_holdout"
-                            } else {
-                                "matched_quasi_experiment"
-                            }
-                        }
-                        _ => "matched_quasi_experiment",
-                    };
+                    .await?;
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
                         SET durable_fans_30d = COALESCE(durable_fans_30d, $3),
-                            evidence_quality = $5,
-                            resolved_at = COALESCE(resolved_at, $4)
+                            evidence_quality = $4
                         WHERE workspace_id = $1
                           AND action_id = $2
                           AND durable_fans_30d IS NULL
@@ -1036,52 +1021,24 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
-                    .bind(now)
                     .bind(evidence_quality)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
                 }
-                // Scanner/strategist proximal outcome measurements: mark
-                // the prediction and evidence as resolved. The observed
-                // value (discovered targets / produced insights) is stored
-                // in the outcome table but not in the prediction's fan
-                // columns — these workers don't acquire fans.
-                AutopilotMeasurementKind::ScannerDiscoveryQuality14d
-                | AutopilotMeasurementKind::StrategistInsightQuality14d => {
-                    let _ = sqlx::query(
-                        r#"
-                        UPDATE viryaos_dispatch_predictions
-                        SET resolved_at = COALESCE(resolved_at, $3)
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND resolved_at IS NULL
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                    let _ = sqlx::query(
-                        r#"
-                        UPDATE viryaos_growth_evidence
-                        SET resolved_at = COALESCE(resolved_at, $3)
-                        WHERE workspace_id = $1
-                          AND action_id = $2
-                          AND resolved_at IS NULL
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_id.into_uuid())
-                    .bind(now)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?;
-                }
+                // Scanner/strategist proximal outcomes have no column on the
+                // evidence row — the observed value lives in the outcome table
+                // and these workers acquire no fans. Readiness below closes
+                // their evidence once their queue is empty, same as everyone
+                // else's.
                 _ => {}
             }
+            // The queue decides readiness, and it decides it after this
+            // measurement has been marked terminal above, so an action whose
+            // last outcome just landed closes here and one still waiting on a
+            // fourteen- or forty-four-day window does not.
+            refresh_evidence_readiness(&mut transaction, workspace_id, measurement.action_id, now)
+                .await?;
             if effect.assessment == EffectAssessment::Worsened {
                 let demoted_context = sqlx::query_scalar::<_, String>(
                     r#"
@@ -1204,22 +1161,39 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 } else {
                     None
                 };
-            transaction.commit().await.map_err(map_sqlx)?;
-            // Evaluate contamination over the full measurement window
-            // after the transaction commits. This scans ALL treatment
-            // actions on the same unit during the window and downgrades
-            // evidence quality if contamination is high.
+            // Contamination is established inside this transaction, with the
+            // outcome it qualifies. It used to run after the commit with its
+            // result dropped, so a failure left the assignment's
+            // `final_contamination` NULL while the evidence row went on saying
+            // `randomized_holdout` — an unbacked claim of clean causal
+            // evidence that nothing downstream could detect. Committed
+            // together, the outcome and what is known about its cleanliness
+            // cannot disagree; and a failure here rolls the outcome back so
+            // the measurement is retried rather than half-recorded.
             if let Some((exp_uuid, unit_id, assigned_at)) = experiment_info {
-                let _ = super::operations::experiment_assignments::evaluate_contamination(
-                    self,
+                super::operations::experiment_assignments::evaluate_contamination(
+                    &mut transaction,
                     workspace_id,
                     exp_uuid,
                     &unit_id,
                     assigned_at,
                     now,
                 )
-                .await;
+                .await?;
+                // The control arm is measured in the same breath. A control
+                // unit is never dispatched, so nothing schedules a measurement
+                // for it, so its evidence would sit unresolved forever while
+                // the treatment rows resolved around it — leaving the learner
+                // with treatment-only data under an intent-to-treat label.
+                super::operations::experiment_assignments::resolve_control_evidence(
+                    &mut transaction,
+                    workspace_id,
+                    exp_uuid,
+                    now,
+                )
+                .await?;
             }
+            transaction.commit().await.map_err(map_sqlx)?;
             Ok(())
         })
         .await
@@ -1234,7 +1208,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
-            sqlx::query(
+            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let action_id: Option<uuid::Uuid> = sqlx::query_scalar::<_, uuid::Uuid>(
                 r#"
                 UPDATE viryaos_autopilot_measurements
                 SET status = CASE WHEN $4 AND attempt_count < 3 THEN 'pending' ELSE 'failed' END,
@@ -1246,6 +1221,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     finished_at = CASE WHEN $4 AND attempt_count < 3 THEN NULL ELSE $3 END,
                     last_error_kind = $5
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
+                RETURNING action_id
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -1253,9 +1229,23 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .bind(now)
             .bind(retryable)
             .bind(error_kind)
-            .execute(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // An outcome that will never arrive must not hold the evidence
+            // open forever. Readiness re-checks the queue: if this was the
+            // last thing outstanding, the row closes with that outcome's
+            // column still NULL, and the learner skips what it never learned.
+            if let Some(action_id) = action_id {
+                refresh_evidence_readiness(
+                    &mut transaction,
+                    workspace_id,
+                    AutopilotActionId::from(action_id),
+                    now,
+                )
+                .await?;
+            }
+            transaction.commit().await.map_err(map_sqlx)?;
             Ok(())
         })
         .await

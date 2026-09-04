@@ -106,9 +106,9 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
             predicted_fans, predicted_signal_installs, context,
             strategy, evidence_quality,
             sample_size, contamination, measurement_delay_days,
-            episode_id, resolved_at
+            episode_id, resolved_at, experiment_assignment_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
         ON CONFLICT (workspace_id, action_id) DO NOTHING
         "#,
     )
@@ -140,6 +140,7 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
     .bind(evidence.measurement_delay_days.map(|v| v as i32))
     .bind(&evidence.episode_id)
     .bind(evidence.resolved_at)
+    .bind(&evidence.experiment_assignment_id)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
@@ -222,6 +223,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         measurement_delay_days: Option<i32>,
         episode_id: Option<String>,
         resolved_at: Option<OffsetDateTime>,
+        experiment_assignment_id: Option<String>,
+        experiment_uuid: Option<uuid::Uuid>,
+        final_contamination: Option<f64>,
     }
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
@@ -234,7 +238,8 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                ge.converted, ge.converted_fan_id, ge.predicted_fans, ge.predicted_signal_installs,
                ge.context, ge.strategy, ge.evidence_quality,
                ge.sample_size, ge.contamination, ge.measurement_delay_days,
-               ge.episode_id, ge.resolved_at
+               ge.episode_id, ge.resolved_at,
+               ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination
         FROM viryaos_growth_evidence ge
         -- LATERAL subquery: pick at most ONE assignment row per evidence
         -- row to prevent fan-out. A partial UNIQUE INDEX on
@@ -245,10 +250,28 @@ pub(in crate::autopilot) async fn load_growth_evidence(
         -- that might predate the constraint. Multiple assignments for
         -- one action are INVALID STATE, not a supported case — the
         -- LIMIT 1 does not make them acceptable.
+        -- The assignment id is the primary key into the randomisation, because
+        -- it is the only one the control arm has: a control unit is never
+        -- dispatched, so `ge.action_id` is NULL and the old `action_id` join
+        -- could never reach it. `action_id` remains as the fallback for rows
+        -- written before the column existed.
+        --
+        -- `final_contamination` comes across with it. It was being computed and
+        -- stored and read by nobody, so the learner had no way to tell a clean
+        -- randomised comparison from one whose unit received two other
+        -- campaigns during the same window.
         LEFT JOIN LATERAL (
-            SELECT execution_status
-            FROM viryaos_experiment_assignments ea
-            WHERE ea.workspace_id = ge.workspace_id AND ea.action_id = ge.action_id
+            SELECT assignment.execution_status, assignment.experiment_uuid,
+                   assignment.final_contamination
+            FROM viryaos_experiment_assignments assignment
+            WHERE assignment.workspace_id = ge.workspace_id
+              AND (
+                  (ge.experiment_assignment_id IS NOT NULL
+                   AND assignment.id = ge.experiment_assignment_id)
+                  OR (ge.experiment_assignment_id IS NULL
+                      AND ge.action_id IS NOT NULL
+                      AND assignment.action_id = ge.action_id)
+              )
             LIMIT 1
         ) ea ON true
         WHERE ge.workspace_id = $1
@@ -266,8 +289,15 @@ pub(in crate::autopilot) async fn load_growth_evidence(
           -- SQL filter. SQL provides eligible observations; the causal
           -- layer chooses the estimand.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
-          AND ($2::timestamptz IS NULL OR ge.timestamp > $2)
-        ORDER BY ge.timestamp ASC
+          -- The cursor is `resolved_at`, the moment the row became something
+          -- the model can learn from. It used to be `ge.timestamp`, which is
+          -- when the dispatch went out — days or weeks before its outcome
+          -- exists. The checkpoint advances every cycle, so by the time a
+          -- fourteen- or forty-four-day measurement landed, its dispatch
+          -- timestamp was long behind the cursor and the delta skipped it. The
+          -- brain was replaying an empty set and saving a checkpoint of it.
+          AND ($2::timestamptz IS NULL OR ge.resolved_at > $2)
+        ORDER BY ge.resolved_at ASC, ge.timestamp ASC
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -320,6 +350,9 @@ pub(in crate::autopilot) async fn load_growth_evidence(
                 strategy: row.strategy,
                 evidence_quality: crowdrelay_brain::EvidenceQuality::parse(&row.evidence_quality)
                     .unwrap_or(crowdrelay_brain::EvidenceQuality::Observational),
+                experiment_assignment_id: row.experiment_assignment_id,
+                experiment_uuid: row.experiment_uuid,
+                final_contamination: row.final_contamination,
                 sample_size: row.sample_size.map(|v| v as u32),
                 contamination: row.contamination,
                 measurement_delay_days: row.measurement_delay_days.map(|v| v as u32),

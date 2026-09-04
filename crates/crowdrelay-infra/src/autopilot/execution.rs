@@ -352,20 +352,49 @@ pub(super) async fn schedule_effect_measurement(
             // fans regardless of status would compare an outcome that
             // excludes suppressed arrivals against a counterfactual that
             // includes them.
-            let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COUNT(*)::double precision / 14.0 FROM fans
-                WHERE workspace_id = $1
-                  AND created_at >= $2 - INTERVAL '14 days'
-                  AND created_at < $2
-                  AND status != 'suppressed'
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            // When the experimental unit is a community, the outcome will be
+            // read from that community's own conversion ledger. A workspace
+            // arrival rate is then the wrong counterfactual by both population
+            // and unit: it subtracts everything the whole workspace acquired
+            // from what one subreddit sent, which makes a community that
+            // performed exactly at its own baseline look like it destroyed a
+            // fortnight of growth. Same ledger, same width, same community.
+            let community = measurement_unit_community(transaction, workspace_id, action_id).await?;
+            let pre_action_daily_rate = if let Some(handle) = &community {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(DISTINCT fan_id)::double precision / 14.0
+                    FROM fan_provenance_events
+                    WHERE workspace_id = $1
+                      AND community = $3
+                      AND event_kind = 'conversion'
+                      AND fan_id IS NOT NULL
+                      AND occurred_at >= $2 - INTERVAL '14 days'
+                      AND occurred_at < $2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(handle)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?
+            } else {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision / 14.0 FROM fans
+                    WHERE workspace_id = $1
+                      AND created_at >= $2 - INTERVAL '14 days'
+                      AND created_at < $2
+                      AND status != 'suppressed'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?
+            };
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
@@ -392,20 +421,44 @@ pub(super) async fn schedule_effect_measurement(
             // from the last fourteen days cannot have a thirty-day durability
             // outcome yet. So the baseline window is the fourteen days ending
             // thirty days ago — same width, old enough to have been observed.
-            let pre_action_durable_daily_rate = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COUNT(*)::double precision / 14.0 FROM fans
-                WHERE workspace_id = $1
-                  AND created_at >= $2 - INTERVAL '44 days'
-                  AND created_at < $2 - INTERVAL '30 days'
-                  AND status = 'active'
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            let pre_action_durable_daily_rate = if let Some(handle) = &community {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(DISTINCT fan.id)::double precision / 14.0
+                    FROM fan_provenance_events AS conversion
+                    JOIN fans AS fan
+                      ON fan.workspace_id = conversion.workspace_id
+                     AND fan.id = conversion.fan_id
+                    WHERE conversion.workspace_id = $1
+                      AND conversion.community = $3
+                      AND conversion.event_kind = 'conversion'
+                      AND conversion.occurred_at >= $2 - INTERVAL '44 days'
+                      AND conversion.occurred_at < $2 - INTERVAL '30 days'
+                      AND fan.status = 'active'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(handle)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?
+            } else {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision / 14.0 FROM fans
+                    WHERE workspace_id = $1
+                      AND created_at >= $2 - INTERVAL '44 days'
+                      AND created_at < $2 - INTERVAL '30 days'
+                      AND status = 'active'
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?
+            };
             plans.push((
                 AutopilotMeasurementKind::DurableFanGrowth30d,
                 action_id.into_uuid(),
@@ -489,6 +542,54 @@ pub(super) async fn schedule_effect_measurement(
     }
     Ok(())
 }
+/// The community handle this action's experimental unit refers to, when it is
+/// a community at all.
+///
+/// The unit id on a community assignment is an `agent_outreach_targets` UUID;
+/// the ledger is keyed by the handle the smart link carries. Both the
+/// counterfactual here and the observation in `observe_measurement` resolve it
+/// the same way, so the two sides of the subtraction cannot drift onto
+/// different keys.
+async fn measurement_unit_community(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+) -> Result<Option<String>, RepositoryError> {
+    let unit_id: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT unit_id
+        FROM viryaos_experiment_assignments
+        WHERE workspace_id = $1
+          AND action_id = $2
+          AND unit_kind = 'target_community'
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let Some(unit_id) = unit_id else {
+        return Ok(None);
+    };
+    let Ok(target_id) = Uuid::parse_str(&unit_id) else {
+        return Ok(None);
+    };
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT display_name
+        FROM agent_outreach_targets
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(target_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)
+}
+
 pub(super) async fn record_execution_outcome(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -649,176 +750,6 @@ pub(super) async fn record_execution_outcome(
     .await
     .map_err(map_sqlx)?;
     Ok(())
-}
-
-async fn lock_booking_target_for_execution(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    city_id: CityId,
-    target_id: BookingTargetId,
-    expected_version: i64,
-) -> Result<(String, String, String), RepositoryError> {
-    sqlx::query_as::<_, (String, String, String)>(
-        r#"
-        SELECT target_kind, display_name, contact_email
-        FROM viryaos_booking_targets
-        WHERE workspace_id = $1
-          AND id = $2
-          AND city_id = $3
-          AND version = $4
-          AND active
-          AND accepts_booking
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(target_id.into_uuid())
-    .bind(city_id.into_uuid())
-    .bind(expected_version)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?
-    .ok_or(RepositoryError::Conflict)
-}
-
-async fn ensure_promotion_state_current(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    action_id: AutopilotActionId,
-    campaign_id: PromotionCampaignId,
-    expected_budget_minor: i64,
-    proposed_budget_minor: i64,
-) -> Result<(), RepositoryError> {
-    let current = sqlx::query_as::<_, (i64, String)>(
-        r#"
-        SELECT current_daily_budget_minor, currency
-        FROM viryaos_promotion_campaign_states
-        WHERE workspace_id = $1 AND id = $2 AND active AND expires_at > now()
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(campaign_id.into_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?
-    .ok_or(RepositoryError::NotFound)?;
-    if current.0 != expected_budget_minor {
-        return Err(RepositoryError::Conflict);
-    }
-    if proposed_budget_minor <= expected_budget_minor {
-        return Ok(());
-    }
-
-    let guardrail = sqlx::query_as::<_, (i64, i64)>(
-        r#"
-        SELECT maximum_total_daily_budget_minor, maximum_monthly_spend_minor
-        FROM viryaos_promotion_budget_guardrails
-        WHERE workspace_id = $1 AND currency = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(&current.1)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?
-    .ok_or(RepositoryError::Conflict)?;
-
-    let (daily_budget_minor, month_to_date_minor) = sqlx::query_as::<_, (i64, i64)>(
-        r#"
-        SELECT
-            COALESCE(SUM(current_daily_budget_minor), 0)::bigint,
-            COALESCE(SUM(spend_month_to_date_minor), 0)::bigint
-        FROM viryaos_promotion_campaign_states
-        WHERE workspace_id = $1
-          AND currency = $2
-          AND active
-          AND expires_at > now()
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(&current.1)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    let reserved_delta_minor = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COALESCE(SUM(daily_delta_minor), 0)::bigint
-        FROM viryaos_promotion_budget_reservations
-        WHERE workspace_id = $1 AND currency = $2 AND expires_at > now()
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(&current.1)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    let delta = proposed_budget_minor
-        .checked_sub(expected_budget_minor)
-        .ok_or(RepositoryError::Unexpected)?;
-    let projected_daily = daily_budget_minor
-        .checked_add(reserved_delta_minor)
-        .and_then(|value| value.checked_add(delta))
-        .ok_or(RepositoryError::Unexpected)?;
-    if projected_daily > guardrail.0 || month_to_date_minor >= guardrail.1 {
-        return Err(RepositoryError::Conflict);
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO viryaos_promotion_budget_reservations (
-            workspace_id, action_id, campaign_id, currency, daily_delta_minor, expires_at
-        ) VALUES ($1,$2,$3,$4,$5,now() + interval '24 hours')
-        ON CONFLICT (workspace_id, action_id) DO NOTHING
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .bind(campaign_id.into_uuid())
-    .bind(&current.1)
-    .bind(delta)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(())
-}
-
-async fn ensure_marketing_eligible(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    fan_id: FanId,
-) -> Result<(), RepositoryError> {
-    let eligible = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM fans AS fan
-            JOIN LATERAL (
-                SELECT consent.granted
-                FROM fan_consents AS consent
-                WHERE consent.workspace_id = fan.workspace_id
-                  AND consent.fan_id = fan.id
-                  AND consent.purpose = 'marketing'
-                ORDER BY consent.recorded_at DESC, consent.id DESC
-                LIMIT 1
-            ) AS latest_consent ON latest_consent.granted
-            WHERE fan.workspace_id = $1
-              AND fan.id = $2
-              AND fan.status = 'active'
-        )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(fan_id.into_uuid())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    if eligible {
-        Ok(())
-    } else {
-        Err(RepositoryError::Conflict)
-    }
 }
 
 /// Whether this payload is executed by an external executor that must file

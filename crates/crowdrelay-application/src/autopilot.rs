@@ -8,11 +8,13 @@
 mod control;
 mod evaluate;
 mod growth_posture;
+mod measurement_ports;
 mod model;
 mod ports;
 
 pub use control::*;
 pub use evaluate::*;
 pub use growth_posture::*;
+pub use measurement_ports::*;
 pub use model::*;
 pub use ports::*;

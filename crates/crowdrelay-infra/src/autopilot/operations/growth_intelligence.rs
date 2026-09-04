@@ -869,6 +869,58 @@ pub(in crate::autopilot) async fn load_causal_model(
 /// observations to the OutcomeModel regime tracker. This ensures that
 /// a badly calibrated observational predictor cannot distort uncertainty
 /// for the randomized treatment estimator.
+/// The control arm's average outcome, per experiment.
+///
+/// `None` for a horizon means no control unit has a resolved outcome on it
+/// yet, which is the difference between having a comparison and only claiming
+/// one. The caller uses that distinction to decide whether a treated row can
+/// be called randomised evidence at all.
+#[derive(Clone, Copy, Debug, Default)]
+struct ControlMean {
+    y14: Option<f64>,
+    y30: Option<f64>,
+}
+
+/// Averages the control arm per experiment so treated rows can be measured
+/// against it.
+fn control_arm_means(
+    evidence: &[crowdrelay_brain::GrowthEvidence],
+) -> std::collections::HashMap<uuid::Uuid, ControlMean> {
+    let mut sums: std::collections::HashMap<uuid::Uuid, (f64, u32, f64, u32)> =
+        std::collections::HashMap::new();
+    for ev in evidence {
+        if ev.treatment.is_treatment() {
+            continue;
+        }
+        let Some(experiment_uuid) = ev.experiment_uuid else {
+            // A control row that cannot say which experiment it belongs to
+            // cannot be anyone's counterfactual. Counting it against every
+            // experiment would be worse than counting it against none.
+            continue;
+        };
+        let entry = sums.entry(experiment_uuid).or_insert((0.0, 0, 0.0, 0));
+        if let Some(y14) = ev.observed_incremental_fans {
+            entry.0 += y14;
+            entry.1 += 1;
+        }
+        if let Some(y30) = ev.y30_outcome() {
+            entry.2 += y30;
+            entry.3 += 1;
+        }
+    }
+    sums.into_iter()
+        .map(|(experiment_uuid, (y14_sum, y14_n, y30_sum, y30_n))| {
+            (
+                experiment_uuid,
+                ControlMean {
+                    y14: (y14_n > 0).then(|| y14_sum / f64::from(y14_n)),
+                    y30: (y30_n > 0).then(|| y30_sum / f64::from(y30_n)),
+                },
+            )
+        })
+        .collect()
+}
+
 fn apply_evidence_to_model(
     model: &mut crowdrelay_brain::CausalModel,
     evidence: &[crowdrelay_brain::GrowthEvidence],
@@ -888,6 +940,18 @@ fn apply_evidence_to_model(
     // `execution_status = executed` with "TOT is identified".
     let estimand = CausalEstimand::IntentToTreat;
 
+    // Intent-to-treat compares the arms. The control rows in this batch are
+    // that comparison, so they are gathered first and the treated rows are
+    // measured against them.
+    //
+    // Feeding a control row to `update_treatment_effect_for_target` — which is
+    // what happened before — hands the posterior a control unit's own pre/post
+    // drift as though it were a treatment effect, and leaves the treated rows
+    // contributing their own pre/post difference with nothing subtracted. The
+    // result is a number built entirely from treated units, labelled ITT. A
+    // control arm that does not enter the arithmetic is not a control arm.
+    let control_means = control_arm_means(evidence);
+
     for ev in evidence {
         let template = extract_template_from_opportunity(&ev.opportunity_id);
         let subreddit_type = ev.context.subreddit_type.as_deref();
@@ -902,7 +966,11 @@ fn apply_evidence_to_model(
         // → moves the posterior more. Lower quality evidence (observational)
         // gets a higher variance → barely moves the posterior. This prevents
         // weak pre/post evidence from dominating strong causal evidence.
-        let quality_multiplier = ev.evidence_quality.variance_multiplier();
+        // The quality a row has earned, not the one it was labelled with at
+        // dispatch. `evidence_quality` records that the unit was randomised;
+        // whether that randomisation survived the measurement window is a
+        // separate fact, and `final_contamination` is where it lives.
+        let evidence_quality = ev.effective_evidence_quality();
 
         // Update the outcome model (P(Y|action,context)) from the raw
         // observed fan count — NOT the DiD estimate. The outcome model
@@ -954,6 +1022,23 @@ fn apply_evidence_to_model(
         if !contributes_to_tau {
             continue;
         }
+        // Control rows are the counterfactual, not an effect. They have already
+        // been folded into `control_means`; passing them on would teach the
+        // treatment-effect posterior that withholding an action is an action.
+        if !ev.treatment.is_treatment() {
+            continue;
+        }
+        // The contrast this treated row is measured against, and whether one
+        // exists at all. Without a resolved control arm there is no randomised
+        // comparison to make, so the row falls back to its own difference-in-
+        // differences and is capped at the quasi-experiment it then is.
+        let contrast = ev.experiment_uuid.and_then(|id| control_means.get(&id));
+        let earned_quality = if contrast.is_some() {
+            evidence_quality
+        } else {
+            evidence_quality.min_quasi_experimental()
+        };
+        let quality_multiplier = earned_quality.variance_multiplier();
 
         // Update the Y14 treatment-effect posterior from the incremental
         // outcome. The `observed_incremental_fans` field is the
@@ -963,7 +1048,8 @@ fn apply_evidence_to_model(
         //
         // Y14 treatment-effect calibration is recorded to the Y14Bridged
         // regime tracker — separate from Y30Direct and OutcomeModel.
-        if let Some(tau_y14) = ev.observed_incremental_fans {
+        if let Some(outcome_y14) = ev.observed_incremental_fans {
+            let tau_y14 = outcome_y14 - contrast.and_then(|mean| mean.y14).unwrap_or(0.0);
             let obs_var = 2.0 * tau_y14.abs().max(1.0) * quality_multiplier;
             model.update_treatment_effect_for_target(
                 &template,
@@ -971,7 +1057,7 @@ fn apply_evidence_to_model(
                 target_key,
                 tau_y14,
                 obs_var,
-                ev.evidence_quality,
+                earned_quality,
             );
             // Record Y14Bridged calibration with the actual measurement-
             // determined evidence quality, not a synthesized one.
@@ -983,16 +1069,17 @@ fn apply_evidence_to_model(
                 tau_y14,
                 subreddit_type,
                 None,
-                ev.evidence_quality.as_str(),
+                earned_quality.as_str(),
             );
         }
 
         // When Y30 (durable) is available, update the Y30 treatment-effect
         // posterior, the Y30Direct calibration tracker, and the Y14→Y30
         // bridge.
-        if let Some(y30_fans) = ev.y30_outcome() {
+        if let Some(outcome_y30) = ev.y30_outcome() {
             // Y30 treatment-effect update (North Star). Scaled by evidence
             // quality — same rationale as Y14.
+            let y30_fans = outcome_y30 - contrast.and_then(|mean| mean.y30).unwrap_or(0.0);
             let obs_var = 2.0 * y30_fans.abs().max(1.0) * quality_multiplier;
             model.update_treatment_effect_y30_for_target(
                 &template,
@@ -1000,7 +1087,7 @@ fn apply_evidence_to_model(
                 target_key,
                 y30_fans,
                 obs_var,
-                ev.evidence_quality,
+                earned_quality,
             );
             // Y30Direct calibration — isolated from Y14Bridged and
             // OutcomeModel. A bad OutcomeModel calibration cannot distort
@@ -1014,7 +1101,7 @@ fn apply_evidence_to_model(
                 y30_fans,
                 subreddit_type,
                 None,
-                ev.evidence_quality.as_str(),
+                earned_quality.as_str(),
             );
             // Y14→Y30 bridge: update when both outcomes are available.
             if let Some(y14_fans) = ev.y14_outcome() {

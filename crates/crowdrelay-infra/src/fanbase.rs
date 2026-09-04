@@ -985,6 +985,7 @@ pub async fn register_manual_reddit_post(
         ))
     })?;
 
+    let mut transaction = pool.begin().await?;
     let result = sqlx::query(
         r#"
         UPDATE community_posts
@@ -1003,12 +1004,84 @@ pub async fn register_manual_reddit_post(
     .bind(workspace_id)
     .bind(&reddit_post_id)
     .bind(reddit_post_url)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(ManualRedditPostError::NotFound);
     }
+    anchor_measurements_to_publication(&mut transaction, workspace_id, community_post_id).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Moves the measurement windows for a manually published post so they start
+/// when the post reached the community.
+///
+/// A draft is not an exposure. The windows were anchored to
+/// `action_finished_at`, which for the manual flow is the moment the text was
+/// written — and an operator who publishes on Thursday what the agent drafted
+/// on Monday would have had three of the fourteen days spent measuring a world
+/// the post was not in yet. Worse, the days are not neutral: they carry
+/// whatever the rest of the workspace did, credited to a post nobody had seen.
+///
+/// Two actions are re-anchored. The post's own action carries the engagement
+/// measurement; the agent run that drafted it carries Y14 and Y30. They are
+/// joined through the community itself — the draft names the target, and the
+/// experiment assigned that same target to the dispatch that produced it. The
+/// most recent assignment for the target before the draft existed is that
+/// dispatch, which keeps an older post to the same community from dragging an
+/// earlier dispatch's windows forward with it.
+///
+/// Each measurement keeps its own offset — seven days stays seven days from
+/// publication, forty-four stays forty-four — so only the origin moves.
+async fn anchor_measurements_to_publication(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    community_post_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        WITH published AS (
+            SELECT post.action_id, post.target_id, post.created_at, post.posted_at
+            FROM community_posts AS post
+            WHERE post.workspace_id = $1 AND post.id = $2
+        ), owning_actions AS (
+            SELECT published.action_id, published.posted_at
+            FROM published
+            UNION
+            SELECT assignment.action_id, published.posted_at
+            FROM published
+            JOIN LATERAL (
+                SELECT candidate.action_id
+                FROM viryaos_experiment_assignments AS candidate
+                WHERE candidate.workspace_id = $1
+                  AND candidate.unit_kind = 'target_community'
+                  AND candidate.unit_id = published.target_id::text
+                  AND candidate.action_id IS NOT NULL
+                  AND candidate.assigned_at <= published.created_at
+                ORDER BY candidate.assigned_at DESC
+                LIMIT 1
+            ) AS assignment ON true
+            WHERE published.target_id IS NOT NULL
+        )
+        UPDATE viryaos_autopilot_measurements AS measurement
+        SET action_finished_at = owning_actions.posted_at,
+            due_at = owning_actions.posted_at
+                     + (measurement.due_at - measurement.action_finished_at),
+            available_at = owning_actions.posted_at
+                     + (measurement.due_at - measurement.action_finished_at)
+        FROM owning_actions
+        WHERE measurement.workspace_id = $1
+          AND measurement.action_id = owning_actions.action_id
+          AND measurement.status = 'pending'
+          AND measurement.action_finished_at < owning_actions.posted_at
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(community_post_id)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
