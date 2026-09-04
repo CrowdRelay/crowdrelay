@@ -160,7 +160,12 @@ report_control_plane_runtime() {
   # under the heartbeat timer, where a second `docker compose exec` costs more
   # CPU than the reading is worth.
   local api_healthy worker_healthy outbox_pending worker_id metrics
-  api_healthy=false
+  # Empty (unknown) until the probe succeeds — same semantics as the worker
+  # probe below. A failed compose exec is a probe failure, not proof the API
+  # is down: reporting false overwrites the last known good state in the
+  # control plane, and a transient Docker daemon hiccup would flip a healthy
+  # tenant to degraded for a full heartbeat window.
+  api_healthy=""
   metrics="$(compose exec -T api curl --fail --silent --show-error --connect-timeout 2 --max-time 10 \
     http://127.0.0.1:8080/metrics 2>/dev/null </dev/null || true)"
   [[ -n "$metrics" ]] && api_healthy=true
