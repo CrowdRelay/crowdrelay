@@ -244,9 +244,9 @@ async fn seed_sweep(
         "INSERT INTO viryaos_autopilot_decisions
          (id, workspace_id, context, subject_kind, subject_id, decision_kind,
           confidence_basis_points, disposition, reason, input_snapshot,
-          policy_snapshot, recommendation, decision_key)
+          policy_snapshot, recommendation, decision_key, trace_id)
          VALUES ($1, $2, 'outreach_supply', 'workspace', $2, 'replenish_outreach_supply',
-                 10000, 'auto_execute', 'test', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, $3)",
+                 10000, 'auto_execute', 'test', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, $3,gen_random_uuid())",
     )
     .bind(decision_id)
     .bind(workspace_id.into_uuid())

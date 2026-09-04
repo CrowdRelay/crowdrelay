@@ -227,9 +227,9 @@ async fn seed_action(
         INSERT INTO viryaos_autopilot_decisions (
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation, evaluated_at
+            input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
         ) VALUES ($1,$2,$3,'content_supply','test_subject',$4,$5,10000,
-                  'auto_execute','gated claim regression','{}','{}','{}',$6)
+                  'auto_execute','gated claim regression','{}','{}','{}',$6,$1)
         "#,
     )
     .bind(decision_id)

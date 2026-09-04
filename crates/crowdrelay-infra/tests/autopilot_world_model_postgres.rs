@@ -449,10 +449,10 @@ async fn pipeline_counts_count_places_not_posts() -> Result<(), Box<dyn std::err
         "INSERT INTO viryaos_autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation)
+            input_snapshot, policy_snapshot, recommendation, trace_id)
          VALUES ($1, $2, $3, 'outreach', 'discovery_place', $4,
                  'community.post', 5000, 'require_approval', 'fixture',
-                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)",
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,gen_random_uuid())",
     )
     .bind(decision_id)
     .bind(workspace_id.into_uuid())

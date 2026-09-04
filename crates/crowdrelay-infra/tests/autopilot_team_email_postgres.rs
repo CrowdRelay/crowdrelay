@@ -341,8 +341,8 @@ async fn seed_action(
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation, evaluated_at
-        ) VALUES ($1,$2,$3,'booking_opportunity','test_subject',$4,$5,10000,
-                  'auto_execute','team email dispatch regression','{}','{}','{}',$6)
+        , trace_id) VALUES ($1,$2,$3,'booking_opportunity','test_subject',$4,$5,10000,
+                  'auto_execute','team email dispatch regression','{}','{}','{}',$6,gen_random_uuid())
         "#,
     )
     .bind(decision_id)

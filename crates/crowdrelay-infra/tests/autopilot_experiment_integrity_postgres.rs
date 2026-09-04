@@ -1686,6 +1686,19 @@ async fn t16_trace_continuity_no_fake_continuity() {
     );
 
     // Case 2: action WITHOUT trace_id (legacy) → downstream records have NULL.
+    //
+    // The legacy shape is an *action* with no trace, which production still has
+    // (52 of 203 actions carried one when this was measured). It used to be
+    // built from a decision with no trace too, but migration 0231 made
+    // `viryaos_autopilot_decisions.trace_id` NOT NULL, so that decision can no
+    // longer exist and the case had to be built from one that can.
+    //
+    // This does not soften the assertion. The claim under test is that a
+    // downstream record never invents a trace its action does not have, and the
+    // action here still has none — the scenario is now one that can actually
+    // occur rather than one the schema forbids. The decision's own id as its
+    // trace is a root, not a borrowed correlation: it links this decision to
+    // nothing else, which is the honest representation of "no recorded cause".
     let decision_id = uuid::Uuid::now_v7();
     let legacy_action_id = uuid::Uuid::now_v7();
     sqlx::query(
@@ -1695,7 +1708,7 @@ async fn t16_trace_continuity_no_fake_continuity() {
             input_snapshot, policy_snapshot, recommendation, trace_id)
            VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
                    'auto_execute',9000,'auto_execute','test',
-                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,NULL)"#,
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$1)"#,
     )
     .bind(decision_id)
     .bind(f.workspace_id.into_uuid())
@@ -4397,10 +4410,10 @@ async fn t28c_action_id_cannot_repeat_across_workspaces() {
         r#"INSERT INTO viryaos_autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation)
+            input_snapshot, policy_snapshot, recommendation, trace_id)
            VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
                    'auto_execute',9000,'auto_execute','test',
-                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())"#,
     )
     .bind(decision_id_2)
     .bind(workspace_id_2.into_uuid())

@@ -252,11 +252,11 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
-        )
+        , trace_id)
         VALUES (
             $1,$2,$3,'plays','fan',$4,'run_play_step',9000,'require_approval',
             'test', '{}'::jsonb, '{}'::jsonb, $5
-        )
+        ,gen_random_uuid())
         "#,
     )
     .bind(decision_id)
@@ -683,9 +683,9 @@ async fn a_sweep_play_runs_once_for_its_show_and_reaches_nobody()
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
-        )
+        , trace_id)
         VALUES ($1,$2,$3,'plays','event',$4,'run_play_step',9000,'auto_execute',
-                'test','{}'::jsonb,'{}'::jsonb,$5)
+                'test','{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
         "#,
     )
     .bind(decision_id)
@@ -945,9 +945,9 @@ async fn a_ladder_is_anchored_on_one_engaged_fan_and_needs_a_tracked_link()
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
-        )
+        , trace_id)
         VALUES ($1,$2,$3,'plays','fan',$4,'run_play_step',9000,'auto_execute',
-                'test','{}'::jsonb,'{}'::jsonb,$5)
+                'test','{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
         "#,
     )
     .bind(decision_id)
