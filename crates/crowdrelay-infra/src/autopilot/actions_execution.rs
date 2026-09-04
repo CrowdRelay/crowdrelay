@@ -902,7 +902,6 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::RequestOutreachTarget {
-                    task_id,
                     target_kind,
                     display_name,
                     ..
@@ -910,24 +909,45 @@ impl PostgresAutopilotRepository {
                     // Internal DB operation: promote the outreach target from
                     // `proposed` to `promoted` in the staging table. No
                     // external executor is involved.
-                    sqlx::query(
+                    //
+                    // Matched on the row's own identity -- the
+                    // `(workspace_id, display_name, target_kind)` unique key the
+                    // proposal conflicts on -- rather than on `source_task_id`.
+                    // A re-proposal of the same target keeps the original task
+                    // on the row, because that DO UPDATE does not touch
+                    // `source_task_id`, while the approval action carries the
+                    // task that proposed it most recently. Keyed on the task,
+                    // approving a target anyone had proposed before promoted
+                    // nothing at all.
+                    //
+                    // `promoted` is accepted so a replayed execution is a
+                    // no-op rather than a conflict; `discarded` is deliberately
+                    // not, because the proposal path preserves that decision
+                    // and an approval must not quietly overturn it.
+                    let promoted = sqlx::query(
                         r#"
                         UPDATE agent_outreach_targets
                         SET status = 'promoted', screened_at = COALESCE(screened_at, now())
                         WHERE workspace_id = $1
-                          AND source_task_id = $2
-                          AND target_kind = $3
-                          AND display_name = $4
-                          AND status = 'proposed'
+                          AND target_kind = $2
+                          AND display_name = $3
+                          AND status IN ('proposed', 'promoted')
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
-                    .bind(task_id)
                     .bind(target_kind)
                     .bind(display_name)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
+                    // The sibling arms treat a write that changed nothing as a
+                    // conflict rather than a success. Without this the ledger
+                    // recorded the approval as executed while the target stayed
+                    // `proposed`, so the growth loop never used it and nothing
+                    // said why.
+                    if promoted.rows_affected() != 1 {
+                        return Err(RepositoryError::Conflict);
+                    }
                 }
                 AutopilotActionPayload::RequestAgentRun {
                     template_id,
