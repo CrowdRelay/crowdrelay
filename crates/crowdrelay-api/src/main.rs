@@ -258,6 +258,7 @@ async fn main() -> Result<()> {
             public_auth_per_minute: config.rate_limit.public_auth_per_minute,
             privileged_per_minute: config.rate_limit.privileged_per_minute,
             general_per_minute: config.rate_limit.general_per_minute,
+            signup_per_minute: config.rate_limit.signup_per_minute,
         }))
     });
     let http_config = HttpConfig::new(config.allowed_origins.clone())

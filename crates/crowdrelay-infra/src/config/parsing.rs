@@ -533,5 +533,15 @@ fn parse_rate_limit(values: &HashMap<String, String>) -> Result<RateLimitConfig,
             1,
             MAX_RATE_LIMIT_PER_MINUTE,
         )?,
+        // Floor of 1 rather than 0: unlike the other classes, turning this one
+        // off is never a deliberate operational choice, it is how the mail
+        // sender gets abused.
+        signup_per_minute: parse_bounded_u32(
+            values.get(RATE_LIMIT_SIGNUP_PER_MINUTE_KEY),
+            RATE_LIMIT_SIGNUP_PER_MINUTE_KEY,
+            DEFAULT_RATE_LIMIT_SIGNUP_PER_MINUTE,
+            1,
+            MAX_RATE_LIMIT_PER_MINUTE,
+        )?,
     })
 }

@@ -510,7 +510,7 @@ pub async fn signup_fan(
         state.acquisition.workspace_id,
         state.ticketing.operation_timeout(),
     );
-    if let Err(error) = mobile_fan
+    match mobile_fan
         .upsert_fan_location_preference(
             result.fan_id,
             &requested_city_slug,
@@ -519,11 +519,21 @@ pub async fn signup_fan(
         )
         .await
     {
-        tracing::warn!(
+        Ok(true) => {}
+        // The write is conditional on the fan already holding an interest in
+        // this city, and a repeat signup for a pending or active address does
+        // not create one. Silence here meant a fan opted into nearby shows,
+        // saw it accepted, and was never reachable by that loop.
+        Ok(false) => tracing::warn!(
+            fan_id = %result.fan_id,
+            city_slug = %requested_city_slug,
+            "fan signup completed but no city interest matched, so the nearby preference was not stored"
+        ),
+        Err(error) => tracing::warn!(
             %error,
             fan_id = %result.fan_id,
             "fan signup completed but nearby preference could not be persisted"
-        );
+        ),
     }
     if let Err(error) = crowdrelay_infra::acquisition::persist_fan_ad_attribution(
         state.ticketing.pool(),

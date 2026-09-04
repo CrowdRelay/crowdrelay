@@ -1050,6 +1050,7 @@ mod tests {
             public_auth_per_minute: 1,
             privileged_per_minute: 1000,
             general_per_minute: 1000,
+            signup_per_minute: 1000,
         }));
         let http_config = HttpConfig::new(["http://localhost:4321".to_owned()])?
             .with_rate_limit(Some(limiter));
@@ -1097,6 +1098,7 @@ mod tests {
             public_auth_per_minute: 1,
             privileged_per_minute: 1000,
             general_per_minute: 1000,
+            signup_per_minute: 1000,
         }));
         let http_config = HttpConfig::new(["http://localhost:4321".to_owned()])?
             .with_rate_limit(Some(limiter));
