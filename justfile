@@ -178,6 +178,20 @@ ps:
       [[ "$code" == "200" ]]
     done
 
-# Deploy via the release script
+# Deploy CrowdRelay alone via the release script
 deploy:
     bash scripts/deploy.sh
+
+# Every component ships its own origin/main; a stale or dirty checkout aborts
+# before anything mutates.
+# Deploy the whole stack: CrowdRelay, Control Plane, agent service
+deploy-ecosystem *ARGS:
+    bash scripts/deploy-ecosystem.sh {{ARGS}}
+
+# Every pre-deploy gate, no mutations — run this before `deploy-ecosystem`.
+deploy-ecosystem-check *ARGS:
+    bash scripts/deploy-ecosystem.sh --dry-run {{ARGS}}
+
+# Roll the stack back to a previously deployed 40-char SHA.
+deploy-ecosystem-rollback sha:
+    bash scripts/deploy-ecosystem.sh --rollback {{sha}}

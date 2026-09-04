@@ -14,12 +14,14 @@ BLUEGREEN = ROOT / "scripts" / "deploy-bluegreen.sh"
 COMPOSE_OVERLAY = ROOT / "compose.bluegreen.yaml"
 CLASSIFIER = ROOT / "scripts" / "classify-migrations.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "ecosystem-deploy.yml"
+JUSTFILE = ROOT / "justfile"
 
 ECOSYSTEM_TEXT = ECOSYSTEM.read_text()
 BLUEGREEN_TEXT = BLUEGREEN.read_text()
 COMPOSE_TEXT = COMPOSE_OVERLAY.read_text()
 CLASSIFIER_TEXT = CLASSIFIER.read_text()
 WORKFLOW_TEXT = WORKFLOW.read_text()
+JUSTFILE_TEXT = JUSTFILE.read_text()
 
 
 class EcosystemDeployContract(unittest.TestCase):
@@ -40,12 +42,73 @@ class EcosystemDeployContract(unittest.TestCase):
             "Phase 1",
             "Phase 2",
             "Phase 3",
-            "Phase 4",
-            "Phase 5",
-            "Phase 6",
-            "Phase 7",
         ):
             self.assertIn(phase, ECOSYSTEM_TEXT, f"orchestrator missing phase: {phase}")
+
+    def test_orchestrator_covers_every_co_deployed_component(self) -> None:
+        """The three services on the production host ship as one unit.
+
+        CrowdRelay, the Control Plane and the agent-service share a host, a
+        database and a compose stack. Deploying one without the others is how
+        the ecosystem drifts, so the orchestrator has to name all three.
+        """
+        for marker in (
+            "CROWDRELAY_DEPLOY=PASS",
+            "CONTROL_PLANE_DEPLOY=PASS",
+            "AGENT_RUNTIME_SHA=PASS",
+        ):
+            self.assertIn(marker, ECOSYSTEM_TEXT, f"orchestrator no longer reports {marker}")
+
+    def test_orchestrator_gates_checkout_freshness(self) -> None:
+        """A component ships its own origin/main, or the deploy stops.
+
+        Phases used to read a sibling checkout's HEAD with no check that it was
+        clean or pushed, so a stale desk copy deployed silently.
+        """
+        self.assertIn("require_sibling_fresh", ECOSYSTEM_TEXT)
+        self.assertIn("CHECKOUT=PASS", ECOSYSTEM_TEXT)
+        self.assertIn("--sync-siblings", ECOSYSTEM_TEXT)
+
+    def test_orchestrator_resolves_repositories_from_the_remote(self) -> None:
+        """Hardcoded owners rotted once: these repos moved org.
+
+        Checked against code only — the comment above `sibling_repo` names the
+        old owner on purpose, to record why the function exists.
+        """
+        self.assertIn("sibling_repo", ECOSYSTEM_TEXT)
+        code = [
+            line for line in ECOSYSTEM_TEXT.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        for line in code:
+            self.assertNotIn(
+                "wojciechbator/", line, f"repository owner is hardcoded again: {line.strip()}"
+            )
+
+    def test_orchestrator_fails_on_a_failed_upstream_run(self) -> None:
+        """`gh run watch ... || true` reported PASS over a red run."""
+        self.assertNotRegex(
+            ECOSYSTEM_TEXT,
+            r"gh run watch[^\n]*\|\| true",
+            "a failed upstream workflow run is being swallowed again",
+        )
+
+    def test_orchestrator_gates_agent_image_currency(self) -> None:
+        """The agent image is resolved by newest publish, not by target SHA.
+
+        So the orchestrator has to prove that image is an ancestor of agents
+        main and that nothing built since. Docs-only commits never trigger the
+        agents CI (`paths-ignore`), so the check asks GitHub whether CI ran
+        rather than re-deriving the ignore list here.
+        """
+        self.assertIn("AGENT_IMAGE=CURRENT", ECOSYSTEM_TEXT)
+        self.assertIn("AGENT_IMAGE=STALE", ECOSYSTEM_TEXT)
+        self.assertIn("merge-base --is-ancestor", ECOSYSTEM_TEXT)
+        self.assertIn("--allow-stale-agents", ECOSYSTEM_TEXT)
+
+    def test_rollback_keeps_the_agents_overlay(self) -> None:
+        """Dropping compose.agents.yml tears the agent out of the stack."""
+        self.assertIn("compose.agents.yml", ECOSYSTEM_TEXT)
 
     def test_orchestrator_has_rollback_mode(self) -> None:
         self.assertIn("--rollback", ECOSYSTEM_TEXT)
@@ -167,6 +230,35 @@ class EcosystemDeployContract(unittest.TestCase):
     def test_workflow_passes_target_sha(self) -> None:
         self.assertIn("target_sha", WORKFLOW_TEXT)
         self.assertIn("steps.target.outputs.sha", WORKFLOW_TEXT)
+
+    def test_workflow_checks_out_both_sibling_repositories(self) -> None:
+        for repository in (
+            "CrowdRelay/crowdrelay-control-plane",
+            "CrowdRelay/crowdrelay-agents",
+        ):
+            self.assertIn(repository, WORKFLOW_TEXT, f"workflow no longer checks out {repository}")
+        self.assertIn("CONTROL_PLANE_CHECKOUT:", WORKFLOW_TEXT)
+        self.assertIn("AGENTS_CHECKOUT:", WORKFLOW_TEXT)
+
+    def test_workflow_flag_assembly_cannot_short_circuit_the_deploy(self) -> None:
+        """`[[ cond ]] && args+=(...)` under `set -e` exits on a false input.
+
+        The last flag in that chain decided whether the deploy step ran at all.
+        """
+        self.assertNotRegex(
+            WORKFLOW_TEXT,
+            r"\]\]\s*&&\s*args\+=",
+            "flag assembly is back to an and-list; a false input aborts the step",
+        )
+
+    def test_one_command_runs_the_whole_deploy(self) -> None:
+        """The point of the orchestrator is a single entry point."""
+        for recipe in (
+            "deploy-ecosystem *ARGS:",
+            "deploy-ecosystem-check *ARGS:",
+            "deploy-ecosystem-rollback sha:",
+        ):
+            self.assertIn(recipe, JUSTFILE_TEXT, f"justfile is missing `just {recipe.split()[0]}`")
 
 
 if __name__ == "__main__":

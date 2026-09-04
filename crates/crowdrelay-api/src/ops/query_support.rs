@@ -46,14 +46,62 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
                 count(DISTINCT preference.city_id) FILTER (
                     WHERE city.moderation_status = 'pending'
                       AND fan.status = 'active'
-                ) AS pending_city_requests
+                ) AS pending_city_requests,
+                -- Moderation and coordinates are different blockers and only
+                -- one of them stops delivery. The nearby-show query gates on
+                -- latitude, not on `moderation_status`, so a city can be
+                -- awaiting a human and still reach its fans -- and a city can
+                -- be approved and reach nobody. Counting only the moderation
+                -- queue hid exactly the failure that matters.
+                count(DISTINCT preference.city_id) FILTER (
+                    WHERE city.latitude IS NULL
+                      AND fan.status = 'active'
+                ) AS cities_awaiting_coordinates,
+                count(DISTINCT preference.city_id) FILTER (
+                    WHERE city.latitude IS NOT NULL
+                      AND fan.status = 'active'
+                ) AS cities_resolved,
+                count(*) FILTER (
+                    WHERE city.latitude IS NOT NULL
+                      AND fan.status = 'active'
+                ) AS fans_with_coordinates,
+                -- What the loop can actually reach right now: the same three
+                -- conditions `emit_due_nearby_gigs` applies before it will
+                -- announce anything to a fan.
+                count(*) FILTER (
+                    WHERE preference.nearby_gigs_enabled
+                      AND fan.status = 'active'
+                      AND city.latitude IS NOT NULL
+                      AND consent.granted
+                ) AS nearby_eligible_fans
             FROM fan_location_preferences AS preference
             JOIN fans AS fan
               ON fan.workspace_id = preference.workspace_id
              AND fan.id = preference.fan_id
             JOIN cities AS city
               ON city.id = preference.city_id
+            LEFT JOIN latest_marketing AS consent
+              ON consent.fan_id = preference.fan_id
             WHERE preference.workspace_id = $1
+        ),
+        push_summary AS (
+            SELECT
+                count(*) FILTER (
+                    WHERE status IN ('queued', 'claimed', 'retry_wait')
+                ) AS pushes_queued,
+                -- Accepted by the provider, which is as far as "sent" can be
+                -- known from here. `delivered` is the app's own acknowledgement
+                -- that the notification reached the device, so the gap between
+                -- the two is the part of the loop nobody else reports on.
+                count(*) FILTER (
+                    WHERE provider_accepted_at IS NOT NULL
+                ) AS pushes_sent,
+                count(*) FILTER (WHERE status = 'delivered') AS pushes_delivered,
+                count(*) FILTER (
+                    WHERE status IN ('failed', 'ambiguous')
+                ) AS pushes_failed
+            FROM fan_push_deliveries
+            WHERE workspace_id = $1
         ),
         referral_summary AS (
             SELECT
@@ -74,9 +122,11 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
             WHERE workspace_id = $1
         ),
         notification_summary AS (
-            SELECT count(*) FILTER (
-                WHERE created_at >= now() - interval '30 days'
-            ) AS nearby_notifications_30d
+            SELECT
+                count(*) FILTER (
+                    WHERE created_at >= now() - interval '30 days'
+                ) AS nearby_notifications_30d,
+                count(*) AS nearby_notifications_total
             FROM nearby_gig_notifications
             WHERE workspace_id = $1
         )
@@ -95,13 +145,23 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
             interest_summary.event_interests_total,
             interest_summary.event_interests_30d,
             notification_summary.nearby_notifications_30d,
-            location_summary.pending_city_requests
+            location_summary.pending_city_requests,
+            location_summary.cities_awaiting_coordinates,
+            location_summary.cities_resolved,
+            location_summary.fans_with_coordinates,
+            location_summary.nearby_eligible_fans,
+            notification_summary.nearby_notifications_total,
+            push_summary.pushes_queued,
+            push_summary.pushes_sent,
+            push_summary.pushes_delivered,
+            push_summary.pushes_failed
         FROM fan_summary
         CROSS JOIN consent_summary
         CROSS JOIN location_summary
         CROSS JOIN referral_summary
         CROSS JOIN interest_summary
         CROSS JOIN notification_summary
+        CROSS JOIN push_summary
         "#,
     )
     .bind(state.workspace_id.into_uuid())
@@ -594,6 +654,15 @@ mod signal_tests {
                 event_interests_30d: 7,
                 nearby_notifications_30d: 5,
                 pending_city_requests: 1,
+                cities_awaiting_coordinates: 2,
+                cities_resolved: 3,
+                fans_with_coordinates: 7,
+                nearby_eligible_fans: 6,
+                nearby_notifications_total: 12,
+                pushes_queued: 4,
+                pushes_sent: 9,
+                pushes_delivered: 8,
+                pushes_failed: 1,
             },
             vec![SignalCitySummary {
                 slug: "wroclaw".to_owned(),
@@ -610,6 +679,22 @@ mod signal_tests {
         };
         assert!(json.contains("\"active_fans\":10"));
         assert!(json.contains("\"top_cities\""));
+        // The retention loop is only debuggable if every stage between a
+        // requested city and a delivered push is reported. Losing any one of
+        // them puts the loop back to failing silently.
+        for stage in [
+            "\"cities_awaiting_coordinates\":2",
+            "\"cities_resolved\":3",
+            "\"fans_with_coordinates\":7",
+            "\"nearby_eligible_fans\":6",
+            "\"notifications_created\":12",
+            "\"pushes_queued\":4",
+            "\"pushes_sent\":9",
+            "\"pushes_delivered\":8",
+            "\"pushes_failed\":1",
+        ] {
+            assert!(json.contains(stage), "missing retention stage {stage}");
+        }
         assert!(!json.contains("email"));
         assert!(!json.contains("display_name"));
         assert!(!json.contains("fan_id"));

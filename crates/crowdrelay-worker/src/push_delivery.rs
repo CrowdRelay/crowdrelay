@@ -32,6 +32,10 @@ const PUSH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub struct PushDeliveryWorker {
     repository: PushDeliveryRepository,
     providers: Arc<PushProviders>,
+    /// Last observed state of the persisted `push_delivery_enabled` flag, so a
+    /// change is reported once rather than on every five-second poll. `None`
+    /// until the first read, which makes the first observation always log.
+    flag_state: Option<bool>,
 }
 
 impl PushDeliveryWorker {
@@ -62,6 +66,7 @@ impl PushDeliveryWorker {
                 quiet_timezone,
             ),
             providers: Arc::new(providers),
+            flag_state: None,
         })
     }
 
@@ -86,7 +91,32 @@ impl PushDeliveryWorker {
 
     async fn run_once(&mut self) -> Result<()> {
         self.repository.maintain().await?;
-        if !self.repository.feature_enabled().await? {
+        let enabled = self.repository.feature_enabled().await?;
+        // The process gate decides whether this worker exists at all; the
+        // persisted flag decides whether it delivers. Returning silently on the
+        // second one meant a workspace with push switched off queued deliveries
+        // forever and never said so -- the rows pile up in `fan_push_deliveries`
+        // and the only symptom is that fans hear nothing. Report the transition
+        // once, with the backlog it is holding, rather than every poll.
+        match flag_transition(self.flag_state, enabled) {
+            FlagTransition::Unchanged => {}
+            FlagTransition::TurnedOn => {
+                tracing::info!(
+                    "fan push delivery is enabled; draining any backlog queued while it was off"
+                );
+            }
+            FlagTransition::TurnedOff => {
+                let waiting = self.repository.pending_delivery_count().await.unwrap_or(-1);
+                tracing::warn!(
+                    waiting,
+                    "fan push delivery is OFF for this workspace: the `push_delivery_enabled` \
+                     feature flag is false, so queued pushes will not be sent. Enable it in \
+                     ecosystem_feature_flags to deliver them."
+                );
+            }
+        }
+        self.flag_state = Some(enabled);
+        if !enabled {
             return Ok(());
         }
         let deliveries = self.repository.claim_due(PUSH_BATCH_SIZE).await?;
@@ -176,6 +206,28 @@ async fn deliver_one(
     Ok(())
 }
 
+/// What the persisted flag did since the last poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlagTransition {
+    Unchanged,
+    TurnedOn,
+    TurnedOff,
+}
+
+/// Decides whether this poll should say anything about the flag.
+///
+/// The worker polls every five seconds, so reporting the state every time would
+/// bury the log; reporting only on a change would mean a worker that starts with
+/// push already off never says so at all. `None` is "nothing observed yet",
+/// which is why the first read always reports.
+fn flag_transition(previous: Option<bool>, enabled: bool) -> FlagTransition {
+    match (previous, enabled) {
+        (Some(before), now) if before == now => FlagTransition::Unchanged,
+        (_, true) => FlagTransition::TurnedOn,
+        (_, false) => FlagTransition::TurnedOff,
+    }
+}
+
 fn new_ack_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     fill_random(&mut bytes).context("fan push acknowledgement token RNG failed")?;
@@ -191,5 +243,38 @@ mod tests {
         let token = new_ack_token().ok();
         assert!(token.as_ref().is_some_and(|value| value.len() == 43));
         assert!(token.as_ref().is_some_and(|value| value.is_ascii()));
+    }
+
+    #[test]
+    fn a_worker_that_starts_with_push_off_says_so() {
+        // The failure this exists to prevent: push disabled, deliveries piling
+        // up in `fan_push_deliveries`, and not one line in the log explaining
+        // why fans hear nothing. A first observation is always worth reporting
+        // even though nothing "changed".
+        assert_eq!(flag_transition(None, false), FlagTransition::TurnedOff);
+        assert_eq!(flag_transition(None, true), FlagTransition::TurnedOn);
+    }
+
+    #[test]
+    fn a_steady_flag_is_reported_once_not_every_poll() {
+        // Five-second polls: repeating the state would make the warning
+        // worthless and hide everything else in the log.
+        assert_eq!(
+            flag_transition(Some(false), false),
+            FlagTransition::Unchanged
+        );
+        assert_eq!(flag_transition(Some(true), true), FlagTransition::Unchanged);
+    }
+
+    #[test]
+    fn flipping_the_flag_is_reported_in_both_directions() {
+        // Enabling push must not need a worker restart, so the enable has to be
+        // visible too -- it is the confirmation that a backlog is about to
+        // drain.
+        assert_eq!(flag_transition(Some(false), true), FlagTransition::TurnedOn);
+        assert_eq!(
+            flag_transition(Some(true), false),
+            FlagTransition::TurnedOff
+        );
     }
 }
