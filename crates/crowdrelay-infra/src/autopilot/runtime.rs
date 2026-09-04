@@ -1174,11 +1174,16 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
-            let executor_manifest_drift = !active_executor_manifest_shas.is_empty()
+            // In-process executors use a capability fingerprint (not a SHA)
+            // as manifest_sha, so they can never match the n8n release manifest.
+            // Filter them out of the drift comparison to avoid a false positive.
+            let n8n_manifests: Vec<&String> = active_executor_manifest_shas
+                .iter()
+                .filter(|sha| valid_sha256(sha))
+                .collect();
+            let executor_manifest_drift = !n8n_manifests.is_empty()
                 && n8n_release_manifest_sha.as_ref().is_none_or(|expected| {
-                    active_executor_manifest_shas
-                        .iter()
-                        .any(|observed| observed != expected)
+                    n8n_manifests.iter().any(|observed| observed.as_str() != expected)
                 });
             let active_team_email_executor_count = sqlx::query_scalar::<_, i64>(
                 r#"SELECT count(DISTINCT executor.executor_id)::bigint
