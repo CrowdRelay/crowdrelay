@@ -87,7 +87,9 @@ pub use decision_value::{DecisionValue, EstimationRegime};
 pub use efe::{
     EfeWeights, GrowthOpportunity, adaptive_temperature, information_gain, softmax_dispatch,
 };
-pub use evidence::{EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence};
+pub use evidence::{
+    CONTAMINATION_CEILING, EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence,
+};
 pub use experiment::{
     CausalEstimand, ExecutionStatus, ExperimentAssignment, ExperimentDesign, ExperimentKind,
     ExperimentStatus, ExperimentUnitKind, FanProvenanceEvent, InterferencePolicy,

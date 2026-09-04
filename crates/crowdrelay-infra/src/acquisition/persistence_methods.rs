@@ -598,6 +598,63 @@ impl PostgresAcquisitionRepository {
         .execute(&mut **transaction)
         .await
         .map_err(StoreError::from_sqlx)?;
+        self.record_community_conversion(transaction, workspace_id, fan_id, signup)
+            .await
+    }
+
+    /// Links a signup back to the community that sent it, when the visitor
+    /// arrived through a community-tagged smart link.
+    ///
+    /// This is the conversion half of the provenance chain the ledger was
+    /// built for. Exposure was already being recorded at dispatch; nothing
+    /// wrote conversion, so every community-level outcome query matched
+    /// nothing — and `COUNT` reports nothing as zero, which reads exactly like
+    /// a community that converted no one. The two facts are not the same and
+    /// the measurement layer cannot tell them apart on its own.
+    ///
+    /// Attribution is the visitor's most recent community-tagged click inside
+    /// thirty days, recorded as such. Naming the method is the point: this
+    /// records an observed click, not a causal claim, and the causal layer is
+    /// still the only thing entitled to make one.
+    async fn record_community_conversion(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        workspace_id: WorkspaceId,
+        fan_id: FanId,
+        signup: &FanSignup,
+    ) -> Result<(), StoreError> {
+        let Some(visitor_id) = signup.visitor_id() else {
+            return Ok(());
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO fan_provenance_events (
+                workspace_id, fan_id, event_kind, channel, source_target,
+                community, campaign_id, attribution_method,
+                attribution_confidence, occurred_at
+            )
+            SELECT $1, $2, 'conversion',
+                   COALESCE(link.channel_source, 'smart_link'),
+                   link.slug, link.channel_community, click.campaign_id,
+                   'last_community_click', 1.0, now()
+            FROM click_events AS click
+            JOIN smart_links AS link
+              ON link.workspace_id = click.workspace_id
+             AND link.id = click.smart_link_id
+            WHERE click.workspace_id = $1
+              AND click.anonymous_visitor_id = $3
+              AND link.channel_community IS NOT NULL
+              AND click.occurred_at >= now() - INTERVAL '30 days'
+            ORDER BY click.occurred_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id.into_uuid())
+        .bind(Into::<Uuid>::into(visitor_id))
+        .execute(&mut **transaction)
+        .await
+        .map_err(StoreError::from_sqlx)?;
         Ok(())
     }
 

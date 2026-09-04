@@ -66,9 +66,111 @@ pub fn assess_effect(
     })
 }
 
+/// Classifies an effect that has already had its counterfactual subtracted.
+///
+/// [`assess_effect`] compares a level against a baseline and refuses a
+/// negative observation, because a negative *level* — minus four ticket sales,
+/// minus two push endpoints — is a malformed reading rather than a result. A
+/// difference-in-differences estimate is not a level. It is the subtraction
+/// itself, and its sign is the answer: a negative one says the action did
+/// worse than doing nothing, which is precisely the thing the learner has to
+/// be able to find out.
+///
+/// So signed effects get their own entry point rather than a relaxed flag on
+/// the level-based one. The two carry different meanings for the same number
+/// and the type system should not let a caller confuse them.
+///
+/// `counterfactual` is the magnitude the effect is expressed against and is
+/// used only to render the relative delta. The assessment itself compares the
+/// effect to zero, because zero is what "the action changed nothing" means
+/// here.
+#[must_use]
+pub fn assess_signed_effect(
+    counterfactual: f64,
+    observed_effect: f64,
+    neutral_band_basis_points: u16,
+) -> Option<EffectResult> {
+    if !counterfactual.is_finite()
+        || !observed_effect.is_finite()
+        || counterfactual < 0.0
+        || neutral_band_basis_points > 10_000
+    {
+        return None;
+    }
+    let delta = if counterfactual == 0.0 {
+        // Nothing to express the effect against. The sign still carries the
+        // finding, so saturate rather than discard it.
+        if observed_effect == 0.0 {
+            0
+        } else if observed_effect > 0.0 {
+            10_000
+        } else {
+            -10_000
+        }
+    } else {
+        let raw = (observed_effect / counterfactual) * 10_000.0;
+        raw.clamp(f64::from(i32::MIN), f64::from(i32::MAX)).round() as i32
+    };
+    let band = i32::from(neutral_band_basis_points);
+    let assessment = if delta > band {
+        EffectAssessment::Improved
+    } else if delta < -band {
+        EffectAssessment::Worsened
+    } else {
+        EffectAssessment::Neutral
+    };
+    Some(EffectResult {
+        assessment,
+        delta_basis_points: delta,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_effect_accepts_a_negative_result_as_a_finding() {
+        // The whole point: an action that did worse than nothing must produce
+        // a classified result, not an absent one.
+        let result = assess_signed_effect(4.0, -2.0, 500);
+        assert_eq!(
+            result.map(|value| value.assessment),
+            Some(EffectAssessment::Worsened)
+        );
+        assert_eq!(result.map(|value| value.delta_basis_points), Some(-5_000));
+    }
+
+    #[test]
+    fn level_based_assessment_still_refuses_a_negative_level() {
+        // And the level-based path keeps refusing it, so the distinction
+        // between the two entry points stays meaningful.
+        assert!(assess_effect(4.0, -2.0, EffectDirection::HigherIsBetter, 500).is_none());
+    }
+
+    #[test]
+    fn signed_effect_without_a_counterfactual_keeps_the_sign() {
+        assert_eq!(
+            assess_signed_effect(0.0, -3.0, 500).map(|value| value.assessment),
+            Some(EffectAssessment::Worsened)
+        );
+        assert_eq!(
+            assess_signed_effect(0.0, 3.0, 500).map(|value| value.assessment),
+            Some(EffectAssessment::Improved)
+        );
+        assert_eq!(
+            assess_signed_effect(0.0, 0.0, 500).map(|value| value.assessment),
+            Some(EffectAssessment::Neutral)
+        );
+    }
+
+    #[test]
+    fn signed_effect_inside_the_band_is_neutral() {
+        assert_eq!(
+            assess_signed_effect(100.0, 2.0, 500).map(|value| value.assessment),
+            Some(EffectAssessment::Neutral)
+        );
+    }
 
     #[test]
     fn material_growth_is_improvement_when_higher_is_better() {

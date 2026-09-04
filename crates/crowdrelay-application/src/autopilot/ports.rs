@@ -7,7 +7,7 @@ use crowdrelay_brain::{
     GrowthIntelligenceSnapshot,
 };
 use crowdrelay_domain::{
-    AutopilotActionId, AutopilotMeasurementId, PlayId, TraceContext, WorkspaceId,
+    AutopilotActionId, PlayId, TraceContext, WorkspaceId,
     action_class::ActionClass,
     audience_lifecycle::FanLifecycleSnapshot,
     autonomy::AutonomyLevel,
@@ -25,7 +25,6 @@ use crowdrelay_domain::{
     merch_bundle::MerchBundleSnapshot,
     merchandising::{MerchInventorySnapshot, MerchPriceSnapshot},
     outreach::{OutreachSnapshot, OutreachTargetKind},
-    performance::{EffectDirection, EffectResult, assess_effect},
     play_measurement::{
         PlayMeasurementPolicy, PlayOutcomeInput, PlayOutcomeVerdict, assess_play_outcome,
         window_velocity_milli_per_day,
@@ -38,7 +37,6 @@ use crowdrelay_domain::{
     show_operations::ShowTaskSnapshot,
     target_discovery::OutreachSupplySnapshot,
 };
-use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crowdrelay_domain::deliverability::DeliverabilitySnapshot;
@@ -412,26 +410,6 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         holdout_probability: f64,
         trace: &TraceContext,
     ) -> Result<CandidatePersistence, RepositoryError>;
-
-    /// Evaluates contamination over the full measurement window.
-    ///
-    /// Contamination is NOT just the assignment-time snapshot. It must be
-    /// evaluated over the entire measurement window: assignment-time
-    /// interference + post-assignment interference + cross-channel
-    /// contamination. A clean assignment can become contaminated later.
-    ///
-    /// This is called when `complete_measurement` resolves a fan-growth
-    /// measurement. It scans ALL treatment actions on the same unit during
-    /// the full window, computes `final_contamination`, and downgrades
-    /// `final_evidence_quality` if contamination is high (> 0.1).
-    async fn evaluate_contamination(
-        &self,
-        workspace_id: WorkspaceId,
-        experiment_uuid: uuid::Uuid,
-        unit_id: &str,
-        assignment_time: time::OffsetDateTime,
-        measurement_window_end: time::OffsetDateTime,
-    ) -> Result<(), RepositoryError>;
 
     /// Records a fan provenance event — an append-only exposure/
     /// interaction/conversion/durability event. PROVENANCE ≠ CAUSALITY:
@@ -959,143 +937,6 @@ pub fn assess_play_claim(
         policy,
     )
 }
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutopilotMeasurementKind {
-    TicketRevenue72h,
-    MerchGrossProxy7d,
-    PromotionRoas7d,
-    BookingReply7d,
-    OutreachReply7d,
-    AudienceTicketRevenue72h,
-    ShowTicketRevenue7d,
-    ShowGrowthSurfaceClicks7d,
-    ShowGrowthAttributedTicketOrders7d,
-    GrassrootsActivationReplies14d,
-    /// Fan count delta in the 14 days after an agent dispatch. Measures
-    /// whether the worker's intelligence gathering actually aggregated
-    /// new fans into the fanbase.
-    AgentRunFanGrowth14d,
-    /// Incremental fan growth: new fans in the 14-day post-action window
-    /// minus the counterfactual (pre-action daily rate × 14). This is the
-    /// North Star metric — it measures causal uplift, not just correlation.
-    /// The baseline_value stores the pre-action daily fan arrival rate.
-    IncrementalFanGrowth14d,
-    /// Signal install delta in the 7 days after an agent dispatch. Measures
-    /// whether the worker's output moved fans toward the Signal app (growth).
-    AgentRunSignalInstalls7d,
-    /// Community engagement metric delta in the 7 days after a community
-    /// engagement dispatch. Measures whether the posts produced meaningful
-    /// engagement (upvotes, comments) rather than just existing.
-    AgentRunCommunityEngagement7d,
-    /// Durable fan growth 30 days after the measurement window. Counts fans
-    /// created in the 14-day post-action window that are still active 30
-    /// days after creation (not suppressed, not deleted). This is the true
-    /// North Star — fans that stick, not just fans that sign up.
-    DurableFanGrowth30d,
-    /// Scanner discovery quality: counts the number of new outreach targets
-    /// discovered by a reddit-scanner dispatch in the 14-day post-action
-    /// window. Measures the scanner's proximal outcome (discovery) rather
-    /// than workspace-wide fan growth — the scanner doesn't acquire fans,
-    /// it finds communities.
-    ScannerDiscoveryQuality14d,
-    /// Strategist insight quality: counts the number of campaign insights
-    /// produced by a growth-strategist dispatch in the 14-day post-action
-    /// window. Measures the strategist's proximal outcome (insight
-    /// production) rather than workspace-wide fan growth.
-    StrategistInsightQuality14d,
-}
-
-impl AutopilotMeasurementKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::TicketRevenue72h => "ticket_revenue_72h",
-            Self::MerchGrossProxy7d => "merch_gross_proxy_7d",
-            Self::PromotionRoas7d => "promotion_roas_7d",
-            Self::BookingReply7d => "booking_reply_7d",
-            Self::OutreachReply7d => "outreach_reply_7d",
-            Self::AudienceTicketRevenue72h => "audience_ticket_revenue_72h",
-            Self::ShowTicketRevenue7d => "show_ticket_revenue_7d",
-            Self::ShowGrowthSurfaceClicks7d => "show_growth_surface_clicks_7d",
-            Self::ShowGrowthAttributedTicketOrders7d => "show_growth_attributed_ticket_orders_7d",
-            Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
-            Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
-            Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
-            Self::AgentRunSignalInstalls7d => "agent_run_signal_installs_7d",
-            Self::AgentRunCommunityEngagement7d => "agent_run_community_engagement_7d",
-            Self::DurableFanGrowth30d => "durable_fan_growth_30d",
-            Self::ScannerDiscoveryQuality14d => "scanner_discovery_quality_14d",
-            Self::StrategistInsightQuality14d => "strategist_insight_quality_14d",
-        }
-    }
-
-    #[must_use]
-    pub const fn direction(self) -> EffectDirection {
-        EffectDirection::HigherIsBetter
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ClaimedAutopilotMeasurement {
-    pub id: AutopilotMeasurementId,
-    pub action_id: AutopilotActionId,
-    pub kind: AutopilotMeasurementKind,
-    pub subject_id: uuid::Uuid,
-    pub baseline_value: f64,
-    pub action_finished_at: OffsetDateTime,
-    pub attempt_number: u32,
-}
-
-#[async_trait]
-pub trait AutopilotMeasurementRepository: Send + Sync {
-    async fn claim_due_measurements(
-        &self,
-        workspace_id: WorkspaceId,
-        limit: u32,
-        now: OffsetDateTime,
-    ) -> Result<Vec<ClaimedAutopilotMeasurement>, RepositoryError>;
-
-    async fn observe_measurement(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement: &ClaimedAutopilotMeasurement,
-        now: OffsetDateTime,
-    ) -> Result<f64, RepositoryError>;
-
-    async fn complete_measurement(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement: &ClaimedAutopilotMeasurement,
-        observed_value: f64,
-        effect: EffectResult,
-        now: OffsetDateTime,
-    ) -> Result<(), RepositoryError>;
-
-    async fn fail_measurement(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement_id: AutopilotMeasurementId,
-        error_kind: &'static str,
-        retryable: bool,
-        now: OffsetDateTime,
-    ) -> Result<(), RepositoryError>;
-}
-
-#[must_use]
-pub fn assess_measurement_effect(
-    measurement: &ClaimedAutopilotMeasurement,
-    observed_value: f64,
-) -> Option<EffectResult> {
-    assess_effect(
-        measurement.baseline_value,
-        observed_value,
-        measurement.kind.direction(),
-        500,
-    )
-}
-
 /// Venue/promoter discovery: the booking pipeline's supply, screened on write.
 #[async_trait]
 pub trait AutopilotBookingDiscoveryRepository: Send + Sync {

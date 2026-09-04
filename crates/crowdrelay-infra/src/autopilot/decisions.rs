@@ -442,25 +442,6 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
-    async fn evaluate_contamination(
-        &self,
-        workspace_id: WorkspaceId,
-        experiment_uuid: uuid::Uuid,
-        unit_id: &str,
-        assignment_time: time::OffsetDateTime,
-        measurement_window_end: time::OffsetDateTime,
-    ) -> Result<(), RepositoryError> {
-        super::operations::experiment_assignments::evaluate_contamination(
-            self,
-            workspace_id,
-            experiment_uuid,
-            unit_id,
-            assignment_time,
-            measurement_window_end,
-        )
-        .await
-    }
-
     async fn record_fan_provenance_event(
         &self,
         workspace_id: WorkspaceId,

@@ -151,6 +151,23 @@ impl EvidenceQuality {
         1.0 / self.weight()
     }
 
+    /// Caps this quality at the strongest level a design without a measured
+    /// control arm can honestly claim.
+    ///
+    /// `RandomizedHoldout` asserts that the action was withheld from a control
+    /// group *and* that the control group's outcome is part of the comparison.
+    /// When no control unit has a resolved outcome, the first half is true and
+    /// the second is not, and what remains is a quasi-experiment: a treated
+    /// unit compared against its own past. Saying so costs the observation
+    /// weight, which is the point — the weight was never earned.
+    #[must_use]
+    pub const fn min_quasi_experimental(self) -> Self {
+        match self {
+            Self::RandomizedHoldout => Self::MatchedQuasiExperiment,
+            other => other,
+        }
+    }
+
     /// Returns the string representation for DB storage.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -272,12 +289,46 @@ pub struct GrowthEvidence {
     /// introduce noise and reduce evidence weight.
     pub measurement_delay_days: Option<u32>,
 
+    // ── Experiment linkage ──
+    /// The experiment assignment this evidence belongs to.
+    ///
+    /// The link used to be inferred from `action_id`, which works for the
+    /// treatment arm and not at all for control: a control unit is never
+    /// dispatched, so it has no action and its evidence could not be joined
+    /// back to the randomisation that produced it. Naming the assignment makes
+    /// both arms reachable by the same key.
+    #[serde(default)]
+    pub experiment_assignment_id: Option<String>,
+    /// The experiment this evidence's unit was randomised within. Rows from
+    /// the same experiment are what an intent-to-treat contrast compares.
+    #[serde(default)]
+    pub experiment_uuid: Option<uuid::Uuid>,
+    /// Contamination as finally established over the whole measurement window,
+    /// not as guessed at assignment time.
+    ///
+    /// `None` means it was never established, which is **not** the same as
+    /// clean. A randomised assignment whose contamination was never evaluated
+    /// has not been shown to be a clean experiment, and
+    /// [`GrowthEvidence::effective_evidence_quality`] refuses to treat it as
+    /// one.
+    #[serde(default)]
+    pub final_contamination: Option<f64>,
+
     // ── Episode linkage ──
     /// The episode this evidence belongs to (links to the episode model).
     pub episode_id: Option<String>,
     /// When the evidence was resolved (measurement window closed).
     pub resolved_at: Option<OffsetDateTime>,
 }
+
+/// Contamination at or above which a randomised assignment is no longer a
+/// clean experiment.
+///
+/// Matches the threshold `evaluate_contamination` uses when it stamps
+/// `final_evidence_quality`, and the one `mark_causal_credits` requires before
+/// it will call a credit causal. One number, three call sites, so they cannot
+/// drift into disagreeing about what "clean" means.
+pub const CONTAMINATION_CEILING: f64 = 0.1;
 
 impl Default for GrowthEvidence {
     fn default() -> Self {
@@ -309,6 +360,9 @@ impl Default for GrowthEvidence {
             sample_size: None,
             contamination: None,
             measurement_delay_days: None,
+            experiment_assignment_id: None,
+            experiment_uuid: None,
+            final_contamination: None,
             episode_id: None,
             resolved_at: None,
         }
@@ -365,6 +419,9 @@ impl GrowthEvidence {
             sample_size: None,
             contamination: None,
             measurement_delay_days: None,
+            experiment_assignment_id: None,
+            experiment_uuid: None,
+            final_contamination: None,
             episode_id: None,
             resolved_at: None,
         }
@@ -394,6 +451,34 @@ impl GrowthEvidence {
     #[must_use]
     pub fn y14_outcome(&self) -> Option<f64> {
         self.observed_incremental_fans
+    }
+
+    /// The evidence quality this row has actually earned, as opposed to the
+    /// one it was labelled with when the dispatch went out.
+    ///
+    /// `evidence_quality` is written at dispatch from the experiment's design:
+    /// it records that the unit was *randomised*, which is a claim about
+    /// selection and says nothing about what happened afterwards. A randomised
+    /// unit that also received two other campaigns during its measurement
+    /// window is not a clean experiment, and one whose contamination was never
+    /// evaluated has not been shown to be one either.
+    ///
+    /// So a row is treated as randomised evidence only when both conditions
+    /// hold: it was randomly assigned, and contamination was established below
+    /// [`CONTAMINATION_CEILING`]. Anything else — high contamination, or an
+    /// evaluation that never ran or failed — reads as the quasi-experiment it
+    /// really is. `None` is not clean; it is unknown, and unknown fails closed.
+    #[must_use]
+    pub fn effective_evidence_quality(&self) -> EvidenceQuality {
+        if self.evidence_quality != EvidenceQuality::RandomizedHoldout {
+            return self.evidence_quality;
+        }
+        match self.final_contamination {
+            Some(contamination) if contamination < CONTAMINATION_CEILING => {
+                EvidenceQuality::RandomizedHoldout
+            }
+            _ => EvidenceQuality::MatchedQuasiExperiment,
+        }
     }
 
     /// Returns the Y30 (30-day durable) outcome for learning. This is the

@@ -445,6 +445,13 @@ pub(in crate::autopilot) async fn record_experiment_assignment(
             strategy.map(|s| s.to_owned()),
             evidence_quality,
         );
+        // Name the assignment on the row. Control has no action, so this is
+        // the only key that leads from its evidence back to the randomisation
+        // — and therefore the only way its outcome can later be written, or
+        // its contamination read.
+        let mut evidence = evidence;
+        evidence.experiment_assignment_id = Some(assignment.assignment_id.clone());
+        evidence.experiment_uuid = Some(assignment.experiment_uuid);
         super::evidence::record_growth_evidence_in_tx(&mut tx, workspace_id, &evidence).await?;
     }
     tx.commit().await.map_err(map_sqlx)?;
@@ -546,15 +553,22 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
 /// This scans ALL treatment actions on the same unit during the full
 /// window, computes `final_contamination`, and downgrades
 /// `final_evidence_quality` if contamination is high (> 0.1).
+///
+/// Runs inside the caller's transaction. It used to run after the measurement
+/// transaction had committed, with its result dropped by `let _ =`, so a
+/// failure left `final_contamination` NULL while the evidence row kept saying
+/// `randomized_holdout` — a claim of clean causal evidence backed by an
+/// evaluation that never happened. Committing the contamination with the
+/// outcome means the two facts cannot disagree, and any failure rolls back the
+/// outcome rather than quietly outliving it.
 pub(in crate::autopilot) async fn evaluate_contamination(
-    repo: &PostgresAutopilotRepository,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     experiment_uuid: uuid::Uuid,
     unit_id: &str,
     assignment_time: time::OffsetDateTime,
     measurement_window_end: time::OffsetDateTime,
 ) -> Result<(), RepositoryError> {
-    let pool = &repo.pool;
     // Count concurrent treatment actions on the same unit during the
     // full measurement window (not just assignment-time).
     let concurrent_count: i64 = sqlx::query_scalar(
@@ -574,7 +588,7 @@ pub(in crate::autopilot) async fn evaluate_contamination(
     .bind(assignment_time)
     .bind(measurement_window_end)
     .bind(experiment_uuid)
-    .fetch_one(pool)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
     // final_contamination = min(1.0, concurrent / (concurrent + 1))
@@ -608,16 +622,156 @@ pub(in crate::autopilot) async fn evaluate_contamination(
     .bind(final_evidence_quality)
     .bind(measurement_window_end)
     .bind(unit_id)
-    .execute(pool)
+    .execute(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
     // CRITICAL INVARIANT: evidence rows are immutable. We do NOT
     // backward-rewrite viryaos_growth_evidence.evidence_quality based
     // on the current contamination assessment. The final_contamination
     // and final_evidence_quality are stored on the experiment assignment
-    // row, and the learner reads them from there when consuming evidence.
+    // row, and `load_growth_evidence` joins them onto the evidence it hands
+    // the learner, which then asks `effective_evidence_quality` what the row
+    // has actually earned. The stored label records the design; the joined
+    // contamination records what happened; the learner reads the pair.
     // Backward-rewriting historical evidence would violate the temporal
     // causal boundary and make evidence non-reproducible.
+    Ok(())
+}
+
+/// Writes the control arm's outcome, so an intent-to-treat comparison has
+/// something to compare against.
+///
+/// A control unit is withheld on purpose: it gets no action, so nothing
+/// schedules a measurement for it, so its evidence row — written at assignment
+/// time — had no path to an outcome and stayed unresolved forever. The learner
+/// then saw resolved treatment rows and nothing else, and called the average of
+/// their pre/post differences an intent-to-treat effect. It was treatment-only
+/// data wearing the label of a comparison.
+///
+/// The control unit does not need an action to have an outcome. It is a
+/// community, and its outcome is the same quantity measured on the treated
+/// communities: conversions the provenance ledger attributes to it, over a
+/// window of the same width, minus the same kind of pre-period counterfactual.
+/// The window starts at assignment, which is when randomisation put the unit in
+/// the control arm — the moment from which "what happened to units we did not
+/// act on" is well defined.
+///
+/// Only windows that have fully elapsed are written. A control row resolves
+/// once, at the point both its outcomes exist, matching how treatment evidence
+/// becomes model-ready.
+pub(in crate::autopilot) async fn resolve_control_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    experiment_uuid: uuid::Uuid,
+    now: time::OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let controls = sqlx::query_as::<_, (String, String, time::OffsetDateTime)>(
+        r#"
+        SELECT assignment.id, target.display_name, assignment.assigned_at
+        FROM viryaos_experiment_assignments AS assignment
+        JOIN viryaos_growth_evidence AS evidence
+          ON evidence.workspace_id = assignment.workspace_id
+         AND evidence.experiment_assignment_id = assignment.id
+        JOIN agent_outreach_targets AS target
+          ON target.workspace_id = assignment.workspace_id
+         AND target.id::text = assignment.unit_id
+        WHERE assignment.workspace_id = $1
+          AND assignment.experiment_uuid = $2
+          AND assignment.arm = 'control'
+          AND assignment.unit_kind = 'target_community'
+          AND evidence.resolved_at IS NULL
+          AND assignment.assigned_at + INTERVAL '44 days' <= $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(experiment_uuid)
+    .bind(now)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    for (assignment_id, community, assigned_at) in controls {
+        // Y14: conversions attributed to this community in the fourteen days
+        // after assignment, against its own preceding fourteen days. Identical
+        // in population, unit and width to what the treated communities are
+        // measured on — a contrast between two differently-measured quantities
+        // would not be a contrast at all.
+        let y14 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT (
+                SELECT COUNT(DISTINCT fan_id)::double precision
+                FROM fan_provenance_events
+                WHERE workspace_id = $1 AND community = $2
+                  AND event_kind = 'conversion' AND fan_id IS NOT NULL
+                  AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '14 days'
+            ) - (
+                SELECT COUNT(DISTINCT fan_id)::double precision
+                FROM fan_provenance_events
+                WHERE workspace_id = $1 AND community = $2
+                  AND event_kind = 'conversion' AND fan_id IS NOT NULL
+                  AND occurred_at >= $3 - INTERVAL '14 days' AND occurred_at < $3
+            )
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&community)
+        .bind(assigned_at)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        // Y30: of those converts, the ones still active thirty days on, against
+        // the same aged comparison the treated units use.
+        let y30 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT (
+                SELECT COUNT(DISTINCT fan.id)::double precision
+                FROM fan_provenance_events AS conversion
+                JOIN fans AS fan
+                  ON fan.workspace_id = conversion.workspace_id AND fan.id = conversion.fan_id
+                WHERE conversion.workspace_id = $1 AND conversion.community = $2
+                  AND conversion.event_kind = 'conversion'
+                  AND conversion.occurred_at >= $3
+                  AND conversion.occurred_at < $3 + INTERVAL '14 days'
+                  AND fan.created_at + INTERVAL '30 days' <= now()
+                  AND fan.status = 'active'
+            ) - (
+                SELECT COUNT(DISTINCT fan.id)::double precision
+                FROM fan_provenance_events AS conversion
+                JOIN fans AS fan
+                  ON fan.workspace_id = conversion.workspace_id AND fan.id = conversion.fan_id
+                WHERE conversion.workspace_id = $1 AND conversion.community = $2
+                  AND conversion.event_kind = 'conversion'
+                  AND conversion.occurred_at >= $3 - INTERVAL '44 days'
+                  AND conversion.occurred_at < $3 - INTERVAL '30 days'
+                  AND fan.status = 'active'
+            )
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&community)
+        .bind(assigned_at)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        sqlx::query(
+            r#"
+            UPDATE viryaos_growth_evidence
+            SET observed_incremental_fans = COALESCE(observed_incremental_fans, $3),
+                durable_fans_30d = COALESCE(durable_fans_30d, $4),
+                resolved_at = COALESCE(resolved_at, $5)
+            WHERE workspace_id = $1
+              AND experiment_assignment_id = $2
+              AND resolved_at IS NULL
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&assignment_id)
+        .bind(y14)
+        .bind(y30)
+        .bind(now)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
     Ok(())
 }
 
