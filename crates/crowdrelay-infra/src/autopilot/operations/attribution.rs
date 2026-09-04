@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 
 use super::PostgresAutopilotRepository;
 use super::evidence;
+use super::map_sqlx;
 use crowdrelay_application::RepositoryError;
 
 /// Processes a batch of pending attribution requests. Claims pending
@@ -163,7 +164,18 @@ async fn process_one(
         measurement_window_end: window_end,
     };
     // Run the allocator.
-    let result = allocator.allocate(&outcome, &competing);
+    let mut result = allocator.allocate(&outcome, &competing);
+    // Upgrade the credits whose action was a clean randomized treatment.
+    //
+    // The allocator sets `is_causal_evidence: false` on every credit and
+    // documents the upgrade as this worker's job — "true only when the
+    // experiment assignment's final_evidence_quality = 'randomized_holdout'
+    // and final_contamination < 0.1" — and the upgrade was never written. So
+    // the flag migration 0176 added to separate attribution artifacts from
+    // causal claims has been constant `false` since it landed, and the
+    // community-engager holdout now running would have filed its first real
+    // experimental results as ordinary proportional attribution.
+    mark_causal_credits(pool, workspace_id, &mut result).await?;
     // Write the credit ledger entries (idempotent).
     evidence::record_credit_allocation(
         repo,
@@ -174,6 +186,52 @@ async fn process_one(
         attribution_version,
     )
     .await?;
+    Ok(())
+}
+
+/// Sets `is_causal_evidence` on credits backed by a clean randomized
+/// treatment assignment.
+///
+/// Both conditions matter and neither is sufficient alone. A randomized
+/// assignment contaminated by concurrent actions on the same unit is not a
+/// clean experiment, and a clean assignment that was never randomized is not
+/// an experiment at all. `final_contamination` is NULL until the measurement
+/// resolves it, and NULL is not "clean" — an unevaluated assignment stays
+/// non-causal, because the flag exists to mark what has been established.
+async fn mark_causal_credits(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    result: &mut crowdrelay_brain::AttributionResult,
+) -> Result<(), RepositoryError> {
+    if result.credits.is_empty() {
+        return Ok(());
+    }
+    let action_ids: Vec<uuid::Uuid> = result.credits.iter().map(|c| c.action_id).collect();
+    let causal: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT action_id
+        FROM viryaos_experiment_assignments
+        WHERE workspace_id = $1
+          AND action_id = ANY($2)
+          AND arm = 'treatment'
+          AND final_evidence_quality = 'randomized_holdout'
+          AND final_contamination IS NOT NULL
+          AND final_contamination < 0.1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&action_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    if causal.is_empty() {
+        return Ok(());
+    }
+    for credit in &mut result.credits {
+        if causal.contains(&credit.action_id) {
+            credit.is_causal_evidence = true;
+        }
+    }
     Ok(())
 }
 
