@@ -88,10 +88,18 @@ const RATE_LIMIT_ENABLED_KEY: &str = "CROWDRELAY_RATE_LIMIT_ENABLED";
 const RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE";
 const RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_PRIVILEGED_PER_MINUTE";
 const RATE_LIMIT_GENERAL_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_GENERAL_PER_MINUTE";
+const RATE_LIMIT_SIGNUP_PER_MINUTE_KEY: &str = "CROWDRELAY_RATE_LIMIT_SIGNUP_PER_MINUTE";
 
 const DEFAULT_RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE: u32 = 30;
 const DEFAULT_RATE_LIMIT_PRIVILEGED_PER_MINUTE: u32 = 120;
 const DEFAULT_RATE_LIMIT_GENERAL_PER_MINUTE: u32 = 600;
+/// Signup sends mail to an address the caller chose, so it is an outbound
+/// reputation risk rather than only a load one, and the confirmation mail it
+/// sends is the whole funnel: an address that lands in spam is a lost fan. It
+/// is deliberately not the 30/minute of the token endpoints, because a crowd
+/// at a show shares one venue IP and the first minute after the band asks
+/// people to sign up is exactly when the burst is real.
+const DEFAULT_RATE_LIMIT_SIGNUP_PER_MINUTE: u32 = 120;
 const MAX_RATE_LIMIT_PER_MINUTE: u32 = 100_000;
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
@@ -184,6 +192,7 @@ const KNOWN_KEYS: &[&str] = &[
     RATE_LIMIT_PUBLIC_AUTH_PER_MINUTE_KEY,
     RATE_LIMIT_PRIVILEGED_PER_MINUTE_KEY,
     RATE_LIMIT_GENERAL_PER_MINUTE_KEY,
+    RATE_LIMIT_SIGNUP_PER_MINUTE_KEY,
     push::PUSH_DELIVERY_ENABLED_KEY,
     push::WEB_PUSH_VAPID_PUBLIC_KEY,
     push::FCM_PROJECT_ID_KEY,
@@ -278,6 +287,8 @@ pub struct RateLimitConfig {
     pub privileged_per_minute: u32,
     /// Everything else, as a coarse flood damper.
     pub general_per_minute: u32,
+    /// Fan signup, which sends a confirmation mail to a caller-chosen address.
+    pub signup_per_minute: u32,
 }
 
 impl Config {

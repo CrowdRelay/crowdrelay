@@ -30,6 +30,14 @@ const SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const CAP_EVICT_BATCH: usize = MAX_ENTRIES / 16;
 const MAX_IDENTITY_BYTES: usize = 64;
 
+/// Fan signup. It has its own class because it is the one public endpoint that
+/// sends mail to an address the caller chose: at the `General` budget it sat at
+/// 600 a minute per IP while `/v1/fans/access`, which does the same thing for
+/// an address that already exists, sat at 30. The exposure is not the database
+/// write, it is the sending domain -- confirmation mail is the whole funnel
+/// under double opt-in, and a reputation hit costs every real signup after it.
+const SIGNUP_PATHS: &[&str] = &["/v1/fans"];
+
 const PUBLIC_AUTH_PATHS: &[&str] = &[
     "/v1/fans/access",
     "/v1/fans/confirm",
@@ -54,6 +62,7 @@ pub struct RateLimitPolicy {
     pub public_auth_per_minute: u32,
     pub privileged_per_minute: u32,
     pub general_per_minute: u32,
+    pub signup_per_minute: u32,
 }
 
 impl RateLimitPolicy {
@@ -63,6 +72,7 @@ impl RateLimitPolicy {
             public_auth_per_minute: 30,
             privileged_per_minute: 120,
             general_per_minute: 600,
+            signup_per_minute: 120,
         }
     }
 }
@@ -72,6 +82,7 @@ enum LimitClass {
     PublicAuth,
     Privileged,
     General,
+    Signup,
 }
 
 impl LimitClass {
@@ -80,6 +91,7 @@ impl LimitClass {
             Self::PublicAuth => "public_auth",
             Self::Privileged => "privileged",
             Self::General => "general",
+            Self::Signup => "signup",
         }
     }
 
@@ -88,6 +100,7 @@ impl LimitClass {
             Self::PublicAuth => policy.public_auth_per_minute,
             Self::Privileged => policy.privileged_per_minute,
             Self::General => policy.general_per_minute,
+            Self::Signup => policy.signup_per_minute,
         }
     }
 }
@@ -250,6 +263,9 @@ fn classify(method: &Method, path: &str) -> Option<LimitClass> {
     ) {
         return None;
     }
+    if method == Method::POST && SIGNUP_PATHS.contains(&path) {
+        return Some(LimitClass::Signup);
+    }
     if method == Method::POST && PUBLIC_AUTH_PATHS.contains(&path) {
         return Some(LimitClass::PublicAuth);
     }
@@ -299,6 +315,7 @@ mod tests {
             public_auth_per_minute: limit,
             privileged_per_minute: limit,
             general_per_minute: limit,
+            signup_per_minute: limit,
         }
     }
 
@@ -333,6 +350,7 @@ mod tests {
             public_auth_per_minute: 0,
             privileged_per_minute: 0,
             general_per_minute: 0,
+            signup_per_minute: 0,
             ..policy(1)
         });
         for _ in 0..100 {
@@ -380,6 +398,11 @@ mod tests {
         assert_eq!(classify(&get, "/metrics"), None);
         assert_eq!(classify(&get, "/v1/health/live"), None);
         assert_eq!(classify(&get, "/public/events"), Some(LimitClass::General));
+        // Signup is the sibling of the two token endpoints above and shares
+        // their abuse shape, so it must never fall through to the flood damper.
+        assert_eq!(classify(&post, "/v1/fans"), Some(LimitClass::Signup));
+        assert_eq!(classify(&get, "/v1/fans"), Some(LimitClass::General));
+        assert_ne!(classify(&post, "/v1/fans"), Some(LimitClass::General));
     }
 
     #[test]

@@ -58,6 +58,7 @@ struct IdempotencyRow {
     request_hash: Vec<u8>,
     state: String,
     response_body: Option<Value>,
+    lease_expired: bool,
 }
 
 impl PostgresMobileFanRepository {
@@ -87,22 +88,30 @@ impl PostgresMobileFanRepository {
     }
 
     /// Records the fan's nearby-gig preference against the city they signed up
-    /// for.
+    /// for. Returns whether a preference row was actually written.
     ///
     /// City slugs are only unique per country (`cities UNIQUE (country_code,
     /// slug)`), so the slug alone cannot identify a city. The interest row the
     /// signup transaction wrote was resolved against the configured country,
     /// so joining it keeps this write on the same city instead of matching a
     /// same-slug city in another country.
+    ///
+    /// The join can match nothing, and that is not hypothetical: a repeat
+    /// signup for an address that is already pending or active returns early
+    /// without writing a city interest, so a fan naming a different city the
+    /// second time has no interest row for it. This used to insert zero rows
+    /// and return `Ok(())`, the caller only logged on `Err`, and the app showed
+    /// the toggle as saved -- so the fan opted into nearby shows, was told it
+    /// worked, and never heard anything again. The caller can see the miss now.
     pub async fn upsert_fan_location_preference(
         &self,
         fan_id: FanId,
         city_slug: &str,
         nearby_gigs_enabled: bool,
         radius_km: i32,
-    ) -> Result<(), MobileFanStoreError> {
+    ) -> Result<bool, MobileFanStoreError> {
         self.bounded(async {
-            sqlx::query(
+            let written = sqlx::query(
                 r#"
                 INSERT INTO fan_location_preferences (
                     workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km
@@ -128,7 +137,7 @@ impl PostgresMobileFanRepository {
             .execute(&self.pool)
             .await
             .map_err(|_| MobileFanStoreError::Unavailable)?;
-            Ok(())
+            Ok(written.rows_affected() == 1)
         })
         .await
     }
@@ -215,6 +224,36 @@ impl PostgresMobileFanRepository {
                       AND fan_city.longitude IS NOT NULL
                       AND event_city.latitude IS NOT NULL
                       AND event_city.longitude IS NOT NULL
+                      -- Latitude is a cheap, exact lower bound on great-circle
+                      -- distance: one degree of latitude is 111.19 km wherever
+                      -- you stand, so a pair further apart than the radius in
+                      -- latitude alone can never be inside it. Dividing by
+                      -- 111.0 rather than 111.19, and allowing one extra
+                      -- kilometre, keeps the box strictly wider than the test
+                      -- below -- including for the pair that only passes it
+                      -- because `distance_km` is rounded down to the radius.
+                      -- No safe equivalent exists for longitude: a degree of it
+                      -- is worth less distance the further north you are, so
+                      -- the same bound would drop real matches.
+                      AND abs(fan_city.latitude - event_city.latitude)
+                          <= (preferences.radius_km + 1)::double precision / 111.0
+                      -- Every run recomputed the haversine for every fan-event
+                      -- pair ever notified and threw the result away in the
+                      -- INSERT's ON CONFLICT. The work grew with the whole
+                      -- fanbase times the whole calendar while the useful
+                      -- output stayed proportional to what is new, and the
+                      -- statement runs under a five-second operation timeout --
+                      -- so the notification loop was on course to stop
+                      -- delivering exactly when the fanbase got big enough to
+                      -- matter. The insert still guards the race; this only
+                      -- stops the pointless arithmetic reaching it.
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM nearby_gig_notifications sent
+                          WHERE sent.workspace_id = preferences.workspace_id
+                            AND sent.fan_id = preferences.fan_id
+                            AND sent.event_id = events.id
+                      )
                 ),
                 inserted AS (
                     INSERT INTO nearby_gig_notifications (
@@ -380,7 +419,11 @@ impl PostgresMobileFanRepository {
 
         let idempotency = sqlx::query_as::<_, IdempotencyRow>(
             r#"
-            SELECT request_hash, state, response_body
+            SELECT
+                request_hash,
+                state,
+                response_body,
+                COALESCE(lease_expires_at <= now(), false) AS lease_expired
             FROM idempotency_keys
             WHERE workspace_id = $1 AND scope = $2 AND key = $3
             FOR UPDATE
@@ -409,8 +452,42 @@ impl PostgresMobileFanRepository {
                 .map_err(|_| MobileFanStoreError::Unavailable)?;
             return Ok(response);
         }
+        // A lease was written on the way in and then never read, so a request
+        // that died between claiming the key and completing it left the row
+        // `in_progress` until its 24-hour retention expired. Every retry of
+        // that key answered 503 for the rest of the day, and the city picker is
+        // the first screen of onboarding -- the one place a fan cannot route
+        // around. Reclaim an expired lease the way the signup path already
+        // does, and keep 503 for the case it was actually describing: another
+        // request holding a live lease right now.
         if inserted.rows_affected() != 1 {
-            return Err(MobileFanStoreError::Unavailable);
+            if !idempotency.lease_expired {
+                return Err(MobileFanStoreError::Conflict);
+            }
+            let reclaimed = sqlx::query(
+                r#"
+                UPDATE idempotency_keys
+                SET lease_owner = $4,
+                    lease_expires_at =
+                        now() + ($5::bigint * interval '1 second')
+                WHERE workspace_id = $1
+                  AND scope = $2
+                  AND key = $3
+                  AND state = 'in_progress'
+                  AND lease_expires_at <= now()
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(CITY_REQUEST_SCOPE)
+            .bind(command.idempotency_key.as_str())
+            .bind(&lease_owner)
+            .bind(CITY_REQUEST_LEASE_SECONDS)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| MobileFanStoreError::Unavailable)?;
+            if reclaimed.rows_affected() != 1 {
+                return Err(MobileFanStoreError::Conflict);
+            }
         }
 
         let result = match find_approved_city(&mut transaction, command).await? {

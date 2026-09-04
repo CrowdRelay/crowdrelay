@@ -37,6 +37,7 @@ pub(crate) struct HttpMetrics {
     rate_limited_public_auth: AtomicU64,
     rate_limited_privileged: AtomicU64,
     rate_limited_general: AtomicU64,
+    rate_limited_signup: AtomicU64,
     route_series: Mutex<HashMap<String, RouteStats>>,
     route_series_dropped: AtomicU64,
 }
@@ -62,6 +63,7 @@ pub(crate) struct HttpMetricsSnapshot {
     pub rate_limited_public_auth: u64,
     pub rate_limited_privileged: u64,
     pub rate_limited_general: u64,
+    pub rate_limited_signup: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -207,6 +209,7 @@ impl HttpMetrics {
         let counter = match class {
             "public_auth" => &self.rate_limited_public_auth,
             "privileged" => &self.rate_limited_privileged,
+            "signup" => &self.rate_limited_signup,
             _ => &self.rate_limited_general,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -237,6 +240,7 @@ impl HttpMetrics {
             rate_limited_public_auth: self.rate_limited_public_auth.load(Ordering::Relaxed),
             rate_limited_privileged: self.rate_limited_privileged.load(Ordering::Relaxed),
             rate_limited_general: self.rate_limited_general.load(Ordering::Relaxed),
+            rate_limited_signup: self.rate_limited_signup.load(Ordering::Relaxed),
         }
     }
 }
