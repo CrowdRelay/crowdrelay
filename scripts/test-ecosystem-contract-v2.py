@@ -78,6 +78,40 @@ if signal.exists():
             f"manifest={manifest['minimumSchemaVersion']}"
         )
 
+    # Every path the Signal client asks for must still be mounted here.
+    # The generated wire contract pins DTO shape, not routing, and Signal's
+    # transport is hand written -- so renaming or dropping a route was a change
+    # nothing failed on until an installed app got a 404 for a screen that used
+    # to work. This is the direction that actually breaks: CrowdRelay moves,
+    # the app in someone's pocket does not.
+    route_sources = "\n".join(
+        (root / "crates/crowdrelay-api/src" / name).read_text()
+        for name in ("routing.rs", "ops_routes.rs", "synesthesia.rs", "area_admin.rs")
+    )
+    mounted = {
+        re.sub(r"\{[^}]*\}", "{}", path)
+        for path in re.findall(r'"(/v1/[^"]*)"', route_sources)
+    }
+    called = set()
+    for source in (signal / "src-tauri/src/api").glob("*.rs"):
+        text = source.read_text()
+        for raw in re.findall(r'(?:Method::\w+,\s*)"([^"]+)"', text):
+            called.add(raw)
+        for raw in re.findall(r'format!\(\s*"([a-z][^"]*\{\}[^"]*)"', text):
+            called.add(raw)
+    for raw in sorted(called):
+        path = raw.split("?", 1)[0]
+        if not re.match(
+            r"^(v1/)?(me|public|fans|staff|staff-pairing|beacon|internal|admin|commerce|passes|go|meta|health)(/|$)",
+            path,
+        ):
+            continue
+        normalized = re.sub(r"\{[^}]*\}", "{}", path)
+        if not normalized.startswith("/v1"):
+            normalized = "/v1/" + normalized.removeprefix("v1/").lstrip("/")
+        if normalized not in mounted:
+            errors.append(f"Signal calls an endpoint CrowdRelay no longer mounts: {normalized}")
+
 syn = ecosystem / "synesthesia"
 if syn.exists():
     reward = (syn / "scripts/reward_client.gd").read_text()
