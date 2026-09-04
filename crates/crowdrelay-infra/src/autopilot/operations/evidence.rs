@@ -533,9 +533,17 @@ pub(in crate::autopilot) async fn record_credit_allocation(
     Ok(())
 }
 
-/// Counts unresolved growth evidence rows — dispatches whose outcomes
-/// haven't been observed yet (resolved_at IS NULL). Used by the WAIT
-/// candidate's value-of-information computation.
+/// Counts measurements that have not resolved yet. Used by the WAIT
+/// candidate's value-of-information computation: waiting is worth something
+/// precisely when outcomes are still coming.
+///
+/// Counted from the measurement queue rather than from
+/// `viryaos_growth_evidence.resolved_at`. Four measurements resolve against
+/// one evidence row and the first to land stamps `resolved_at`, so a
+/// dispatch with three outcomes still outstanding read as fully observed and
+/// dropped out of the count. VOI was undercounted by roughly the ratio of
+/// measurements to dispatches — which is to say WAIT almost never had a
+/// reason to win.
 pub(in crate::autopilot) async fn count_pending_measurements(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -544,9 +552,9 @@ pub(in crate::autopilot) async fn count_pending_measurements(
         let count: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*)
-            FROM viryaos_growth_evidence
+            FROM viryaos_autopilot_measurements
             WHERE workspace_id = $1
-              AND resolved_at IS NULL
+              AND status = 'pending'
             "#,
         )
         .bind(workspace_id.into_uuid())
