@@ -8,7 +8,7 @@ CrowdRelay owns the durable business state behind audience growth and live opera
 
 Runs a whole roster from one seat. Each artist is a workspace inside a label organization. The portfolio layer lets a roster's audiences amplify each other through explicit, revocable, capped consent edges — the one capability that only exists when one platform holds every artist's fan graph.
 
-The Autopilot evaluates twenty-plus bounded contexts on every cycle — ticket yield, fan lifecycle, merchandising, booking opportunities, outreach to curators and press, promotion budget, show operations, community engagement, and more. Each action passes through a shared funnel: confidence gate, authority level, class ceiling, envelope budget, deliverability halt. The stricter limit wins.
+The Autopilot evaluates 22 bounded contexts on every cycle — ticket yield, fan lifecycle, merchandising, merch pricing, merch bundles, booking opportunities, outreach, content supply, promotion budget, experimentation, show operations, release, live opportunities, funding, beacons, show growth, growth metrics, growth debt, outreach supply, growth intelligence, and plays. Each action passes through a shared funnel: confidence gate, authority level, class ceiling, envelope budget, deliverability halt. The stricter limit wins.
 
 External services — email, payment, calendar, ad platforms, workflow automation — are adapters, not sources of truth. A successful API call proves request handling, not delivery. The transactional outbox owns durability, retries, and dead-state inspection.
 
@@ -26,18 +26,18 @@ Its decision layer combines:
 
 - candidate generation and information-seeking signals
 - portfolio optimization
-- causal experiments and attribution
-- outcome and strategy learning
+- causal experiments and evidence-graded attribution
+- outcome and strategy learning with calibration
 - provenance and evidence tracking
 - explicit authority, budget, and safety constraints
 
-Models can produce language or creative work. The brain decides whether that work should happen, under what constraints, and what should happen next. LLM-assisted creative work (press pitches, social posts, campaign analysis) is dispatched to the separately deployed [`crowdrelay-agents`](https://github.com/CrowdRelay/crowdrelay-agents) service; the LLMs produce drafts seeded with real tenant data, and the brain decides what to do with them.
+Models can produce language or creative work. The brain decides whether that work should happen, under what constraints, and what should happen next. LLM-assisted creative work (press pitches, social posts, community engagement, campaign analysis, audience research, Discord/Telegram posting, Signal invites) is dispatched to the separately deployed [`crowdrelay-agents`](https://github.com/CrowdRelay/crowdrelay-agents) service; the LLMs produce drafts seeded with real tenant data, and the brain decides what to do with them.
 
 The system is deliberately built so that:
 
 what happened ≠ what was attributed ≠ what was causally supported ≠ what was predicted ≠ what was worth doing
 
-The core execution and decision infrastructure is already in place. The learning and causal layer is actively evolving as it is exercised against real outcomes and adversarial tests.
+The execution, decision, and causal-learning infrastructure is in place and exercised against real outcomes. Attribution is graded by evidence quality — a randomized holdout claims full credit, an observational correlation claims a tenth and leaves nine tenths unattributed.
 
 The goal is not better suggestions. The goal is a system that gets better at making decisions that produce incremental durable fans.
 
@@ -53,7 +53,7 @@ Money and contracts stay behind approval in every posture.
 
 ## Measurement and learning
 
-Executed actions settle against benchmarks after their horizon. Effects are labelled `improved`, `neutral`, or `worsened` — never a raw score without context. Strategies whose record repeatedly worsens retire themselves with a stated reason. Attribution is honest: smart-link clicks are attribution; follower movement after a campaign is correlational, always labelled as such. Causal experiments (randomized holdout with power analysis) separate treatment effect from observational correlation — where the experiment population is large enough to support it.
+Executed actions settle against benchmarks after their horizon. Effects are labelled `improved`, `neutral`, or `worsened` — never a raw score without context. Strategies whose record repeatedly worsens retire themselves with a stated reason. Attribution is honest and evidence-graded: a randomized holdout with clean treatment/control arms claims full credit; a pre-post comparison without a control group claims 30%; an observational correlation claims 10% and leaves the rest unattributed. Causal experiments (randomized holdout with power analysis) separate treatment effect from observational correlation — where the experiment population is large enough to support it.
 
 The daily brief breaks silence only for things that lie when quiet: halted ceilings, stale approvals, dead executors, pending withdrawals. Everything else waits for somebody to look at the panel.
 
@@ -75,11 +75,11 @@ Blue-green with zero-downtime Caddy cutover. The deploy waits for CI, pulls immu
 
 | Repository | Role |
 |-----------|------|
-| [crowdrelay-control-plane](https://github.com/CrowdRelay/crowdrelay-control-plane) | Operator plane — tenant provisioning, runtime health, audit |
-| [crowdrelay-agents](https://github.com/CrowdRelay/crowdrelay-agents) | LLM worker service — press pitches, social posts, campaign analysis |
-| [virya](https://github.com/CrowdRelay/virya) | Public website — tickets, merch, fan experiences |
-| [virya-signal](https://github.com/CrowdRelay/virya-signal) | Mobile client — fan wallet, ticket scanning, staff operations |
-| [synesthesia](https://github.com/CrowdRelay/synesthesia) | Interactive album — playable companion to *Echoes Of The Modern Mind* |
+| [crowdrelay-control-plane](https://github.com/CrowdRelay/crowdrelay-control-plane) | Operator plane — 19 pages, tenant provisioning, runtime health, automation events, notifiers, growth steering |
+| [crowdrelay-agents](https://github.com/CrowdRelay/crowdrelay-agents) | LLM worker service — 10 templates, 10 providers, Reddit authenticated scraping |
+| [virya](https://github.com/CrowdRelay/virya) | Public website — tickets, merch, AREA game, staff panel, EPK |
+| [virya-signal](https://github.com/CrowdRelay/virya-signal) | Mobile client — fan wallet, ticket scanning, staff operations, Android Play Store |
+| [synesthesia](https://github.com/CrowdRelay/synesthesia) | Interactive album — 11 rooms, Godot + Rust, web and Android |
 
 ---
 
