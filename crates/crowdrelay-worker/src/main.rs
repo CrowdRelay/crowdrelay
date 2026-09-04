@@ -44,6 +44,7 @@ use crowdrelay_worker::{
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     growth_metric_sync::GrowthMetricSyncWorker,
     leadership::acquire_leadership,
+    nearby_gigs::{DEFAULT_POLL_INTERVAL as NEARBY_GIG_POLL_INTERVAL, NearbyGigScheduler},
     ops_watchdog::OpsWatchdogWorker,
     outbox::{MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretProvider, SecretValue},
     push_delivery::PushDeliveryWorker,
@@ -327,6 +328,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         tracing::info!("fan push delivery is disabled by process configuration");
         None
     };
+    let nearby_gig_scheduler = NearbyGigScheduler::new(
+        database.clone(),
+        workspace_id,
+        NEARBY_GIG_POLL_INTERVAL,
+        config.database.operation_timeout,
+    );
     let autopilot_repository = PostgresAutopilotRepository::new(database.clone(), &config.database);
     let team_email_worker = TeamEmailDispatchWorker::new(
         autopilot_repository.clone(),
@@ -704,6 +711,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let reminder_shutdown = shutdown_receiver.clone();
+    let nearby_gig_shutdown = shutdown_receiver.clone();
     let retention_shutdown = shutdown_receiver.clone();
     let event_sync_shutdown = shutdown_receiver.clone();
     let draw_shutdown = shutdown_receiver.clone();
@@ -736,6 +744,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         autopilot_enabled: autopilot_worker.is_some(),
         agent_outcomes_enabled: agent_outcome_worker.is_some(),
         push_delivery_enabled: push_delivery_worker.is_some(),
+        nearby_shows_enabled: true,
         community_executor_enabled: community_executor.is_some(),
         telegram_executor_enabled: telegram_executor.is_some(),
         discord_executor_enabled: discord_executor.is_some(),
@@ -756,6 +765,10 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     runtime_tasks.spawn(async move {
         reminder_scheduler.run(reminder_shutdown).await;
         "event reminder scheduler"
+    });
+    runtime_tasks.spawn(async move {
+        nearby_gig_scheduler.run(nearby_gig_shutdown).await;
+        "nearby gig scheduler"
     });
     runtime_tasks.spawn(async move {
         retention_worker.run(retention_shutdown).await;
@@ -1163,6 +1176,11 @@ struct GrowthReadiness {
     /// Fan push notification delivery. Without this, Signal invites can't
     /// be sent. Env: CROWDRELAY_PUSH_DELIVERY_ENABLED=true
     push_delivery_enabled: bool,
+    /// Nearby-show announcements to fans who asked for them. Always on: it is
+    /// the only automatic reason an installed app reopens itself, and it had no
+    /// caller at all until it got this loop. The mail half needs marketing
+    /// consent, the push half additionally needs `push_delivery_enabled`.
+    nearby_shows_enabled: bool,
     /// Reddit posting executor. Without this, community engagement posts are
     /// drafted but never posted. Env: CROWDRELAY_AGENT_SERVICE_AUTH_KEY
     community_executor_enabled: bool,
@@ -1203,10 +1221,11 @@ impl GrowthReadiness {
     /// Logs a structured growth readiness summary. Each component is logged
     /// as a field so it can be searched/alerted on in log aggregation.
     fn log(&self) {
-        let active = [
+        let components = [
             self.autopilot_enabled,
             self.agent_outcomes_enabled,
             self.push_delivery_enabled,
+            self.nearby_shows_enabled,
             self.community_executor_enabled,
             self.telegram_executor_enabled,
             self.discord_executor_enabled,
@@ -1216,24 +1235,25 @@ impl GrowthReadiness {
             self.x_discovery_enabled,
             self.ad_conversion_enabled,
             self.random_draws_enabled,
-        ]
-        .iter()
-        .filter(|&&v| v)
-        .count();
+        ];
+        // The count was compared against a hard-coded 8 while the array had
+        // grown to twelve, so a healthy boot could report "11/8 active".
+        let total = components.len();
+        let active = components.iter().filter(|&&value| value).count();
 
         tracing::info!(
             active_components = active,
-            total_components = 8,
+            total_components = total,
             autopilot = self.autopilot_enabled,
             agent_outcomes = self.agent_outcomes_enabled,
             push_delivery = self.push_delivery_enabled,
+            nearby_shows = self.nearby_shows_enabled,
             community_executor = self.community_executor_enabled,
             reddit_discovery = self.reddit_discovery_enabled,
             x_discovery = self.x_discovery_enabled,
             ad_conversion = self.ad_conversion_enabled,
             random_draws = self.random_draws_enabled,
-            "growth readiness: {}/8 fan-growth components active",
-            active,
+            "growth readiness: {active}/{total} fan-growth components active",
         );
 
         if !self.autopilot_enabled {

@@ -36,6 +36,7 @@ pub mod event_sync;
 pub mod executor_registry;
 pub mod growth_metric_sync;
 pub mod leadership;
+pub mod nearby_gigs;
 pub mod ops_watchdog;
 pub mod outbox;
 pub mod push_delivery;
