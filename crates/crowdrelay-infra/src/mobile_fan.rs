@@ -38,6 +38,20 @@ pub struct CityRequestCommand {
     pub slug: String,
 }
 
+/// A city fans asked for that still has no coordinates, with the demand behind
+/// it. Reaching a fan by proximity needs coordinates on both ends, so until
+/// somebody supplies them every fan sitting in one of these is unreachable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, FromRow)]
+pub struct PendingCity {
+    pub city_id: Uuid,
+    pub slug: String,
+    pub name: String,
+    pub country_code: String,
+    pub region: Option<String>,
+    pub request_count: i32,
+    pub waiting_fans: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CityRequestResult {
     pub city_slug: String,
@@ -149,6 +163,7 @@ impl PostgresMobileFanRepository {
         longitude: f64,
         canonical_name: Option<String>,
         region: Option<String>,
+        approve: bool,
     ) -> Result<bool, MobileFanStoreError> {
         self.bounded(async {
             let updated = sqlx::query(
@@ -157,7 +172,11 @@ impl PostgresMobileFanRepository {
                 SET latitude = $2,
                     longitude = $3,
                     name = COALESCE($4, name),
-                    region = COALESCE($5, region)
+                    region = COALESCE($5, region),
+                    moderation_status = CASE
+                        WHEN $6 THEN 'approved'
+                        ELSE moderation_status
+                    END
                 WHERE id = $1
                   AND moderation_status IN ('pending', 'approved')
                 "#,
@@ -167,10 +186,62 @@ impl PostgresMobileFanRepository {
             .bind(longitude)
             .bind(canonical_name)
             .bind(region)
+            .bind(approve)
             .execute(&self.pool)
             .await
             .map_err(|_| MobileFanStoreError::Unavailable)?;
             Ok(updated.rows_affected() == 1)
+        })
+        .await
+    }
+
+    /// Lists the cities fans requested that still cannot reach anybody, most
+    /// wanted first.
+    ///
+    /// `request_city` records a name, never coordinates, and the nearby-gig
+    /// query needs them on both ends. Signup resolves a city without checking
+    /// moderation status, so fans keep arriving into these and waiting. Nothing
+    /// listed them and nothing called the geocode endpoint beside this one, so
+    /// the queue was invisible: the ops snapshot counted them and stopped
+    /// there. `waiting_fans` is the cost of leaving each one alone.
+    pub async fn list_pending_cities(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingCity>, MobileFanStoreError> {
+        self.bounded(async {
+            sqlx::query_as::<_, PendingCity>(
+                r#"
+                SELECT
+                    cities.id AS city_id,
+                    cities.slug,
+                    cities.name,
+                    cities.country_code::text AS country_code,
+                    cities.region,
+                    cities.request_count,
+                    count(preference.fan_id) FILTER (
+                        WHERE preference.nearby_gigs_enabled
+                          AND fan.status = 'active'
+                    ) AS waiting_fans
+                FROM cities
+                LEFT JOIN fan_location_preferences AS preference
+                    ON preference.city_id = cities.id
+                   AND preference.workspace_id = $1
+                LEFT JOIN fans AS fan
+                    ON fan.workspace_id = preference.workspace_id
+                   AND fan.id = preference.fan_id
+                WHERE cities.moderation_status = 'pending'
+                   OR cities.latitude IS NULL
+                   OR cities.longitude IS NULL
+                GROUP BY cities.id
+                ORDER BY waiting_fans DESC, cities.request_count DESC, cities.name, cities.id
+                LIMIT $2
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(limit.clamp(1, 200))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| MobileFanStoreError::Unavailable)
         })
         .await
     }

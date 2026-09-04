@@ -222,3 +222,152 @@ async fn nearby_gigs_notify_inside_the_radius_once_and_never_outside_it()
     );
     Ok(())
 }
+
+/// Closes the loop a fan-requested city used to fall into.
+///
+/// `request_city` writes a `pending` row with no coordinates, and signup
+/// resolves a city without checking moderation status, so a fan could arrive
+/// into a city that no nearby-gig notification could ever reach -- that query
+/// needs coordinates on both ends. The ops snapshot counted these as
+/// `pending_city_requests` and stopped there: nothing listed which ones, and
+/// nothing in the workspace called the geocode endpoint that is the only
+/// sanctioned way to give a shared-catalogue city coordinates. Every route out
+/// was closed.
+///
+/// This walks the way out on the surface that owns the mutation: the request
+/// shows up in the pending queue ranked by the fans stuck behind it, geocoding
+/// it fills the coordinates and approves it, and the waiting fan is reached on
+/// the next run with no backfill.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_city_fans_asked_for_can_be_geocoded_and_starts_reaching_them()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    let suffix = Uuid::now_v7().simple().to_string();
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!("adopt-{suffix}"))?;
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'City adoption test')")
+        .bind(workspace_id.into_uuid())
+        .bind(workspace_slug.as_str())
+        .execute(&pool)
+        .await?;
+
+    let repository =
+        PostgresMobileFanRepository::new(pool.clone(), workspace_id, Duration::from_secs(5));
+    let requested_slug = format!("pending-bielawa-{suffix}");
+    let requested = repository
+        .request_city(&CityRequestCommand {
+            idempotency_key: IdempotencyKey::parse(format!("adopt-{suffix}"))?,
+            request_id: Some(format!("request-adopt-{suffix}")),
+            // `find_approved_city` matches an existing approved city by name
+            // across the whole catalogue, so a fixed name here would resolve to
+            // whatever a previous run left behind instead of creating the
+            // pending row this test is about.
+            name: format!("Bielawa {suffix}"),
+            region: Some("Dolnoslaskie".to_owned()),
+            country_code: "PL".to_owned(),
+            slug: requested_slug.clone(),
+        })
+        .await?;
+    assert_eq!(requested.status, "pending");
+
+    let city_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM cities WHERE country_code = 'PL' AND slug = $1",
+    )
+    .bind(&requested_slug)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<f64>>("SELECT latitude FROM cities WHERE id = $1")
+            .bind(city_id)
+            .fetch_one(&pool)
+            .await?,
+        None,
+        "a fan request carries a name, never coordinates"
+    );
+
+    // A fan is already waiting in the city before anyone geocodes it.
+    let fan_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fans (workspace_id, normalized_email, locale, status)
+         VALUES ($1, $2, 'pl-PL', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("adopt-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_location_preferences
+             (workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km)
+         VALUES ($1, $2, $3, true, 150)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(city_id)
+    .execute(&pool)
+    .await?;
+    let show_city = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+         VALUES ($1, 'Show city', 'PL', 50.9, 16.6) RETURNING id",
+    )
+    .bind(format!("show-{suffix}"))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (workspace_id, city_id, slug, title, starts_at, status, published_at)
+         VALUES ($1, $2, $3, 'Show', now() + interval '30 days', 'published', now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_city)
+    .bind(format!("show-{suffix}"))
+    .execute(&pool)
+    .await?;
+
+    let (before, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("before-{suffix}")), false)
+        .await?;
+    assert_eq!(
+        before, 0,
+        "without coordinates the fan is unreachable, which is the whole defect"
+    );
+
+    let queued = repository.list_pending_cities(100).await?;
+    let entry = queued
+        .iter()
+        .find(|city| city.city_id == city_id)
+        .expect("an operator has to be able to see what fans asked for");
+    assert_eq!(
+        entry.waiting_fans, 1,
+        "the queue has to rank by the fans stuck behind each request"
+    );
+    assert_eq!(entry.request_count, 1);
+
+    assert!(
+        repository
+            .geocode_city(city_id, 50.69, 16.62, None, None, true)
+            .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT moderation_status FROM cities WHERE id = $1")
+            .bind(city_id)
+            .fetch_one(&pool)
+            .await?,
+        "approved",
+    );
+    assert!(
+        !repository
+            .list_pending_cities(100)
+            .await?
+            .iter()
+            .any(|city| city.city_id == city_id),
+        "a geocoded city must leave the queue"
+    );
+
+    let (after, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("after-{suffix}")), false)
+        .await?;
+    assert_eq!(
+        after, 1,
+        "the fan waiting behind the request is reached on the next run, with no backfill"
+    );
+    Ok(())
+}
