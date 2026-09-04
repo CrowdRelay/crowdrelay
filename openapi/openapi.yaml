@@ -8381,6 +8381,39 @@ paths:
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '422': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /internal/cities/pending:
+    get:
+      operationId: listInternalPendingCities
+      summary: Cities fans requested that still have no coordinates
+      description: >-
+        Proximity delivery needs coordinates on both ends, so every fan sitting
+        in one of these cities is unreachable until it is geocoded. Ranked by
+        the number of fans waiting, then by how often the city was requested.
+      security: [{ commerceBearer: [] }]
+      responses:
+        '200':
+          description: Cities awaiting coordinates.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [city_id, slug, name, country_code, request_count, waiting_fans]
+                      properties:
+                        city_id: { type: string, format: uuid }
+                        slug: { type: string }
+                        name: { type: string }
+                        country_code: { type: string }
+                        region: { type: [string, 'null'] }
+                        request_count: { type: integer }
+                        waiting_fans: { type: integer }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /internal/cities/{city_id}/geocode:
     post:
       operationId: geocodeInternalCity
@@ -8404,6 +8437,13 @@ paths:
                 longitude: { type: number, minimum: -180, maximum: 180 }
                 canonical_name: { type: [string, 'null'], maxLength: 120 }
                 region: { type: [string, 'null'], maxLength: 120 }
+                approve:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Also promote a fan-requested city out of `pending`.
+                    Coordinates alone make it reachable by proximity; approval
+                    is what lets it appear in the city signal list.
       responses:
         '200': { description: City coordinates updated. }
         '400': { $ref: '#/components/responses/PrivateProblem' }

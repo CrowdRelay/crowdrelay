@@ -455,6 +455,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(releases::announce_release),
         )
         .route(
+            "/v1/internal/cities/pending",
+            get(mobile_fan::pending_cities),
+        )
+        .route(
             "/v1/internal/cities/{city_id}/geocode",
             post(mobile_fan::geocode_city),
         )

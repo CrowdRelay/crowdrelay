@@ -42,6 +42,12 @@ pub struct GeocodeCity {
     longitude: f64,
     canonical_name: Option<String>,
     region: Option<String>,
+    /// Also promote a fan-requested city out of `pending`. Coordinates alone
+    /// make it reachable by proximity; approval is what lets it appear in the
+    /// city signal list and host an AREA drop. Defaults off so geocoding stays
+    /// separable from the moderation decision.
+    #[serde(default)]
+    approve: bool,
 }
 
 fn clean(value: &str, max_chars: usize) -> Option<String> {
@@ -210,6 +216,7 @@ pub async fn geocode_city(
             payload.longitude,
             canonical_name,
             region,
+            payload.approve,
         )
         .await
     {
@@ -225,6 +232,31 @@ pub async fn geocode_city(
         Err(_) => Problem::service_unavailable(request_id_value)
             .private()
             .into_response(),
+    }
+}
+
+/// The queue behind the ops snapshot's `pending_city_requests` counter: which
+/// cities fans asked for, and how many of them are waiting in each.
+pub async fn pending_cities(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let request_id_value = request_id(&headers);
+    if !state.ticketing.commerce_authorized(&headers) {
+        return Problem::unauthorized(request_id_value)
+            .private()
+            .into_response();
+    }
+    match mobile_fan_repository(&state).list_pending_cities(100).await {
+        Ok(items) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(json!({"items": items})),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "could not list cities awaiting coordinates");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
     }
 }
 
