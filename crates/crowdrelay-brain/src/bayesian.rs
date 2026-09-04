@@ -930,7 +930,14 @@ mod tests {
     fn treatment_effect_posterior_learns_positive_effect() {
         let mut tep = TreatmentEffectPosterior::new();
         for _ in 0..10 {
-            tep.update("social-post", None, 5.0, 1.0);
+            tep.update_with_quality(
+                "social-post",
+                None,
+                None,
+                5.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let (mean, std, confidence) = tep.predict_stats("social-post", None);
         assert!(mean > 2.0, "positive τ should move mean up, got {mean}");

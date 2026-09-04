@@ -953,7 +953,14 @@ mod tests {
         let mut model = CausalModel::new();
         // Only 2 observations — below the hysteresis floor (5-2=3).
         for _ in 0..2 {
-            model.update_treatment_effect("t", None, 5.0, 1.0);
+            model.update_treatment_effect_for_target(
+                "t",
+                None,
+                None,
+                5.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let ctx = DispatchContext::default();
         let stats = model.predict_stats_with_treatment("t", &ctx);
@@ -966,7 +973,14 @@ mod tests {
         let mut model = CausalModel::new();
         // 10 observations — above MIN_TREATMENT_CONFIDENCE (5).
         for _ in 0..10 {
-            model.update_treatment_effect("t", None, 5.0, 1.0);
+            model.update_treatment_effect_for_target(
+                "t",
+                None,
+                None,
+                5.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let ctx = DispatchContext::default();
         let stats = model.predict_stats_with_treatment("t", &ctx);
@@ -979,7 +993,14 @@ mod tests {
     fn treatment_effect_can_be_negative() {
         let mut model = CausalModel::new();
         for _ in 0..10 {
-            model.update_treatment_effect("bad", None, -3.0, 1.0);
+            model.update_treatment_effect_for_target(
+                "bad",
+                None,
+                None,
+                -3.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let ctx = DispatchContext::default();
         let stats = model.predict_stats_with_treatment("bad", &ctx);
@@ -1020,11 +1041,25 @@ mod tests {
         let mut model = CausalModel::new();
         // Build Y30 confidence above MIN_TREATMENT_CONFIDENCE.
         for _ in 0..10 {
-            model.update_treatment_effect_y30("t", None, 5.0, 1.0);
+            model.update_treatment_effect_y30_for_target(
+                "t",
+                None,
+                None,
+                5.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         // Also build Y14 confidence (but Y30 should be preferred).
         for _ in 0..10 {
-            model.update_treatment_effect("t", None, 3.0, 1.0);
+            model.update_treatment_effect_for_target(
+                "t",
+                None,
+                None,
+                3.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let ctx = DispatchContext::default();
         let stats = model.predict_stats_with_treatment("t", &ctx);
@@ -1049,7 +1084,14 @@ mod tests {
         let mut model = CausalModel::new();
         // Build Y14 confidence but NOT Y30 confidence.
         for _ in 0..10 {
-            model.update_treatment_effect("t", None, 5.0, 1.0);
+            model.update_treatment_effect_for_target(
+                "t",
+                None,
+                None,
+                5.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let ctx = DispatchContext::default();
         let stats = model.predict_stats_with_treatment("t", &ctx);
@@ -1163,7 +1205,14 @@ mod tests {
         let mut model = CausalModel::new();
         // Build Y14 confidence to exactly MIN_TREATMENT_CONFIDENCE (5).
         for _ in 0..5 {
-            model.update_treatment_effect("t", None, 5.0, 1.0);
+            model.update_treatment_effect_for_target(
+                "t",
+                None,
+                None,
+                5.0,
+                1.0,
+                crate::evidence::EvidenceQuality::RandomizedHoldout,
+            );
         }
         let ctx = DispatchContext::default();
         let stats = model.predict_stats_with_treatment("t", &ctx);
