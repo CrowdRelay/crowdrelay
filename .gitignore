@@ -17,6 +17,12 @@ __pycache__/
 .crowdrelay-artifacts/
 /artifacts/
 .crowdrelay-maintenance.lock
+# The ecosystem deploy needs the Control Plane source on the machine running
+# it, and a CI runner has nowhere to put a sibling checkout -- `actions/checkout`
+# will not write outside the workspace. It lands here instead, and the deploy
+# refuses to run against a dirty worktree, so it has to be ignored or the
+# checkout that makes Phase 2 possible is what stops Phase 1 starting.
+.control-plane/
 deploy/.env.*
 !deploy/env.production.example
 deploy/*.production.json
