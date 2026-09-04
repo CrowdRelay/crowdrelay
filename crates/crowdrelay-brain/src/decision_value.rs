@@ -52,8 +52,23 @@ use crate::resource_cost::ResourceCost;
 ///
 /// The optimizer does NOT refuse to compare candidates across regimes —
 /// that would paralyze a young learning system where different templates
-/// have different evidence maturity. Instead, the regime's reliability
-/// is accounted for via `uncertainty` and `bridge_is_reliable`.
+/// have different evidence maturity.
+///
+/// It does not currently account for the difference either, and this comment
+/// used to claim otherwise ("the regime's reliability is accounted for via
+/// `uncertainty` and `bridge_is_reliable`"). Nothing reads those fields.
+/// [`DecisionValue::total`] is `pragmatic_value + risk_penalty +
+/// opportunity_cost`, `risk_penalty` is `None`, and `opportunity_cost` is set
+/// by the optimizer — so ranking is the posterior mean alone. A candidate
+/// with wide uncertainty and observational evidence ranks level with a tight
+/// randomised one carrying the same mean.
+///
+/// That is a real gap, and it is a decision rather than an oversight: a risk
+/// penalty suppresses uncertain candidates, and suppressing uncertain
+/// candidates in a system that has not yet resolved a single outcome is how
+/// a young learner stops learning. The fields are carried so the decision can
+/// be made from evidence when there is some. Until then this comment says
+/// what is true rather than what was intended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EstimationRegime {
@@ -267,8 +282,13 @@ impl DecisionValue {
             uses_y30: stats.uses_y30,
             bridge_confidence: stats.bridge_confidence,
             bridge_is_reliable: stats.bridge_is_reliable,
-            contamination: 0.0,    // Wired in Step 7 from experiment state
-            calibration_bias: 0.0, // Wired in Step 7 from calibration tracker
+            // Still zero, and "Step 7" has not happened: `load_calibration_bias`
+            // is implemented in infra, declared on the port and called by
+            // nobody. Populating them would change no decision — neither
+            // enters `total()` — so the honest state is zero and a note,
+            // rather than a value that looks consulted.
+            contamination: 0.0,
+            calibration_bias: 0.0,
             resource_cost,
             pragmatic_value: expected_y30,
             risk_penalty: None,    // Phase 1: NotModeled. NOT "risk = 0".
