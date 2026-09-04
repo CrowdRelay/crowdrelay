@@ -598,33 +598,37 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // it on workspace-wide fan count would credit it for fans
                 // acquired by other workers.
                 AutopilotMeasurementKind::ScannerDiscoveryQuality14d => {
-                    // Only targets an agent actually proposed count as a
-                    // scanner's discovery. `source_task_id` is what marks
-                    // them; a target promoted from the audience graph has no
-                    // task behind it, and the promotion sweep writes up to a
-                    // hundred a pass. Counting every row in the window would
-                    // have credited the next scanner dispatch with every
-                    // subreddit discovery had already found.
+                    // Targets this dispatch found, and no others.
                     //
-                    // What this still cannot do is attribute a target to
-                    // *this* dispatch rather than another run of the same
-                    // template: the `agent.run.request` payload carries no
-                    // task id, so the action and the task it started are not
-                    // linked. Two scanner runs a fortnight apart share their
-                    // discoveries. Narrowing the population is the part that
-                    // is a bug; splitting it between dispatches needs that
-                    // link to exist first.
+                    // `execute_agent_run` stamps the action id into the
+                    // task's metadata, so the chain is exact:
+                    //   action -> agent_service_tasks.metadata->>'action_id'
+                    //          -> agent_outreach_targets.source_task_id
+                    //
+                    // Counting every row in the window instead credited a
+                    // scanner with everything the workspace discovered:
+                    // production holds 85 targets, 28 of them written by the
+                    // promotion sweep from the audience graph, which no
+                    // scanner found. Counting only rows with a
+                    // `source_task_id` fixed that but still pooled every run
+                    // of the same template, so two scanner dispatches a
+                    // fortnight apart shared their discoveries and each was
+                    // measured on the other's work. The join settles it.
                     sqlx::query_scalar::<_, f64>(
                         r#"
-                        SELECT COUNT(*)::double precision FROM agent_outreach_targets
-                        WHERE workspace_id = $1
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '14 days'
-                          AND source_task_id IS NOT NULL
+                        SELECT COUNT(*)::double precision
+                        FROM agent_outreach_targets AS target
+                        JOIN agent_service_tasks AS task
+                          ON task.id = target.source_task_id
+                        WHERE target.workspace_id = $1
+                          AND target.created_at >= $2
+                          AND target.created_at < $2 + INTERVAL '14 days'
+                          AND task.metadata->>'action_id' = $3
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_finished_at)
+                    .bind(measurement.action_id.into_uuid().to_string())
                     .fetch_one(&self.pool)
                     .await
                     .map_err(map_sqlx)?
@@ -634,18 +638,20 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // strategist's proximal outcome is intelligence production,
                 // not fan growth.
                 AutopilotMeasurementKind::StrategistInsightQuality14d => {
-                    // `campaign_insight` is not the strategist's alone. In
-                    // production fifteen came from `growth-strategist` and
-                    // four from `campaign-analysis`, and this counted all
-                    // nineteen — so the strategist's standing carried a
-                    // fifth of another template's output, and a run of
-                    // campaign-analysis raised the strategist's measured
-                    // quality without the strategist doing anything.
+                    // Insights this dispatch produced, and no others.
                     //
-                    // Joining the task that produced the outcome is what
-                    // separates them. As with the scanner, this still cannot
-                    // split one dispatch from another of the same template:
-                    // the `agent.run.request` payload carries no task id.
+                    // `campaign_insight` is not the strategist's alone —
+                    // production has fifteen from `growth-strategist` and
+                    // four from `campaign-analysis` — and counting all
+                    // nineteen let a campaign-analysis run raise the
+                    // strategist's measured quality without the strategist
+                    // doing anything. Filtering by template fixed that and
+                    // still pooled every strategist run together.
+                    //
+                    // The action id in the task metadata is the exact link,
+                    // and it makes the template filter redundant: a task
+                    // started by this action is this action's task whatever
+                    // template it ran.
                     sqlx::query_scalar::<_, f64>(
                         r#"
                         SELECT COUNT(*)::double precision
@@ -653,13 +659,14 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         JOIN agent_service_tasks AS task ON task.id = outcome.task_id
                         WHERE outcome.workspace_id = $1
                           AND outcome.kind = 'campaign_insight'
-                          AND task.template_id = 'growth-strategist'
                           AND outcome.created_at >= $2
                           AND outcome.created_at < $2 + INTERVAL '14 days'
+                          AND task.metadata->>'action_id' = $3
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_finished_at)
+                    .bind(measurement.action_id.into_uuid().to_string())
                     .fetch_one(&self.pool)
                     .await
                     .map_err(map_sqlx)?
