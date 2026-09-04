@@ -70,6 +70,26 @@ impl PushDeliveryRepository {
         .await
     }
 
+    /// How many deliveries are waiting to be sent. Only used to say what a
+    /// disabled flag is costing, so a failure to count must never stop the
+    /// worker: the caller falls back to -1.
+    pub async fn pending_delivery_count(&self) -> Result<i64> {
+        self.with_timeout(
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT count(*)::bigint
+                FROM fan_push_deliveries
+                WHERE workspace_id = $1
+                  AND status IN ('queued', 'retry_wait', 'claimed')
+                "#,
+            )
+            .bind(self.workspace_id)
+            .fetch_one(&self.database),
+            "pending push delivery count",
+        )
+        .await
+    }
+
     pub async fn maintain(&self) -> Result<()> {
         let stale_claim_seconds = seconds_i64(self.operation_timeout.saturating_mul(3));
         let mut transaction = self

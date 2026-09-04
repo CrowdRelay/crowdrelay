@@ -12365,6 +12365,7 @@ components:
       - summary
       - activity
       - top_cities
+      - retention_loop
       - unavailable_sources
       properties:
         generated_at:
@@ -12379,6 +12380,8 @@ components:
           maxItems: 10
           items:
             $ref: '#/components/schemas/SignalCitySummary'
+        retention_loop:
+          $ref: '#/components/schemas/SignalRetentionLoop'
         unavailable_sources:
           type: array
           maxItems: 8
@@ -12468,6 +12471,61 @@ components:
           format: int64
           minimum: 0
         pending_city_requests:
+          type: integer
+          format: int64
+          minimum: 0
+    SignalRetentionLoop:
+      description: >-
+        Every stage between a fan asking for a city and a push reaching their
+        device. Counted separately because the loop has stalled silently at each
+        one; a requested city without coordinates blocks delivery even when it
+        has been approved.
+      type: object
+      additionalProperties: false
+      required:
+      - cities_awaiting_coordinates
+      - cities_resolved
+      - fans_with_coordinates
+      - nearby_eligible_fans
+      - notifications_created
+      - pushes_queued
+      - pushes_sent
+      - pushes_delivered
+      - pushes_failed
+      properties:
+        cities_awaiting_coordinates:
+          type: integer
+          format: int64
+          minimum: 0
+        cities_resolved:
+          type: integer
+          format: int64
+          minimum: 0
+        fans_with_coordinates:
+          type: integer
+          format: int64
+          minimum: 0
+        nearby_eligible_fans:
+          type: integer
+          format: int64
+          minimum: 0
+        notifications_created:
+          type: integer
+          format: int64
+          minimum: 0
+        pushes_queued:
+          type: integer
+          format: int64
+          minimum: 0
+        pushes_sent:
+          type: integer
+          format: int64
+          minimum: 0
+        pushes_delivered:
+          type: integer
+          format: int64
+          minimum: 0
+        pushes_failed:
           type: integer
           format: int64
           minimum: 0

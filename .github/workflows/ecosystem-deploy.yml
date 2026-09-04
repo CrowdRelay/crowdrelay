@@ -12,23 +12,8 @@ on:
         required: false
         type: boolean
         default: false
-      skip_virya:
-        description: Skip Virya website deploy
-        required: false
-        type: boolean
-        default: false
-      skip_synesthesia:
-        description: Skip Synesthesia web deploy
-        required: false
-        type: boolean
-        default: false
-      skip_ledgerguard:
-        description: Skip LedgerGuard deploy
-        required: false
-        type: boolean
-        default: false
-      skip_n8n:
-        description: Skip n8n workflow verification
+      allow_stale_agents:
+        description: Deploy even if the agent image lags crowdrelay-agents main
         required: false
         type: boolean
         default: false
@@ -67,6 +52,19 @@ jobs:
           repository: CrowdRelay/crowdrelay-control-plane
           ref: main
           path: .control-plane
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      # The agent-service ships as an overlay on the Control Plane stack. The
+      # orchestrator does not build it, but it needs the history to prove the
+      # published image is an ancestor of agents main, so `fetch-depth: 0`.
+      - name: Check out Agents
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CrowdRelay/crowdrelay-agents
+          ref: main
+          path: .agents
+          fetch-depth: 0
           token: ${{ github.token }}
           persist-credentials: false
 
@@ -121,14 +119,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CONTROL_PLANE_CHECKOUT: ${{ github.workspace }}/.control-plane
+          AGENTS_CHECKOUT: ${{ github.workspace }}/.agents
         run: |
           set -euo pipefail
+          # `cond && args+=(...)` is an and-list: when the condition is false the
+          # whole statement returns 1, and under `set -e` the step exits there.
+          # The last flag in the chain therefore decided whether the deploy ran
+          # at all. Use plain `if` so a false input only skips its own flag.
           args=()
-          [[ "${{ inputs.allow_contract_migrations }}" == "true" ]] && args+=(--allow-contract-migrations)
-          [[ "${{ inputs.skip_virya }}" == "true" ]] && args+=(--skip-virya)
-          [[ "${{ inputs.skip_synesthesia }}" == "true" ]] && args+=(--skip-synesthesia)
-          [[ "${{ inputs.skip_ledgerguard }}" == "true" ]] && args+=(--skip-ledgerguard)
-          [[ "${{ inputs.skip_n8n }}" == "true" ]] && args+=(--skip-n8n)
+          if [[ "${{ inputs.allow_contract_migrations }}" == "true" ]]; then
+            args+=(--allow-contract-migrations)
+          fi
+          if [[ "${{ inputs.allow_stale_agents }}" == "true" ]]; then
+            args+=(--allow-stale-agents)
+          fi
           bash scripts/deploy-ecosystem.sh "${{ steps.target.outputs.sha }}" "${args[@]}"
 
       - name: Post-deploy production smoke

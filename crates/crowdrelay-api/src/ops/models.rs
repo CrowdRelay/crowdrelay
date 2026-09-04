@@ -296,6 +296,7 @@ pub struct SignalOverview {
     summary: SignalFanSummary,
     activity: SignalActivitySummary,
     top_cities: Vec<SignalCitySummary>,
+    retention_loop: SignalRetentionLoop,
     unavailable_sources: Vec<&'static str>,
 }
 
@@ -320,6 +321,38 @@ pub struct SignalActivitySummary {
     event_interests_30d: i64,
     nearby_notifications_30d: i64,
     pending_city_requests: i64,
+}
+
+/// The retention loop end to end: a fan asks for a city, the city gets
+/// coordinates, the fan becomes reachable, a show near them produces a
+/// notification, and a push carries it to the device.
+///
+/// Each stage is counted separately because the loop has failed silently at
+/// every one of them. Only the moderation queue was visible before, and that is
+/// the one stage which does not block delivery at all.
+#[derive(Debug, Serialize)]
+pub struct SignalRetentionLoop {
+    /// Requested cities with no latitude. These block delivery: no fan in one
+    /// can be matched to a show, whatever their consent says.
+    cities_awaiting_coordinates: i64,
+    /// Requested cities that have coordinates, moderated or not.
+    cities_resolved: i64,
+    /// Fans whose chosen city has coordinates.
+    fans_with_coordinates: i64,
+    /// Fans the nearby-show loop would announce to today: opted in, active,
+    /// located, and holding current marketing consent.
+    nearby_eligible_fans: i64,
+    /// Nearby-show notifications ever produced. `nearby_notifications_30d` on
+    /// the activity summary is the recent window of the same thing.
+    notifications_created: i64,
+    /// Deliveries waiting for the push worker.
+    pushes_queued: i64,
+    /// Deliveries the push provider accepted.
+    pushes_sent: i64,
+    /// Deliveries the app acknowledged from the device.
+    pushes_delivered: i64,
+    /// Deliveries that stopped without reaching a device.
+    pushes_failed: i64,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -347,6 +380,15 @@ struct SignalSummaryRow {
     event_interests_30d: i64,
     nearby_notifications_30d: i64,
     pending_city_requests: i64,
+    cities_awaiting_coordinates: i64,
+    cities_resolved: i64,
+    fans_with_coordinates: i64,
+    nearby_eligible_fans: i64,
+    nearby_notifications_total: i64,
+    pushes_queued: i64,
+    pushes_sent: i64,
+    pushes_delivered: i64,
+    pushes_failed: i64,
 }
 
 #[derive(Debug, FromRow)]

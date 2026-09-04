@@ -612,6 +612,17 @@ fn signal_overview_from_row(
             pending_city_requests: row.pending_city_requests,
         },
         top_cities,
+        retention_loop: SignalRetentionLoop {
+            cities_awaiting_coordinates: row.cities_awaiting_coordinates,
+            cities_resolved: row.cities_resolved,
+            fans_with_coordinates: row.fans_with_coordinates,
+            nearby_eligible_fans: row.nearby_eligible_fans,
+            notifications_created: row.nearby_notifications_total,
+            pushes_queued: row.pushes_queued,
+            pushes_sent: row.pushes_sent,
+            pushes_delivered: row.pushes_delivered,
+            pushes_failed: row.pushes_failed,
+        },
         unavailable_sources,
     }
 }
