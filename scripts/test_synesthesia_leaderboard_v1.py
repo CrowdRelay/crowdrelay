@@ -41,8 +41,24 @@ class SynesthesiaLeaderboardV1Contract(unittest.TestCase):
     def test_only_best_attempt_per_install_is_ranked_and_indexed(self):
         api = (ROOT / "crates/crowdrelay-api/src/synesthesia/leaderboard.rs").read_text()
         migration = (ROOT / "migrations/0071_synesthesia_install_leaderboard_index.sql").read_text()
-        self.assertGreaterEqual(api.count("SELECT DISTINCT ON (run.install_hash)"), 2)
-        self.assertIn("ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)", api)
+        # One entry per install, and that entry is the install's best attempt.
+        # The board listing gets there with DISTINCT ON; the publish reply gets
+        # there by counting distinct installs ahead of this one's best, because
+        # ranking the whole board to read a single rank costs the size of the
+        # board on every publish. Both must still key on `install_hash` and
+        # order an install's attempts by elapsed time, so a fan with five tries
+        # appears once, at their fastest.
+        self.assertIn("SELECT DISTINCT ON (run.install_hash)", api)
+        self.assertIn("ORDER BY run.install_hash, run.client_total_elapsed_ms, run.completed_at, run.id", api)
+        self.assertIn("count(DISTINCT run.install_hash)", api)
+        self.assertIn(
+            "ORDER BY run.client_total_elapsed_ms, run.completed_at, run.id\n            LIMIT 1",
+            api,
+        )
+        self.assertIn(
+            "(run.client_total_elapsed_ms, run.completed_at, run.id)\n                      < (my_best.elapsed_ms, my_best.completed_at, my_best.id)",
+            api,
+        )
         self.assertIn("synesthesia_runs_leaderboard_best_idx", migration)
         self.assertIn("install_hash", migration)
         self.assertIn("DROP INDEX IF EXISTS synesthesia_runs_leaderboard_fan_best_idx", migration)

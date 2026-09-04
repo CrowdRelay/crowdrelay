@@ -180,26 +180,41 @@ pub async fn publish_leaderboard(
 
     let ranked = sqlx::query_as::<_, (i64, i64)>(
         r#"
-        WITH best AS (
-            SELECT DISTINCT ON (run.install_hash)
-                run.install_hash,
-                run.client_total_elapsed_ms AS elapsed_ms,
-                run.completed_at,
-                run.id
+        -- This install's own entry, then the count of entries ahead of it.
+        -- Building the whole board to read one rank costs the size of the board
+        -- on every publish and does it inside this transaction; the count is a
+        -- range scan on an index already ordered by elapsed time, so it stops
+        -- at this install's position. See the same rewrite and its measurements
+        -- in `fan_context::fan_home`.
+        WITH my_best AS (
+            SELECT run.client_total_elapsed_ms AS elapsed_ms, run.completed_at, run.id
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $2
+              AND run.install_hash = $3
               AND NOT run.synthetic
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL
               AND run.leaderboard_name IS NOT NULL
-            ORDER BY run.install_hash, run.client_total_elapsed_ms, run.completed_at, run.id
-        ), ranked AS (
-            SELECT install_hash, elapsed_ms,
-                   ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
-            FROM best
+            ORDER BY run.client_total_elapsed_ms, run.completed_at, run.id
+            LIMIT 1
         )
-        SELECT rank, elapsed_ms FROM ranked WHERE install_hash = $3
+        SELECT
+            (
+                SELECT 1 + count(DISTINCT run.install_hash)::bigint
+                FROM synesthesia_runs AS run
+                WHERE run.workspace_id = $1
+                  AND run.campaign_slug = $2
+                  AND run.install_hash <> $3
+                  AND NOT run.synthetic
+                  AND run.completed_at IS NOT NULL
+                  AND run.client_total_elapsed_ms IS NOT NULL
+                  AND run.leaderboard_name IS NOT NULL
+                  AND (run.client_total_elapsed_ms, run.completed_at, run.id)
+                      < (my_best.elapsed_ms, my_best.completed_at, my_best.id)
+            ) AS rank,
+            my_best.elapsed_ms
+        FROM my_best
         "#,
     )
     .bind(workspace_id)
