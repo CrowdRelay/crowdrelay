@@ -68,6 +68,7 @@ struct IdempotencyRow {
     request_hash: Vec<u8>,
     state: String,
     response_body: Option<Value>,
+    lease_expired: bool,
 }
 
 pub async fn announce_release(
@@ -259,7 +260,11 @@ async fn announce_release_inner(
     if claimed.is_none() {
         let existing = sqlx::query_as::<_, IdempotencyRow>(
             r#"
-            SELECT request_hash, state, response_body
+            SELECT
+                request_hash,
+                state,
+                response_body,
+                COALESCE(lease_expires_at <= now(), false) AS lease_expired
             FROM idempotency_keys
             WHERE workspace_id = $1 AND scope = $2 AND key = $3
             FOR UPDATE
@@ -274,21 +279,58 @@ async fn announce_release_inner(
         if existing.request_hash.as_slice() != request_hash.as_slice() {
             return Err(AnnounceReleaseError::Conflict);
         }
+        // A five-minute lease is written on the way in and was never read back,
+        // and this key is derived from the release rather than supplied by the
+        // caller -- `source:id` -- so every retry of an announcement collides
+        // with the same row. A request that died between claiming the key and
+        // completing it therefore blocked that release from ever being
+        // announced: `in_progress` with a retention of ten years, answering
+        // InProgress forever. Reclaiming an expired lease is what the lease was
+        // written for. InProgress now means what it says: another announcement
+        // is genuinely running right now.
         if existing.state != "completed" {
-            return Err(AnnounceReleaseError::InProgress);
-        }
-        let mut response: AnnounceReleaseResponse = serde_json::from_value(
-            existing
-                .response_body
-                .ok_or(AnnounceReleaseError::Unavailable)?,
-        )
-        .map_err(|_| AnnounceReleaseError::Unavailable)?;
-        response.duplicate = true;
-        transaction
-            .commit()
+            if !existing.lease_expired {
+                return Err(AnnounceReleaseError::InProgress);
+            }
+            let reclaimed = sqlx::query(
+                r#"
+                UPDATE idempotency_keys
+                SET lease_owner = $4,
+                    lease_expires_at = now() + interval '5 minutes'
+                WHERE workspace_id = $1
+                  AND scope = $2
+                  AND key = $3
+                  AND state = 'in_progress'
+                  AND lease_expires_at <= now()
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(IDEMPOTENCY_SCOPE)
+            .bind(&key)
+            .bind(&lease_owner)
+            .execute(&mut *transaction)
             .await
             .map_err(|_| AnnounceReleaseError::Unavailable)?;
-        return Ok(response);
+            if reclaimed.rows_affected() != 1 {
+                return Err(AnnounceReleaseError::InProgress);
+            }
+            // The abandoned attempt never reached `complete`, so nothing was
+            // sent under it. Fall through and run the announcement now, under
+            // this request's lease.
+        } else {
+            let mut response: AnnounceReleaseResponse = serde_json::from_value(
+                existing
+                    .response_body
+                    .ok_or(AnnounceReleaseError::Unavailable)?,
+            )
+            .map_err(|_| AnnounceReleaseError::Unavailable)?;
+            response.duplicate = true;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| AnnounceReleaseError::Unavailable)?;
+            return Ok(response);
+        }
     }
 
     let recipient_count = sqlx::query_scalar::<_, i64>(
