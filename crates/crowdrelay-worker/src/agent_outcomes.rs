@@ -357,6 +357,7 @@ impl AgentOutcomeWorker {
         };
 
         // Side tables per kind. Single-writer: only this worker inserts here.
+        let mut outreach_target_auto_promoted = false;
         match outcome.kind {
             OutcomeKind::AudienceSegments => {
                 if let Some(item) = &outcome.payload.item {
@@ -365,7 +366,8 @@ impl AgentOutcomeWorker {
             }
             OutcomeKind::OutreachTargets => {
                 if let Some(item) = &outcome.payload.item {
-                    self.insert_outreach_target(&mut tx, outcome, item).await?;
+                    outreach_target_auto_promoted =
+                        self.insert_outreach_target(&mut tx, outcome, item).await?;
                 }
             }
             _ => {}
@@ -428,8 +430,7 @@ impl AgentOutcomeWorker {
                 false
             };
 
-            let (payload, action_kind, action_class) = if let Some(target_id) = community_target_id
-            {
+            let action_details = if let Some(target_id) = community_target_id {
                 let item = outcome.payload.item.as_ref();
                 let subreddit = item
                     .and_then(|i| i.get("subreddit"))
@@ -469,7 +470,7 @@ impl AgentOutcomeWorker {
                 } else {
                     None
                 };
-                (
+                Some((
                     json!({
                         "kind": "request_community_engagement",
                         "target_id": target_id,
@@ -481,10 +482,10 @@ impl AgentOutcomeWorker {
                     }),
                     "community.engage.request",
                     "third_party",
-                )
+                ))
             } else {
                 match outcome.kind {
-                    OutcomeKind::PressPitch | OutcomeKind::SocialPost => (
+                    OutcomeKind::PressPitch | OutcomeKind::SocialPost => Some((
                         json!({
                             "kind": "request_agent_content",
                             "task_id": outcome.task_id,
@@ -492,7 +493,7 @@ impl AgentOutcomeWorker {
                         }),
                         "agent.content.request",
                         "first_party_reversible",
-                    ),
+                    )),
                     OutcomeKind::SignalPush => {
                         let item = outcome.payload.item.as_ref();
                         let title = item
@@ -515,7 +516,7 @@ impl AgentOutcomeWorker {
                             .and_then(|i| i.get("segment"))
                             .and_then(Value::as_str)
                             .map(|s| s.to_owned());
-                        (
+                        Some((
                             json!({
                                 "kind": "request_signal_push",
                                 "task_id": outcome.task_id,
@@ -527,27 +528,79 @@ impl AgentOutcomeWorker {
                             }),
                             "signal.push.request",
                             "owned_audience",
-                        )
+                        ))
                     }
-                    OutcomeKind::OutreachTargets => (
-                        json!({
-                            "kind": "request_agent_content",
-                            "task_id": outcome.task_id,
-                            "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
-                        }),
-                        "outreach.request",
-                        "first_party_reversible",
-                    ),
-                    _ => (
-                        Value::Null,
-                        "agent.content.request",
-                        "first_party_reversible",
-                    ),
+                    OutcomeKind::OutreachTargets => {
+                        // Community targets (Reddit, forums) are auto-promoted
+                        // in insert_outreach_target — no approval action needed.
+                        if outreach_target_auto_promoted {
+                            None
+                        } else {
+                            let item = outcome.payload.item.as_ref();
+                            let target_kind = item
+                                .and_then(|i| i.get("target_kind"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown");
+                            let display_name = item
+                                .and_then(|i| i.get("display_name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("Unnamed target");
+                            let contact_email = item
+                                .and_then(|i| i.get("contact_email"))
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_owned());
+                            let contact_domain = item
+                                .and_then(|i| i.get("contact_domain"))
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_owned());
+                            let why_fit = item
+                                .and_then(|i| i.get("why_fit"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let evidence_urls = item
+                                .and_then(|i| i.get("evidence_urls"))
+                                .cloned()
+                                .unwrap_or(json!([]));
+                            let subreddit = item
+                                .and_then(|i| i.get("subreddit"))
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_owned());
+                            Some((
+                                json!({
+                                    "kind": "request_outreach_target",
+                                    "task_id": outcome.task_id,
+                                    "target_kind": target_kind,
+                                    "display_name": display_name,
+                                    "contact_email": contact_email,
+                                    "contact_domain": contact_domain,
+                                    "why_fit": why_fit,
+                                    "evidence_urls": evidence_urls,
+                                    "subreddit": subreddit,
+                                }),
+                                "outreach.target.request",
+                                "first_party_reversible",
+                            ))
+                        }
+                    }
+                    // An unhandled require_approval kind should not produce a
+                    // garbage action with a null payload. Log and skip — the
+                    // outcome row is still preserved for audit.
+                    _ => {
+                        tracing::warn!(
+                            kind = %outcome.kind.as_str(),
+                            task_id = %outcome.task_id,
+                            "require_approval outcome has no action mapping — skipping action creation"
+                        );
+                        None
+                    }
                 }
             };
-            let inserted_action = if auto_execute {
-                sqlx::query_scalar::<_, Uuid>(
-                    r#"
+            let inserted_action = if let Some((payload, action_kind, action_class)) = action_details
+            {
+                if auto_execute {
+                    sqlx::query_scalar::<_, Uuid>(
+                        r#"
                     INSERT INTO viryaos_autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
@@ -562,24 +615,24 @@ impl AgentOutcomeWorker {
                     ON CONFLICT DO NOTHING
                     RETURNING id
                     "#,
-                )
-                .bind(action_id)
-                .bind(outcome.workspace_id)
-                .bind(decision_id)
-                .bind(outcome.kind.autopilot_context())
-                .bind(action_kind)
-                .bind("agent_outcome")
-                .bind(outcome.id)
-                .bind(&outcome.idempotency_key)
-                .bind(&payload)
-                .bind("queued")
-                .bind(action_class)
-                .bind(outcome.trace_id)
-                .fetch_optional(&mut *tx)
-                .await?
-            } else {
-                sqlx::query_scalar::<_, Uuid>(
-                    r#"
+                    )
+                    .bind(action_id)
+                    .bind(outcome.workspace_id)
+                    .bind(decision_id)
+                    .bind(outcome.kind.autopilot_context())
+                    .bind(action_kind)
+                    .bind("agent_outcome")
+                    .bind(outcome.id)
+                    .bind(&outcome.idempotency_key)
+                    .bind(&payload)
+                    .bind("queued")
+                    .bind(action_class)
+                    .bind(outcome.trace_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                } else {
+                    sqlx::query_scalar::<_, Uuid>(
+                        r#"
                     INSERT INTO viryaos_autopilot_actions (
                         id, workspace_id, decision_id, context, action_kind,
                         subject_kind, subject_id, idempotency_key, payload, status,
@@ -595,21 +648,24 @@ impl AgentOutcomeWorker {
                     ON CONFLICT DO NOTHING
                     RETURNING id
                     "#,
-                )
-                .bind(action_id)
-                .bind(outcome.workspace_id)
-                .bind(decision_id)
-                .bind(outcome.kind.autopilot_context())
-                .bind(action_kind)
-                .bind("agent_outcome")
-                .bind(outcome.id)
-                .bind(&outcome.idempotency_key)
-                .bind(&payload)
-                .bind("awaiting_approval")
-                .bind(action_class)
-                .bind(outcome.trace_id)
-                .fetch_optional(&mut *tx)
-                .await?
+                    )
+                    .bind(action_id)
+                    .bind(outcome.workspace_id)
+                    .bind(decision_id)
+                    .bind(outcome.kind.autopilot_context())
+                    .bind(action_kind)
+                    .bind("agent_outcome")
+                    .bind(outcome.id)
+                    .bind(&outcome.idempotency_key)
+                    .bind(&payload)
+                    .bind("awaiting_approval")
+                    .bind(action_class)
+                    .bind(outcome.trace_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                }
+            } else {
+                None
             };
             tracing::debug!(
                 outcome_id = %outcome.id,
@@ -618,19 +674,20 @@ impl AgentOutcomeWorker {
                 "action INSERT result"
             );
             // On a re-run the action row already exists (conflict). Resolve
-            // the existing id so processed_action_id is not NULL.
+            // the existing id so processed_action_id is not NULL. When the
+            // outcome had no action mapping (None payload), no row exists —
+            // fetch_optional returns None instead of erroring.
             match inserted_action {
                 Some(id) => Some(id),
-                None => {
-                    sqlx::query_scalar::<_, Option<Uuid>>(
-                        "SELECT id FROM viryaos_autopilot_actions \
+                None => sqlx::query_scalar::<_, Option<Uuid>>(
+                    "SELECT id FROM viryaos_autopilot_actions \
                  WHERE workspace_id = $1 AND idempotency_key = $2",
-                    )
-                    .bind(outcome.workspace_id)
-                    .bind(&outcome.idempotency_key)
-                    .fetch_one(&mut *tx)
-                    .await?
-                }
+                )
+                .bind(outcome.workspace_id)
+                .bind(&outcome.idempotency_key)
+                .fetch_optional(&mut *tx)
+                .await?
+                .flatten(),
             }
         } else {
             None
@@ -778,7 +835,7 @@ impl AgentOutcomeWorker {
         tx: &mut Transaction<'_, Postgres>,
         outcome: &ValidatedOutcome,
         item: &Value,
-    ) -> Result<(), AgentOutcomeError> {
+    ) -> Result<bool, AgentOutcomeError> {
         let target_kind = item
             .get("target_kind")
             .and_then(Value::as_str)
@@ -866,7 +923,10 @@ impl AgentOutcomeWorker {
         .bind(refusal)
         .execute(&mut **tx)
         .await?;
-        Ok(())
+        // Community targets are auto-promoted — the operator does not need
+        // to approve them. Personal-contact kinds keep the proposed → promoted
+        // operator-approval flow and need an action row.
+        Ok(is_community)
     }
 
     /// Looks up the audience-graph place for a proposed community, matching

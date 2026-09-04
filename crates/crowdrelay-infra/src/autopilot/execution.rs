@@ -257,7 +257,8 @@ pub(super) async fn schedule_effect_measurement(
         // is not. Phase 14 measures the play against its own pre-play baseline.
         | AutopilotActionPayload::RunPlayStep { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-        | AutopilotActionPayload::RequestAgentContent { .. } => {}
+        | AutopilotActionPayload::RequestAgentContent { .. }
+        | AutopilotActionPayload::RequestOutreachTarget { .. } => {}
         // A Signal push exists to put the app in someone's hand, so measure
         // exactly that: installs in the week after it went out.
         //
@@ -717,6 +718,9 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestAgentContent { .. } => {
             ("agent_content_requested", 1.0, None)
         }
+        AutopilotActionPayload::RequestOutreachTarget { .. } => {
+            ("outreach_target_promoted", 1.0, None)
+        }
         AutopilotActionPayload::RequestAgentRun { .. } => {
             ("agent_run_dispatched", 1.0, None)
         }
@@ -785,6 +789,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RunPlayStep { .. }
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
                 | AutopilotActionPayload::RequestAgentContent { .. }
+                | AutopilotActionPayload::RequestOutreachTarget { .. }
                 | AutopilotActionPayload::RequestCommunityEngagement { .. }
         ),
     }

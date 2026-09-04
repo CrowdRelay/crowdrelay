@@ -671,6 +671,26 @@ pub enum AutopilotActionPayload {
         task_id: uuid::Uuid,
         draft: serde_json::Value,
     },
+    /// An agent discovered an outreach target (press contact, radio station,
+    /// community subreddit) that the operator should verify before the growth
+    /// loop engages it. Execution promotes the target from `proposed` to
+    /// `promoted` in the `agent_outreach_targets` staging table — an internal
+    /// database operation, no external executor needed.
+    RequestOutreachTarget {
+        task_id: uuid::Uuid,
+        target_kind: String,
+        display_name: String,
+        #[serde(default)]
+        contact_email: Option<String>,
+        #[serde(default)]
+        contact_domain: Option<String>,
+        #[serde(default)]
+        why_fit: String,
+        #[serde(default)]
+        evidence_urls: serde_json::Value,
+        #[serde(default)]
+        subreddit: Option<String>,
+    },
     /// The deterministic brain dispatches an LLM worker to gather intelligence
     /// or draft content. The brain decides what to gather and when — never the
     /// LLM. The worker runs the specified template with the deterministic prompt
@@ -783,6 +803,10 @@ impl AutopilotActionPayload {
             // An LLM draft materializes as a first-party campaign draft; the
             // actual send is a separate, separately-approved action.
             | Self::RequestAgentContent { .. }
+            // A target promotion is an internal DB write (flipping a staging
+            // row from proposed to promoted). It reaches nobody and is undone
+            // by flipping the status back.
+            | Self::RequestOutreachTarget { .. }
             // The brain dispatching a worker is an internal DB write (creating
             // an agent_service_tasks row). It reaches nobody, costs nothing,
             // and is undone by deleting the task row.
@@ -869,6 +893,7 @@ impl AutopilotActionPayload {
             Self::RunPlayStep { .. } => "play.step.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
             Self::RequestAgentContent { .. } => "agent.content.request",
+            Self::RequestOutreachTarget { .. } => "outreach.target.request",
             Self::RequestAgentRun { .. } => "agent.run.request",
             Self::RequestCommunityEngagement { .. } => "community.engage.request",
             Self::RequestSignalPush { .. } => "signal.push.request",
@@ -1362,7 +1387,12 @@ impl AutopilotActionPayload {
                 deadline_note: String::new(),
             },
             Self::RequestAgentContent { template_id, task_id, draft } => ActionBriefing {
-                summary: "Zatwierdź draft treści od agenta".into(),
+                summary: match template_id.as_deref() {
+                    Some("press-pitch") | Some("press_pitch") => "Zatwierdź pitch prasowy od agenta".into(),
+                    Some("social-post") | Some("social_post") => "Zatwierdź post społecznościowy od agenta".into(),
+                    Some(tid) => format!("Zatwierdź draft treści od agenta ({tid})"),
+                    None => "Zatwierdź draft treści od agenta".into(),
+                },
                 why_it_matters: "Agent wygenerował ten draft na podstawie inteligencji zebranej przez system. Po akceptacji treść zostanie opublikowana w odpowiednim kanale.".into(),
                 steps: vec![
                     BriefingStep { what_to_do: "Przeczytaj draft poniżej".into(), why_it_matters: "Sprawdź ton, fakty i zgodność z marką".into() },
@@ -1374,7 +1404,51 @@ impl AutopilotActionPayload {
                         fields.push(BriefingField { label: "Szablon".into(), value: tid.clone() });
                     }
                     fields.push(BriefingField { label: "Zadanie".into(), value: task_id.to_string() });
+                    // Extract channel/destination from draft if present so the
+                    // operator knows where the content will be published.
+                    if let Some(obj) = draft.as_object() {
+                        if let Some(platform) = obj.get("platform").and_then(|v| v.as_str()) {
+                            fields.push(BriefingField { label: "Kanał".into(), value: platform.to_owned() });
+                        }
+                        if let Some(subject) = obj.get("subject").and_then(|v| v.as_str()) {
+                            fields.push(BriefingField { label: "Temat".into(), value: subject.to_owned() });
+                        }
+                    }
                     fields.push(BriefingField { label: "Draft".into(), value: truncate(draft_to_text(draft), 2000) });
+                    fields
+                },
+                deadline_note: String::new(),
+            },
+            Self::RequestOutreachTarget { target_kind, display_name, contact_email, contact_domain, why_fit, evidence_urls, subreddit, .. } => ActionBriefing {
+                summary: format!("Zatwierdź cel outreach: {}", display_name),
+                why_it_matters: format!("Agent odkrył ten cel (typ: {}). Po akceptacji cel zostanie promowany i growth loop będzie mógł go używać w kampaniach.", target_kind),
+                steps: vec![
+                    BriefingStep { what_to_do: "Sprawdź dane kontaktowe i uzasadnienie".into(), why_it_matters: "Upewnij się, że cel jest realny i zgodny z marką".into() },
+                    BriefingStep { what_to_do: "Kliknij AKCEPTUJ aby promować cel, ODRZUĆ jeśli nie pasuje".into(), why_it_matters: "Po akceptacji growth loop może używać tego celu w kampaniach".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Typ celu".into(), value: target_kind.clone() },
+                        BriefingField { label: "Nazwa".into(), value: display_name.clone() },
+                    ];
+                    if let Some(email) = contact_email {
+                        fields.push(BriefingField { label: "Email kontaktowy".into(), value: email.clone() });
+                    }
+                    if let Some(domain) = contact_domain {
+                        fields.push(BriefingField { label: "Domena".into(), value: domain.clone() });
+                    }
+                    if let Some(sub) = subreddit {
+                        fields.push(BriefingField { label: "Subreddit".into(), value: sub.clone() });
+                    }
+                    if !why_fit.is_empty() {
+                        fields.push(BriefingField { label: "Dlaczego pasuje".into(), value: truncate(why_fit.clone(), 500) });
+                    }
+                    if let Some(urls) = evidence_urls.as_array() {
+                        let url_list = urls.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ");
+                        if !url_list.is_empty() {
+                            fields.push(BriefingField { label: "Dowody".into(), value: truncate(url_list, 500) });
+                        }
+                    }
                     fields
                 },
                 deadline_note: String::new(),
@@ -1474,6 +1548,9 @@ fn platform_label(platform: &MetricPlatform) -> String {
 /// Drafts are structured JSON from the agent service; this flattens them
 /// into a single string for display. Falls back to pretty-printed JSON.
 fn draft_to_text(draft: &serde_json::Value) -> String {
+    if draft.is_null() {
+        return "(Agent nie wygenerował treści — sprawdź szczegóły zadania na panelu)".to_owned();
+    }
     if let Some(s) = draft.as_str() {
         return s.to_owned();
     }

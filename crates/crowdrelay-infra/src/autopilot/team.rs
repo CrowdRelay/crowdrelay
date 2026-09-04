@@ -54,6 +54,7 @@ struct UnassignedShowTaskRow {
 #[derive(Debug, FromRow)]
 struct ReminderRow {
     assignment_id: Uuid,
+    action_id: Option<Uuid>,
     action_kind: Option<String>,
     context: Option<String>,
     source_kind: String,
@@ -221,6 +222,7 @@ impl PostgresAutopilotRepository {
                     enriched_task_detail(&action.payload, action.approval_expires_at, None),
                     action.approval_expires_at,
                     0,
+                    Some(action.id),
                     now,
                 )
                 .await?;
@@ -277,6 +279,7 @@ impl PostgresAutopilotRepository {
                     ),
                     Some(task.due_at),
                     0,
+                    None,
                     now,
                 )
                 .await?;
@@ -309,6 +312,7 @@ impl PostgresAutopilotRepository {
             let rows = sqlx::query_as::<_, ReminderRow>(
                 r#"
                 SELECT assignment.id assignment_id,
+                       action.id action_id,
                        action.action_kind, action.context, assignment.source_kind,
                        assignment.source_ref, event.title event_title,
                        member.display_name, member.normalized_email,
@@ -388,6 +392,7 @@ impl PostgresAutopilotRepository {
                     detail,
                     row.due_at,
                     u8::try_from(reminder_number.clamp(1, 12)).unwrap_or(12),
+                    row.action_id,
                     now,
                 )
                 .await?;
@@ -477,6 +482,7 @@ pub(super) async fn queue_team_email_action(
     task_detail: String,
     due_at: Option<OffsetDateTime>,
     reminder_number: u8,
+    source_action_id: Option<Uuid>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let suffix = if reminder_number == 0 {
@@ -531,7 +537,10 @@ pub(super) async fn queue_team_email_action(
         task_title,
         task_detail,
         due_at,
-        action_url_path: "/staff/?tab=overview#needs-you".to_owned(),
+        action_url_path: match source_action_id {
+            Some(id) => format!("/staff/?tab=overview#needs-you&action={id}"),
+            None => "/staff/?tab=overview#needs-you".to_owned(),
+        },
         reminder_number,
     })
     .map_err(|_| RepositoryError::Unexpected)?;
@@ -759,6 +768,9 @@ pub(super) fn friendly_action_title(action_kind: &str) -> String {
         "opportunity.live.apply" => "Sprawdź i zatwierdź zgłoszenie koncertowe".into(),
         "funding.application.submit" => "Sprawdź i zatwierdź wysłanie wniosku".into(),
         "promotion.budget_change.request" => "Sprawdź zmianę budżetu promocji".into(),
+        "agent.content.request" => "Zatwierdź treść od agenta".into(),
+        "outreach.target.request" => "Zatwierdź cel outreach".into(),
+        "outreach.request" => "Zatwierdź cel outreach".into(),
         other => format!("VIRYA OS — {}", other.replace(['.', '_'], " ")),
     }
 }
@@ -789,7 +801,7 @@ fn enriched_task_detail(
     use crowdrelay_application::autopilot::AutopilotActionPayload;
 
     let Ok(payload) = serde_json::from_value::<AutopilotActionPayload>(payload_json.clone()) else {
-        return "To zadanie nadal czeka na Twoją decyzję lub wykonanie.".to_owned();
+        return "Nie udało się odczytać szczegółów zadania. Otwórz panel operacyjny aby zobaczyć pełne dane.".to_owned();
     };
     let mut briefing = payload.briefing();
     briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at);

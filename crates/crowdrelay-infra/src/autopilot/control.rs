@@ -1045,6 +1045,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     format!("Wymaga Twojej decyzji w VIRYA OS: {}.", action.1),
                     due_at,
                     0,
+                    Some(action_id.into_uuid()),
                     OffsetDateTime::now_utc(),
                 )
                 .await?;
