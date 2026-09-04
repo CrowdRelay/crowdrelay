@@ -28,6 +28,8 @@ async fn load_fan_cards(
                 ) AS last_meaningful_action_at
             FROM fans fan
             WHERE fan.workspace_id = $1
+              AND fan.status <> 'suppressed'
+              AND fan.deleted_at IS NULL
         )
         SELECT
             fan.id,
@@ -183,6 +185,8 @@ async fn load_fan_card(
         FROM fans fan
         JOIN fan_activation act ON act.id = fan.id
         WHERE fan.workspace_id = $1 AND fan.id = $2
+          AND fan.status <> 'suppressed'
+          AND fan.deleted_at IS NULL
         "#,
     )
     .bind(workspace_id)
