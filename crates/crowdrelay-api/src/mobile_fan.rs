@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crowdrelay_application::IdempotencyKey;
+use crowdrelay_domain::FanId;
 use crowdrelay_infra::mobile_fan::{
     CityRequestCommand, MobileFanStoreError, PostgresMobileFanRepository,
 };
@@ -33,6 +34,14 @@ pub struct RequestedCity {
     city_slug: String,
     display_name: String,
     status: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetFanLocation {
+    city_slug: String,
+    nearby_gigs_enabled: bool,
+    radius_km: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +241,109 @@ pub async fn geocode_city(
         Err(_) => Problem::service_unavailable(request_id_value)
             .private()
             .into_response(),
+    }
+}
+
+/// Sets the signed-in fan's city and nearby-show preference.
+///
+/// Signup is the only other writer, and it refuses to touch an address that is
+/// already pending or active because that submission is unauthenticated. That
+/// left a fan who bought a ticket, or a fan who moved, with no way to establish
+/// a location at all -- and the nearby loop is keyed entirely on one. A proved
+/// session is the missing authority, so this is the authenticated counterpart
+/// to that rule rather than a hole in it.
+pub async fn set_fan_location(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<SetFanLocation>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Some(session) = crate::acquisition::fan_session_from_headers(&headers) else {
+        return Problem::unauthorized(request_id_value)
+            .private()
+            .into_response();
+    };
+    let Json(payload) = match payload {
+        Ok(value) => value,
+        Err(_) => {
+            return Problem::bad_request(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    // Same bounds the signup handler enforces, so a fan cannot widen their
+    // radius past what the column's CHECK allows by coming through this door.
+    if !(25..=500).contains(&payload.radius_km) {
+        return Problem::unprocessable(request_id_value)
+            .private()
+            .into_response();
+    }
+    let city_slug = payload.city_slug.trim().to_ascii_lowercase();
+    if city_slug.is_empty() || city_slug.len() > 128 {
+        return Problem::unprocessable(request_id_value)
+            .private()
+            .into_response();
+    }
+
+    let fan_id = match sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT session.fan_id
+        FROM fan_sessions AS session
+        JOIN fans AS fan
+          ON fan.workspace_id = session.workspace_id
+         AND fan.id = session.fan_id
+        WHERE session.workspace_id = $1
+          AND session.session_token_hash = digest($2, 'sha256')
+          AND session.revoked_at IS NULL
+          AND session.expires_at > now()
+          AND fan.status = 'active'
+        LIMIT 1
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(session.as_str())
+    .fetch_optional(&state.database)
+    .await
+    {
+        Ok(Some(fan_id)) => FanId::from_uuid(fan_id),
+        Ok(None) => {
+            return Problem::unauthorized(request_id_value)
+                .private()
+                .into_response();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not resolve fan session for a location change");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+
+    match mobile_fan_repository(&state)
+        .set_fan_location(
+            fan_id,
+            &city_slug,
+            &state.tenant.regional.country_code,
+            payload.nearby_gigs_enabled,
+            payload.radius_km,
+        )
+        .await
+    {
+        Ok(Some(location)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(location),
+        )
+            .into_response(),
+        Ok(None) => Problem::not_found(request_id_value)
+            .private()
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "could not store the fan location preference");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
     }
 }
 

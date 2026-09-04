@@ -52,6 +52,22 @@ pub struct PendingCity {
     pub waiting_fans: i64,
 }
 
+/// What a fan's location targeting actually looks like after a change.
+///
+/// `targeting_ready` is the honest answer to "will nearby shows reach me": it
+/// is false while the chosen city has no coordinates, which happens for a city
+/// a fan requested and nobody has geocoded yet. Without it the client can only
+/// report that the preference was saved, which is true and useless -- the fan
+/// hears nothing and has no way to know why.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FanLocationState {
+    pub city_slug: String,
+    pub city_name: String,
+    pub nearby_gigs_enabled: bool,
+    pub radius_km: i32,
+    pub targeting_ready: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CityRequestResult {
     pub city_slug: String,
@@ -152,6 +168,141 @@ impl PostgresMobileFanRepository {
             .await
             .map_err(|_| MobileFanStoreError::Unavailable)?;
             Ok(written.rows_affected() == 1)
+        })
+        .await
+    }
+
+    /// Sets the city and nearby-show preference for a fan who has proved a
+    /// session, and reports whether targeting can actually work.
+    ///
+    /// The only other writer of a location preference is the signup handler,
+    /// and it refuses to touch an address that is already pending or active --
+    /// correctly, because that submission is unauthenticated and an
+    /// unconfirmed address is not proof of anything. The gap that leaves is
+    /// wide: a fan who bought a ticket has an `active` row and never signed
+    /// up, and a fan who moved cannot change city. Neither could establish a
+    /// location at all, and the nearby loop is keyed entirely on one.
+    ///
+    /// A proved session closes that without reopening the poisoning hole, so
+    /// this is the authenticated counterpart rather than a relaxation of the
+    /// signup rule. It writes only tenant-scoped rows; `cities` is a shared
+    /// catalogue and is read here, never written.
+    ///
+    /// Idempotent by construction: the interest insert is `DO NOTHING` and the
+    /// preference is an upsert, so a replay lands on the same state and the
+    /// city aggregate counts a fan once.
+    pub async fn set_fan_location(
+        &self,
+        fan_id: FanId,
+        city_slug: &str,
+        country_code: &str,
+        nearby_gigs_enabled: bool,
+        radius_km: i32,
+    ) -> Result<Option<FanLocationState>, MobileFanStoreError> {
+        self.bounded(async {
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| MobileFanStoreError::Unavailable)?;
+
+            // Slugs are unique per country, never globally, so the country has
+            // to be part of the lookup or a same-slug city elsewhere matches.
+            let Some((city_id, city_name, has_coordinates)) =
+                sqlx::query_as::<_, (Uuid, String, bool)>(
+                    r#"
+                    SELECT
+                        id,
+                        name,
+                        latitude IS NOT NULL AND longitude IS NOT NULL
+                    FROM cities
+                    WHERE country_code = $1 AND slug = $2
+                    "#,
+                )
+                .bind(country_code)
+                .bind(city_slug)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| MobileFanStoreError::Unavailable)?
+            else {
+                return Ok(None);
+            };
+
+            let interest_created = sqlx::query_scalar::<_, i32>(
+                r#"
+                INSERT INTO fan_city_interests (workspace_id, fan_id, city_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (workspace_id, fan_id, city_id) DO NOTHING
+                RETURNING 1
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(fan_id.into_uuid())
+            .bind(city_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| MobileFanStoreError::Unavailable)?
+            .is_some();
+
+            // Mirrors the signup path: an active fan joining a city they were
+            // not already interested in adds one to that city's confirmed
+            // count. A fan who is not active is counted when they confirm, so
+            // counting here too would count them twice.
+            if interest_created {
+                sqlx::query(
+                    r#"
+                    INSERT INTO city_aggregates (workspace_id, city_id, confirmed_fan_count)
+                    SELECT $1, $2, 1
+                    WHERE EXISTS (
+                        SELECT 1 FROM fans
+                        WHERE workspace_id = $1 AND id = $3 AND status = 'active'
+                    )
+                    ON CONFLICT (workspace_id, city_id) DO UPDATE
+                    SET confirmed_fan_count = city_aggregates.confirmed_fan_count + 1,
+                        updated_at = now()
+                    "#,
+                )
+                .bind(self.workspace_id.into_uuid())
+                .bind(city_id)
+                .bind(fan_id.into_uuid())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| MobileFanStoreError::Unavailable)?;
+            }
+
+            sqlx::query(
+                r#"
+                INSERT INTO fan_location_preferences (
+                    workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (workspace_id, fan_id) DO UPDATE
+                SET city_id = EXCLUDED.city_id,
+                    nearby_gigs_enabled = EXCLUDED.nearby_gigs_enabled,
+                    radius_km = EXCLUDED.radius_km
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(fan_id.into_uuid())
+            .bind(city_id)
+            .bind(nearby_gigs_enabled)
+            .bind(radius_km)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| MobileFanStoreError::Unavailable)?;
+
+            transaction
+                .commit()
+                .await
+                .map_err(|_| MobileFanStoreError::Unavailable)?;
+
+            Ok(Some(FanLocationState {
+                city_slug: city_slug.to_owned(),
+                city_name,
+                nearby_gigs_enabled,
+                radius_km,
+                targeting_ready: has_coordinates,
+            }))
         })
         .await
     }
@@ -291,6 +442,36 @@ impl PostgresMobileFanRepository {
                     WHERE preferences.workspace_id = $1
                       AND preferences.nearby_gigs_enabled
                       AND fans.status = 'active'
+                      -- Current marketing consent gates both channels. It used
+                      -- to gate only push, and `fans.status = 'active'` was
+                      -- doing the work for mail on the reasoning that
+                      -- unsubscribing moves the status. That covers a fan who
+                      -- consented and then withdrew; it does not cover a fan
+                      -- who never consented at all, and those exist: a ticket
+                      -- purchase creates an `active` fan row with no consent
+                      -- row, correctly, because buying is not subscribing.
+                      -- Such a fan could not reach this query while nothing
+                      -- could give them a location preference. Now that they
+                      -- can set one, the missing check would be the difference
+                      -- between lawful and not, so it moves here where both
+                      -- channels read it rather than staying on one of them.
+                      AND EXISTS (
+                          SELECT 1
+                          FROM fan_consents AS consent
+                          WHERE consent.workspace_id = preferences.workspace_id
+                            AND consent.fan_id = preferences.fan_id
+                            AND consent.purpose = 'marketing'
+                            AND consent.granted
+                            AND consent.id = (
+                                SELECT newest.id
+                                FROM fan_consents AS newest
+                                WHERE newest.workspace_id = consent.workspace_id
+                                  AND newest.fan_id = consent.fan_id
+                                  AND newest.purpose = consent.purpose
+                                ORDER BY newest.recorded_at DESC, newest.id DESC
+                                LIMIT 1
+                            )
+                      )
                       AND fan_city.latitude IS NOT NULL
                       AND fan_city.longitude IS NOT NULL
                       AND event_city.latitude IS NOT NULL
@@ -396,24 +577,9 @@ impl PostgresMobileFanRepository {
                      AND endpoint.fan_id = candidates.fan_id
                      AND endpoint.active
                      AND endpoint.invalidated_at IS NULL
+                    -- Consent is checked once in `candidates` now, for both
+                    -- channels, so this only asks whether push is switched on.
                     WHERE $3::boolean
-                      AND EXISTS (
-                          SELECT 1
-                          FROM fan_consents consent
-                          WHERE consent.workspace_id = $1
-                            AND consent.fan_id = candidates.fan_id
-                            AND consent.purpose = 'marketing'
-                            AND consent.granted
-                            AND consent.id = (
-                                SELECT newest.id
-                                FROM fan_consents newest
-                                WHERE newest.workspace_id = consent.workspace_id
-                                  AND newest.fan_id = consent.fan_id
-                                  AND newest.purpose = consent.purpose
-                                ORDER BY newest.recorded_at DESC, newest.id DESC
-                                LIMIT 1
-                            )
-                      )
                     ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
                     RETURNING 1
                 )

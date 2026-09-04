@@ -225,6 +225,55 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/location:
+    post:
+      operationId: setMyLocation
+      summary: Set the signed-in fan's city and nearby-show preference
+      description: >-
+        Signup is the only other writer of a fan location, and it refuses to
+        touch an address that is already pending or active because that
+        submission is unauthenticated. A fan who bought a ticket, or one who
+        moved, therefore had no way to establish a location at all, and
+        nearby-show delivery is keyed entirely on one. `targeting_ready` is
+        false while the chosen city still has no coordinates, so the client can
+        say the preference is stored but not yet usable instead of implying
+        shows are on their way.
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [city_slug, nearby_gigs_enabled, radius_km]
+              properties:
+                city_slug: { type: string, maxLength: 128 }
+                nearby_gigs_enabled: { type: boolean }
+                radius_km: { type: integer, minimum: 25, maximum: 500 }
+      responses:
+        '200':
+          description: Stored location state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [city_slug, city_name, nearby_gigs_enabled, radius_km, targeting_ready]
+                properties:
+                  city_slug: { type: string }
+                  city_name: { type: string }
+                  nearby_gigs_enabled: { type: boolean }
+                  radius_km: { type: integer }
+                  targeting_ready:
+                    type: boolean
+                    description: >-
+                      Whether the city has coordinates, and therefore whether
+                      nearby-show delivery can actually reach this fan.
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /me/push/preferences:
     get:
       operationId: getMyPushPreferences
