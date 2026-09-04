@@ -445,22 +445,49 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
                 COALESCE(BOOL_OR(run.leaderboard_name IS NOT NULL), false) AS leaderboard_published
             FROM synesthesia_runs AS run
             WHERE run.workspace_id = $1 AND run.fan_id = $2 AND run.campaign_slug = $3 AND NOT run.synthetic
-        ), public_best AS (
-            SELECT DISTINCT ON (run.fan_id)
-                run.fan_id, run.client_total_elapsed_ms AS elapsed_ms, run.completed_at, run.id
+        -- This fan's own leaderboard entry: their best run by the same
+        -- ordering the board uses.
+        ), my_best AS (
+            SELECT run.client_total_elapsed_ms AS elapsed_ms, run.completed_at, run.id
             FROM synesthesia_runs AS run
+            WHERE run.workspace_id = $1
+              AND run.campaign_slug = $3
+              AND run.fan_id = $2
+              AND NOT run.synthetic
+              AND run.completed_at IS NOT NULL
+              AND run.client_total_elapsed_ms IS NOT NULL
+              AND run.leaderboard_name IS NOT NULL
+            ORDER BY run.client_total_elapsed_ms, run.completed_at, run.id
+            LIMIT 1
+        -- Rank is one plus the number of fans who beat that entry, which is a
+        -- range count on `synesthesia_runs_leaderboard_public_idx` -- it is
+        -- ordered by elapsed time, so the scan stops at this fan's position.
+        --
+        -- It used to build the entire board: every fan's best row, sorted, then
+        -- a window function over all of it, to read one number. Measured at
+        -- 50k leaderboard entries that was a sequential scan and two external
+        -- merge sorts spilling 2.8 MB to disk each, 69.8 ms, on a warm database
+        -- with nothing else running -- and it ran on every load of the fan home
+        -- screen, which is the most requested authenticated endpoint there is.
+        -- The cost grew with the whole board while the answer stayed one row.
+        --
+        -- Equivalent by construction: a fan whose best sorts before this one
+        -- has at least one run that does, and is counted once; a fan whose best
+        -- sorts after it has none, because their best is their minimum under
+        -- that same ordering.
+        ), ranked AS (
+            SELECT 1 + count(DISTINCT run.fan_id)::bigint AS rank
+            FROM synesthesia_runs AS run, my_best
             WHERE run.workspace_id = $1
               AND run.campaign_slug = $3
               AND NOT run.synthetic
               AND run.fan_id IS NOT NULL
+              AND run.fan_id <> $2
               AND run.completed_at IS NOT NULL
               AND run.client_total_elapsed_ms IS NOT NULL
               AND run.leaderboard_name IS NOT NULL
-            ORDER BY run.fan_id, run.client_total_elapsed_ms, run.completed_at, run.id
-        ), ranked AS (
-            SELECT fan_id,
-                   ROW_NUMBER() OVER (ORDER BY elapsed_ms, completed_at, id)::bigint AS rank
-            FROM public_best
+              AND (run.client_total_elapsed_ms, run.completed_at, run.id)
+                  < (my_best.elapsed_ms, my_best.completed_at, my_best.id)
         )
         SELECT latest.next_room_index, latest.completed_at, latest.recovery_completed_at,
                latest.client_total_elapsed_ms, latest.linked_at,
@@ -468,10 +495,10 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
                    SELECT 1 FROM synesthesia_reward_entries AS reward
                    WHERE reward.workspace_id = latest.workspace_id AND reward.run_id = latest.id
                ) AS reward_entered,
-               stats.best_elapsed_ms, stats.completed_runs, stats.leaderboard_published, ranked.rank
+               stats.best_elapsed_ms, stats.completed_runs, stats.leaderboard_published,
+               (SELECT rank FROM ranked) AS rank
         FROM latest
         CROSS JOIN stats
-        LEFT JOIN ranked ON ranked.fan_id = $2
         "#,
     )
     .bind(workspace_id)
