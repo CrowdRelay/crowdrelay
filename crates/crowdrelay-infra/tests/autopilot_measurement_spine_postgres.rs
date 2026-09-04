@@ -205,6 +205,27 @@ async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observe
         .expect("complete");
 }
 
+/// `resolve` with the clock chosen by the caller.
+///
+/// The control arm resolves only once its own measurement window has elapsed,
+/// so reproducing the production ordering — treated units finishing days apart,
+/// the control becoming measurable only at the end — needs the completion time
+/// to be a parameter rather than the wall clock.
+async fn resolve_at(
+    f: &Fixture,
+    measurement: &ClaimedAutopilotMeasurement,
+    observed: f64,
+    at: OffsetDateTime,
+) {
+    mark_processing(f, measurement).await;
+    let effect = assess_measurement_effect(measurement, observed)
+        .expect("a measurement the worker can classify");
+    f.repository
+        .complete_measurement(f.workspace_id, measurement, observed, effect, at)
+        .await
+        .expect("complete");
+}
+
 async fn evidence_state(
     f: &Fixture,
     action_id: uuid::Uuid,
@@ -890,5 +911,230 @@ async fn i_control_units_produce_an_outcome_and_itt_uses_it() {
             .iter()
             .all(|ev| ev.experiment_uuid == Some(experiment_uuid)),
         "both arms must name the experiment they are being compared within"
+    );
+}
+
+/// J: a treated row waits for its control arm, so the two are replayed together.
+///
+/// Intent-to-treat compares arms, and the contrast is computed per delta batch.
+/// The treated units of one experiment finish their measurements days apart —
+/// production has nine spread across 2026-10-13 to 2026-10-17 — while the
+/// control arm resolves once, on whichever measurement happens to fire after
+/// its own window elapses. Every treated row that resolved before that moment
+/// was consumed in an earlier batch, contrasted against nothing, and capped at
+/// a quasi-experiment. The delta cursor never returns, so the intent-to-treat
+/// estimate those units were randomised to produce could not be recovered.
+///
+/// Readiness is the right place to hold them: the row is not model-ready until
+/// every outcome its model update needs exists, and under intent-to-treat the
+/// control arm's outcome is one of them.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn j_treated_rows_wait_for_their_control_arm() {
+    let f = setup().await.expect("fixture");
+    // Old enough that every measurement window has elapsed.
+    let assigned_at = f.now - time::Duration::days(50);
+    let experiment_uuid = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_designs
+           (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
+            unit_kind, holdout_probability, interference_policy, experiment_status)
+           VALUES ($1,$2,'community-engager',$3,'target_community',0.1,'none','active')"#,
+    )
+    .bind(experiment_uuid)
+    .bind(f.workspace_id.into_uuid())
+    .bind(experiment_uuid.to_string())
+    .execute(&f.pool)
+    .await
+    .expect("design");
+
+    // One control unit, its assignment and the evidence row that names it.
+    let control_target = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO agent_outreach_targets
+           (id, workspace_id, target_kind, display_name, subreddit, status)
+           VALUES ($1,$2,'community','r/waitctrl','waitctrl','promoted')"#,
+    )
+    .bind(control_target)
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("control target");
+    let control_assignment = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm, assigned_at,
+            intended_template_id, propensity, context, prediction,
+            contamination_estimate, is_interference_controllable, experiment_status,
+            execution_status, experiment_kind)
+           VALUES ($1,$2,$3,$4,'target_community','control',$5,'community-engager',0.9,
+                   '{}'::jsonb,'{}'::jsonb,0.0,true,'active','control','randomized_holdout')"#,
+    )
+    .bind(&control_assignment)
+    .bind(f.workspace_id.into_uuid())
+    .bind(experiment_uuid)
+    .bind(control_target.to_string())
+    .bind(assigned_at)
+    .execute(&f.pool)
+    .await
+    .expect("control assignment");
+    sqlx::query(
+        r#"INSERT INTO viryaos_growth_evidence
+           (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
+            channel, estimated_reach, treatment, propensity, converted,
+            predicted_fans, predicted_signal_installs, context, evidence_quality,
+            experiment_assignment_id)
+           VALUES ($1,NULL,'community-engager:wait-control',$2,'r/waitctrl','reddit_post',
+                   1,'control',0.9,false,2.0,1.0,'{}'::jsonb,'randomized_holdout',$3)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(assigned_at)
+    .bind(&control_assignment)
+    .execute(&f.pool)
+    .await
+    .expect("control evidence");
+
+    // Two treated units. `early` finishes its measurement first; `late` is the
+    // one whose completion will resolve the control arm.
+    let mut treated = Vec::new();
+    for label in ["early", "late"] {
+        let action_id =
+            insert_dispatch(&f, &format!("community-engager:{label}"), assigned_at).await;
+        let assignment_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            r#"INSERT INTO viryaos_experiment_assignments
+               (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm, assigned_at,
+                intended_template_id, propensity, context, prediction,
+                contamination_estimate, is_interference_controllable, experiment_status,
+                execution_status, action_id, experiment_kind)
+               VALUES ($1,$2,$3,$4,'target_community','treatment',$5,'community-engager',0.9,
+                       '{}'::jsonb,'{}'::jsonb,0.0,true,'active','executed',$6,
+                       'randomized_holdout')"#,
+        )
+        .bind(&assignment_id)
+        .bind(f.workspace_id.into_uuid())
+        .bind(experiment_uuid)
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(assigned_at)
+        .bind(action_id)
+        .execute(&f.pool)
+        .await
+        .expect("treatment assignment");
+        sqlx::query(
+            "UPDATE viryaos_growth_evidence SET experiment_assignment_id = $3 \
+             WHERE workspace_id = $1 AND action_id = $2",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(action_id)
+        .bind(&assignment_id)
+        .execute(&f.pool)
+        .await
+        .expect("link treatment evidence");
+        treated.push(action_id);
+    }
+    let early = treated[0];
+    let late = treated[1];
+
+    // The early unit finishes everything it was waiting on.
+    let early_measurement = queue_measurement(
+        &f,
+        early,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.0,
+        assigned_at,
+    )
+    .await;
+    // Twenty days in: the control arm's forty-four-day window has not elapsed,
+    // so it cannot be measured yet. This is the production ordering.
+    resolve_at(
+        &f,
+        &early_measurement,
+        5.0,
+        assigned_at + time::Duration::days(20),
+    )
+    .await;
+
+    let (_, early_y14, _, early_resolved) = evidence_state(&f, early).await;
+    assert_eq!(
+        early_y14,
+        Some(5.0),
+        "the outcome itself lands as soon as it is measured"
+    );
+    assert!(
+        early_resolved.is_none(),
+        "but the row is not model-ready while its control arm is unmeasured — \
+         replaying it now would contrast it against nothing and consume it"
+    );
+
+    // The late unit finishes, which is what resolves the control arm.
+    let late_measurement = queue_measurement(
+        &f,
+        late,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.0,
+        assigned_at,
+    )
+    .await;
+    resolve(&f, &late_measurement, 7.0).await;
+
+    let (_, _, _, early_resolved) = evidence_state(&f, early).await;
+    let (_, _, _, late_resolved) = evidence_state(&f, late).await;
+    let control_resolved = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+        "SELECT resolved_at FROM viryaos_growth_evidence \
+         WHERE workspace_id=$1 AND experiment_assignment_id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(&control_assignment)
+    .fetch_one(&f.pool)
+    .await
+    .expect("control evidence state");
+
+    assert!(control_resolved.is_some(), "the control arm was measured");
+    assert!(
+        early_resolved.is_some(),
+        "the row held back earlier must be released by the control sweep, not \
+         left waiting for a measurement that already completed"
+    );
+    assert!(
+        late_resolved.is_some(),
+        "and so must the one that triggered it"
+    );
+
+    // Same batch is the point: the contrast is computed per delta, so all three
+    // must be visible to a single replay.
+    let batch = f
+        .repository
+        .load_growth_evidence(f.workspace_id, Some(assigned_at))
+        .await
+        .expect("delta replay");
+    let arms: Vec<_> = batch.iter().map(|ev| ev.treatment).collect();
+    assert_eq!(
+        arms.iter()
+            .filter(|arm| **arm == crowdrelay_brain::TreatmentAssignment::Treatment)
+            .count(),
+        2,
+        "both treated rows in one batch, got {arms:?}"
+    );
+    assert!(
+        arms.contains(&crowdrelay_brain::TreatmentAssignment::Control),
+        "with the control arm they are contrasted against, got {arms:?}"
+    );
+
+    // Consumed exactly once: a cursor past this batch returns nothing, so no
+    // row can be applied to the posterior a second time.
+    let after = batch
+        .iter()
+        .filter_map(|ev| ev.resolved_at)
+        .max()
+        .expect("resolved rows carry a cursor value");
+    let replayed = f
+        .repository
+        .load_growth_evidence(f.workspace_id, Some(after))
+        .await
+        .expect("second delta replay");
+    assert!(
+        replayed.is_empty(),
+        "advancing the cursor past the batch must consume it, got {} rows",
+        replayed.len()
     );
 }
