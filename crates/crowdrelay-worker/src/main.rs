@@ -432,7 +432,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             // posting" with no cause is the kind of message an operator reads
             // once and cannot act on.
             if manual_mode {
-                let reason = if !auto_post_requested {
+                // Read-only is checked first because it overrides the other
+                // two: an operator who set the env var deserves to be told
+                // it had no effect rather than left to infer it.
+                let reason = if CommunityExecutorWorker::reddit_is_read_only() {
+                    "reddit is read-only by policy — the login session the growth loop reads through is not risked on automated posting"
+                } else if !auto_post_requested {
                     "CROWDRELAY_COMMUNITY_AUTO_POST is not enabled"
                 } else {
                     "CROWDRELAY_AGENT_SERVICE_AUTH_KEY is missing"

@@ -118,6 +118,9 @@ pub struct GrowthMetricSyncWorker {
     /// read without a credential somebody else holds.
     agent_service_url: String,
     agent_service_auth_key: Option<String>,
+    /// Platforms this process holds no credential for. Reported on the first
+    /// cycle, filtered to the ones actually connected — see `run`.
+    uncredentialled: Vec<String>,
     tiktok_client_key: Option<String>,
     tiktok_client_secret: Option<String>,
     /// Encryption key for decrypting OAuth tokens stored in
@@ -166,18 +169,11 @@ impl GrowthMetricSyncWorker {
             ("lastfm", lastfm_api_key.is_some()),
             ("discogs", discogs_token.is_some()),
         ];
-        let missing: Vec<&str> = credentialled
+        let uncredentialled: Vec<String> = credentialled
             .iter()
             .filter(|(_, present)| !present)
-            .map(|(name, _)| *name)
+            .map(|(name, _)| (*name).to_owned())
             .collect();
-        if !missing.is_empty() {
-            tracing::warn!(
-                platforms = %missing.join(","),
-                "growth metric sync: no credentials for these platforms; \
-                 connections to them will fail until the keys are set"
-            );
-        }
         // The main HTTP client is used for YouTube and Spotify — no proxy.
         // Reddit gets its own per-request clients with proxies.
         let http_client = reqwest::Client::builder()
@@ -198,6 +194,7 @@ impl GrowthMetricSyncWorker {
             facebook_page_access_token,
             agent_service_url,
             agent_service_auth_key,
+            uncredentialled,
             tiktok_client_key,
             tiktok_client_secret,
             response_encryption_key,
@@ -209,11 +206,53 @@ impl GrowthMetricSyncWorker {
 
     /// Main loop: reactive. LISTENs on `growth_metric_sync` channel and
     /// sleeps until the next due connection. No ticker.
+    /// Warns about platforms that are connected and have no credential.
+    ///
+    /// The check used to run over the whole credential list at construction,
+    /// so production warned about a missing discogs key on every startup with
+    /// no discogs connection in existence — a permanent false alarm in the
+    /// one log an operator reads to find real ones. It also ran before the
+    /// database was reachable, which is why it could not ask.
+    ///
+    /// A read failure reports nothing: warning about everything is the
+    /// problem being fixed, and the first sync cycle surfaces anything real.
+    async fn report_uncredentialled_connections(&self) {
+        if self.uncredentialled.is_empty() {
+            return;
+        }
+        let connected: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT platform FROM fanbase_connections WHERE status = 'connected'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let blocked: Vec<&str> = self
+            .uncredentialled
+            .iter()
+            // "facebook/instagram" is one credential covering two platform
+            // rows, so each side is matched separately.
+            .filter(|platform| {
+                platform
+                    .split('/')
+                    .any(|part| connected.iter().any(|c| c == part))
+            })
+            .map(String::as_str)
+            .collect();
+        if !blocked.is_empty() {
+            tracing::warn!(
+                platforms = %blocked.join(","),
+                "growth metric sync: connected platforms with no credentials; \
+                 their connections will fail until the keys are set"
+            );
+        }
+    }
+
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), GrowthMetricSyncError> {
         tracing::info!("growth metric sync worker started (reactive mode)");
+        self.report_uncredentialled_connections().await;
 
         // PgListener uses its own connection, separate from the pool.
         let mut listener = PgListener::connect_with(&self.pool)

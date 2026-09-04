@@ -123,6 +123,35 @@ const USER_AGENT: &str = "server:com.crowdrelay.community:v1.0.0 (by /u/virya_ba
 /// action payload is a `/l/{slug}` path; Reddit needs a full URL.
 const DEFAULT_PUBLIC_ORIGIN: &str = "https://virya.music";
 
+/// Reddit is read-only: this executor drafts posts and never publishes them.
+///
+/// The decision is about what Reddit access actually is, not about a
+/// preference. Reddit requires authentication for its JSON API from every IP
+/// — measured 403 from a datacenter host and a residential connection alike,
+/// with `old.reddit.com` redirecting to login and the HTML page serving a
+/// JavaScript proof-of-work challenge. API access for this account was
+/// refused under Reddit's Responsible Builder Policy, so no script-app
+/// credential exists. What remains is a headless browser holding a login
+/// session, and that session is the only Reddit access the system has at all:
+/// community observation, subreddit metrics and post engagement all run
+/// through it.
+///
+/// Publishing through that same session is what puts it at risk. An automated
+/// post that a moderator reads as spam does not cost a post — it costs the
+/// account, and with it every read the growth loop depends on. Reading is
+/// worth more than posting here, so posting does not happen automatically.
+///
+/// Drafting continues. `community_posts` rows are written
+/// `awaiting_manual_post`, an operator publishes and registers the URL
+/// through `POST /v1/control-plane/community-posts/{id}/register-manual`, and
+/// measurement proceeds from there exactly as it would have.
+///
+/// `CROWDRELAY_COMMUNITY_AUTO_POST` cannot override this. An environment
+/// variable is the wrong place for a decision this consequential — the point
+/// of writing it here is that turning it back on means editing this constant
+/// and reading the paragraph above.
+const REDDIT_IS_READ_ONLY: bool = true;
+
 #[derive(Debug, Error)]
 pub enum CommunityExecutorError {
     #[error("database error: {0}")]
@@ -162,6 +191,15 @@ pub struct CommunityExecutorWorker {
 }
 
 impl CommunityExecutorWorker {
+    /// Whether Reddit posting is disabled by policy rather than by
+    /// configuration. Reported at startup so an operator who set
+    /// `CROWDRELAY_COMMUNITY_AUTO_POST` is told plainly that it had no
+    /// effect, instead of watching drafts pile up and wondering.
+    #[must_use]
+    pub const fn reddit_is_read_only() -> bool {
+        REDDIT_IS_READ_ONLY
+    }
+
     /// Creates a new executor. Returns an error if the HTTP client cannot be
     /// built (e.g. TLS backend failure). When `manual_mode` is false, the
     /// caller should ensure `agent_service_auth_key` is set for browser-based
@@ -184,6 +222,10 @@ impl CommunityExecutorWorker {
         let http_client = Arc::new(RwLock::new(http_client));
         let public_origin = std::env::var("CROWDRELAY_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| DEFAULT_PUBLIC_ORIGIN.to_owned());
+        // Read-only wins over whatever the caller asked for. The guard lives
+        // here rather than at the call site because this type owns the
+        // invariant, and `new` is public.
+        let manual_mode = manual_mode || REDDIT_IS_READ_ONLY;
         Ok(Self {
             pool,
             workspace_id,
@@ -1243,6 +1285,29 @@ mod tests {
             agent_service_auth_key: None,
             env_proxy_url: None,
         }
+    }
+
+    #[tokio::test]
+    async fn reddit_stays_read_only_however_the_worker_is_constructed() {
+        // The policy is not a default an environment variable can flip. A
+        // caller asking for automatic posting still gets a drafting
+        // executor, because the login session this would post through is the
+        // only Reddit access the growth loop has for reading.
+        let worker = CommunityExecutorWorker::new(
+            PgPool::connect_lazy("postgres://invalid/invalid").expect("lazy pool"),
+            WorkspaceId::from_uuid(uuid::Uuid::nil()),
+            Duration::from_secs(5),
+            false, // caller asks for automatic posting
+            None,
+            "http://agent-service:8095".to_owned(),
+            Some("key".to_owned()),
+        )
+        .expect("worker");
+        assert!(
+            worker.manual_mode,
+            "reddit posting must stay manual while the policy holds"
+        );
+        assert!(CommunityExecutorWorker::reddit_is_read_only());
     }
 
     #[tokio::test]
