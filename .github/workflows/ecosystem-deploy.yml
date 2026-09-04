@@ -56,6 +56,20 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      # Phase 2 deploys the Control Plane from source, so the runner needs its
+      # checkout. `actions/checkout` will not write outside `$GITHUB_WORKSPACE`,
+      # which is where the script's default sibling path points, so it lands in
+      # the workspace and the script is told where to look. Public repo, so the
+      # job token is enough and no PAT is introduced.
+      - name: Check out Control Plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CrowdRelay/crowdrelay-control-plane
+          ref: main
+          path: .control-plane
+          token: ${{ github.token }}
+          persist-credentials: false
+
       - name: Resolve target SHA
         id: target
         shell: bash
@@ -106,6 +120,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONTROL_PLANE_CHECKOUT: ${{ github.workspace }}/.control-plane
         run: |
           set -euo pipefail
           args=()

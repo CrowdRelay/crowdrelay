@@ -28,6 +28,13 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CROWDRELAY_REMOTE="${CROWDRELAY_DEPLOY_HOST:-virya-crowdrelay}"
 CROWDRELAY_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
+# Where the Control Plane source lives on the machine running this script. The
+# default is the sibling checkout an ecosystem worktree has. CI cannot use it:
+# `actions/checkout` refuses a path outside `$GITHUB_WORKSPACE`, so the runner
+# has nowhere to put a sibling and Phase 2 aborted on every deploy after
+# CrowdRelay had already cut over -- production ended up on the new revision
+# with the orchestrator reporting failure.
+CONTROL_PLANE_CHECKOUT="${CONTROL_PLANE_CHECKOUT:-$ROOT_DIR/../crowdrelay-control-plane}"
 CONTROL_PLANE_REMOTE="${CONTROL_PLANE_DEPLOY_HOST:-virya-crowdrelay}"
 CONTROL_PLANE_DIR="${CONTROL_PLANE_DEPLOY_REMOTE_DIR:-/srv/crowdrelay-control-plane}"
 LEDGERGUARD_REMOTE="${LEDGERGUARD_DEPLOY_HOST:-virya-home}"
@@ -267,8 +274,8 @@ printf 'CROWDRELAY_DEPLOY=PASS sha=%s\n' "$TARGET"
 PHASE="2-control-plane"
 printf '\n========== Phase 2 — Control Plane blue-green ==========\n'
 
-cp_checkout="$ROOT_DIR/../crowdrelay-control-plane"
-[[ -d "$cp_checkout/.git" ]] || fail 'Control Plane checkout is required for exact deployment'
+cp_checkout="$CONTROL_PLANE_CHECKOUT"
+[[ -d "$cp_checkout/.git" ]] || fail "Control Plane checkout is required for exact deployment (looked in $cp_checkout; set CONTROL_PLANE_CHECKOUT to override)"
 cp_target="$(git -C "$cp_checkout" rev-parse HEAD)"
 printf '\n==> 2a — Canonical exact-artifact Control Plane deploy\n'
 bash "$cp_checkout/scripts/deploy.sh" "$cp_target"
