@@ -51,6 +51,23 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Fallback sleep when no connections are due: check again in 5 minutes.
 /// This is NOT a poll — it's a safety net in case a NOTIFY is missed.
 const FALLBACK_SLEEP: Duration = Duration::from_secs(5 * 60);
+/// How long a connection waits after a failed sync before it is due again.
+///
+/// Without this the worker span-locked on any connection that could never
+/// record a point. Due-ness was defined purely as "no metric point newer than
+/// SYNC_INTERVAL", and a connection whose provider always fails never gets a
+/// point — so it was due, failed, and was still due. `next_due_time` then
+/// returned `Instant::now()`, `sleep` returned instantly, and the cycle ran
+/// again. Production's Discogs connection sat in that loop at three to four
+/// requests a second against an API that was already answering 429: 1372
+/// failures in seven minutes, a rate limit that could never clear, and a log
+/// so full of them that the one line saying city geocoding was switched off
+/// was buried under it.
+///
+/// One hour turns roughly 300,000 doomed requests a day into 24. The failure
+/// state it reads was already being written by `record_sync_failure` and
+/// already cleared by `record_sync_success`; nothing looked at it.
+pub const FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60 * 60);
 /// HTTP timeout for provider calls.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum connections to sync per cycle.
@@ -350,8 +367,14 @@ impl GrowthMetricSyncWorker {
     }
 
     /// Finds connections whose latest metric point is older than SYNC_INTERVAL
-    /// (or has no points yet). Returns at most MAX_CONNECTIONS_PER_CYCLE.
-    async fn find_due_connections(&self) -> Result<Vec<DueConnection>, GrowthMetricSyncError> {
+    /// (or has no points yet) and whose retry delay has elapsed. Returns at most
+    /// MAX_CONNECTIONS_PER_CYCLE.
+    ///
+    /// Public so the scheduling contract can be asserted against a real schema.
+    /// The bug it guards against lived entirely in this query's WHERE clause and
+    /// in `next_due_time`, so a test that reimplemented the SQL would have
+    /// proven nothing.
+    pub async fn find_due_connections(&self) -> Result<Vec<DueConnection>, GrowthMetricSyncError> {
         let rows = sqlx::query_as::<_, DueConnectionRow>(
             r#"
             SELECT
@@ -369,6 +392,13 @@ impl GrowthMetricSyncWorker {
                     AND s.subject_kind = 'fanbase_connection'
                     AND s.subject_id = fc.id
                     AND p.captured_at > now() - ($2::bigint * interval '1 second')
+              )
+              -- A connection that just failed is not due again until its retry
+              -- delay elapses. Without this clause a provider that always fails
+              -- is permanently due, because failure records no point.
+              AND (
+                  fc.last_sync_failed_at IS NULL
+                  OR fc.last_sync_failed_at <= now() - ($4::bigint * interval '1 second')
               )
             ORDER BY CASE fc.platform
                         WHEN 'youtube' THEN 1
@@ -394,6 +424,7 @@ impl GrowthMetricSyncWorker {
         .bind(SYNCED_PLATFORMS)
         .bind(SYNC_INTERVAL.as_secs() as i64)
         .bind(MAX_CONNECTIONS_PER_CYCLE as i64)
+        .bind(FAILURE_RETRY_DELAY.as_secs() as i64)
         .fetch_all(&self.pool)
         .await?;
 
@@ -411,70 +442,63 @@ impl GrowthMetricSyncWorker {
 
     /// Computes the earliest next-due time across all connections. Returns
     /// None if no connections exist (sleep until NOTIFY).
-    async fn next_due_time(&self) -> Option<Instant> {
-        // Find the oldest "last sync" time across all connections. The next
-        // due time is that + SYNC_INTERVAL. If no points exist yet, the
-        // connection is due now.
+    ///
+    /// One query per connection-set rather than the two it used to take. The
+    /// old pair asked "when is the oldest point due" and, separately, "does any
+    /// connection have no points at all" — and the second answer short-circuited
+    /// to `Instant::now()`. A connection that can never record a point answers
+    /// yes to that forever, so the worker slept for zero and span. The retry
+    /// delay is part of the due time here, so a failing connection pushes the
+    /// wake-up out instead of pinning it to now.
+    ///
+    /// Public alongside `find_due_connections` for the same reason: the spin was
+    /// this function returning `Instant::now()` forever.
+    pub async fn next_due_time(&self) -> Option<Instant> {
         let next: Option<time::OffsetDateTime> = sqlx::query_scalar(
             r#"
-            SELECT MIN(p.captured_at)
-            FROM fanbase_connections fc
-            JOIN viryaos_growth_metric_series s
-              ON s.workspace_id = fc.workspace_id
-             AND s.subject_kind = 'fanbase_connection'
-             AND s.subject_id = fc.id
-            JOIN LATERAL (
-                SELECT captured_at
-                FROM viryaos_growth_metric_points
-                WHERE series_id = s.id
-                ORDER BY captured_at DESC
-                LIMIT 1
-            ) p ON true
-            WHERE fc.status = 'connected'
-              AND fc.platform = ANY($1)
-              AND fc.provider_account_id IS NOT NULL
+            SELECT MIN(due)
+            FROM (
+                SELECT GREATEST(
+                           -- Due on the sync schedule: one interval after the
+                           -- newest point, or now when there is no point yet.
+                           COALESCE(
+                               latest.captured_at + ($2::bigint * interval '1 second'),
+                               now()
+                           ),
+                           -- ...but never before the retry delay has elapsed on
+                           -- a failed attempt. Cleared on success, so a healthy
+                           -- connection is unaffected.
+                           COALESCE(
+                               fc.last_sync_failed_at + ($3::bigint * interval '1 second'),
+                               now()
+                           )
+                       ) AS due
+                FROM fanbase_connections fc
+                LEFT JOIN LATERAL (
+                    SELECT max(p.captured_at) AS captured_at
+                    FROM viryaos_growth_metric_points p
+                    JOIN viryaos_growth_metric_series s ON s.id = p.series_id
+                    WHERE s.workspace_id = fc.workspace_id
+                      AND s.subject_kind = 'fanbase_connection'
+                      AND s.subject_id = fc.id
+                ) latest ON true
+                WHERE fc.status = 'connected'
+                  AND fc.platform = ANY($1)
+                  AND fc.provider_account_id IS NOT NULL
+            ) schedule
             "#,
         )
         .bind(SYNCED_PLATFORMS)
+        .bind(SYNC_INTERVAL.as_secs() as i64)
+        .bind(FAILURE_RETRY_DELAY.as_secs() as i64)
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten();
 
-        // Also check if any connection has no points yet (due immediately).
-        let has_unsynced: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM fanbase_connections fc
-                WHERE fc.status = 'connected'
-                  AND fc.platform = ANY($1)
-                  AND fc.provider_account_id IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM viryaos_growth_metric_points p
-                      JOIN viryaos_growth_metric_series s ON s.id = p.series_id
-                      WHERE s.workspace_id = fc.workspace_id
-                        AND s.subject_kind = 'fanbase_connection'
-                        AND s.subject_id = fc.id
-                  )
-            )
-            "#,
-        )
-        .bind(SYNCED_PLATFORMS)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if has_unsynced {
-            return Some(Instant::now());
-        }
-
-        next.map(|captured_at| {
-            let elapsed = OffsetDateTime::now_utc() - captured_at;
-            let remaining = SYNC_INTERVAL
-                .saturating_sub(Duration::from_secs(elapsed.whole_seconds().max(0) as u64));
-            Instant::now() + remaining
+        next.map(|due| {
+            let remaining = due - OffsetDateTime::now_utc();
+            Instant::now() + Duration::from_secs(remaining.whole_seconds().max(0) as u64)
         })
     }
 
@@ -1232,13 +1256,16 @@ struct DueConnectionRow {
     external_account_ref: String,
 }
 
+/// A connection the scheduler decided is due. Public with its fields so the
+/// postgres suite can assert *which* connections a cycle would touch, which is
+/// the whole content of the retry-delay contract.
 #[derive(Clone, Debug)]
-struct DueConnection {
-    id: Uuid,
-    workspace_id: Uuid,
-    platform: String,
-    provider_account_id: String,
-    external_account_ref: String,
+pub struct DueConnection {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub platform: String,
+    pub provider_account_id: String,
+    pub external_account_ref: String,
 }
 
 // --- YouTube response types ---
