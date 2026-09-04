@@ -769,11 +769,15 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
-                        SET observed_new_fans = $3,
+                        -- Same shape as the growth-evidence write above: two
+                        -- measurements land on this row, signal installs at 7
+                        -- days and fan growth at 14, and gating on
+                        -- `resolved_at` let the first silence the second.
+                        SET observed_new_fans = COALESCE(observed_new_fans, $3),
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND resolved_at IS NULL
+                          AND observed_new_fans IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -787,11 +791,21 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
-                        SET observed_fans = $3,
+                        -- `resolved_at` means "some outcome has landed", so it cannot also gate
+                        -- the write. Four measurements resolve against one evidence row —
+                        -- signal installs at 7 days, raw and incremental fans at 14, durable
+                        -- fans at 44 — and `AND resolved_at IS NULL` meant the first one to
+                        -- arrive stamped the row and silenced the other three. The 7-day
+                        -- measurement always arrives first, so `observed_incremental_fans`
+                        -- and `durable_fans_30d` would have stayed NULL forever and the Y14
+                        -- and Y30 posteriors would never have seen a single observation.
+                        -- Each measurement guards its own column instead: first write wins
+                        -- per column, which is what COALESCE already said about resolved_at.
+                        SET observed_fans = COALESCE(observed_fans, $3),
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND resolved_at IS NULL
+                          AND observed_fans IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -884,12 +898,12 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
-                        SET observed_incremental_fans = $3,
+                        SET observed_incremental_fans = COALESCE(observed_incremental_fans, $3),
                             evidence_quality = $5,
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND resolved_at IS NULL
+                          AND observed_incremental_fans IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -905,11 +919,11 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
-                        SET observed_signal_installs = $3,
+                        SET observed_signal_installs = COALESCE(observed_signal_installs, $3),
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND resolved_at IS NULL
+                          AND observed_signal_installs IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -1011,12 +1025,12 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence
-                        SET durable_fans_30d = $3,
+                        SET durable_fans_30d = COALESCE(durable_fans_30d, $3),
                             evidence_quality = $5,
                             resolved_at = COALESCE(resolved_at, $4)
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND resolved_at IS NULL
+                          AND durable_fans_30d IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
