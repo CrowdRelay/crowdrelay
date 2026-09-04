@@ -1,189 +1,12 @@
 //! Split PostgreSQL Autopilot adapter implementation.
 
+mod readiness;
+
 use super::*;
-
-/// Resolves the community an action's experiment unit refers to, but only
-/// once that community has actually been posted to.
-///
-/// Returns `Ok(None)` when the unit is not a community, which is the caller's
-/// signal to fall back to the workspace-level comparison.
-///
-/// Two things went wrong here before and both are guarded by the same
-/// function. The unit id on a community assignment is an
-/// `agent_outreach_targets` UUID, while `fan_provenance_events.community`
-/// holds the handle the smart link was tagged with — `r/metalmemes`. Querying
-/// the ledger with the UUID matched nothing, and `COUNT` answers "nothing"
-/// with a zero rather than a NULL, so the miss arrived looking exactly like a
-/// community that had genuinely converted no one. The handle lookup fixes the
-/// key; requiring a published post fixes the rest, because a community whose
-/// post is still a draft has no outcome to report and must say so instead of
-/// reporting zero.
-async fn observable_community(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    action_id: AutopilotActionId,
-) -> Result<Option<String>, RepositoryError> {
-    let unit: Option<(String, String)> = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT unit_id, unit_kind
-        FROM viryaos_experiment_assignments
-        WHERE workspace_id = $1
-          AND action_id = $2
-          AND experiment_uuid IS NOT NULL
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx)?;
-    let Some((unit_id, unit_kind)) = unit else {
-        return Ok(None);
-    };
-    if unit_kind != "target_community" {
-        return Ok(None);
-    }
-    let Ok(target_id) = uuid::Uuid::parse_str(&unit_id) else {
-        return Ok(None);
-    };
-    // The handle, and the evidence that the post reached the community.
-    // `posted_at` is stamped when the operator registers the published URL,
-    // so a row that is still `awaiting_manual_post` correctly yields nothing.
-    let community: Option<String> = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT target.display_name
-        FROM agent_outreach_targets AS target
-        WHERE target.workspace_id = $1
-          AND target.id = $2
-          AND EXISTS (
-              SELECT 1
-              FROM community_posts AS post
-              WHERE post.workspace_id = target.workspace_id
-                AND post.target_id = target.id
-                AND post.status = 'posted'
-                AND post.posted_at IS NOT NULL
-          )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(target_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx)?;
-    // The unit is a community, so the workspace-level fallback would answer a
-    // different question about a different population. Nothing published means
-    // no outcome exists, and that is not the same fact as an outcome of zero.
-    community.map_or(Err(RepositoryError::NotFound), |handle| Ok(Some(handle)))
-}
-
-/// Marks an action's evidence complete once every measurement it is waiting on
-/// has reached a terminal state.
-///
-/// `resolved_at` answers "is this row ready for the model", and only the
-/// measurement queue knows that. Each measurement used to stamp the column
-/// itself, which made the earliest arrival — signal installs at seven days —
-/// speak for outcomes that were still fourteen and forty-four days away. The
-/// row then looked finished while `observed_incremental_fans` and
-/// `durable_fans_30d` were still empty, and, because the delta cursor moves
-/// with it, it looked finished at the one moment it had the least to teach.
-///
-/// A failed measurement counts as terminal. An outcome that will never arrive
-/// must not hold the evidence open forever; the column stays NULL and the
-/// learner skips it, which is the honest reading of "we tried and could not
-/// find out".
-async fn refresh_evidence_readiness(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: WorkspaceId,
-    action_id: AutopilotActionId,
-    now: OffsetDateTime,
-) -> Result<(), RepositoryError> {
-    sqlx::query(
-        r#"
-        UPDATE viryaos_growth_evidence AS evidence
-        SET resolved_at = $3
-        WHERE evidence.workspace_id = $1
-          AND evidence.action_id = $2
-          AND evidence.resolved_at IS NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM viryaos_autopilot_measurements AS outstanding
-              WHERE outstanding.workspace_id = evidence.workspace_id
-                AND outstanding.action_id = evidence.action_id
-                AND outstanding.status IN ('pending', 'processing')
-          )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .bind(now)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    sqlx::query(
-        r#"
-        UPDATE viryaos_dispatch_predictions AS prediction
-        SET resolved_at = $3
-        WHERE prediction.workspace_id = $1
-          AND prediction.action_id = $2
-          AND prediction.resolved_at IS NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM viryaos_autopilot_measurements AS outstanding
-              WHERE outstanding.workspace_id = prediction.workspace_id
-                AND outstanding.action_id = prediction.action_id
-                AND outstanding.status IN ('pending', 'processing')
-          )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .bind(now)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(())
-}
-
-/// The evidence quality this measurement actually earned.
-///
-/// A randomised assignment is a claim about how the unit was chosen. It only
-/// becomes randomised *evidence* when the outcome was read at the level the
-/// randomisation was performed at — here, from the community's own ledger. If
-/// the observation came from the workspace fallback instead, the design was
-/// randomised but the reading was not, and the row says so.
-async fn measured_evidence_quality(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: WorkspaceId,
-    measurement: &ClaimedAutopilotMeasurement,
-    community: Option<&str>,
-) -> Result<&'static str, RepositoryError> {
-    if community.is_none() {
-        return Ok("matched_quasi_experiment");
-    }
-    let experiment_kind: Option<String> = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT experiment_kind
-        FROM viryaos_experiment_assignments
-        WHERE workspace_id = $1
-          AND action_id = $2
-          AND experiment_uuid IS NOT NULL
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(measurement.action_id.into_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    Ok(
-        if experiment_kind.as_deref() == Some("randomized_holdout") {
-            "randomized_holdout"
-        } else {
-            "matched_quasi_experiment"
-        },
-    )
-}
+use readiness::{
+    measured_evidence_quality, observable_community, refresh_evidence_readiness,
+    refresh_experiment_readiness,
+};
 
 #[async_trait]
 impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
@@ -1033,12 +856,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // else's.
                 _ => {}
             }
-            // The queue decides readiness, and it decides it after this
-            // measurement has been marked terminal above, so an action whose
-            // last outcome just landed closes here and one still waiting on a
-            // fourteen- or forty-four-day window does not.
-            refresh_evidence_readiness(&mut transaction, workspace_id, measurement.action_id, now)
-                .await?;
             if effect.assessment == EffectAssessment::Worsened {
                 let demoted_context = sqlx::query_scalar::<_, String>(
                     r#"
@@ -1192,7 +1009,20 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     now,
                 )
                 .await?;
+                // Readiness for the whole experiment, not just this action. The
+                // control arm may have resolved a moment ago in this very
+                // transaction, releasing treated rows that finished their own
+                // measurements days earlier and have been waiting for it.
+                refresh_experiment_readiness(&mut transaction, workspace_id, exp_uuid, now).await?;
             }
+            // The queue decides readiness, and it decides it after this
+            // measurement has been marked terminal above, so an action whose
+            // last outcome just landed closes here and one still waiting on a
+            // fourteen- or forty-four-day window does not. Runs after the
+            // control sweep so a treated row released by it is not held for
+            // another cycle.
+            refresh_evidence_readiness(&mut transaction, workspace_id, measurement.action_id, now)
+                .await?;
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(())
         })
