@@ -30,6 +30,8 @@
 use super::*;
 
 mod community_targets;
+#[cfg(test)]
+mod learning_tests;
 mod worker_signals;
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
@@ -1393,95 +1395,4 @@ pub(in crate::autopilot) async fn load_last_dispatched_template(
     .await
     .map_err(map_sqlx)?;
     Ok(template)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::apply_evidence_to_model;
-    use crowdrelay_brain::{CausalModel, DispatchContext, GrowthEvidence, TreatmentAssignment};
-
-    /// Brain-level evidence-eligibility invariant:
-    ///
-    /// Evidence with a treatment assignment but NO observed outcome
-    /// (`observed_incremental_fans = None`) must NOT move the
-    /// treatment-effect posterior. The `apply_evidence_to_model`
-    /// function guards `update_treatment_effect` behind
-    /// `if let Some(tau_y14) = ev.observed_incremental_fans`, so
-    /// absent outcomes are naturally skipped. This test proves the
-    /// guard works by constructing real evidence and passing it
-    /// through the actual evidence-processing path.
-    ///
-    /// This is the brain-level complement to T25i (which proves the
-    /// SQL boundary excludes UNKNOWN evidence). Together they form
-    /// two independent defenses:
-    /// - T25i → SQL/persistence learning-boundary proof
-    /// - This test → model-level evidence-eligibility proof
-    #[test]
-    fn evidence_without_observed_outcome_does_not_update_treatment_posterior() {
-        let mut model = CausalModel::new();
-        let ctx = DispatchContext::default();
-        let template = "community.engage";
-        let before = model.predict_stats_with_treatment(template, &ctx);
-
-        // Construct real evidence with treatment assignment but no
-        // observed outcome. This is what an unresolved/UNKNOWN dispatch
-        // looks like if it somehow reached the learner.
-        let evidence = GrowthEvidence {
-            opportunity_id: Some(format!("{template}:subreddit:community.engage.request:ctx")),
-            treatment: TreatmentAssignment::Treatment,
-            observed_incremental_fans: None, // ← no outcome
-            observed_fans: None,             // ← no raw outcome either
-            ..GrowthEvidence::default()
-        };
-
-        // Pass through the real evidence-processing path.
-        apply_evidence_to_model(&mut model, &[evidence]);
-
-        let after = model.predict_stats_with_treatment(template, &ctx);
-        assert_eq!(
-            before.treatment_effect, after.treatment_effect,
-            "treatment posterior must not move when observed outcome is absent"
-        );
-        assert_eq!(
-            before.treatment_confidence, after.treatment_confidence,
-            "treatment confidence must not change when observed outcome is absent"
-        );
-        assert_eq!(
-            before.use_treatment_effect, after.use_treatment_effect,
-            "treatment activation must not change when observed outcome is absent"
-        );
-    }
-
-    /// Positive control: evidence WITH an observed outcome DOES move
-    /// the treatment-effect posterior. This proves the evidence path
-    /// is actually exercised — without this test, the negative test
-    /// above could be vacuously true because `apply_evidence_to_model`
-    /// does nothing at all.
-    #[test]
-    fn evidence_with_observed_outcome_updates_treatment_posterior() {
-        let mut model = CausalModel::new();
-        let ctx = DispatchContext::default();
-        let template = "community.engage";
-        let before = model.predict_stats_with_treatment(template, &ctx);
-
-        // Construct evidence with a real observed outcome.
-        let evidence = GrowthEvidence {
-            opportunity_id: Some(format!("{template}:subreddit:community.engage.request:ctx")),
-            treatment: TreatmentAssignment::Treatment,
-            observed_incremental_fans: Some(5.0), // ← real outcome
-            observed_fans: Some(10.0),            // ← raw outcome
-            predicted_fans: 3.0,
-            ..GrowthEvidence::default()
-        };
-
-        apply_evidence_to_model(&mut model, &[evidence]);
-
-        let after = model.predict_stats_with_treatment(template, &ctx);
-        // The treatment effect estimate should have moved from the
-        // prior (0.0) toward the observed value (5.0).
-        assert_ne!(
-            before.treatment_effect, after.treatment_effect,
-            "treatment posterior must move when an observed outcome is present"
-        );
-    }
 }
