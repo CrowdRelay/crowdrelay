@@ -475,19 +475,29 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
         -- has at least one run that does, and is counted once; a fan whose best
         -- sorts after it has none, because their best is their minimum under
         -- that same ordering.
+        --
+        -- Grouped on purpose. A fan who never published has no `my_best` row,
+        -- and an ungrouped aggregate over an empty input still returns one row
+        -- holding zero -- which would report them as rank 1, top of a board
+        -- they are not on. Grouping makes an absent entry produce no row, so
+        -- the scalar read below stays NULL exactly as the old LEFT JOIN did.
+        -- The join is LEFT so that a fan nobody beats still counts zero rather
+        -- than vanishing.
         ), ranked AS (
             SELECT 1 + count(DISTINCT run.fan_id)::bigint AS rank
-            FROM synesthesia_runs AS run, my_best
-            WHERE run.workspace_id = $1
-              AND run.campaign_slug = $3
-              AND NOT run.synthetic
-              AND run.fan_id IS NOT NULL
-              AND run.fan_id <> $2
-              AND run.completed_at IS NOT NULL
-              AND run.client_total_elapsed_ms IS NOT NULL
-              AND run.leaderboard_name IS NOT NULL
-              AND (run.client_total_elapsed_ms, run.completed_at, run.id)
-                  < (my_best.elapsed_ms, my_best.completed_at, my_best.id)
+            FROM my_best
+            LEFT JOIN synesthesia_runs AS run
+              ON run.workspace_id = $1
+             AND run.campaign_slug = $3
+             AND NOT run.synthetic
+             AND run.fan_id IS NOT NULL
+             AND run.fan_id <> $2
+             AND run.completed_at IS NOT NULL
+             AND run.client_total_elapsed_ms IS NOT NULL
+             AND run.leaderboard_name IS NOT NULL
+             AND (run.client_total_elapsed_ms, run.completed_at, run.id)
+                 < (my_best.elapsed_ms, my_best.completed_at, my_best.id)
+            GROUP BY my_best.elapsed_ms, my_best.completed_at, my_best.id
         )
         SELECT latest.next_room_index, latest.completed_at, latest.recovery_completed_at,
                latest.client_total_elapsed_ms, latest.linked_at,
