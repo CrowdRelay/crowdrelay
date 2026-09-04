@@ -1106,8 +1106,16 @@ fn apply_evidence_to_model(
                 earned_quality.as_str(),
             );
             // Y14→Y30 bridge: update when both outcomes are available.
-            if let Some(y14_fans) = ev.y14_outcome() {
-                model.update_bridge(y14_fans, y30_fans);
+            //
+            // Both sides carry the same contrast. `y30_fans` has the control
+            // arm's mean subtracted, so feeding the raw `y14_outcome()` against
+            // it would fit a slope between two differently-defined quantities —
+            // and that slope is what carries a Y14 effect across to Y30 in the
+            // bridged regime. A regression is only a transformation between the
+            // things it was fitted on.
+            if let Some(outcome_y14) = ev.observed_incremental_fans {
+                let paired_y14 = outcome_y14 - contrast.and_then(|mean| mean.y14).unwrap_or(0.0);
+                model.update_bridge(paired_y14, y30_fans);
             }
         }
     }
