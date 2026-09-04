@@ -209,7 +209,12 @@ impl TreatmentEffectPosterior {
             .effects
             .predict_for_target(template_id, subreddit_type, target_key);
         let std = var.sqrt().max(0.1);
-        let confidence = self.effects.confidence(template_id);
+        // The quality-weighted count, not the raw one. `self.effects.confidence`
+        // is the number of rows; `self.confidence` is how much identification
+        // those rows bought. Reading the former let five pre/post rows flip the
+        // regime switch exactly as fast as five randomized holdouts, which is
+        // the thing `effective_observations` exists to prevent.
+        let confidence = self.confidence(template_id);
         (mean, std, confidence)
     }
 
@@ -268,6 +273,40 @@ mod tests {
         assert!(
             tep.confidence("community-engager") < MIN_TREATMENT_CONFIDENCE,
             "observational evidence must not flip the treatment-effect switch"
+        );
+    }
+
+    /// The same guard, asserted where the decision is actually made.
+    ///
+    /// The test above asserts `confidence()`, and `confidence()` was not what
+    /// the decision path read: `predict_stats_for_target` called
+    /// `self.effects.confidence`, the raw row count. So the guard returned the
+    /// right number to nobody, the test stayed green, and five observational
+    /// rows flipped `use_treatment_effect` exactly as fast as five randomized
+    /// holdouts. Asserting on `use_treatment_effect` is what closes that gap:
+    /// it is the flag that decides whether `DecisionValue::pragmatic_value` is
+    /// a treatment effect or an outcome-model prediction.
+    #[test]
+    fn the_quality_gate_governs_the_live_regime_switch() {
+        use crate::causal_model::{CausalModel, DispatchContext};
+
+        let switched = |quality: EvidenceQuality| {
+            let mut model = CausalModel::new();
+            for _ in 0..MIN_TREATMENT_CONFIDENCE {
+                model.update_treatment_effect_for_target("t", None, None, 2.0, 1.0, quality);
+            }
+            model
+                .predict_stats_with_treatment_for_target("t", None, &DispatchContext::default())
+                .use_treatment_effect
+        };
+
+        assert!(
+            !switched(EvidenceQuality::Observational),
+            "five observational rows must not put the brain on the treatment effect"
+        );
+        assert!(
+            switched(EvidenceQuality::RandomizedHoldout),
+            "five randomized holdouts must, or the switch can never fire at all"
         );
     }
 

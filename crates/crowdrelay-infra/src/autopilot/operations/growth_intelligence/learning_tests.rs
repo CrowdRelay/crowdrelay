@@ -136,9 +136,13 @@ fn a_resolved_y14_outcome_moves_y14_and_not_y30() {
         before.treatment_effect,
         after.treatment_effect
     );
+    // The fixture's evidence is `Observational`, so it moves the estimate
+    // without buying identification. Confidence is quality-weighted: one
+    // observational row is a tenth of an observation, and the regime switch
+    // stays where it was.
     assert_eq!(
-        after.treatment_confidence, 1,
-        "one observation is exactly one observation"
+        after.treatment_confidence, 0,
+        "an observational row must not buy treatment confidence"
     );
     assert!(
         after.expected_fans > before.expected_fans,
