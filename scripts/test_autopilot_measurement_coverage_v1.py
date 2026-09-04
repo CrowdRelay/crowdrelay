@@ -60,6 +60,7 @@ KNOWN_UNMEASURED = {
     "RequestMerchBundle",
     "RequestMerchReorder",
     "RequestOutreachDiscovery",
+    "RequestOutreachTarget",
     "RunPlayStep",
     "SendTeamAssignmentEmail",
     "SubmitFundingApplication",

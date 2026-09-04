@@ -901,6 +901,34 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestOutreachTarget {
+                    task_id,
+                    target_kind,
+                    display_name,
+                    ..
+                } => {
+                    // Internal DB operation: promote the outreach target from
+                    // `proposed` to `promoted` in the staging table. No
+                    // external executor is involved.
+                    sqlx::query(
+                        r#"
+                        UPDATE agent_outreach_targets
+                        SET status = 'promoted', screened_at = COALESCE(screened_at, now())
+                        WHERE workspace_id = $1
+                          AND source_task_id = $2
+                          AND target_kind = $3
+                          AND display_name = $4
+                          AND status = 'proposed'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(task_id)
+                    .bind(target_kind)
+                    .bind(display_name)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
                 AutopilotActionPayload::RequestAgentRun {
                     template_id,
                     prompt,
