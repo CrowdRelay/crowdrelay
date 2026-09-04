@@ -144,6 +144,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/v1/me/area/challenge", post(area::me_challenge))
         .route("/v1/me/area/claim", post(area::me_claim))
         .route("/v1/me/home", get(fan_context::fan_home))
+        .route("/v1/me/location", post(mobile_fan::set_fan_location))
         .route("/v1/me/account", delete(fan_privacy::delete_account))
         .route(
             "/v1/me/synesthesia/leaderboard",

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crowdrelay_application::IdempotencyKey;
+use crowdrelay_domain::FanId;
 use crowdrelay_domain::{WorkspaceId, WorkspaceSlug};
 use crowdrelay_infra::{
     config::DatabaseConfig,
@@ -157,6 +158,19 @@ async fn nearby_gigs_notify_inside_the_radius_once_and_never_outside_it()
     .bind(format!("nearby-{suffix}@example.test"))
     .fetch_one(&pool)
     .await?;
+    // Delivery is gated on current marketing consent, not on the fan row alone.
+    // This test is about the radius filter, so grant it and keep the subject
+    // of the test to one thing.
+    sqlx::query(
+        "INSERT INTO fan_consents
+             (workspace_id, fan_id, purpose, granted, policy_version, source, request_id)
+         VALUES ($1, $2, 'marketing', true, 'privacy-v1', 'test', $3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(format!("consent-{suffix}"))
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "INSERT INTO fan_location_preferences
              (workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km)
@@ -296,6 +310,16 @@ async fn a_city_fans_asked_for_can_be_geocoded_and_starts_reaching_them()
     .fetch_one(&pool)
     .await?;
     sqlx::query(
+        "INSERT INTO fan_consents
+             (workspace_id, fan_id, purpose, granted, policy_version, source, request_id)
+         VALUES ($1, $2, 'marketing', true, 'privacy-v1', 'test', $3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(format!("consent-adopt-{suffix}"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO fan_location_preferences
              (workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km)
          VALUES ($1, $2, $3, true, 150)",
@@ -368,6 +392,267 @@ async fn a_city_fans_asked_for_can_be_geocoded_and_starts_reaching_them()
     assert_eq!(
         after, 1,
         "the fan waiting behind the request is reached on the next run, with no backfill"
+    );
+    Ok(())
+}
+
+/// Creates an active fan, optionally with current marketing consent, and a
+/// published show 55 km from their city.
+async fn nearby_fixture(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    suffix: &str,
+    consented: bool,
+) -> Result<(Uuid, Uuid), Box<dyn std::error::Error>> {
+    let home_city = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+         VALUES ($1, 'Home', 'PL', 52.0, 21.0) RETURNING id",
+    )
+    .bind(format!("home-{suffix}"))
+    .fetch_one(pool)
+    .await?;
+    let show_city = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO cities (slug, name, country_code, latitude, longitude)
+         VALUES ($1, 'Show', 'PL', 52.5, 21.0) RETURNING id",
+    )
+    .bind(format!("show-{suffix}"))
+    .fetch_one(pool)
+    .await?;
+    let fan_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fans (workspace_id, normalized_email, locale, status)
+         VALUES ($1, $2, 'pl-PL', 'active') RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(format!("nearby-{suffix}@example.test"))
+    .fetch_one(pool)
+    .await?;
+    if consented {
+        sqlx::query(
+            "INSERT INTO fan_consents
+                 (workspace_id, fan_id, purpose, granted, policy_version, source, request_id)
+             VALUES ($1, $2, 'marketing', true, 'privacy-v1', 'test', $3)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(format!("consent-{suffix}"))
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO events (workspace_id, city_id, slug, title, starts_at, status, published_at)
+         VALUES ($1, $2, $3, 'Show', now() + interval '30 days', 'published', now())",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(show_city)
+    .bind(format!("event-{suffix}"))
+    .execute(pool)
+    .await?;
+    Ok((fan_id, home_city))
+}
+
+async fn nearby_workspace(
+    pool: &PgPool,
+    suffix: &str,
+) -> Result<WorkspaceId, Box<dyn std::error::Error>> {
+    let workspace_id = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Lifecycle test')")
+        .bind(workspace_id.into_uuid())
+        .bind(WorkspaceSlug::parse(format!("life-{suffix}"))?.as_str())
+        .execute(pool)
+        .await?;
+    Ok(workspace_id)
+}
+
+/// Nearby-show mail requires current marketing consent, not merely an active
+/// fan row.
+///
+/// `fans.status = 'active'` used to carry this on its own, on the reasoning
+/// that unsubscribing moves the status. That covers a fan who consented and
+/// then withdrew. It does not cover a fan who never consented: a ticket
+/// purchase creates an `active` row with no consent row, correctly, because
+/// buying is not subscribing. Such a fan was unreachable only because nothing
+/// could give them a location preference, and the authenticated location
+/// endpoint now can -- so the gate has to be real rather than incidental.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn nearby_delivery_requires_marketing_consent_not_just_an_active_fan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+
+    let without = Uuid::now_v7().simple().to_string();
+    let workspace_id = nearby_workspace(&pool, &without).await?;
+    let (fan_id, home_city) = nearby_fixture(&pool, workspace_id, &without, false).await?;
+    let repository =
+        PostgresMobileFanRepository::new(pool.clone(), workspace_id, Duration::from_secs(5));
+    sqlx::query(
+        "INSERT INTO fan_location_preferences
+             (workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km)
+         VALUES ($1, $2, $3, true, 150)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(home_city)
+    .execute(&pool)
+    .await?;
+    let (queued, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("no-consent-{without}")), false)
+        .await?;
+    assert_eq!(
+        queued, 0,
+        "an active fan who never granted marketing consent must not be mailed"
+    );
+
+    let with = Uuid::now_v7().simple().to_string();
+    let workspace_id = nearby_workspace(&pool, &with).await?;
+    let (fan_id, home_city) = nearby_fixture(&pool, workspace_id, &with, true).await?;
+    let repository =
+        PostgresMobileFanRepository::new(pool.clone(), workspace_id, Duration::from_secs(5));
+    sqlx::query(
+        "INSERT INTO fan_location_preferences
+             (workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km)
+         VALUES ($1, $2, $3, true, 150)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(home_city)
+    .execute(&pool)
+    .await?;
+    let (queued, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("consent-{with}")), false)
+        .await?;
+    assert_eq!(queued, 1, "a consenting fan must still be reached");
+
+    // Withdrawing consent without touching status must stop delivery too.
+    sqlx::query(
+        "INSERT INTO fan_consents
+             (workspace_id, fan_id, purpose, granted, policy_version, source, request_id)
+         VALUES ($1, $2, 'marketing', false, 'privacy-v1', 'test', $3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(format!("withdraw-{with}"))
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM nearby_gig_notifications WHERE workspace_id = $1")
+        .bind(workspace_id.into_uuid())
+        .execute(&pool)
+        .await?;
+    let (queued, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("withdrawn-{with}")), false)
+        .await?;
+    assert_eq!(
+        queued, 0,
+        "the newest consent row decides, so a withdrawal stops delivery"
+    );
+    Ok(())
+}
+
+/// A fan who proved a session can establish a location, which is the only door
+/// a ticket buyer or a fan who moved has.
+///
+/// Signup refuses to write a city for an address that is already active,
+/// because that submission is unauthenticated -- correct, and it left these
+/// fans with no location at all. This is the authenticated counterpart. It also
+/// pins the honesty of `targeting_ready`: a city with no coordinates cannot
+/// reach anybody, and saying otherwise is how a fan ends up waiting for shows
+/// that will never arrive.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_signed_in_fan_can_set_a_location_and_is_told_whether_it_can_reach_them()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = test_pool().await?;
+    let suffix = Uuid::now_v7().simple().to_string();
+    let workspace_id = nearby_workspace(&pool, &suffix).await?;
+    let (fan_id, home_city) = nearby_fixture(&pool, workspace_id, &suffix, true).await?;
+    let repository =
+        PostgresMobileFanRepository::new(pool.clone(), workspace_id, Duration::from_secs(5));
+
+    // A city the fan requested, still waiting for coordinates.
+    let ungeocoded = format!("pending-city-{suffix}");
+    sqlx::query(
+        "INSERT INTO cities (slug, name, country_code, moderation_status)
+         VALUES ($1, 'Requested', 'PL', 'pending')",
+    )
+    .bind(&ungeocoded)
+    .execute(&pool)
+    .await?;
+
+    let waiting = repository
+        .set_fan_location(FanId::from_uuid(fan_id), &ungeocoded, "PL", true, 150)
+        .await?
+        .expect("the city exists");
+    assert!(
+        !waiting.targeting_ready,
+        "a city without coordinates cannot reach anybody and must not claim it can"
+    );
+    let (queued, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("waiting-{suffix}")), false)
+        .await?;
+    assert_eq!(queued, 0, "and it must in fact reach nobody");
+
+    let home_slug = sqlx::query_scalar::<_, String>("SELECT slug FROM cities WHERE id = $1")
+        .bind(home_city)
+        .fetch_one(&pool)
+        .await?;
+    let ready = repository
+        .set_fan_location(FanId::from_uuid(fan_id), &home_slug, "PL", true, 150)
+        .await?
+        .expect("the city exists");
+    assert!(ready.targeting_ready);
+    assert_eq!(ready.radius_km, 150);
+    let (queued, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("ready-{suffix}")), false)
+        .await?;
+    assert_eq!(queued, 1, "moving to a usable city starts delivery");
+
+    // Replay: same call again must not double-count the city aggregate or
+    // change the outcome.
+    let before = sqlx::query_scalar::<_, i64>(
+        "SELECT confirmed_fan_count FROM city_aggregates WHERE workspace_id = $1 AND city_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(home_city)
+    .fetch_one(&pool)
+    .await?;
+    let replay = repository
+        .set_fan_location(FanId::from_uuid(fan_id), &home_slug, "PL", true, 150)
+        .await?
+        .expect("the city exists");
+    assert_eq!(replay, ready, "a replay lands on the same state");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT confirmed_fan_count FROM city_aggregates WHERE workspace_id = $1 AND city_id = $2",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(home_city)
+        .fetch_one(&pool)
+        .await?,
+        before,
+        "a fan is counted in a city once, however many times they resubmit it"
+    );
+
+    // Switching the toggle off stops delivery without losing the city.
+    sqlx::query("DELETE FROM nearby_gig_notifications WHERE workspace_id = $1")
+        .bind(workspace_id.into_uuid())
+        .execute(&pool)
+        .await?;
+    let off = repository
+        .set_fan_location(FanId::from_uuid(fan_id), &home_slug, "PL", false, 150)
+        .await?
+        .expect("the city exists");
+    assert!(!off.nearby_gigs_enabled);
+    assert!(off.targeting_ready, "the city is still usable, just muted");
+    let (queued, _) = repository
+        .emit_due_nearby_gigs(Some(&format!("off-{suffix}")), false)
+        .await?;
+    assert_eq!(queued, 0);
+
+    assert_eq!(
+        repository
+            .set_fan_location(FanId::from_uuid(fan_id), "no-such-city", "PL", true, 150)
+            .await?,
+        None,
+        "an unknown city is reported, never silently stored"
     );
     Ok(())
 }
