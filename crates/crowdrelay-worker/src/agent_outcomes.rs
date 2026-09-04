@@ -58,7 +58,7 @@ const AGENT_TARGET_KINDS: [&str; 7] = [
 ];
 
 #[derive(Debug, Error)]
-enum AgentOutcomeError {
+pub enum AgentOutcomeError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("validation error: {0}")]
@@ -158,7 +158,11 @@ impl AgentOutcomeWorker {
         }
     }
 
-    async fn run_once(&self) -> Result<usize, AgentOutcomeError> {
+    /// Public so the postgres suite can drive one ingestion cycle and assert
+    /// what the decision it wrote is correlated to. The trace resolution is the
+    /// product claim here -- an agent-produced decision must join to the action
+    /// that caused it -- and it is only observable through a real cycle.
+    pub async fn run_once(&self) -> Result<usize, AgentOutcomeError> {
         // Recover any outcomes stuck in 'processing' from a previous crash.
         // The poll query only selects 'pending', so without this a crash
         // between the UPDATE to 'processing' and the commit leaves rows
@@ -272,12 +276,87 @@ impl AgentOutcomeWorker {
         Ok(processed)
     }
 
+    /// The trace this outcome belongs to. Never `None`.
+    ///
+    /// An agent-produced decision used to be an orphan in the audit timeline.
+    /// The agents service is the only writer of `agent_outcomes` and has never
+    /// populated `trace_id` — 67 of 67 rows in production carried NULL — so
+    /// every decision mapped from one was recorded with no correlation, and the
+    /// question the ledger exists to answer ("what caused this?") had no answer
+    /// for exactly the non-deterministic half of the system.
+    ///
+    /// The correlation was never actually lost, only unrecorded: the outcome
+    /// names its task, and the task's metadata names the action that dispatched
+    /// it. So resolve in order of directness and stop at the first answer:
+    ///
+    /// 1. what the outcome itself declares, if the agents service ever starts
+    ///    sending it;
+    /// 2. the trace stamped into the task's metadata at dispatch;
+    /// 3. the trace of the action named by that metadata, which repairs every
+    ///    task dispatched before the stamp existed;
+    /// 4. the task's own id, as a trace root.
+    ///
+    /// Step 4 is not a fabricated correlation. It says "this outcome's history
+    /// starts at its task", which is true of anything the agents service
+    /// scheduled on its own rather than on an action's behalf, and it keeps the
+    /// invariant total: no decision without a trace.
+    ///
+    /// Two deliberate choices about failure:
+    ///
+    /// `agent_service_tasks` belongs to the agents service, not to this
+    /// repository — it is in `FOREIGN_RELATIONS` and no migration here creates
+    /// it. A deployment without the agents schema must still ingest outcomes,
+    /// so a lookup failure falls back to step 4 rather than propagating.
+    ///
+    /// And it runs on the pool rather than inside the caller's transaction. A
+    /// statement that errors inside a transaction poisons it: querying a table
+    /// that does not exist would abort the whole mapping, so enriching the trace
+    /// would have been able to stop the ledger from being written at all.
+    async fn resolve_trace(&self, outcome: &ValidatedOutcome) -> Uuid {
+        if let Some(trace_id) = outcome.trace_id {
+            return trace_id;
+        }
+        let resolved = sqlx::query_scalar::<_, Option<Uuid>>(
+            r#"
+            SELECT COALESCE(
+                       (task.metadata ->> 'trace_id')::uuid,
+                       action.trace_id,
+                       task.id
+                   )
+            FROM agent_service_tasks AS task
+            LEFT JOIN viryaos_autopilot_actions AS action
+                   ON action.workspace_id = task.workspace_id
+                  AND action.id = (task.metadata ->> 'action_id')::uuid
+            WHERE task.workspace_id = $1 AND task.id = $2
+            "#,
+        )
+        .bind(outcome.workspace_id)
+        .bind(outcome.task_id)
+        .fetch_optional(&self.pool)
+        .await;
+        match resolved {
+            Ok(found) => found.flatten().unwrap_or(outcome.task_id),
+            Err(error) => {
+                tracing::debug!(
+                    outcome_id = %outcome.id,
+                    error = %error,
+                    "could not resolve the dispatching trace; rooting at the task"
+                );
+                outcome.task_id
+            }
+        }
+    }
+
     /// Maps a validated outcome into autopilot decision (+ action) rows and
     /// any side tables (fan_segments, outreach_targets) in one transaction.
     async fn map_outcome(
         &self,
         outcome: &ValidatedOutcome,
     ) -> Result<(Option<Uuid>, Option<Uuid>), AgentOutcomeError> {
+        // Resolved before the transaction opens: the lookup touches a table the
+        // agents service owns, and a failed statement inside a transaction
+        // would abort the mapping it is only meant to annotate.
+        let trace_id = self.resolve_trace(outcome).await;
         let mut tx = self.pool.begin().await?;
         let decision_id = Uuid::now_v7();
         let input_snapshot = json!({
@@ -329,7 +408,7 @@ impl AgentOutcomeWorker {
         .bind(&input_snapshot)
         .bind(json!({ "source": "agent_outcome", "schema_version": outcome.schema_version }))
         .bind(json!({}))
-        .bind(outcome.trace_id)
+        .bind(trace_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -627,7 +706,7 @@ impl AgentOutcomeWorker {
                     .bind(&payload)
                     .bind("queued")
                     .bind(action_class)
-                    .bind(outcome.trace_id)
+                    .bind(trace_id)
                     .fetch_optional(&mut *tx)
                     .await?
                 } else {
@@ -660,7 +739,7 @@ impl AgentOutcomeWorker {
                     .bind(&payload)
                     .bind("awaiting_approval")
                     .bind(action_class)
-                    .bind(outcome.trace_id)
+                    .bind(trace_id)
                     .fetch_optional(&mut *tx)
                     .await?
                 }

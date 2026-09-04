@@ -969,6 +969,30 @@ pub(in crate::autopilot) async fn execute_agent_run(
     tier: crowdrelay_brain::AgentTier,
     _now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // The trace the dispatching action belongs to. `agent_service_tasks` has no
+    // trace column of its own and is consumed by a service outside this
+    // repository, so the correlation travels in `metadata` where that service
+    // already reads `action_id` and passes the object through untouched.
+    //
+    // Dropping it here is what broke the audit timeline: the action knew its
+    // trace, the task did not carry it, and every decision the returning
+    // outcome produced was recorded uncorrelated — 67 of 67 agent outcomes and
+    // 42 of 42 agent-sourced decisions in production had a NULL trace. Read it
+    // in the same transaction that creates the task so the two cannot disagree.
+    let trace_id = sqlx::query_scalar::<_, Option<uuid::Uuid>>(
+        r#"
+        SELECT trace_id
+        FROM viryaos_autopilot_actions
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .flatten();
+
     // Insert a task row into agent_service_tasks. The TS agent service's
     // scheduler claims due tasks and runs them. model_id = "auto" tells the
     // runner to pick a model based on the tier: free for basic, connected
@@ -987,6 +1011,7 @@ pub(in crate::autopilot) async fn execute_agent_run(
     .bind(serde_json::json!({
         "source": "autopilot",
         "action_id": action_id.into_uuid(),
+        "trace_id": trace_id,
     }))
     .execute(&mut **tx)
     .await

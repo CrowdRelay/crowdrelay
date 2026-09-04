@@ -204,10 +204,10 @@ async fn insert_bare_action(pool: &sqlx::PgPool, workspace_id: WorkspaceId, acti
         r#"INSERT INTO viryaos_autopilot_decisions
              (id, workspace_id, decision_key, context, subject_kind, subject_id,
               decision_kind, confidence_basis_points, disposition, reason,
-              input_snapshot, policy_snapshot, recommendation)
+              input_snapshot, policy_snapshot, recommendation, trace_id)
            VALUES ($1,$2,$3,'growth_intelligence','target_community',$4,
                    'request_agent_run',5000,'require_approval','fixture',
-                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())"#,
     )
     .bind(decision_id)
     .bind(workspace_id.into_uuid())

@@ -246,9 +246,9 @@ async fn a_soft_bounce_suppresses_nobody_and_the_snapshot_reads_both() {
         "INSERT INTO viryaos_autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
-             input_snapshot, policy_snapshot, recommendation
+             input_snapshot, policy_snapshot, recommendation, trace_id
          ) VALUES ($1,$2,'e2e-deliverability','growth_metrics','workspace',$3,
-                   'e2e.kind',9000,'recommend_only','e2e','{}','{}','{}')",
+                   'e2e.kind',9000,'recommend_only','e2e','{}','{}','{}',$1)",
     )
     .bind(decision_id)
     .bind(fixture.workspace_id.into_uuid())
@@ -335,9 +335,9 @@ async fn a_complaint_rate_closes_the_ceiling_against_real_rows() {
         "INSERT INTO viryaos_autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
-             input_snapshot, policy_snapshot, recommendation
+             input_snapshot, policy_snapshot, recommendation, trace_id
          ) VALUES ($1,$2,'e2e-halt','growth_metrics','workspace',$3,
-                   'e2e.kind',9000,'recommend_only','e2e','{}','{}','{}')",
+                   'e2e.kind',9000,'recommend_only','e2e','{}','{}','{}',$1)",
     )
     .bind(decision_id)
     .bind(fixture.workspace_id.into_uuid())
@@ -400,9 +400,9 @@ async fn a_failed_action_takes_its_finding_off_the_board_instead_of_parking_a_de
         "INSERT INTO viryaos_autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
-             input_snapshot, policy_snapshot, recommendation
+             input_snapshot, policy_snapshot, recommendation, trace_id
          ) VALUES ($1,$2,'e2e-failed-off-board','content_supply','content_source',$3,
-                   'request_content_artifact',9000,'require_approval','e2e','{}','{}','{}')",
+                   'request_content_artifact',9000,'require_approval','e2e','{}','{}','{}',$1)",
     )
     .bind(decision_id)
     .bind(fixture.workspace_id.into_uuid())
@@ -449,9 +449,9 @@ async fn an_approved_action_reads_as_executing_not_awaiting_approval() {
         "INSERT INTO viryaos_autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
-             input_snapshot, policy_snapshot, recommendation
+             input_snapshot, policy_snapshot, recommendation, trace_id
          ) VALUES ($1,$2,'e2e-approved-executing','beacon','beacon',$3,
-                   'beacon_outreach_request',10000,'require_approval','e2e','{}','{}','{}')",
+                   'beacon_outreach_request',10000,'require_approval','e2e','{}','{}','{}',$1)",
     )
     .bind(decision_id)
     .bind(fixture.workspace_id.into_uuid())
@@ -499,9 +499,9 @@ async fn done_ourselves_takes_the_finding_and_its_parked_action_off_the_board() 
         "INSERT INTO viryaos_autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
-             input_snapshot, policy_snapshot, recommendation
+             input_snapshot, policy_snapshot, recommendation, trace_id
          ) VALUES ($1,$2,'e2e-handled','booking_opportunity','team_opportunity',$3,
-                   'prepare_live_opportunity',9000,'require_approval','e2e','{}','{}','{}')",
+                   'prepare_live_opportunity',9000,'require_approval','e2e','{}','{}','{}',$1)",
     )
     .bind(decision_id)
     .bind(fixture.workspace_id.into_uuid())
@@ -714,9 +714,9 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
         "INSERT INTO viryaos_autopilot_decisions (
              id, workspace_id, decision_key, context, subject_kind, subject_id,
              decision_kind, confidence_basis_points, disposition, reason,
-             input_snapshot, policy_snapshot, recommendation
+             input_snapshot, policy_snapshot, recommendation, trace_id
          ) VALUES ($1,$2,'e2e-no-executor','beacon','beacon',$3,
-                   'beacon_outreach_request',9000,'require_approval','e2e','{}','{}','{}')",
+                   'beacon_outreach_request',9000,'require_approval','e2e','{}','{}','{}',$1)",
     )
     .bind(decision_id)
     .bind(fixture.workspace_id.into_uuid())

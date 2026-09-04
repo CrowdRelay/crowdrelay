@@ -97,10 +97,10 @@ async fn insert_dispatch(
         r#"INSERT INTO viryaos_autopilot_decisions
            (id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation)
+            input_snapshot, policy_snapshot, recommendation, trace_id)
            VALUES ($1,$2,$3,'growth_metrics','target_community',$4,
                    'auto_execute',9000,'auto_execute','test',
-                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb)"#,
+                   '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())"#,
     )
     .bind(decision_id)
     .bind(f.workspace_id.into_uuid())

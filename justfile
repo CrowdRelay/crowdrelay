@@ -120,7 +120,13 @@ test-postgres-env:
     export CROWDRELAY_DATABASE_MAX_CONNECTIONS=5
     export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
     {{CARGO}} run --locked --all-features --package crowdrelay-worker -- setup
-    {{CARGO}} test --locked -p crowdrelay-infra --tests -- --ignored
+    # Every crate, not just crowdrelay-infra. CI discovers integration targets
+    # by glob across the workspace, so a recipe scoped to one package reported
+    # green while CI ran tests it had never executed -- crowdrelay-worker's
+    # postgres targets (outbox, city geocoding, metric sync schedule, agent
+    # decision trace) were all invisible here. A local gate that is narrower
+    # than CI is worse than no local gate: it teaches you to trust it.
+    {{CARGO}} test --locked --workspace --tests -- --ignored
 
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env

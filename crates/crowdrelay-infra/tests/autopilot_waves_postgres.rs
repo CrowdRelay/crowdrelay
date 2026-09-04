@@ -179,10 +179,10 @@ async fn queue_pitch(
             id, workspace_id, decision_key, context, subject_kind, subject_id,
             decision_kind, confidence_basis_points, disposition, reason,
             input_snapshot, policy_snapshot, recommendation
-        )
+        , trace_id)
         VALUES ($1,$2,$3,'outreach','outreach_opportunity',$4,
                 'request_relationship_outreach',9000,'require_approval','test',
-                '{}'::jsonb,'{}'::jsonb,$5)
+                '{}'::jsonb,'{}'::jsonb,$5,gen_random_uuid())
         "#,
     )
     .bind(decision_id)
