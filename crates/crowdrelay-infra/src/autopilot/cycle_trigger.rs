@@ -169,6 +169,15 @@ pub async fn close_cycle_run(
                 WHERE action.workspace_id = run.workspace_id
                   AND action.created_at >= run.started_at
                   AND action.created_at <= $3
+            ),
+            -- The North Star as it stood when this cycle finished. Fans, which
+            -- is what the tenant exists to grow, so the brain's assessment of
+            -- itself is measured against the thing it is for.
+            north_star_value = (
+                SELECT count(*)
+                FROM fans
+                WHERE fans.workspace_id = run.workspace_id
+                  AND fans.status = 'active'
             )
         WHERE run.workspace_id = $1 AND run.id = $2
         "#,

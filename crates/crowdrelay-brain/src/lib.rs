@@ -56,6 +56,7 @@ pub mod platform_yield;
 pub mod portfolio;
 pub mod reach;
 pub mod resource_cost;
+pub mod self_assessment;
 pub mod snapshot;
 pub mod standing;
 pub mod strategy;
