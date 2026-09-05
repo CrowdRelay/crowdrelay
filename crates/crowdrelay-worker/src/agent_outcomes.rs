@@ -776,19 +776,35 @@ impl AgentOutcomeWorker {
         // between the decision/action inserts and the status update can
         // never leave the row stuck in 'processing' (which the poll query
         // never re-selects).
+        //
+        // The resolved trace is written back here too. `/v1/admin/ops/trace/{id}`
+        // reads `agent_outcomes` as one branch of the timeline, and that branch
+        // was dead for every row: the agents service never populates the column,
+        // so the outcome that caused a decision did not appear in the timeline
+        // it caused. Writing it on the row we are already updating costs
+        // nothing, needs no change to the agents service, and is what makes the
+        // agent step visible in the causal chain rather than inferred from the
+        // decision's `input_snapshot`.
+        //
+        // Left nullable in the schema on purpose: this column belongs to a table
+        // an external service writes, and narrowing a column whose other writer
+        // is outside this repository is how a migration breaks a service nobody
+        // deployed.
         sqlx::query(
             r#"
             UPDATE agent_outcomes
             SET status = 'processed',
                 processed_decision_id = $2,
                 processed_action_id = $3,
-                processed_at = now()
+                processed_at = now(),
+                trace_id = COALESCE(trace_id, $4)
             WHERE id = $1
             "#,
         )
         .bind(outcome.id)
         .bind(decision_id)
         .bind(action_id)
+        .bind(trace_id)
         .execute(&mut *tx)
         .await?;
 

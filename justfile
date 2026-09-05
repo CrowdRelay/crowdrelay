@@ -92,6 +92,13 @@ test-postgres-env:
     export CROWDRELAY_FAN_LIFECYCLE_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     export CROWDRELAY_MOBILE_FAN_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     export CROWDRELAY_REFERRAL_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
+    # The outbox, reminder and retention suites live in unit-test modules rather
+    # than their own integration targets. CI exports these three and runs them by
+    # name; the local recipe exported neither, so widening it to the workspace
+    # surfaced three failures that were really a missing variable.
+    export CROWDRELAY_OUTBOX_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
+    export CROWDRELAY_REMINDER_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
+    export CROWDRELAY_RETENTION_TEST_DATABASE_URL=$CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL
     {{COMPOSE}} up --detach --wait postgres
     {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres \
         -c "DROP DATABASE IF EXISTS crowdrelay_autopilot_test;" \
@@ -120,13 +127,42 @@ test-postgres-env:
     export CROWDRELAY_DATABASE_MAX_CONNECTIONS=5
     export CROWDRELAY_BOOTSTRAP_JSON='{"workspace_name":"CrowdRelay local test","cities":[{"slug":"wroclaw","name":"Wroclaw","country":"PL","region":"Dolnoslaskie","lat":51.1079,"lng":17.0385}],"campaigns":[],"webhook_endpoints":[]}'
     {{CARGO}} run --locked --all-features --package crowdrelay-worker -- setup
-    # Every crate, not just crowdrelay-infra. CI discovers integration targets
-    # by glob across the workspace, so a recipe scoped to one package reported
-    # green while CI ran tests it had never executed -- crowdrelay-worker's
-    # postgres targets (outbox, city geocoding, metric sync schedule, agent
-    # decision trace) were all invisible here. A local gate that is narrower
-    # than CI is worse than no local gate: it teaches you to trust it.
-    {{CARGO}} test --locked --workspace --tests -- --ignored
+    # Every crate, not just crowdrelay-infra. This recipe ran
+    # `-p crowdrelay-infra` alone while CI globs `crates/*/tests/*_postgres.rs`
+    # across the workspace, so it reported green while CI ran tests it had never
+    # executed -- crowdrelay-worker's postgres targets (outbox, city geocoding,
+    # metric sync schedule, agent decision trace) were all invisible here. A
+    # local gate narrower than CI is worse than none: it teaches you to trust it.
+    #
+    # One invocation per target, exactly as CI does. Not a formality: several
+    # suites share the one database rather than creating a disposable copy, and
+    # claims like `claim_deliveries` are workspace-wide, so two suites live at
+    # once makes one claim a row the other left pending. Running them together
+    # is stricter than CI and fails on that coupling alone. The coupling is
+    # worth fixing; reproducing CI is what this recipe is for.
+    targets=()
+    for path in crates/*/tests/*_postgres.rs; do
+      package="$(basename "$(dirname "$(dirname "$path")")")"
+      targets+=("${package}:$(basename "$path" .rs)")
+    done
+    if [ "${#targets[@]}" -eq 0 ]; then
+      echo "no *_postgres.rs integration targets found; the glob is wrong" >&2
+      exit 1
+    fi
+    printf 'running %s integration targets\n' "${#targets[@]}"
+    for entry in "${targets[@]}"; do
+      {{CARGO}} test --locked --package "${entry%%:*}" --test "${entry##*:}" \
+        -- --ignored --test-threads=1
+    done
+    # The outbox, reminder and retention suites live in unit-test modules rather
+    # than their own integration target, so the glob above cannot see them.
+    for filter in \
+      postgres_outbox_round_trip \
+      due_reminder_is_enqueued_exactly_once \
+      cycle_deletes_expired_rows_scrubs_safe_payloads_and_preserves_audit
+    do
+      {{CARGO}} test --locked --package crowdrelay-worker "$filter" -- --ignored --test-threads=1
+    done
 
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env
