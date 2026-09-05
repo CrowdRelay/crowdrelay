@@ -1,0 +1,262 @@
+{
+  "name": "CrowdRelay \u2014 VIRYA OS fan lifecycle message executor",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "fl-trigger",
+      "name": "Called by verified ingress",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -620,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// CrowdRelay decided WHO hears from us, WHICH message, and that consent\n// and cooldown allow it. This workflow renders the named template and sends\n// it to one fan. It never chooses a different template, broadens the\n// recipient, or sends a message CrowdRelay did not request.\nconst e = $json;\nif (!e || e.type !== 'crowdrelay.fan_lifecycle.message_requested' || e.version !== 1) return [];\nconst d = e.data ?? {};\nfor (const key of ['action_id', 'fan_id', 'template_key']) {\n  if (!d[key]) throw new Error('lifecycle request missing ' + key);\n}\nconst fan = d.fan ?? {};\nif (!fan.email || !fan.email.includes('@')) throw new Error('invalid fan.email');\nreturn [{ json: {\n  action_id: String(d.action_id),\n  fan_id: String(d.fan_id),\n  template_key: String(d.template_key),\n  email: String(fan.email),\n  display_name: fan.display_name || '',\n  locale: String(fan.locale || ''),\n  referral_code: fan.referral_code || null,\n}}];"
+      },
+      "id": "fl-validate",
+      "name": "Validate lifecycle request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,version:'1',observed_at:new Date().toISOString(),expires_at:new Date(Date.now()+30*60*1000).toISOString(),capabilities:['fan.lifecycle.message']}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "fl-claim",
+      "name": "Claim action once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -180,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fail closed. Only `claimed` may send; `already_succeeded` is a no-op\n// replay; `in_flight` and `ambiguous` require reconciliation instead of a\n// second send.\nconst c = $input.first().json;\nconst plan = $('Validate lifecycle request').first().json;\nif (c.status === 'already_succeeded') return [];\nif (c.status !== 'claimed') throw new Error('claim not granted: ' + c.status);\nreturn [{ json: { ...plan, claim_token: c.claim_token } }];"
+      },
+      "id": "fl-gate",
+      "name": "Fail-closed claim gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Render the named template. CrowdRelay chose which message; the executor\n// renders it from the supplied facts. A default branch sends the wrong\n// message, which is worse than sending none — it is indistinguishable from\n// working, and the fan reads a thank-you for something they did not do.\n// Throw on a key you do not know.\nconst p = $input.first().json;\nconst key = p.template_key;\nconst name = p.display_name || '';\nconst hello = name ? ('Czesc ' + name) : 'Czesc';\nconst helloEn = name ? ('Hi ' + name) : 'Hi';\nlet subject, text;\nif (key === 'crowdrelay.fan.welcome.v1') {\n  subject = 'Witamy w VIRYA';\n  text = [hello + ',', '', 'Dziekujemy za zapisanie sie do VIRYA. Od teraz koncerty, nagrody i polecenia pracuja jako jeden system.', '', '- VIRYA'].join('\\n');\n} else if (key === 'crowdrelay.synesthesia.follow_up.v1') {\n  subject = 'Dziekujemy za Synestezje';\n  text = [hello + ',', '', 'Dziekujemy za wziecie udzialu w Synestezji. Koncerty sa najblizszym krokiem — wpadnij na nastepny.', '', '- VIRYA'].join('\\n');\n} else if (key === 'crowdrelay.fan.reactivation.v1') {\n  subject = 'Brakowalo nam Ciebie';\n  text = [hello + ',', '', 'Dlugo Cie nie bylo. Najblizszy koncert jest blizej niz myslisz — wpadnij.', '', '- VIRYA'].join('\\n');\n} else if (key === 'crowdrelay.fan.first_ticket_thanks.v1') {\n  subject = 'Dziekujemy za pierwszy bilet';\n  text = [hello + ',', '', 'To Twoj pierwszy bilet na VIRYA. Dzien, w ktorym ktos kupuje pierwszy bilet, to najlepszy moment, zeby stac sie fanem.', '', 'Do zobaczenia na koncercie.', '', '- VIRYA'].join('\\n');\n} else if (key === 'crowdrelay.fan.returning_thanks.v1') {\n  subject = 'Wracasz — i to zauwazamy';\n  text = [hello + ',', '', 'Byles na wystarczajaco wielu koncertach, zeby to mialo znaczenie. Dziekujemy, ze wracasz.', '', '- VIRYA'].join('\\n');\n} else if (key === 'crowdrelay.fan.referral_thanks.v1') {\n  subject = 'Ktos przyszedl dzieki Tobie';\n  text = [hello + ',', '', 'Osoba, ktora poleciles, wlasnie dolaczyla. To jedyna petla, ktora rosnie sama — i Ty ja napędzasz.', '', '- VIRYA'].join('\\n');\n} else if (key === 'crowdrelay.fan.referral_invite.v1') {\n  if (!p.referral_code) throw new Error('referral_invite missing fan.referral_code');\n  const link = 'https://virya.music/r/' + p.referral_code;\n  subject = 'Polec kogos na VIRYA';\n  text = [hello + ',', '', 'Jesli znasz kogos, kto powinien byc tutaj, podziel sie swoim linkiem:', '', link, '', 'Kazdy, kto przez niego dojdzie, jest przypisany do Ciebie.', '', '- VIRYA'].join('\\n');\n} else {\n  throw new Error('Unknown lifecycle template: ' + key);\n}\nreturn [{ json: { ...p, subject, text } }];"
+      },
+      "id": "fl-render",
+      "name": "Render template by key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "fl-send",
+      "name": "Send lifecycle email (Gmail)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':succeeded:' + ($json.threadId || 'gmail'), executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'succeeded', claim_token: $('Fail-closed claim gate').first().json.claim_token, provider_reference: $json.threadId || null, metadata:{template_key:$('Fail-closed claim gate').first().json.template_key, delivered_to:$('Fail-closed claim gate').first().json.email}, observed_at:new Date().toISOString()}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "fl-receipt",
+      "name": "Report success receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "x-virya-executor-id",
+              "value": "={{ $env.VIRYA_N8N_EXECUTOR_ID }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':failed', executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'failed', claim_token: $('Fail-closed claim gate').first().json.claim_token, error_kind:'provider_reject', metadata:{template_key:$('Fail-closed claim gate').first().json.template_key, error: $json.error || 'unknown'}, observed_at:new Date().toISOString()}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "fl-fail",
+      "name": "Report failure receipt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Called by verified ingress": {
+      "main": [
+        [
+          {
+            "node": "Validate lifecycle request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate lifecycle request": {
+      "main": [
+        [
+          {
+            "node": "Claim action once",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim action once": {
+      "main": [
+        [
+          {
+            "node": "Fail-closed claim gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail-closed claim gate": {
+      "main": [
+        [
+          {
+            "node": "Render template by key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render template by key": {
+      "main": [
+        [
+          {
+            "node": "Send lifecycle email (Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send lifecycle email (Gmail)": {
+      "main": [
+        [
+          {
+            "node": "Report success receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report failure receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "example"
+  },
+  "active": false
+}
