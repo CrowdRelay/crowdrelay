@@ -119,7 +119,59 @@ pub async fn connect(config: &DatabaseConfig) -> Result<PgPool, DatabaseError> {
         });
     }
 
+    report_schema_skew(&pool, config.connect_timeout).await;
+
     Ok(pool)
+}
+
+/// Says so when the database has migrations this build does not contain.
+///
+/// The two numbers can disagree, and when they do nothing noticed. Production
+/// ran a build whose newest migration was 0234 while the database had 0236
+/// applied: `/v1/meta` reported 234, because that constant is baked in at build
+/// time from the migrations directory and describes the binary rather than the
+/// database. The gap was invisible from every surface.
+///
+/// It is not harmless. 0236 widened a CHECK and demoted one row's `status` to a
+/// value the running code had never heard of, and that code filters on
+/// `status = 'connected'` — so a connection silently dropped out of the metric
+/// sync, with no error anywhere, because the schema had moved and the code had
+/// not.
+///
+/// A warning rather than a refusal. Migrations are applied ahead of a cutover on
+/// purpose during blue-green: the green containers migrate, and for the length
+/// of the soak the blue ones are legitimately behind. Refusing to start would
+/// turn the normal case into an outage. What was missing is that anybody could
+/// tell the normal case from a deploy that stopped halfway.
+async fn report_schema_skew(pool: &PgPool, deadline: Duration) {
+    let applied = timeout(
+        deadline,
+        sqlx::query_scalar::<_, Option<i64>>("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(pool),
+    )
+    .await;
+    let Ok(Ok(Some(applied))) = applied else {
+        // A database with no migration table has not been set up yet, and a
+        // failed read here must never keep a process from starting: this
+        // reports on the deploy, it does not gate it.
+        return;
+    };
+    let built = MIGRATOR
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0);
+    if applied > built {
+        tracing::warn!(
+            database_schema_version = applied,
+            build_schema_version = built,
+            "the database has migrations this build does not contain: it was migrated by a newer \
+             release. During a blue-green soak this is expected and clears at cutover. Outside one \
+             it means a deploy applied its migrations and never finished, and this process is \
+             reading a schema it was not written against."
+        );
+    }
 }
 
 /// Checks database readiness within the caller-provided deadline.
@@ -268,6 +320,44 @@ mod tests {
         assert_eq!(
             classify_sqlx_error(&sqlx::Error::RowNotFound),
             SqlxErrorClass::NotFound
+        );
+    }
+
+    /// The embedded migrator agrees with the migrations directory.
+    ///
+    /// This does NOT catch a stale `sqlx::migrate!` — adding a migration file
+    /// does not force a rebuild, and a binary stale enough to miss one is stale
+    /// enough that this test misses it too. That failure is real and was hit
+    /// while building the skew check above; `touch`ing this file is the cure.
+    ///
+    /// What it does catch is a migration the migrator refuses to see at all: a
+    /// filename the version parser rejects, or an empty embed. The skew warning
+    /// reads `MIGRATOR.migrations` to decide what this build contains, so an
+    /// empty or truncated list would make it compare a real database version
+    /// against nothing and stay silent for ever.
+    #[test]
+    fn the_migrator_knows_its_newest_migration() {
+        let built = MIGRATOR
+            .migrations
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("the embedded migrator must carry migrations");
+        let newest_file =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations"))
+                .expect("migrations directory")
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    name.split('_').next()?.parse::<i64>().ok()
+                })
+                .max()
+                .expect("at least one migration on disk");
+        assert_eq!(
+            built, newest_file,
+            "the embedded migrator and the migrations directory disagree in this build: a \
+             migration file is present that the migrator did not parse, most likely a filename \
+             the version prefix parser rejects"
         );
     }
 }
