@@ -233,6 +233,13 @@ pub enum ConnectionStatus {
     Connected,
     Expired,
     Disconnected,
+    /// Provider proved the identity is wrong (e.g. 404). The sync worker
+    /// skips invalid connections.
+    Invalid,
+    /// Creation-time probe could not establish identity (network error,
+    /// rate limit, missing credential). A successful sync promotes it
+    /// to `Connected`.
+    Unverified,
 }
 
 impl ConnectionStatus {
@@ -241,6 +248,8 @@ impl ConnectionStatus {
             Self::Connected => "connected",
             Self::Expired => "expired",
             Self::Disconnected => "disconnected",
+            Self::Invalid => "invalid",
+            Self::Unverified => "unverified",
         }
     }
 
@@ -249,6 +258,8 @@ impl ConnectionStatus {
             "connected" => Some(Self::Connected),
             "expired" => Some(Self::Expired),
             "disconnected" => Some(Self::Disconnected),
+            "invalid" => Some(Self::Invalid),
+            "unverified" => Some(Self::Unverified),
             _ => None,
         }
     }
@@ -362,6 +373,8 @@ mod tests {
             ConnectionStatus::Connected,
             ConnectionStatus::Expired,
             ConnectionStatus::Disconnected,
+            ConnectionStatus::Invalid,
+            ConnectionStatus::Unverified,
         ] {
             assert_eq!(
                 ConnectionStatus::from_storage(status.as_str()),
