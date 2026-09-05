@@ -120,6 +120,46 @@ class BrainLearningLoopDoc(unittest.TestCase):
                     f"and it is not there. The map has drifted from the code",
                 )
 
+    def test_the_cycle_does_not_default_a_failed_repository_read(self) -> None:
+        """A read that failed is not a reading of zero.
+
+        Three loads in the growth-intelligence cycle swallowed their errors.
+        Each had a legitimate `Ok` for the empty case, so the default could only
+        ever fire on a failure, and each answered the failure with a specific
+        false claim:
+
+        - `count_pending_measurements` -> 0 erased WAIT's entire
+          value-of-information, making a database error push an autonomous
+          system towards acting.
+        - `load_last_dispatched_template` -> None reported no previous
+          strategy, switching off the hysteresis that exists to stop the brain
+          flip-flopping on a borderline world model.
+        - `load_exploration_memory` -> empty claimed every (template, context)
+          pair unvisited, maximum novelty everywhere.
+
+        None of them logged. The cycle reports degraded when a load propagates,
+        which is the whole difference: a visible failure instead of a confident
+        wrong number.
+        """
+        source = (
+            ROOT
+            / "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs"
+        ).read_text()
+        swallowed = re.findall(
+            r"\.await\s*\n\s*\.(unwrap_or|unwrap_or_default|unwrap_or_else|ok\(\))[^;]*;",
+            source,
+        )
+        # The strategy posterior load is the documented exception: it is
+        # dormant, nothing reads it, and it is no longer written back — so its
+        # default cannot reach a decision or overwrite learned state. If it ever
+        # gains a consumer, the dormancy gate above fires first.
+        self.assertLessEqual(
+            len(swallowed),
+            1,
+            f"a repository read in the growth-intelligence cycle is defaulting "
+            f"its error instead of propagating: {swallowed}",
+        )
+
     def test_the_dormant_edges_are_still_dormant(self) -> None:
         sources = production_sources()
         for label, pattern in DORMANT:

@@ -54,21 +54,33 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // predictions. The brain uses this to compute novelty:
         // unexplored (template, context) pairs get an exploration
         // bonus in the EFE score.
+        //
+        // Propagated, not defaulted. An empty archive is a legitimate `Ok` —
+        // a workspace that has explored nothing — so `unwrap_or_default()`
+        // could only ever fire on a read failure, and it answered it by
+        // claiming every (template, context) pair is unvisited. That is
+        // maximum novelty on every candidate: the brain would re-explore
+        // territory it already knows, and nothing would say why.
         let exploration_memory = self
             .repository
             .load_exploration_memory(self.workspace_id)
-            .await
-            .unwrap_or_default();
+            .await?;
         // Derive the growth strategy from the world model, with
         // hysteresis — the brain doesn't flip-flop between
         // strategies every cycle when conditions are borderline.
         // The previous strategy is inferred from the most
         // recently dispatched template.
+        //
+        // Also propagated. `Ok(None)` already means "nothing has been
+        // dispatched yet", so `unwrap_or(None)` only fired on a read failure —
+        // and it answered it by reporting no previous strategy, which switches
+        // hysteresis off. A transient database blip would produce exactly the
+        // flip-flop the hysteresis exists to prevent, on a borderline world
+        // model, once, with no trace.
         let last_template = self
             .repository
             .load_last_dispatched_template(self.workspace_id)
-            .await
-            .unwrap_or(None);
+            .await?;
         let previous_strategy = last_template
             .as_deref()
             .map(GrowthStrategy::infer_from_template);
@@ -170,11 +182,18 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // of candidates, accounting for audience overlap, fatigue,
         // and resource costs. See `evaluate/portfolio.rs` for the
         // selection logic.
+        // This one is economic, and it fails in the direction that acts.
+        // `pending_measurement_count` is the whole of WAIT's
+        // value-of-information: `n × avg_treatment_std × DECISION_SENSITIVITY`.
+        // A read failure defaulted to zero, WAIT lost its entire epistemic
+        // value, and the brain became more willing to dispatch — a database
+        // error making an autonomous system more active, silently. Zero
+        // outstanding measurements is a real state the query returns as `Ok(0)`;
+        // not knowing is not that state.
         let pending_measurement_count = self
             .repository
             .count_pending_measurements(self.workspace_id)
-            .await
-            .unwrap_or(0);
+            .await?;
         // ── P0-1: Experiment population ≠ portfolio selection ──
         //
         // FULL SEPARATION: The experiment is created from the ELIGIBLE
