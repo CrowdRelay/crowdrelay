@@ -28,6 +28,9 @@ impl GrowthStrategy {
             // Discovery is the wrong lever when reach already exists but is
             // not converting — see `reach_outruns_conversion`.
             && !Self::reach_outruns_conversion(world)
+            // ...and it is not a lever at all when the feeds it works through
+            // have stopped answering — see `discovery_channels_are_silent`.
+            && !Self::discovery_channels_are_silent(world)
         {
             return Self::AggressiveDiscovery;
         }
@@ -50,11 +53,43 @@ impl GrowthStrategy {
         }
         // A tenant behind on an off-platform north star needs more reach, not
         // more Signal invites. Widening the top of the funnel is the lever that
-        // moves subscriber and follower counts.
-        if world.growth_target_progress.north_star_status == TargetStatus::Behind {
+        // moves subscriber and follower counts — through feeds that are
+        // answering.
+        if world.growth_target_progress.north_star_status == TargetStatus::Behind
+            && !Self::discovery_channels_are_silent(world)
+        {
             return Self::AggressiveDiscovery;
         }
         Self::ContentFirst
+    }
+
+    /// Whether every feed this tenant has connected has stopped reporting.
+    ///
+    /// `fresh_platforms` counts platforms whose newest audience observation is
+    /// under a week old. The world model has carried it, and
+    /// `connected_platforms` beside it, since they were added — and nothing
+    /// read either one. The brain therefore had the evidence that its channels
+    /// were dead and planned as though they were live: production sat on
+    /// `AggressiveDiscovery`, whose entire lead is scanners, while every Reddit
+    /// connection was failing on an invalid credential. Every cycle dispatched
+    /// scanners at feeds that answered nothing, and the operator watched the
+    /// agent produce outreach proposals built on no data at all.
+    ///
+    /// Deliberately not `fresh_platforms == 0` alone. A tenant who has
+    /// connected nothing yet has no feeds to have gone quiet, and discovery is
+    /// exactly right for them — it is how they get a first channel. The
+    /// condition is connected-and-silent: the channels exist and have stopped
+    /// answering, which is the state in which looking harder through them is
+    /// not a plan.
+    ///
+    /// The fallthrough is `ContentFirst`, which leads with publishing to the
+    /// audience already held rather than with scanners. That is the same
+    /// reasoning `reach_outruns_conversion` already applies, for the same
+    /// reason: when the top of the funnel cannot be widened, work the part of
+    /// it that exists.
+    #[must_use]
+    pub fn discovery_channels_are_silent(world: &WorldModel) -> bool {
+        world.connected_platforms > 0 && world.fresh_platforms == 0
     }
 
     /// Whether the tenant's off-platform reach dwarfs the fanbase it converted
@@ -116,8 +151,12 @@ impl GrowthStrategy {
                 }
             }
             Self::AggressiveDiscovery => {
+                // Hysteresis keeps the brain from flip-flopping; it must not
+                // keep it on a plan whose channels have gone quiet. Silence is
+                // not a borderline reading.
                 if world.growth_target_progress.status == TargetStatus::Behind
                     && world.fan_growth_trend.is_stagnant()
+                    && !Self::discovery_channels_are_silent(world)
                 {
                     return Self::AggressiveDiscovery;
                 }
@@ -262,6 +301,125 @@ mod tests {
             fan_growth_trend: GrowthTrend::Stagnant,
             growth_target_progress: GrowthTargetProgress {
                 status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst
+        );
+    }
+
+    #[test]
+    fn silent_feeds_stop_the_brain_planning_more_discovery() {
+        // Production's state for weeks: behind, stagnant, six Reddit feeds
+        // connected and every one of them failing on an invalid credential, so
+        // nothing had reported in over a week. The brain read `Behind` and
+        // `Stagnant`, chose `AggressiveDiscovery` — whose entire lead is
+        // scanners — and dispatched them at feeds that answered nothing, every
+        // five minutes. `fresh_platforms` said so the whole time and nothing
+        // read it.
+        let world = WorldModel {
+            total_fans: 10,
+            connected_platforms: 6,
+            fresh_platforms: 0,
+            fan_growth_trend: GrowthTrend::Stagnant,
+            growth_target_progress: GrowthTargetProgress {
+                status: TargetStatus::Behind,
+                north_star_status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst,
+            "with every connected feed silent, publishing to the audience \
+             already held is a plan and scanning dead feeds is not"
+        );
+    }
+
+    #[test]
+    fn a_tenant_with_nothing_connected_still_discovers() {
+        // The narrow half of the rule. A tenant who has connected no feed has
+        // none that could have gone quiet, and discovery is how they get a
+        // first channel. Blocking them would be the opposite of the fix.
+        let world = WorldModel {
+            total_fans: 0,
+            connected_platforms: 0,
+            fresh_platforms: 0,
+            fan_growth_trend: GrowthTrend::Stagnant,
+            growth_target_progress: GrowthTargetProgress {
+                status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::AggressiveDiscovery
+        );
+    }
+
+    #[test]
+    fn one_live_feed_is_enough_to_keep_discovering() {
+        let world = WorldModel {
+            total_fans: 10,
+            connected_platforms: 6,
+            fresh_platforms: 1,
+            fan_growth_trend: GrowthTrend::Stagnant,
+            growth_target_progress: GrowthTargetProgress {
+                status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::AggressiveDiscovery
+        );
+    }
+
+    #[test]
+    fn hysteresis_does_not_hold_the_brain_on_silent_feeds() {
+        // Hysteresis exists so a borderline reading does not flip the plan
+        // every cycle. Every feed having stopped answering is not borderline,
+        // and holding the previous strategy through it is how a brain stays
+        // fixated on a dead channel.
+        let world = WorldModel {
+            total_fans: 10,
+            connected_platforms: 6,
+            fresh_platforms: 0,
+            fan_growth_trend: GrowthTrend::Stagnant,
+            growth_target_progress: GrowthTargetProgress {
+                status: TargetStatus::Behind,
+                north_star_status: TargetStatus::Behind,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_hysteresis(
+                &world,
+                Some(GrowthStrategy::AggressiveDiscovery)
+            ),
+            GrowthStrategy::ContentFirst
+        );
+    }
+
+    #[test]
+    fn an_off_platform_north_star_behind_still_needs_a_live_feed() {
+        // The second discovery branch: behind on an off-platform north star is
+        // a reach problem, and reach is widened through feeds. Silent ones
+        // widen nothing.
+        let world = WorldModel {
+            total_fans: 10,
+            connected_platforms: 3,
+            fresh_platforms: 0,
+            fan_growth_trend: GrowthTrend::Steady,
+            growth_target_progress: GrowthTargetProgress {
+                north_star_status: TargetStatus::Behind,
                 ..Default::default()
             },
             ..Default::default()
