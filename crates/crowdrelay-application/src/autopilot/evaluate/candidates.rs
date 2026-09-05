@@ -173,6 +173,7 @@ fn lifecycle_candidate(
         LifecycleTemplate::FirstTicketThankYou => "crowdrelay.fan.first_ticket_thanks.v1",
         LifecycleTemplate::ReturningFanThankYou => "crowdrelay.fan.returning_thanks.v1",
         LifecycleTemplate::ReferralThankYou => "crowdrelay.fan.referral_thanks.v1",
+        LifecycleTemplate::ReferralInvite => "crowdrelay.fan.referral_invite.v1",
     };
     let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
     let subject = ActionSubject::Fan(snapshot.fan_id);
