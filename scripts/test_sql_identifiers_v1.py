@@ -101,6 +101,17 @@ FOREIGN_RELATIONS = {
     # to dispatch and never writes to it; the executor writes via action
     # dispatch. Documented at the call site in operations/growth_intelligence.rs.
     "agent_service_tasks",
+    # Owned by sqlx's migrator, which creates and maintains it. No migration in
+    # this repository creates it, and none should: it is the migrator's own
+    # bookkeeping.
+    #
+    # Read in two places, both reporting on a deploy rather than driving one.
+    # `database::report_schema_skew` warns when the database holds migrations
+    # this build does not embed, and the ops summary reports the applied version
+    # beside the build's compiled-in constant. Production once served
+    # `schema_version: 234` while the database was at 236, and no surface showed
+    # the difference.
+    "_sqlx_migrations",
 }
 
 
