@@ -227,3 +227,90 @@ async fn load_cycle_runs(
     .await
     .map_err(OpsError::sqlx)
 }
+
+// ── Connection health ──
+
+/// What is actually known about a fanbase connection, derived from evidence
+/// rather than from the creation-time probe.
+///
+/// `fanbase_connections.status` does not mean what it reads like. A connection
+/// whose identity probe came back `Unavailable` -- network error, rate limit,
+/// missing credential -- is stored as `connected`, which
+/// `provider_verification.rs` documents plainly as "we don't know yet". The
+/// consequence is that every one of production's connections is `connected`,
+/// including 29 Reddit feeds whose credential is invalid, so the column carries
+/// no information at all while reading like a health check.
+///
+/// `health` is computed from what actually happened instead:
+///
+/// * `working` — synced at least once and not currently failing.
+/// * `failing` — the last attempt failed, and `last_error` says how.
+/// * `unverified` — never synced and never failed. No evidence either way,
+///   which is the honest answer for a platform the sync does not poll and for
+///   one that has simply never run yet.
+#[derive(Debug, Serialize, FromRow)]
+pub struct ConnectionHealthEntry {
+    pub platform: String,
+    pub label: String,
+    /// The stored status, reported as-is so the discrepancy is visible rather
+    /// than quietly corrected.
+    pub status: String,
+    pub health: String,
+    pub last_sync_at: Option<String>,
+    pub last_sync_failed_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// GET /v1/admin/ops/connections — every fanbase connection and what is known
+/// about it.
+pub async fn list_connection_health(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match run_with_timeout(
+        state.ops.operation_timeout,
+        load_connection_health(&state.ops),
+    )
+    .await
+    {
+        Ok(entries) => private_json(StatusCode::OK, entries),
+        Err(error) => error.into_response(request_id(&headers)),
+    }
+}
+
+async fn load_connection_health(ops: &OpsState) -> Result<Vec<ConnectionHealthEntry>, OpsError> {
+    sqlx::query_as::<_, ConnectionHealthEntry>(
+        r#"
+        SELECT
+            platform,
+            label,
+            status,
+            CASE
+                WHEN last_sync_failed_at IS NOT NULL
+                     AND (last_sync_at IS NULL OR last_sync_failed_at > last_sync_at)
+                    THEN 'failing'
+                WHEN last_sync_at IS NOT NULL THEN 'working'
+                ELSE 'unverified'
+            END AS health,
+            to_char(last_sync_at, 'YYYY-MM-DD"T"HH24:MI:SSOF:00') AS last_sync_at,
+            to_char(last_sync_failed_at, 'YYYY-MM-DD"T"HH24:MI:SSOF:00') AS last_sync_failed_at,
+            left(last_sync_error, 200) AS last_error
+        FROM fanbase_connections
+        WHERE workspace_id = $1
+        ORDER BY
+            CASE
+                WHEN last_sync_failed_at IS NOT NULL
+                     AND (last_sync_at IS NULL OR last_sync_failed_at > last_sync_at)
+                    THEN 0
+                WHEN last_sync_at IS NULL THEN 1
+                ELSE 2
+            END,
+            platform,
+            label
+        "#,
+    )
+    .bind(ops.workspace_id.into_uuid())
+    .fetch_all(&ops.pool)
+    .await
+    .map_err(OpsError::sqlx)
+}
