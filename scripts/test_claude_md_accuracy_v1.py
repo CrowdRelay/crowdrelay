@@ -305,6 +305,30 @@ class LayoutIsRoughlyRight(ClaudeMdTestCase):
                 f"CLAUDE.md says {prefix} has {count} routes, the API registers {actual}",
             )
 
+    def test_every_operator_endpoint_named_is_registered(self) -> None:
+        """The capability map has to point at endpoints that exist.
+
+        It was added because six capabilities were reported missing in one
+        session while live in production. A map that rots into naming dead
+        endpoints is worse than none: it would send the next reader looking for
+        a 404 and confirm the belief it exists to correct.
+
+        Path parameters are compared by shape, since the map writes
+        `{trace_id}` where the router writes whatever it named the segment.
+        """
+        registered = {re.sub(r"\{[a-z_]+\}", "{}", route) for route in all_routes()}
+        named = {
+            re.sub(r"\{[a-z_]+\}", "{}", match)
+            for match in re.findall(r"`(/v1/control-plane/[a-z0-9/_{}-]+)`", TEXT)
+        }
+        self.assertTrue(named, "CLAUDE.md no longer names any operator endpoint")
+        missing = sorted(path for path in named if path not in registered)
+        self.assertEqual(
+            missing,
+            [],
+            f"CLAUDE.md names operator endpoints the API does not register: {missing}",
+        )
+
     def test_every_registration_file_is_named(self) -> None:
         """A new router file has to be added to the map before it can hide in it.
 
