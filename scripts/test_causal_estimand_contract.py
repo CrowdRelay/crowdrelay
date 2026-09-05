@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """Source-level contract for the active causal estimand in the production learner.
 
-The production learner (growth_intelligence.rs) must explicitly select
-IntentToTreat as the active estimand. PerProtocol is a legitimate domain
-concept and remains available in the enum, but it is NOT the current
-production methodology. Switching to PerProtocol requires an explicit code
-change visible in review — it must not happen silently via config or
-data-derived selection.
+The production learner must explicitly select IntentToTreat as the active
+estimand. PerProtocol is a legitimate domain concept and remains available in
+the enum, but it is NOT the current production methodology. Switching to
+PerProtocol requires an explicit code change visible in review — it must not
+happen silently via config or data-derived selection.
+
+The learner lives in `growth_intelligence/evidence_replay.rs`; it was split out
+of `growth_intelligence.rs`, which is now the snapshot loader. The estimand
+belongs wherever `apply_evidence_to_model` is, so this follows it there.
 
 This contract fails if:
-  - growth_intelligence.rs does not contain an explicit ITT selection
-  - growth_intelligence.rs contains an active PerProtocol selection
+  - the replay module does not contain an explicit ITT selection
+  - the replay module contains an active PerProtocol selection
   - The estimand is derived from data/config rather than hardcoded
 """
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-GI_PATH = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs"
+GI_PATH = (
+    ROOT
+    / "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/evidence_replay.rs"
+)
 EXPERIMENT_PATH = ROOT / "crates/crowdrelay-brain/src/experiment.rs"
 
 errors = []

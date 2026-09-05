@@ -38,7 +38,7 @@ RUST = sorted((ROOT / "crates").rglob("*.rs"))
 # to write it — the owner.
 SINGLE_WRITER_KEYS = {
     "strategy_posterior": (
-        "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs"
+        "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/evidence_replay.rs"
     ),
 }
 

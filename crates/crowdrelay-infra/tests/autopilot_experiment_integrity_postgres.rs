@@ -4553,3 +4553,8 @@ async fn t28e_experiment_unit_uniqueness_remains_intact() {
         "duplicate (workspace_id, experiment_uuid, assignment_round, unit_id) must fail"
     );
 }
+
+// The staggered-resolution contrast proof and its fixtures. `include!`d for
+// the same reason `fixtures.rs` is: shared scope, and the suite file stays
+// inside the source-size ratchet.
+include!("autopilot_experiment_integrity_postgres/contrast_batches.rs");

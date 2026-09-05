@@ -45,8 +45,8 @@ NAMED_SYMBOLS = {
         "pub(super) async fn refresh_evidence_readiness(",
         "pub(super) async fn measured_evidence_quality(",
     ],
-    "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs": [
-        "fn control_arm_means(",
+    "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/evidence_replay.rs": [
+        "fn control_arm_means<",
         "async fn apply_evidence_to_stored_strategy_posterior(",
     ],
     "crates/crowdrelay-brain/src/causal_model.rs": [

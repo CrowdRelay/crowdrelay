@@ -147,6 +147,25 @@ pub(in crate::autopilot) async fn record_growth_evidence_in_tx(
     Ok(())
 }
 
+/// Which resolved evidence rows to load. The two modes are exclusive on
+/// purpose: one advances the learner, the other supplies a comparison for rows
+/// the learner is already advancing.
+pub(in crate::autopilot) enum EvidenceSelector<'a> {
+    /// Rows that became learnable after the cursor. `None` loads every
+    /// resolved row — a full replay.
+    ResolvedAfter(Option<OffsetDateTime>),
+    /// The control arm of specific experiments, regardless of the cursor.
+    ///
+    /// A control row is a counterfactual, not an observation to learn from,
+    /// and it is only useful next to the treated rows it is the counterfactual
+    /// *for*. Those can resolve in a later batch than it did — treated units
+    /// in one experiment finish their measurements on different days — so the
+    /// batch that needs the contrast is often the batch that no longer
+    /// contains it. Loading it by experiment rather than by cursor is what
+    /// keeps a randomised comparison randomised.
+    ControlArmOf(&'a [uuid::Uuid]),
+}
+
 /// Loads resolved growth evidence for the brain's learning loop.
 /// Returns only evidence rows that have a resolved outcome.
 /// Ordered oldest-first so the brain can replay in chronological order.
@@ -155,7 +174,41 @@ pub(in crate::autopilot) async fn load_growth_evidence(
     workspace_id: WorkspaceId,
     since: Option<OffsetDateTime>,
 ) -> Result<Vec<GrowthEvidence>, RepositoryError> {
+    load_evidence(repo, workspace_id, &EvidenceSelector::ResolvedAfter(since)).await
+}
+
+/// Loads the resolved control arm of the given experiments, ignoring the
+/// learning cursor.
+///
+/// The rows this returns must be used as a contrast only. Feeding them back
+/// into the learner would replay observations it has already seen — the
+/// outcome model updates from every row, control ones included.
+pub(in crate::autopilot) async fn load_control_arm_evidence(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    experiments: &[uuid::Uuid],
+) -> Result<Vec<GrowthEvidence>, RepositoryError> {
+    if experiments.is_empty() {
+        return Ok(Vec::new());
+    }
+    load_evidence(
+        repo,
+        workspace_id,
+        &EvidenceSelector::ControlArmOf(experiments),
+    )
+    .await
+}
+
+async fn load_evidence(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    selector: &EvidenceSelector<'_>,
+) -> Result<Vec<GrowthEvidence>, RepositoryError> {
     let pool = &repo.pool;
+    let (since, contrast_experiments) = match selector {
+        EvidenceSelector::ResolvedAfter(since) => (*since, None),
+        EvidenceSelector::ControlArmOf(experiments) => (None, Some(*experiments)),
+    };
 
     // Diagnostic: check for legacy duplicate experiment assignments.
     // Migration 0201 added a partial UNIQUE INDEX on
@@ -296,12 +349,22 @@ pub(in crate::autopilot) async fn load_growth_evidence(
           -- fourteen- or forty-four-day measurement landed, its dispatch
           -- timestamp was long behind the cursor and the delta skipped it. The
           -- brain was replaying an empty set and saving a checkpoint of it.
-          AND ($2::timestamptz IS NULL OR ge.resolved_at > $2)
+          --
+          -- The control-arm mode ignores the cursor entirely. It is not
+          -- advancing the learner — it is fetching the comparison for rows the
+          -- learner is advancing this batch, and that comparison resolved
+          -- whenever it resolved.
+          AND CASE WHEN $3::uuid[] IS NULL
+                   THEN ($2::timestamptz IS NULL OR ge.resolved_at > $2)
+                   ELSE ge.treatment = 'control'
+                        AND ea.experiment_uuid = ANY($3)
+              END
         ORDER BY ge.resolved_at ASC, ge.timestamp ASC
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(since)
+    .bind(contrast_experiments)
     .fetch_all(pool)
     .await
     .map_err(map_sqlx)?;
