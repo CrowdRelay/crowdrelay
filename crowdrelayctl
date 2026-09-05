@@ -302,6 +302,63 @@ init_files() {
   fi
 }
 
+# Configuration that is set but can never reach a container.
+#
+# Two env files sit next to each other and do different jobs. `.env` is what
+# Docker Compose reads to substitute `${VAR}` in the compose files; the file
+# named by CROWDRELAY_ENV_FILE is what `env_file:` injects into the containers.
+# A variable in `.env` alone reaches a container only if some compose file
+# mentions it by name. If neither is true, the value is inert: it is set, it
+# looks set, and nothing consumes it.
+#
+# This is not hypothetical. `CROWDRELAY_CITY_GEOCODING_CONTACT` was set
+# correctly-looking in `.env`, and the city geocoding worker stayed switched off
+# across restarts and deploys because the value never entered the container.
+# The only symptom was one line in the boot log saying the component was
+# disabled, and requested cities silently kept no coordinates.
+check_unreachable_config() {
+  require_command python3
+  python3 - "$ROOT_DIR" "$(absolute_path "$CROWDRELAY_ENV_FILE")" <<'PY'
+import pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+env_file = pathlib.Path(sys.argv[2])
+dotenv = root / ".env"
+
+def assignments(path):
+    if not path.is_file():
+        return set()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {m.group(1) for m in re.finditer(r"^\s*(CROWDRELAY_[A-Z0-9_]+)=", text, re.M)}
+
+# A variable named anywhere in a compose file reaches a container through
+# substitution, so it is legitimately allowed to live only in `.env` -- image
+# tags are the usual case.
+referenced = set()
+for pattern in ("compose*.yaml", "compose*.yml", "docker-compose*.yaml", "docker-compose*.yml"):
+    for path in sorted(root.glob(pattern)):
+        referenced |= set(
+            re.findall(r"\$\{(CROWDRELAY_[A-Z0-9_]+)", path.read_text(encoding="utf-8", errors="replace"))
+        )
+
+unreachable = sorted(assignments(dotenv) - assignments(env_file) - referenced)
+if unreachable:
+    print(
+        f"These variables are set in {dotenv} but cannot reach any container: "
+        "they are absent from " + str(env_file) + " and no compose file names them.",
+        file=sys.stderr,
+    )
+    for name in unreachable:
+        print(f"  {name}", file=sys.stderr)
+    print(
+        f"Move them to {env_file} (the file `env_file:` injects), or reference "
+        "them from a compose service's `environment:` block.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+}
+
 doctor() {
   require_command docker
   docker compose version >/dev/null
@@ -325,6 +382,7 @@ doctor() {
   esac
 
   compose config --quiet
+  check_unreachable_config
   if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then compose run --rm -T --no-deps --entrypoint caddy area-management-proxy validate --config /etc/caddy/Caddyfile >/dev/null </dev/null; fi
   echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
 }
