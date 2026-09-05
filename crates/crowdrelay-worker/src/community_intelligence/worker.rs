@@ -130,6 +130,9 @@ pub struct CommunityIntelligenceWorker {
     adapters: Vec<Arc<dyn SourceAdapter>>,
     repo: Arc<PostgresCommunityIntelligenceRepository>,
     pool: sqlx::PgPool,
+    /// The workspace this process serves. Carried so the sweep schedule reads
+    /// this tenant's observation history rather than the whole table.
+    workspace_id: uuid::Uuid,
 }
 
 impl CommunityIntelligenceWorker {
@@ -137,11 +140,13 @@ impl CommunityIntelligenceWorker {
         adapters: Vec<Arc<dyn SourceAdapter>>,
         repo: Arc<PostgresCommunityIntelligenceRepository>,
         pool: sqlx::PgPool,
+        workspace_id: uuid::Uuid,
     ) -> Self {
         Self {
             adapters,
             repo,
             pool,
+            workspace_id,
         }
     }
 
@@ -151,21 +156,24 @@ impl CommunityIntelligenceWorker {
 
         // Per-source health state, keyed by adapter id, seeded from when each
         // source last observed anything rather than from process start.
-        let last_seen: HashMap<String, Duration> =
-            match self.repo.seconds_since_last_observation().await {
-                Ok(rows) => rows
-                    .into_iter()
-                    .filter_map(|(source, seconds)| {
-                        (seconds >= 0.0).then(|| (source, Duration::from_secs_f64(seconds)))
-                    })
-                    .collect(),
-                Err(error) => {
-                    // Treat every source as never-observed: due soon rather than
-                    // silently postponed by a full interval.
-                    warn!(%error, "could not read last observation times; sources will sweep now");
-                    HashMap::new()
-                }
-            };
+        let last_seen: HashMap<String, Duration> = match self
+            .repo
+            .seconds_since_last_observation(self.workspace_id)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(source, seconds)| {
+                    (seconds >= 0.0).then(|| (source, Duration::from_secs_f64(seconds)))
+                })
+                .collect(),
+            Err(error) => {
+                // Treat every source as never-observed: due soon rather than
+                // silently postponed by a full interval.
+                warn!(%error, "could not read last observation times; sources will sweep now");
+                HashMap::new()
+            }
+        };
         let mut health: HashMap<String, SourceHealth> = HashMap::new();
         for adapter in &self.adapters {
             let adapter_id = adapter.id();

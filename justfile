@@ -59,6 +59,7 @@ check: fmt lint test
     python3 scripts/check-ci-policy.py
     python3 scripts/source-size-ratchet.py
     python3 scripts/api-sql-ratchet.py
+    python3 scripts/workspace-scope-ratchet.py
     python3 scripts/test-modularity-contract.py
     python3 scripts/test_platform_vocabulary_v1.py
     python3 scripts/test_sql_identifiers_v1.py

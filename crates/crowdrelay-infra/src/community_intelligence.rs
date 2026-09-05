@@ -181,15 +181,26 @@ impl PostgresCommunityIntelligenceRepository {
     ///
     /// A source absent from the result has never observed anything and is due
     /// immediately.
+    ///
+    /// Scoped to one workspace, like every other read in this file. It was not:
+    /// the aggregate ran over the whole table, so in a database holding two
+    /// workspaces one tenant's observations would satisfy the other's freshness
+    /// check and postpone its sweep by a full interval. The tenant that never
+    /// discovered a community would have had nothing in the log to say why.
+    /// Today one deployment serves one workspace, so this could not yet
+    /// mis-fire, which is exactly why it was worth fixing before it could.
     pub async fn seconds_since_last_observation(
         &self,
+        workspace_id: Uuid,
     ) -> Result<Vec<(String, f64)>, CommunityIntelligenceError> {
         sqlx::query_as::<_, (String, f64)>(
             r#"SELECT source,
                       EXTRACT(EPOCH FROM (now() - max(observed_at)))::double precision
                FROM community_observations
+               WHERE workspace_id = $1
                GROUP BY source"#,
         )
+        .bind(workspace_id)
         .fetch_all(&self.pool)
         .await
         .map_err(CommunityIntelligenceError::unexpected)

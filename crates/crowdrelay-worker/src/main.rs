@@ -723,6 +723,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         community_intel_adapters,
         community_intel_repo,
         database.clone(),
+        workspace_id.into_uuid(),
     );
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);

@@ -1,0 +1,17 @@
+{
+  "crates/crowdrelay-infra/src/audience_graph.rs": 1,
+  "crates/crowdrelay-infra/src/autopilot/operations/attribution.rs": 2,
+  "crates/crowdrelay-infra/src/autopilot/operations/experiment_assignments.rs": 1,
+  "crates/crowdrelay-infra/src/fanbase.rs": 1,
+  "crates/crowdrelay-worker/src/agent_outcomes.rs": 2,
+  "crates/crowdrelay-worker/src/community_executor.rs": 7,
+  "crates/crowdrelay-worker/src/discord_executor.rs": 5,
+  "crates/crowdrelay-worker/src/draws/candidates_and_rewards.rs": 1,
+  "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2,
+  "crates/crowdrelay-worker/src/growth_metric_sync/simple_platforms.rs": 1,
+  "crates/crowdrelay-worker/src/main.rs": 1,
+  "crates/crowdrelay-worker/src/outbox/repository.rs": 4,
+  "crates/crowdrelay-worker/src/retention/steps.rs": 6,
+  "crates/crowdrelay-worker/src/social_post_executor.rs": 5,
+  "crates/crowdrelay-worker/src/telegram_executor.rs": 5
+}
