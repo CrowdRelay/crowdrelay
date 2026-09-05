@@ -42,6 +42,20 @@ const PLAY_OUTCOME_BATCH_SIZE: u32 = 8;
 const WAVE_OUTCOME_BATCH_SIZE: u32 = 8;
 const REPLY_TRIAGE_BATCH_SIZE: u32 = 50;
 
+/// What one cycle produced, for the record that describes it.
+#[derive(Clone, Copy, Debug, Default)]
+struct CycleObservation {
+    /// A phase fell over while the others completed. Not a failed cycle: the
+    /// phases are isolated so that one failing cannot stop already-authorized
+    /// work, and calling that failure would teach an operator to ignore the
+    /// word.
+    degraded: bool,
+    /// The North Star as the evaluation phase read it, in whatever metric the
+    /// tenant has chosen. `None` when that phase did not get far enough to
+    /// take a reading.
+    north_star: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AutopilotWorker {
     repository: PostgresAutopilotRepository,
@@ -145,33 +159,37 @@ impl AutopilotWorker {
             "autopilot_cycle",
             cycle_id = cycle_id.map(|id| id.to_string()).unwrap_or_default()
         );
-        let degraded = {
+        let observed = {
             let _entered = span.enter();
-            match self.run_once(started).await {
-                Ok(()) => false,
-                Err(error) => {
-                    tracing::warn!(error = %error, "ViryaOS Autopilot cycle failed");
-                    true
-                }
-            }
+            self.run_once(started).await
         };
         if let Some(cycle_id) = cycle_id {
             crowdrelay_infra::autopilot::close_cycle_run(
                 self.repository.pool(),
                 self.workspace_id,
                 cycle_id,
-                degraded,
+                observed.degraded,
                 OffsetDateTime::now_utc(),
+                observed.north_star,
             )
             .await;
         }
     }
 
-    async fn run_once(&self, now: OffsetDateTime) -> Result<(), RepositoryError> {
+    /// Runs one cycle and reports what the record of it should say.
+    ///
+    /// Not a `Result`: a failed phase does not fail the cycle. The phases are
+    /// isolated on purpose, so a cycle in which one fell over and the rest
+    /// completed is degraded, and the reading the evaluation phase took is
+    /// still a real reading. Collapsing that into an error discarded it —
+    /// putting a gap in the series the brain assesses itself from at exactly
+    /// the moment something was going wrong.
+    async fn run_once(&self, now: OffsetDateTime) -> CycleObservation {
         // Evaluation, execution and delayed measurement are intentionally isolated.
         // A context-specific query failure must never block already-authorized work
         // or evidence collection from a previous cycle.
         let mut phase_failed = false;
+        let mut north_star_observed = None;
 
         // Recording first-party observations runs before evaluation so a cycle
         // reasons about the newest evidence it can. It is a separate phase
@@ -199,29 +217,33 @@ impl AutopilotWorker {
 
         let evaluator = EvaluateAutopilot::new(&self.repository, self.workspace_id);
         match evaluator.execute(now).await {
-            // A cycle that only started a campaign or only settled a step it
-            // will never send has still done something an operator should be
-            // able to see. Reading the play counters here is what keeps a
-            // recorded omission from being a silent one.
-            Ok(report)
+            Ok(report) => {
+                // The reading is taken whether or not the cycle went on to do
+                // anything, because a cycle that decided nothing is exactly the
+                // one whose North Star an operator needs to see.
+                north_star_observed = report.north_star_observed;
+                // A cycle that only started a campaign or only settled a step it
+                // will never send has still done something an operator should be
+                // able to see. Reading the play counters here is what keeps a
+                // recorded omission from being a silent one.
                 if report.decisions > 0
                     || report.actions_enqueued > 0
                     || report.actions_throttled > 0
                     || report.plays_started > 0
                     || report.play_steps_skipped > 0
-                    || report.plays_completed > 0 =>
-            {
-                tracing::info!(
-                    decisions = report.decisions,
-                    actions_enqueued = report.actions_enqueued,
-                    actions_throttled = report.actions_throttled,
-                    plays_started = report.plays_started,
-                    play_steps_skipped = report.play_steps_skipped,
-                    plays_completed = report.plays_completed,
-                    "ViryaOS Autopilot evaluated bounded contexts"
-                );
+                    || report.plays_completed > 0
+                {
+                    tracing::info!(
+                        decisions = report.decisions,
+                        actions_enqueued = report.actions_enqueued,
+                        actions_throttled = report.actions_throttled,
+                        plays_started = report.plays_started,
+                        play_steps_skipped = report.play_steps_skipped,
+                        plays_completed = report.plays_completed,
+                        "ViryaOS Autopilot evaluated bounded contexts"
+                    );
+                }
             }
-            Ok(_) => {}
             Err(error) => {
                 phase_failed = true;
                 tracing::warn!(error = %error, "ViryaOS Autopilot evaluation failed");
@@ -532,9 +554,15 @@ impl AutopilotWorker {
         }
 
         if phase_failed {
-            Err(RepositoryError::Unexpected)
-        } else {
-            Ok(())
+            // Each phase has already logged what it hit. This line says the
+            // cycle as a whole is degraded, which the previous one -- an
+            // opaque `RepositoryError::Unexpected` raised here and logged by
+            // the caller -- did not.
+            tracing::warn!("ViryaOS Autopilot cycle degraded: a phase failed");
+        }
+        CycleObservation {
+            degraded: phase_failed,
+            north_star: north_star_observed,
         }
     }
 

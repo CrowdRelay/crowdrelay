@@ -12,6 +12,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .repository
             .load_growth_intelligence_snapshots(self.workspace_id, now)
             .await?;
+        // Report the North Star the world model actually resolved, so the cycle
+        // record trends the metric the brain is optimizing rather than a second
+        // figure derived somewhere else under the same name.
+        _report.north_star_observed = snapshots
+            .first()
+            .map(|snapshot| snapshot.world_model.north_star_current);
         // Load the causal model from past predictions + outcomes.
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.

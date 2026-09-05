@@ -48,6 +48,19 @@ pub struct AutopilotCycleReport {
     /// quota throttling because the two mean different things: throttled work
     /// is deferred, gated work is somebody's decision to make.
     pub actions_gated: u32,
+    /// The North Star as this cycle read it, whatever metric the tenant has
+    /// chosen — signal installs by default, not fans.
+    ///
+    /// Reported rather than re-derived. The cycle record used to compute its
+    /// own figure with a hardcoded count of active fans, so a tenant whose
+    /// North Star was anything else had two numbers under the same name: one on
+    /// `/autopilot/cycle/preview`, another on `/ops/cycles`, and the brain's
+    /// self-assessment trending the one the brain was not optimizing.
+    ///
+    /// `None` when the evaluation phase could not run. A cycle that took no
+    /// reading records no reading, because a zero here is indistinguishable
+    /// from having lost the entire audience.
+    pub north_star_observed: Option<u32>,
 }
 
 #[derive(Debug, Error)]
