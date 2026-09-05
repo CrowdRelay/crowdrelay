@@ -57,6 +57,11 @@ pub struct CyclePreview {
     /// correctly decide to do nothing, which is the honest answer rather than a
     /// failure.
     pub has_any_connected_platform: bool,
+    /// Every connected feed has stopped reporting. The brain will not plan more
+    /// discovery through them, which is why the strategy above may not be the
+    /// one the growth numbers alone would suggest — and it is the single fact
+    /// an operator needs in order to go and fix a credential.
+    pub discovery_channels_silent: bool,
 }
 
 /// Asks the worker to run a cycle now.
@@ -291,5 +296,6 @@ pub async fn preview_autopilot_cycle(
         north_star_current: world.north_star_current,
         north_star_this_month: world.north_star_this_month,
         has_any_connected_platform: world.connected_platforms > 0,
+        discovery_channels_silent: GrowthStrategy::discovery_channels_are_silent(world),
     })
 }
