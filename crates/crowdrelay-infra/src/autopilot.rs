@@ -5,7 +5,8 @@ mod actions_execution;
 mod control;
 mod cycle_trigger;
 pub use cycle_trigger::{
-    AUTOPILOT_CYCLE_CHANNEL, CyclePreview, preview_autopilot_cycle, request_autopilot_cycle,
+    AUTOPILOT_CYCLE_CHANNEL, CyclePreview, CycleTrigger, close_cycle_run, open_cycle_run,
+    preview_autopilot_cycle, request_autopilot_cycle,
 };
 mod control_mutations;
 mod decisions;

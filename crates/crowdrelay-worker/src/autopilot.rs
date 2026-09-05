@@ -13,7 +13,7 @@ use crowdrelay_application::{
     },
 };
 use crowdrelay_domain::{WorkspaceId, play_measurement::PlayMeasurementPolicy};
-use crowdrelay_infra::autopilot::PostgresAutopilotRepository;
+use crowdrelay_infra::autopilot::{CycleTrigger, PostgresAutopilotRepository};
 use sqlx::postgres::PgListener;
 use time::OffsetDateTime;
 use tokio::{
@@ -108,16 +108,62 @@ impl AutopilotWorker {
                         continue;
                     }
                     tracing::info!("ViryaOS Autopilot cycle requested by operator");
-                    if let Err(error) = self.run_once(OffsetDateTime::now_utc()).await {
-                        tracing::warn!(error = %error, "ViryaOS Autopilot cycle failed");
-                    }
+                    self.run_recorded_cycle(CycleTrigger::Requested).await;
                 }
                 _ = ticks.tick() => {
-                    if let Err(error) = self.run_once(OffsetDateTime::now_utc()).await {
-                        tracing::warn!(error = %error, "ViryaOS Autopilot cycle failed");
-                    }
+                    self.run_recorded_cycle(CycleTrigger::Scheduled).await;
                 }
             }
+        }
+    }
+
+    /// Runs one cycle and records that it happened.
+    ///
+    /// The four phases are isolated on purpose -- one failing must not block the
+    /// others -- and that is exactly why nothing tied a cycle together: each
+    /// phase logged its own line and `phase_failed` collapsed all of them into
+    /// one boolean. Asking "which cycle produced that decision, and what else
+    /// did that cycle do" meant correlating timestamps across four tables and a
+    /// log, which is how a brain fixating on a dead channel went unnoticed for
+    /// two weeks.
+    ///
+    /// The cycle id also enters a tracing span, so every line the cycle emits
+    /// carries it and the log can be filtered to one run.
+    ///
+    /// Recording never gates the work: an unopened record still runs the cycle,
+    /// because losing the note of what the brain did must not cost the doing.
+    async fn run_recorded_cycle(&self, trigger: CycleTrigger) {
+        let started = OffsetDateTime::now_utc();
+        let cycle_id = crowdrelay_infra::autopilot::open_cycle_run(
+            self.repository.pool(),
+            self.workspace_id,
+            trigger,
+            started,
+        )
+        .await;
+        let span = tracing::info_span!(
+            "autopilot_cycle",
+            cycle_id = cycle_id.map(|id| id.to_string()).unwrap_or_default()
+        );
+        let degraded = {
+            let _entered = span.enter();
+            match self.run_once(started).await {
+                Ok(()) => false,
+                Err(error) => {
+                    tracing::warn!(error = %error, "ViryaOS Autopilot cycle failed");
+                    true
+                }
+            }
+        };
+        if let Some(cycle_id) = cycle_id {
+            crowdrelay_infra::autopilot::close_cycle_run(
+                self.repository.pool(),
+                self.workspace_id,
+                cycle_id,
+                degraded,
+                OffsetDateTime::now_utc(),
+            )
+            .await;
         }
     }
 
