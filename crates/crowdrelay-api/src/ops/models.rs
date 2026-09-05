@@ -38,6 +38,7 @@ pub struct OpsSummary {
     http: HttpRequestSummary,
     database: DatabaseRuntimeSummary,
     area: AreaRuntimeSummary,
+    /// The newest migration this build embeds. A property of the binary.
     schema_version: u32,
     release: String,
 }
