@@ -38,6 +38,12 @@ pub mod ports;
 pub mod referrals;
 pub mod use_cases;
 
+/// The brain's assessment of its own performance, re-exported so the HTTP
+/// layer can report it without taking a direct dependency on the brain.
+/// The rule is policy and belongs above infrastructure; the dependency edge
+/// api -> brain does not exist and is not worth creating for a read model.
+pub use crowdrelay_brain::self_assessment;
+
 pub use admission::{
     AdmissionRepository, AdmissionUseCaseError, ClaimAdmissionPass, ClaimAdmissionPassCommand,
     IssueAdmissionPass, IssueAdmissionPassCommand, LoadAdmissionPass, RedeemAdmissionPass,

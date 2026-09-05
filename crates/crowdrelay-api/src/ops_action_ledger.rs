@@ -176,6 +176,32 @@ pub struct CycleRunEntry {
     pub outcome: Option<String>,
     pub decisions_recorded: i32,
     pub actions_created: i32,
+    /// Active fans when the cycle finished. NULL when the reading could not be
+    /// taken, which is not the same as zero.
+    pub north_star_value: Option<i32>,
+}
+
+/// What the brain makes of its own recent performance, and the cycles behind it.
+///
+/// This answers what sixteen consecutive `succeeded` cycles could not: whether
+/// anything is working. `succeeded` means every phase completed, which stays
+/// true while the fan count does not move — and an operator reading a wall of
+/// successes beside a flat number concludes the thing is broken, which is the
+/// wrong conclusion for a system that is merely starved.
+///
+/// Vocabulary ported from Kern's `brain::metacognition`, including its central
+/// judgement: a brain with no result yet is learning, not stuck.
+#[derive(Debug, Serialize)]
+pub struct CycleReport {
+    /// `improving`, `learning`, `stagnant`, `regressing`, or `initializing`.
+    pub brain_state: &'static str,
+    /// True only for `regressing` and `stagnant`. A flat North Star on a young
+    /// system is expected, and alarming on it every five minutes teaches an
+    /// operator to ignore alarms.
+    pub needs_attention: bool,
+    /// Distinct days of North Star readings behind the assessment.
+    pub days_observed: usize,
+    pub cycles: Vec<CycleRunEntry>,
 }
 
 /// GET /v1/admin/ops/cycles — the last brain cycles, newest first.
@@ -191,7 +217,30 @@ pub async fn list_cycles(
     )
     .await
     {
-        Ok(entries) => private_json(StatusCode::OK, entries),
+        Ok(entries) => {
+            let samples: Vec<DailyNorthStar> = entries
+                .iter()
+                .filter_map(|entry| {
+                    entry.north_star_value.map(|value| DailyNorthStar {
+                        day: i64::from(entry.started_at.to_julian_day()),
+                        value: f64::from(value),
+                    })
+                })
+                .collect();
+            let mut days: Vec<i64> = samples.iter().map(|sample| sample.day).collect();
+            days.sort_unstable();
+            days.dedup();
+            let state = assess(samples);
+            private_json(
+                StatusCode::OK,
+                CycleReport {
+                    brain_state: state.as_str(),
+                    needs_attention: state.needs_attention(),
+                    days_observed: days.len(),
+                    cycles: entries,
+                },
+            )
+        }
         Err(error) => error.into_response(request_id(&headers)),
     }
 }
@@ -212,7 +261,8 @@ async fn load_cycle_runs(
                duration_ms,
                outcome,
                decisions_recorded,
-               actions_created
+               actions_created,
+               north_star_value
         FROM viryaos_autopilot_cycle_runs
         WHERE workspace_id = $1
           AND ($2::text IS NULL OR outcome IS NOT DISTINCT FROM $2)
