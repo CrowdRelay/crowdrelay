@@ -237,6 +237,50 @@ impl PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // An approval nobody can answer is not a decision.
+            //
+            // `evaluate_outcome_quality` refuses to create these now: a
+            // `require_approval` outcome with zero confidence produces no
+            // decision at all. That guard is prospective, and it left the ones
+            // already in the queue where they were. Production carried one --
+            // "Zatwierdź cel outreach: Unnamed target", 0% confidence, whose own
+            // stated reason is that all three Reddit searches returned
+            // credential errors and no subreddit data was retrieved.
+            //
+            // An operator cannot approve that and cannot reject it as wrong,
+            // because it is not a proposal about the world; it is a connector
+            // failure wearing the shape of one. Left alone it would sit in the
+            // queue until `approval_expires_at` reaped it days later, teaching
+            // the operator that the queue contains things to ignore -- which is
+            // the habit that makes an exception queue worthless.
+            //
+            // Same rule as the ingress guard, applied to state rather than to
+            // arrivals, so a guard added after the rows exist still finishes the
+            // job. No attempt row: this action was never attempted, and the
+            // sibling approval sweep above does not write one either.
+            sqlx::query(
+                r#"
+                UPDATE viryaos_autopilot_actions AS action
+                SET status = 'cancelled',
+                    finished_at = $2,
+                    last_error_kind = 'insufficient_evidence'
+                FROM viryaos_autopilot_decisions AS decision
+                WHERE action.workspace_id = $1
+                  AND action.status = 'awaiting_approval'
+                  AND ($3::text IS NULL OR action.action_kind = $3)
+                  AND ($4::text IS NULL OR action.action_kind <> $4)
+                  AND decision.workspace_id = action.workspace_id
+                  AND decision.id = action.decision_id
+                  AND decision.confidence_basis_points = 0
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .bind(include_action_kind)
+            .bind(exclude_action_kind)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
             // Close the attempt too, not only the action.
             //
             // This sweep reaps an action whose worker claimed it and then died:
