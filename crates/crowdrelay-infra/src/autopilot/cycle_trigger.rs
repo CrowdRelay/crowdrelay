@@ -78,6 +78,112 @@ pub async fn request_autopilot_cycle(
     Ok(())
 }
 
+/// How a cycle was started. A brain that only ever runs when asked is a
+/// different problem from one that runs on schedule and decides nothing.
+#[derive(Clone, Copy, Debug)]
+pub enum CycleTrigger {
+    Scheduled,
+    Requested,
+}
+
+impl CycleTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::Requested => "requested",
+        }
+    }
+}
+
+/// Opens a cycle-run row and returns its id.
+///
+/// A cycle runs four isolated phases, each logging its own line, and until this
+/// existed nothing tied them together: `phase_failed` collapsed every phase into
+/// one boolean and the only evidence a cycle had happened was a scatter of log
+/// lines with no shared identifier. Answering "which cycle produced that
+/// decision, and what else did it do" meant correlating timestamps across four
+/// tables and a log.
+///
+/// Returns `None` when the row cannot be written. The caller runs the cycle
+/// regardless: this is an operator's record of what the brain did, and losing
+/// the record must never cost the work it describes.
+pub async fn open_cycle_run(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    trigger: CycleTrigger,
+    now: OffsetDateTime,
+) -> Option<uuid::Uuid> {
+    let id = uuid::Uuid::now_v7();
+    let written = sqlx::query(
+        r#"
+        INSERT INTO viryaos_autopilot_cycle_runs (id, workspace_id, trigger, started_at)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id.into_uuid())
+    .bind(trigger.as_str())
+    .bind(now)
+    .execute(pool)
+    .await;
+    match written {
+        Ok(_) => Some(id),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not open an autopilot cycle run record");
+            None
+        }
+    }
+}
+
+/// Closes a cycle-run row, counting what the cycle produced.
+///
+/// The counts are read back from the tables that hold the truth rather than
+/// accumulated as the cycle runs, so this record cannot drift away from the
+/// ledger it describes. `degraded` rather than `failed` when a phase fell over:
+/// the phases are isolated on purpose, so one failing while the others complete
+/// is the design working, and calling that a failed cycle would train the
+/// operator to ignore the word.
+pub async fn close_cycle_run(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    cycle_id: uuid::Uuid,
+    degraded: bool,
+    finished_at: OffsetDateTime,
+) {
+    let closed = sqlx::query(
+        r#"
+        UPDATE viryaos_autopilot_cycle_runs AS run
+        SET finished_at = $3,
+            duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM ($3 - run.started_at)) * 1000)::integer),
+            outcome = CASE WHEN $4 THEN 'degraded' ELSE 'succeeded' END,
+            decisions_recorded = (
+                SELECT count(*)
+                FROM viryaos_autopilot_decisions AS decision
+                WHERE decision.workspace_id = run.workspace_id
+                  AND decision.evaluated_at >= run.started_at
+                  AND decision.evaluated_at <= $3
+            ),
+            actions_created = (
+                SELECT count(*)
+                FROM viryaos_autopilot_actions AS action
+                WHERE action.workspace_id = run.workspace_id
+                  AND action.created_at >= run.started_at
+                  AND action.created_at <= $3
+            )
+        WHERE run.workspace_id = $1 AND run.id = $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .bind(finished_at)
+    .bind(degraded)
+    .execute(pool)
+    .await;
+    if let Err(error) = closed {
+        tracing::warn!(error = %error, "could not close an autopilot cycle run record");
+    }
+}
+
 /// Reports what a cycle would decide, without running one.
 pub async fn preview_autopilot_cycle(
     repo: &crate::autopilot::PostgresAutopilotRepository,
