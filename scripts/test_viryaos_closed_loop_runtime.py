@@ -18,15 +18,23 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         infra = (ROOT / 'crates/crowdrelay-infra/src/autopilot/execution.rs').read_text()
         infra_caps = (ROOT / 'crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs').read_text()
         runtime = (ROOT / 'crates/crowdrelay-infra/src/autopilot/runtime.rs').read_text()
+        # The circuit breaker moved to its own module; the invariants it holds
+        # are unchanged and are asserted there. Same statements, one file over.
+        circuit = (ROOT / 'crates/crowdrelay-infra/src/autopilot/executor_circuit.rs').read_text()
         self.assertIn('ensure_executor_capability', infra_caps)
         self.assertIn('viryaos_executor_instances', runtime)
         self.assertIn('RepositoryError::Unavailable', infra_caps)
         self.assertIn('heartbeat_write.rows_affected() != 1', runtime)
         self.assertIn("'n8n','production'", runtime)
-        self.assertIn('viryaos_executor_circuit_breakers', runtime)
-        self.assertIn("INTERVAL '15 minutes'", runtime)
-        self.assertIn('last_failure_at <= EXCLUDED.last_failure_at', runtime)
-        self.assertIn('last_failure_at <= $3', runtime)
+        self.assertIn('viryaos_executor_circuit_breakers', circuit)
+        # The window is one named constant now, interpolated into both the
+        # consecutive-failure test and the guard extension.
+        self.assertIn("WINDOW: &str = \"15 minutes\"", circuit)
+        self.assertIn("INTERVAL '{WINDOW}'", circuit)
+        # Both statements stay ordered by last_failure_at, so an out-of-order
+        # receipt cannot rewind the breaker with a stale observation.
+        self.assertIn('last_failure_at <= EXCLUDED.last_failure_at', circuit)
+        self.assertIn('last_failure_at <= $3', circuit)
         self.assertIn('guarded_executor_count', runtime)
 
     def test_feedback_loop_and_contact_governor(self):
@@ -114,13 +122,21 @@ class ViryaOsClosedLoopRuntime(unittest.TestCase):
         runtime = (ROOT / 'crates/crowdrelay-infra/src/autopilot/runtime.rs').read_text()
         control = (ROOT / 'crates/crowdrelay-infra/src/autopilot/control.rs').read_text()
         chief = (ROOT / 'crates/crowdrelay-infra/src/autopilot/operations/chief.rs').read_text()
+        evidence = (ROOT / 'crates/crowdrelay-infra/src/autopilot/success_evidence.rs').read_text()
         failed_arm = runtime[runtime.index('ExecutorReportStatus::Failed =>'):runtime.index('ExecutorReportStatus::Succeeded =>')]
         # The two-input resolver loads the current action state within the
         # transaction and passes it to legal_transition(current_state,
         # resolve_observation(evidence)). legal_transition(Succeeded, Failed)
         # → Conflict surfaces the contradiction.
-        self.assertIn('SELECT status FROM viryaos_autopilot_actions', failed_arm)
-        self.assertIn('FOR UPDATE', failed_arm)
+        #
+        # The locked read moved into `locked_action_state`, which returns
+        # `Unreadable` rather than a state when the status does not map — the
+        # arm must still take the transaction-scoped, row-locked read, and it
+        # must still be the only way the arm learns the current state.
+        self.assertIn('locked_action_state(', failed_arm)
+        self.assertIn('LockedActionState::Unreadable', failed_arm)
+        self.assertIn('SELECT status FROM viryaos_autopilot_actions', evidence)
+        self.assertIn('FOR UPDATE', evidence)
         self.assertIn('legal_transition(', failed_arm)
         self.assertIn('resolve_observation(', failed_arm)
         self.assertIn('ResolutionEvidence::TerminalReceipt', failed_arm)

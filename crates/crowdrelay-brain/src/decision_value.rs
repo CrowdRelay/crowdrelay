@@ -456,6 +456,116 @@ mod tests {
         assert!(dv.risk_penalty.is_none());
     }
 
+    /// Prediction error must not become a reward term.
+    ///
+    /// Calibration closes a real loop: `CalibrationTracker` records
+    /// (predicted, observed) per regime and
+    /// `correct_prediction_by_regime(OutcomeModel, ..)` shifts the *outcome
+    /// model's* prediction with it. That is calibration doing its job — it
+    /// changes what the brain expects, upstream of any value.
+    ///
+    /// `calibration_bias` on `DecisionValue` is a different thing: a
+    /// per-template residual carried for provenance. If it ever reached
+    /// `total()`, a template the brain has been wrong about would rank
+    /// differently from an identical one it has been right about, at the same
+    /// expected fans — turning "how well did I predict" into "how much is this
+    /// worth". Two candidates whose economics are identical must score
+    /// identically no matter what the brain's track record on them is.
+    #[test]
+    fn prediction_error_does_not_change_the_economic_value() {
+        let candidate = |calibration_bias: f64, contamination: f64| DecisionValue {
+            expected_incremental_y30: 5.0,
+            uncertainty: 2.0,
+            p_meaningful_effect: 0.8,
+            estimation_regime: EstimationRegime::Y30Direct,
+            evidence_quality: EvidenceQuality::RandomizedHoldout,
+            sample_size: 10,
+            uses_y30: true,
+            bridge_confidence: 5,
+            bridge_is_reliable: false,
+            contamination,
+            calibration_bias,
+            resource_cost: ResourceCost::configured(1.0),
+            pragmatic_value: 5.0,
+            risk_penalty: None,
+            opportunity_cost: -1.0,
+            decision_mode: DecisionMode::Exploit,
+        };
+
+        let well_predicted = candidate(0.0, 0.0);
+        let badly_overpredicted = candidate(4.0, 0.0);
+        let badly_underpredicted = candidate(-4.0, 0.0);
+
+        assert!(
+            (well_predicted.total() - badly_overpredicted.total()).abs() < f64::EPSILON,
+            "a template the brain overestimated must not be worth less at the \
+             same expected fans: {} vs {}",
+            well_predicted.total(),
+            badly_overpredicted.total()
+        );
+        assert!(
+            (well_predicted.total() - badly_underpredicted.total()).abs() < f64::EPSILON,
+            "nor more when it underestimated: {} vs {}",
+            well_predicted.total(),
+            badly_underpredicted.total()
+        );
+
+        // Contamination is the same kind of claim from the other direction: it
+        // says how much a measurement can be trusted, which belongs to evidence
+        // quality and to the variance the posterior is updated with — not to a
+        // number subtracted from what an action is worth.
+        assert!(
+            (well_predicted.total() - candidate(0.0, 0.9).total()).abs() < f64::EPSILON,
+            "contamination must qualify the evidence, not tax the economics"
+        );
+    }
+
+    /// `total()` is exactly its three declared terms.
+    ///
+    /// The invariant this file opens with is that every additive term converts
+    /// into expected incremental fan-equivalents, and that anything which
+    /// cannot is a hard constraint in `PortfolioConfig` rather than a penalty
+    /// here. The way that invariant dies is one plausible-looking term at a
+    /// time, each defended on its own. Pin the arithmetic so a fourth term has
+    /// to arrive as a deliberate change to this assertion.
+    #[test]
+    fn total_is_only_pragmatic_value_risk_and_opportunity_cost() {
+        let dv = DecisionValue {
+            expected_incremental_y30: 5.0,
+            uncertainty: 7.0,
+            p_meaningful_effect: 0.3,
+            estimation_regime: EstimationRegime::OutcomeModel,
+            evidence_quality: EvidenceQuality::Observational,
+            sample_size: 1,
+            uses_y30: false,
+            bridge_confidence: 0,
+            bridge_is_reliable: false,
+            contamination: 0.7,
+            calibration_bias: 2.5,
+            resource_cost: ResourceCost::configured(9.0),
+            pragmatic_value: 5.0,
+            risk_penalty: Some(-0.25),
+            opportunity_cost: -1.5,
+            decision_mode: DecisionMode::Explore,
+        };
+        assert!(
+            (dv.total() - (5.0 - 0.25 - 1.5)).abs() < f64::EPSILON,
+            "total() is pragmatic_value + risk_penalty + opportunity_cost and \
+             nothing else, got {}",
+            dv.total()
+        );
+        // Uncertainty in particular: wide posteriors are not a cost. Risk is
+        // "the downside if this is wrong", uncertainty is "I don't know how
+        // large the effect is", and deriving one from the other is how a young
+        // learner talks itself out of the exploration it needs.
+        let mut certain = dv.clone();
+        certain.uncertainty = 0.0;
+        assert!(
+            (certain.total() - dv.total()).abs() < f64::EPSILON,
+            "uncertainty must not enter the economic value"
+        );
+    }
+
     #[test]
     fn estimation_regime_round_trips() {
         for regime in [
