@@ -15,6 +15,15 @@ pub(super) struct DatabaseRuntimeSummary {
     io_combine_limit_bytes: Option<i64>,
     io_max_combine_limit_bytes: Option<i64>,
     async_io_active: bool,
+    /// The newest migration this database has applied.
+    ///
+    /// `OpsSummary::schema_version` beside it is the build's constant, baked in
+    /// from the migrations directory at compile time. The two answer different
+    /// questions -- what the binary contains, and what the database has -- and
+    /// they can disagree: production served 234 while the database held 236,
+    /// and a migration that had landed ahead of its code silently changed how
+    /// one query behaved. Neither number alone would have shown that.
+    schema_version: Option<i64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -27,6 +36,7 @@ pub(super) struct DatabaseRuntimeRow {
     maintenance_io_concurrency: Option<i32>,
     io_combine_limit_bytes: Option<i64>,
     io_max_combine_limit_bytes: Option<i64>,
+    database_schema_version: Option<i64>,
 }
 
 impl DatabaseRuntimeSummary {
@@ -46,6 +56,7 @@ impl DatabaseRuntimeSummary {
             maintenance_io_concurrency: row.maintenance_io_concurrency,
             io_combine_limit_bytes: row.io_combine_limit_bytes,
             io_max_combine_limit_bytes: row.io_max_combine_limit_bytes,
+            schema_version: row.database_schema_version,
         }
     }
 }

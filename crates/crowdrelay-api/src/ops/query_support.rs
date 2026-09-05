@@ -295,7 +295,18 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             CASE
                 WHEN NULLIF(current_setting('io_max_combine_limit', true), '') IS NULL THEN NULL
                 ELSE pg_size_bytes(current_setting('io_max_combine_limit', true))::bigint
-            END AS io_max_combine_limit_bytes
+            END AS io_max_combine_limit_bytes,
+            -- The newest migration this database has applied.
+            --
+            -- `schema_version` below is the build's constant, baked in from the
+            -- migrations directory at compile time: it describes the binary.
+            -- The two can disagree, and when they did nobody could tell --
+            -- production served `schema_version: 234` while the database had
+            -- 236 applied, and a migration that had landed ahead of its code
+            -- silently changed how one query behaved. Reporting both is the
+            -- cheapest way for that to be visible where an operator looks.
+            (SELECT max(version) FROM _sqlx_migrations)::bigint
+                AS database_schema_version
         "#,
     )
     .fetch_one(&state.pool)
