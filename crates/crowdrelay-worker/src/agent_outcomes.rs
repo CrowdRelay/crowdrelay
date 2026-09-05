@@ -67,6 +67,94 @@ pub enum AgentOutcomeError {
     UnknownTargetKind(String),
 }
 
+/// Why an outcome was rejected by the data-quality guard. Stored in
+/// `rejection_reason` for auditability — the row is never deleted.
+///
+/// The brain must never turn a connector failure into an opportunity.
+/// A Reddit credential error produces 0 evidence and 0% confidence, and
+/// without these guards that still became a decision with an
+/// `awaiting_approval` action targeting "Unnamed target". NO EVIDENCE =
+/// NO OPPORTUNITY.
+#[derive(Debug)]
+enum OutcomeRejection {
+    /// confidence_basis_points is 0 for a require_approval kind.
+    /// The connector produced no evidence to support a decision.
+    InsufficientEvidence { reason: String },
+    /// The outreach target has no usable identity — display_name is
+    /// missing, empty, or the literal "Unnamed target" fallback.
+    MissingTargetIdentity,
+}
+
+impl std::fmt::Display for OutcomeRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientEvidence { reason } => {
+                write!(f, "INSUFFICIENT_EVIDENCE: {reason}")
+            }
+            Self::MissingTargetIdentity => {
+                write!(
+                    f,
+                    "MISSING_TARGET_IDENTITY: display_name is missing or unnamed"
+                )
+            }
+        }
+    }
+}
+
+/// Hard data-quality guard. Runs BEFORE the decision INSERT in `map_outcome`.
+///
+/// `require_approval` kinds create actions that reach external audiences or
+/// fans — they must have evidence. `recommend_only` kinds (insights,
+/// segments) are observations, not actions, so confidence 0 on them is a
+/// weak observation rather than a dangerous act and they pass through.
+///
+/// For `OutreachTargets` specifically, the target must have a real identity
+/// (display_name present and not the "Unnamed target" fallback) and at least
+/// one evidence URL. A connector that returned nothing but errors produces
+/// neither, and the LLM that hallucinated from empty data produces the
+/// "Unnamed target" fallback — both are rejected here.
+fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRejection> {
+    // Only require_approval kinds create actions. Insights and segments
+    // are observations — confidence 0 is weak but not dangerous.
+    if outcome.kind.disposition() != "require_approval" {
+        return Ok(());
+    }
+
+    if outcome.confidence_basis_points == 0 {
+        return Err(OutcomeRejection::InsufficientEvidence {
+            reason: "confidence is 0 — no evidence to support a decision".to_owned(),
+        });
+    }
+
+    // Outreach targets need a real identity and evidence URLs.
+    if outcome.kind == OutcomeKind::OutreachTargets {
+        if let Some(item) = &outcome.payload.item {
+            let display_name = item
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if display_name.is_empty() || display_name.eq_ignore_ascii_case("Unnamed target") {
+                return Err(OutcomeRejection::MissingTargetIdentity);
+            }
+            let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
+            let has_evidence = evidence
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| !item.is_null()));
+            if !has_evidence {
+                return Err(OutcomeRejection::InsufficientEvidence {
+                    reason: "no evidence URLs provided".to_owned(),
+                });
+            }
+        } else {
+            // No item at all — an outreach_targets outcome with no target.
+            return Err(OutcomeRejection::MissingTargetIdentity);
+        }
+    }
+
+    Ok(())
+}
+
 /// Row shape of the audience-graph lookup for a proposed community.
 type CommunityPlaceRow = (Uuid, Option<i32>, Option<i32>, String, String, Option<i16>);
 
@@ -353,6 +441,24 @@ impl AgentOutcomeWorker {
         &self,
         outcome: &ValidatedOutcome,
     ) -> Result<(Option<Uuid>, Option<Uuid>), AgentOutcomeError> {
+        // Hard data-quality guard: NO EVIDENCE = NO OPPORTUNITY.
+        // A connector failure (Reddit credential error) produces 0
+        // confidence, 0 evidence, and "Unnamed target". Without this guard
+        // that still became a decision with an awaiting_approval action.
+        // The guard rejects before any decision or action row is created.
+        if let Err(rejection) = evaluate_outcome_quality(outcome) {
+            tracing::warn!(
+                outcome_id = %outcome.id,
+                kind = %outcome.kind.as_str(),
+                confidence = outcome.confidence_basis_points,
+                rejection = %rejection,
+                "rejecting outcome: data-quality guard — no decision or action created"
+            );
+            self.reject_outcome(outcome.id, &rejection.to_string())
+                .await?;
+            return Ok((None, None));
+        }
+
         // Resolved before the transaction opens: the lookup touches a table the
         // agents service owns, and a failed statement inside a transaction
         // would abort the mapping it is only meant to annotate.
@@ -623,7 +729,7 @@ impl AgentOutcomeWorker {
                             let display_name = item
                                 .and_then(|i| i.get("display_name"))
                                 .and_then(Value::as_str)
-                                .unwrap_or("Unnamed target");
+                                .unwrap_or("");
                             let contact_email = item
                                 .and_then(|i| i.get("contact_email"))
                                 .and_then(Value::as_str)
@@ -941,7 +1047,7 @@ impl AgentOutcomeWorker {
         let display_name = item
             .get("display_name")
             .and_then(Value::as_str)
-            .unwrap_or("Unnamed target");
+            .unwrap_or("");
         let contact_email = item.get("contact_email").and_then(Value::as_str);
         let contact_domain = item.get("contact_domain").and_then(Value::as_str);
         let why_fit = item.get("why_fit").and_then(Value::as_str).unwrap_or("");
@@ -1127,4 +1233,214 @@ struct OutcomeRow {
     confidence_basis_points: i32,
     idempotency_key: String,
     trace_id: Option<Uuid>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crowdrelay_application::agent_outcomes::{OutcomeKind, OutcomePayload};
+
+    fn make_outcome(kind: OutcomeKind, confidence: i32, item: Option<Value>) -> ValidatedOutcome {
+        ValidatedOutcome {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            task_id: Uuid::now_v7(),
+            result_id: Uuid::now_v7(),
+            kind,
+            schema_version: 1,
+            payload: OutcomePayload {
+                rationale: "test".to_owned(),
+                item,
+            },
+            confidence_basis_points: confidence,
+            idempotency_key: "test-key".to_owned(),
+            trace_id: None,
+        }
+    }
+
+    #[test]
+    fn zero_confidence_outreach_target_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            0,
+            Some(json!({
+                "target_kind": "creator",
+                "display_name": "r/metalpolska",
+                "evidence_urls": ["https://reddit.com/r/metalpolska"],
+            })),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::InsufficientEvidence { .. }),
+            "expected InsufficientEvidence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn zero_confidence_press_pitch_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::PressPitch,
+            0,
+            Some(json!({"subject": "test", "body": "test"})),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::InsufficientEvidence { .. }),
+            "expected InsufficientEvidence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unnamed_target_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            5000,
+            Some(json!({
+                "target_kind": "creator",
+                "display_name": "Unnamed target",
+                "evidence_urls": ["https://reddit.com/r/test"],
+            })),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::MissingTargetIdentity),
+            "expected MissingTargetIdentity, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_display_name_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            5000,
+            Some(json!({
+                "target_kind": "creator",
+                "evidence_urls": ["https://reddit.com/r/test"],
+            })),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::MissingTargetIdentity),
+            "expected MissingTargetIdentity, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_display_name_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            5000,
+            Some(json!({
+                "target_kind": "creator",
+                "display_name": "  ",
+                "evidence_urls": ["https://reddit.com/r/test"],
+            })),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::MissingTargetIdentity),
+            "expected MissingTargetIdentity, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_evidence_urls_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            5000,
+            Some(json!({
+                "target_kind": "creator",
+                "display_name": "r/metalpolska",
+                "evidence_urls": [],
+            })),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::InsufficientEvidence { .. }),
+            "expected InsufficientEvidence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_evidence_urls_is_rejected() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            5000,
+            Some(json!({
+                "target_kind": "creator",
+                "display_name": "r/metalpolska",
+            })),
+        );
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::InsufficientEvidence { .. }),
+            "expected InsufficientEvidence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn no_item_outreach_target_is_rejected() {
+        let outcome = make_outcome(OutcomeKind::OutreachTargets, 5000, None);
+        let err = evaluate_outcome_quality(&outcome).expect_err("must reject");
+        assert!(
+            matches!(err, OutcomeRejection::MissingTargetIdentity),
+            "expected MissingTargetIdentity, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn valid_outreach_target_passes() {
+        let outcome = make_outcome(
+            OutcomeKind::OutreachTargets,
+            5000,
+            Some(json!({
+                "target_kind": "creator",
+                "display_name": "r/metalpolska",
+                "evidence_urls": ["https://reddit.com/r/metalpolska"],
+            })),
+        );
+        evaluate_outcome_quality(&outcome).expect("valid outcome must pass the guard");
+    }
+
+    #[test]
+    fn zero_confidence_insight_passes() {
+        // Insights are recommend_only — confidence 0 is a weak observation,
+        // not a dangerous action. The guard must not reject them.
+        let outcome = make_outcome(
+            OutcomeKind::GenericInsight,
+            0,
+            Some(json!({"headline": "test", "detail": "test"})),
+        );
+        evaluate_outcome_quality(&outcome).expect("insights must pass even at confidence 0");
+    }
+
+    #[test]
+    fn zero_confidence_audience_segments_passes() {
+        let outcome = make_outcome(
+            OutcomeKind::AudienceSegments,
+            0,
+            Some(json!({"name": "test", "description": "test"})),
+        );
+        evaluate_outcome_quality(&outcome).expect("segments must pass even at confidence 0");
+    }
+
+    #[test]
+    fn valid_press_pitch_passes() {
+        let outcome = make_outcome(
+            OutcomeKind::PressPitch,
+            7500,
+            Some(json!({"subject": "test", "body": "test"})),
+        );
+        evaluate_outcome_quality(&outcome).expect("valid press pitch must pass");
+    }
+
+    #[test]
+    fn valid_signal_push_passes() {
+        let outcome = make_outcome(
+            OutcomeKind::SignalPush,
+            8000,
+            Some(json!({"title": "test", "body": "test"})),
+        );
+        evaluate_outcome_quality(&outcome).expect("valid signal push must pass");
+    }
 }
