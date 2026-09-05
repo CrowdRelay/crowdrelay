@@ -11,6 +11,7 @@ pub use cycle_trigger::{
 mod control_mutations;
 mod decisions;
 mod deliverability;
+mod executor_circuit;
 mod growth;
 mod growth_metrics;
 mod measurement;

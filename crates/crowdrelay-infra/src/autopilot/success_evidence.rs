@@ -1,9 +1,68 @@
-//! Deriving whether a persisted `succeeded` has external confirmation.
+//! Reading an action's execution state, and deriving whether a persisted
+//! `succeeded` has external confirmation.
 //!
-//! Its own module rather than a helper buried in `runtime.rs`: this is the
-//! fact the success invariant turns on, and it should be findable by name.
+//! Its own module rather than helpers buried in `runtime.rs`: these are the
+//! two facts the success invariant turns on, and they should be findable by
+//! name.
 
 use super::*;
+
+/// What the locked `viryaos_autopilot_actions` row says about execution.
+///
+/// `Unreadable` is not a state — it is the absence of one, kept separate so a
+/// caller cannot spend it as if it were `Running`.
+pub(super) enum LockedActionState {
+    /// The row exists and its status maps to a ledger state. `status` is the
+    /// raw column value, carried so the caller can pin its UPDATE to the exact
+    /// string the decision was made on.
+    Readable { status: String, state: ActionState },
+    /// The row is gone, or its status is a word this build does not know.
+    Unreadable { status: Option<String> },
+}
+
+/// Locks the action row and reads its execution state.
+///
+/// `FOR UPDATE` because the state read here is the monotonicity guard: the
+/// resolver decides from it and the caller then writes pinned to it, and both
+/// have to see the same row.
+///
+/// `from_action_status`, not `parse`: this is the action table's lowercase
+/// vocabulary, and `parse` reads the ledger's uppercase one. Feeding an action
+/// status to `parse` returned `None` for every legal value, so a caller's
+/// fallback became the resolver's only input.
+///
+/// There is no fallback now. The previous `unwrap_or(ActionState::Running)`
+/// read an unknown status as mid-execution, which resolves to `Apply(Failed)`
+/// on a failure receipt and `Apply(Succeeded)` on a success one — and the
+/// UPDATE is pinned to the very status string that could not be read, so the
+/// write lands. Vocabulary drift would have silently rewritten action rows, and
+/// on the success arm committed the full set of success side effects, rather
+/// than raising.
+pub(super) async fn locked_action_state(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+) -> Result<LockedActionState, RepositoryError> {
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM viryaos_autopilot_actions \
+         WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+
+    Ok(match status {
+        Some(status) => match ActionState::from_action_status(&status) {
+            Some(state) => LockedActionState::Readable { status, state },
+            None => LockedActionState::Unreadable {
+                status: Some(status),
+            },
+        },
+        None => LockedActionState::Unreadable { status: None },
+    })
+}
 
 /// Whether this action's persisted `succeeded` has external confirmation.
 ///

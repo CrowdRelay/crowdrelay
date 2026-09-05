@@ -1,6 +1,7 @@
 //! Closed-loop executor evidence, release ledger and first-party RUM storage.
 
-use super::success_evidence::success_evidence_for;
+use super::executor_circuit;
+use super::success_evidence::{LockedActionState, locked_action_state, success_evidence_for};
 use super::*;
 use time::{Duration as TimeDuration, format_description::well_known::Rfc3339};
 
@@ -65,6 +66,21 @@ fn receipt_count(value: &Value, key: &str) -> i64 {
         .and_then(Value::as_i64)
         .filter(|value| *value >= 0)
         .unwrap_or(0)
+}
+
+/// The mutation returned for a receipt that was recorded in the execution
+/// report ledger, whether or not it moved the action's state.
+///
+/// Every arm of `record_execution_report` that stops early — no change,
+/// conflict, unreadable state — reports the same thing: the receipt is durable
+/// and this call is not a replay.
+fn recorded(report_id: Uuid, command: &RecordExecutionReport) -> ExecutionReportMutation {
+    ExecutionReportMutation {
+        report_id,
+        action_id: command.action_id,
+        status: command.status,
+        replayed: false,
+    }
 }
 
 /// Everything a success receipt commits besides the action's own status:
@@ -547,66 +563,37 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // legal_transition(Succeeded, Failed) → Conflict surfaces
                         // the contradiction instead of silently downgrading. The
                         // current state IS the monotonicity guard.
-                        let current_status: Option<String> = sqlx::query_scalar(
-                            "SELECT status FROM viryaos_autopilot_actions \
-                             WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(command.action_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
-                        // `from_action_status`, not `parse`: this is the
-                        // action table's lowercase vocabulary, and `parse`
-                        // reads the ledger's uppercase one. `parse` here
-                        // returned None for every legal status, so a fallback
-                        // was the resolver's only input.
                         //
-                        // There is no fallback now. `None` means the action row
-                        // is gone or its status is a word this build does not
-                        // know, and neither is a state to decide from: the
-                        // previous `unwrap_or(Running)` read an unknown status
-                        // as mid-execution, which resolves to `Apply(Failed)`
-                        // and writes it, pinned to the very status it could not
-                        // read. Vocabulary drift would have silently rewritten
-                        // rows rather than raising. The report row above is the
+                        // An unreadable status is not a state to decide from —
+                        // see `locked_action_state`. The report row above is the
                         // audit trail; nothing else moves.
-                        let Some(current_state) = current_status
-                            .as_deref()
-                            .and_then(ActionState::from_action_status)
-                        else {
-                            tracing::error!(
-                                action_id = %command.action_id,
-                                workspace_id = %workspace_id.into_uuid(),
-                                status = ?current_status,
-                                "UNREADABLE: failure receipt arrived for an action whose \
-                                 status this build cannot map to a ledger state — audited, \
-                                 not applied. The action status vocabulary has drifted."
-                            );
-                            transaction.commit().await.map_err(map_sqlx)?;
-                            return Ok(ExecutionReportMutation {
-                                report_id: id,
-                                action_id: command.action_id,
-                                status: command.status,
-                                replayed: false,
-                            });
-                        };
-                        // Is the persisted `Succeeded` worth anything? Two
-                        // facts decide it, both of which already exist.
-                        //
-                        // An action that completes locally has nothing
-                        // external to confirm, so its success is final on its
-                        // own. An externally executed one is marked
-                        // `succeeded` at dispatch, so it is only confirmed
-                        // once a success report carries a provider reference.
-                        //
-                        // The confirming report is looked up per action, not
-                        // per executor: a success confirmed by anyone is
-                        // confirmed, and making `ProviderConfirmed` sticky
-                        // errs towards `Conflict` rather than towards
-                        // rewriting settled reality. Same-attempt binding is
-                        // enforced earlier and separately — a receipt whose
-                        // `claim_token` does not match the held claim is
+                        let (current_status, current_state) =
+                            match locked_action_state(
+                                &mut transaction,
+                                workspace_id,
+                                command.action_id,
+                            )
+                            .await?
+                            {
+                                LockedActionState::Readable { status, state } => (status, state),
+                                LockedActionState::Unreadable { status } => {
+                                    tracing::error!(
+                                        action_id = %command.action_id,
+                                        workspace_id = %workspace_id.into_uuid(),
+                                        status = ?status,
+                                        "UNREADABLE: failure receipt arrived for an action \
+                                         whose status this build cannot map to a ledger state \
+                                         — audited, not applied. The vocabulary has drifted."
+                                    );
+                                    transaction.commit().await.map_err(map_sqlx)?;
+                                    return Ok(recorded(id, &command));
+                                }
+                            };
+                        // Whether the persisted `Succeeded` is worth anything.
+                        // See `SuccessEvidence` for the invariant and
+                        // `success_evidence_for` for the two facts it reads.
+                        // Same-attempt binding is enforced separately: a receipt
+                        // whose `claim_token` does not match the held claim is
                         // already refused above.
                         let success_evidence =
                             success_evidence_for(&mut transaction, workspace_id, &command).await?;
@@ -620,12 +607,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         if transition == LegalTransition::NoChange {
                             // Late failure after prior success — do not regress.
                             transaction.commit().await.map_err(map_sqlx)?;
-                            return Ok(ExecutionReportMutation {
-                                report_id: id,
-                                action_id: command.action_id,
-                                status: command.status,
-                                replayed: false,
-                            });
+                            return Ok(recorded(id, &command));
                         }
                         if transition == LegalTransition::Conflict {
                             // Contradictory observation: a failure receipt
@@ -642,12 +624,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                                 current_state
                             );
                             transaction.commit().await.map_err(map_sqlx)?;
-                            return Ok(ExecutionReportMutation {
-                                report_id: id,
-                                action_id: command.action_id,
-                                status: command.status,
-                                replayed: false,
-                            });
+                            return Ok(recorded(id, &command));
                         }
                         // transition == Apply(Failed) — apply the
                         // transition atomically.
@@ -682,7 +659,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .bind(workspace_id.into_uuid())
                         .bind(command.action_id.into_uuid())
                         .bind(command.error_kind.as_deref())
-                        .bind(current_status.as_deref())
+                        .bind(&current_status)
                         .execute(&mut *transaction)
                         .await
                         .map_err(map_sqlx)?;
@@ -707,92 +684,50 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         .map_err(map_sqlx)?;
 
                         let reason = command.error_kind.as_deref().unwrap_or("executor_failures");
-                        sqlx::query(
-                            r#"
-                            INSERT INTO viryaos_executor_circuit_breakers (
-                                workspace_id, executor_id, failure_count, last_failure_at, reason
-                            ) VALUES ($1,$2,1,$3,$4)
-                            ON CONFLICT (workspace_id, executor_id) DO UPDATE
-                            SET failure_count = CASE
-                                    WHEN viryaos_executor_circuit_breakers.last_failure_at >= EXCLUDED.last_failure_at - INTERVAL '15 minutes'
-                                    THEN viryaos_executor_circuit_breakers.failure_count + 1 ELSE 1 END,
-                                last_failure_at = EXCLUDED.last_failure_at,
-                                guarded_until = CASE
-                                    WHEN (CASE
-                                        WHEN viryaos_executor_circuit_breakers.last_failure_at >= EXCLUDED.last_failure_at - INTERVAL '15 minutes'
-                                        THEN viryaos_executor_circuit_breakers.failure_count + 1 ELSE 1 END) >= 3
-                                    THEN GREATEST(
-                                        COALESCE(viryaos_executor_circuit_breakers.guarded_until, EXCLUDED.last_failure_at),
-                                        EXCLUDED.last_failure_at + INTERVAL '15 minutes'
-                                    )
-                                    WHEN viryaos_executor_circuit_breakers.guarded_until > EXCLUDED.last_failure_at
-                                    THEN viryaos_executor_circuit_breakers.guarded_until
-                                    ELSE NULL END,
-                                reason = CASE
-                                    WHEN (CASE
-                                        WHEN viryaos_executor_circuit_breakers.last_failure_at >= EXCLUDED.last_failure_at - INTERVAL '15 minutes'
-                                        THEN viryaos_executor_circuit_breakers.failure_count + 1 ELSE 1 END) >= 3
-                                    THEN EXCLUDED.reason
-                                    ELSE viryaos_executor_circuit_breakers.reason END
-                            WHERE viryaos_executor_circuit_breakers.last_failure_at IS NULL
-                               OR viryaos_executor_circuit_breakers.last_failure_at <= EXCLUDED.last_failure_at
-                            "#,
+                        executor_circuit::record_failure(
+                            &mut transaction,
+                            workspace_id,
+                            &command.executor_id,
+                            command.occurred_at,
+                            reason,
                         )
-                        .bind(workspace_id.into_uuid())
-                        .bind(&command.executor_id)
-                        .bind(command.occurred_at)
-                        .bind(reason)
-                        .execute(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
+                        .await?;
                     }
                     ExecutorReportStatus::Succeeded => {
                         // Resolve before mutating anything. The transition is
                         // the gate: success side effects are committed only
                         // after the resolver accepts the observation, and a
                         // Conflict receipt stays audit-only.
-                        let current_status: Option<String> = sqlx::query_scalar(
-                            "SELECT status FROM viryaos_autopilot_actions \
-                             WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(command.action_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
-                        // `from_action_status`, not `parse`: the action table's
-                        // lowercase vocabulary, where `parse` reads the ledger's
-                        // uppercase one and returned None for every legal
-                        // status, leaving a fallback to decide everything.
-                        //
                         // The stakes are higher on this arm than on the failure
-                        // one. `unwrap_or(Running)` read an unmappable status as
-                        // mid-execution, which resolves to `Apply(Succeeded)` —
-                        // so a status this build cannot read committed the full
-                        // set of success side effects: outcome evidence, effect
-                        // measurement, the opportunity closing. An unreadable
-                        // state is not a state to claim success from. Audit the
-                        // receipt and stop.
-                        let Some(current_state) = current_status
-                            .as_deref()
-                            .and_then(ActionState::from_action_status)
-                        else {
-                            tracing::error!(
-                                action_id = %command.action_id,
-                                workspace_id = %workspace_id.into_uuid(),
-                                status = ?current_status,
-                                "UNREADABLE: success receipt arrived for an action whose \
-                                 status this build cannot map to a ledger state — audited, \
-                                 not applied. The action status vocabulary has drifted."
-                            );
-                            transaction.commit().await.map_err(map_sqlx)?;
-                            return Ok(ExecutionReportMutation {
-                                report_id: id,
-                                action_id: command.action_id,
-                                status: command.status,
-                                replayed: false,
-                            });
-                        };
+                        // one: an unreadable status used to read as `Running`,
+                        // which resolves to `Apply(Succeeded)`, so a state this
+                        // build could not read committed the full set of success
+                        // side effects — outcome evidence, effect measurement,
+                        // the opportunity closing. An unreadable state is not a
+                        // state to claim success from. Audit the receipt and
+                        // stop.
+                        let (current_status, current_state) =
+                            match locked_action_state(
+                                &mut transaction,
+                                workspace_id,
+                                command.action_id,
+                            )
+                            .await?
+                            {
+                                LockedActionState::Readable { status, state } => (status, state),
+                                LockedActionState::Unreadable { status } => {
+                                    tracing::error!(
+                                        action_id = %command.action_id,
+                                        workspace_id = %workspace_id.into_uuid(),
+                                        status = ?status,
+                                        "UNREADABLE: success receipt arrived for an action \
+                                         whose status this build cannot map to a ledger state \
+                                         — audited, not applied. The vocabulary has drifted."
+                                    );
+                                    transaction.commit().await.map_err(map_sqlx)?;
+                                    return Ok(recorded(id, &command));
+                                }
+                            };
                         let success_evidence =
                             success_evidence_for(&mut transaction, workspace_id, &command).await?;
                         let transition = legal_transition(
@@ -834,7 +769,7 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             )
                             .bind(workspace_id.into_uuid())
                             .bind(command.action_id.into_uuid())
-                            .bind(current_status.as_deref())
+                            .bind(&current_status)
                             .execute(&mut *transaction)
                             .await
                             .map_err(map_sqlx)?;
@@ -856,30 +791,18 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                             .map_err(map_sqlx)?;
                         }
 
-                        sqlx::query(
-                            r#"
-                            UPDATE viryaos_executor_circuit_breakers
-                            SET failure_count=0, last_failure_at=NULL, guarded_until=NULL, reason=NULL
-                            WHERE workspace_id=$1 AND executor_id=$2
-                              AND (last_failure_at IS NULL OR last_failure_at <= $3)
-                            "#,
+                        executor_circuit::record_success(
+                            &mut transaction,
+                            workspace_id,
+                            &command.executor_id,
+                            command.occurred_at,
                         )
-                        .bind(workspace_id.into_uuid())
-                        .bind(&command.executor_id)
-                        .bind(command.occurred_at)
-                        .execute(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?;
+                        .await?;
                     }
                     ExecutorReportStatus::Accepted | ExecutorReportStatus::Executing => {}
                 }
                 transaction.commit().await.map_err(map_sqlx)?;
-                return Ok(ExecutionReportMutation {
-                    report_id: id,
-                    action_id: command.action_id,
-                    status: command.status,
-                    replayed: false,
-                });
+                return Ok(recorded(id, &command));
             }
 
             let existing = sqlx::query_as::<_, (Uuid, Uuid, String, String)>(
