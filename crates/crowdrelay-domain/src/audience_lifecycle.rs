@@ -50,6 +50,18 @@ pub struct FanLifecyclePolicy {
     pub minimum_hours_after_synesthesia: u32,
     pub marketing_cooldown_hours: u32,
     pub dormant_after_days: u32,
+    /// Days after signup before a fan who has referred nobody is asked to.
+    ///
+    /// Not zero: the welcome lands first and an invite in the same breath reads
+    /// as a transaction rather than a welcome.
+    pub referral_invite_after_days: u32,
+    /// Days after signup past which the ask stops.
+    ///
+    /// A bound, not a schedule. Nothing records that a fan has been asked, so
+    /// the window is what keeps "ask once or twice" from becoming "ask forever":
+    /// with the default cooldown of 120 hours, days 3 to 14 allow at most two.
+    /// A fan who has not invited anyone in two weeks has answered.
+    pub referral_invite_until_days: u32,
 }
 
 impl Default for FanLifecyclePolicy {
@@ -61,6 +73,8 @@ impl Default for FanLifecyclePolicy {
             minimum_hours_after_synesthesia: 48,
             marketing_cooldown_hours: 120,
             dormant_after_days: 60,
+            referral_invite_after_days: 3,
+            referral_invite_until_days: 14,
         }
     }
 }
@@ -77,6 +91,16 @@ pub enum LifecycleTemplate {
     ReturningFanThankYou,
     /// A referral this fan made actually converted.
     ReferralThankYou,
+    /// Ask a fan who has referred nobody to invite someone.
+    ///
+    /// The one lifecycle step whose purpose is growth rather than
+    /// acknowledgement. Every other message *carries* an invite; none of them
+    /// asks, and a code nobody is asked to share is a door with no handle --
+    /// which is what ten issued codes and one attributed referral looks like.
+    ///
+    /// Not a milestone: it is an approach, so it waits for the cooldown like
+    /// every other approach.
+    ReferralInvite,
 }
 
 impl LifecycleTemplate {
@@ -224,6 +248,23 @@ pub fn evaluate_fan_lifecycle(
         return FanLifecycleDecision::RequestMessage {
             template: LifecycleTemplate::Welcome,
             confidence: Confidence::saturating_from_basis_points(9_700),
+        };
+    }
+
+    // The ask. Placed after the welcome so it is never a fan's first contact,
+    // and before dormancy so it reaches somebody still paying attention.
+    //
+    // Bounded by a window rather than by a "an asked" flag because nothing records
+    // one. Outside the window the fan is left alone: someone who has invited
+    // nobody in two weeks has given an answer.
+    if snapshot.qualified_referrals == 0
+        && snapshot.last_marketing_touch_at.is_some()
+        && now - snapshot.created_at >= Duration::days(i64::from(policy.referral_invite_after_days))
+        && now - snapshot.created_at < Duration::days(i64::from(policy.referral_invite_until_days))
+    {
+        return FanLifecycleDecision::RequestMessage {
+            template: LifecycleTemplate::ReferralInvite,
+            confidence: Confidence::saturating_from_basis_points(8_800),
         };
     }
 
@@ -510,6 +551,83 @@ mod tests {
         assert!(!matches!(
             decision,
             FanLifecycleDecision::IssueReferralCode { .. }
+        ));
+    }
+
+    /// The one lifecycle step whose purpose is growth. Ten codes were issued and
+    /// one referral was ever attributed, because every message could carry an
+    /// invite and none of them asked for one.
+    #[test]
+    fn a_welcomed_fan_who_has_referred_nobody_is_asked_to() {
+        let mut snapshot = eligible();
+        // Welcomed six days ago: inside the ask window, past the cooldown.
+        snapshot.created_at = now() - Duration::days(6);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        assert!(matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_ask_is_never_a_fans_first_contact() {
+        // No marketing touch yet: the welcome comes first, always.
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(6);
+        snapshot.last_marketing_touch_at = None;
+        assert!(matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::Welcome,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_fan_who_already_referred_someone_is_not_asked_again() {
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(6);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        snapshot.qualified_referrals = 1;
+        assert!(!matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_ask_stops_at_the_end_of_its_window() {
+        // Nothing records that a fan has been asked, so the window is the only
+        // thing stopping "ask once or twice" becoming "ask forever". Someone who
+        // has invited nobody in two weeks has answered.
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(30);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(30));
+        assert!(!matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_ask_waits_for_the_cooldown_like_every_other_approach() {
+        // Welcomed yesterday: inside the window by age, but the cooldown holds.
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(6);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::hours(24));
+        assert!(matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::Hold(FanLifecycleHoldReason::CooldownActive)
         ));
     }
 }
