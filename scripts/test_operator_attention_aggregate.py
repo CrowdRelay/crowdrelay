@@ -83,6 +83,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
             [
                 "alerts",
                 "awaiting_approval",
+                "brain",
                 "dead_deliveries",
                 "dead_outbox",
                 "dead_push",

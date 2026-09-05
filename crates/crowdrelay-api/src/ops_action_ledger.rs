@@ -215,28 +215,28 @@ pub async fn list_cycles(
         state.ops.operation_timeout,
         load_cycle_runs(&state.ops, query.state.as_deref(), limit),
     );
-    let samples = run_with_timeout(
+    // The same assessment `/ops/attention` reports, from the same loader, so
+    // the two surfaces cannot disagree about whether the fanbase is growing.
+    let brain = run_with_timeout(
         state.ops.operation_timeout,
-        load_north_star_days(&state.ops),
+        load_brain_assessment(&state.ops),
     );
-    let (cycles, samples) = tokio::join!(cycles, samples);
+    let (cycles, brain) = tokio::join!(cycles, brain);
     let entries = match cycles {
         Ok(entries) => entries,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    let samples = match samples {
-        Ok(samples) => samples,
+    let brain = match brain {
+        Ok(brain) => brain,
         Err(error) => return error.into_response(request_id(&headers)),
     };
 
-    let days_observed = samples.len();
-    let assessment = assess(samples);
     private_json(
         StatusCode::OK,
         CycleReport {
-            brain_state: assessment.as_str(),
-            needs_attention: assessment.needs_attention(),
-            days_observed,
+            brain_state: brain.state,
+            needs_attention: brain.needs_attention,
+            days_observed: brain.days_observed,
             cycles: entries,
         },
     )

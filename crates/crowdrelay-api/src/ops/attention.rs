@@ -48,6 +48,30 @@ struct OperatorAttentionSnapshot {
     /// Count of opportunities awaiting approval. Derived from authoritative
     /// action state, not from rendered UI items.
     awaiting_approval: i64,
+    /// What the brain makes of its own recent performance.
+    ///
+    /// This view exists to answer "what needs me?", and a fanbase that is
+    /// shrinking, or flat for a month, is the largest thing that can need a
+    /// person -- larger than any dead outbox row. It was computed on
+    /// `/v1/admin/ops/cycles` and nowhere else, so an operator only saw it if
+    /// they went looking at a cycle list, which is the opposite of
+    /// exception-first.
+    brain: BrainSelfAssessment,
+}
+
+/// The brain's own verdict, and whether it is asking for a person.
+#[derive(Debug, Serialize)]
+struct BrainSelfAssessment {
+    /// `improving`, `learning`, `stagnant`, `regressing`, or `initializing`.
+    state: &'static str,
+    /// True only for `regressing` and `stagnant`. A flat North Star on a young
+    /// system is expected, and raising it as an exception every five minutes is
+    /// how an operator learns to stop reading the exceptions.
+    needs_attention: bool,
+    /// Distinct days of North Star readings behind the verdict. `initializing`
+    /// with a small number here is a system that has not watched itself for
+    /// long enough, which is a different thing from one that cannot decide.
+    days_observed: usize,
 }
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -61,13 +85,14 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
     let needs_you = run_with_timeout(timeout_duration, load_needs_you(&state.ops));
     let awaiting_approval = run_with_timeout(timeout_duration, load_awaiting_approval(&state.ops));
+    let brain = run_with_timeout(timeout_duration, load_brain_assessment(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
-        ecosystem, findings, needs_you, awaiting_approval,
+        ecosystem, findings, needs_you, awaiting_approval, brain,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
-        ecosystem, findings, needs_you, awaiting_approval,
+        ecosystem, findings, needs_you, awaiting_approval, brain,
     );
 
     let request_id_value = request_id(&headers);
@@ -107,6 +132,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let brain = match brain {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     private_json(
         StatusCode::OK,
@@ -120,8 +149,23 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             findings,
             needs_you,
             awaiting_approval,
+            brain,
         },
     )
+}
+
+/// The brain's verdict on itself, from the same daily series `/ops/cycles`
+/// reports. One query, one interpretation, so the two surfaces cannot disagree
+/// about whether the fanbase is growing.
+async fn load_brain_assessment(state: &OpsState) -> Result<BrainSelfAssessment, OpsError> {
+    let samples = load_north_star_days(state).await?;
+    let days_observed = samples.len();
+    let assessment = assess(samples);
+    Ok(BrainSelfAssessment {
+        state: assessment.as_str(),
+        needs_attention: assessment.needs_attention(),
+        days_observed,
+    })
 }
 
 /// Open watchdog alerts, plus the ones that recovered in the last 24 hours.
