@@ -283,13 +283,11 @@ async fn load_cycle_runs(
 /// What is actually known about a fanbase connection, derived from evidence
 /// rather than from the creation-time probe.
 ///
-/// `fanbase_connections.status` does not mean what it reads like. A connection
-/// whose identity probe came back `Unavailable` -- network error, rate limit,
-/// missing credential -- is stored as `connected`, which
-/// `provider_verification.rs` documents plainly as "we don't know yet". The
-/// consequence is that every one of production's connections is `connected`,
-/// including 29 Reddit feeds whose credential is invalid, so the column carries
-/// no information at all while reading like a health check.
+/// `fanbase_connections.status` records credential state: `connected` (verified
+/// or synced successfully), `unverified` (creation-time probe could not
+/// confirm identity — we don't know yet), `invalid` (provider proved the
+/// identity is wrong), `expired` (token refresh failed), or `disconnected`.
+/// A successful sync promotes `unverified` to `connected`.
 ///
 /// `health` is a generated column on `fanbase_connections`, derived from what
 /// actually happened rather than from the creation-time probe. Generated, so no

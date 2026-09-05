@@ -6546,7 +6546,7 @@ paths:
         the moment a token expires. When the provider proves the identity does not
         exist the connection is stored with status `invalid` and the sync worker
         skips it. When the probe cannot reach a verdict — network error, rate limit,
-        or a missing process credential — the connection is stored as `connected`
+        or a missing process credential — the connection is stored as `unverified`
         and reported as `unavailable`, because not knowing is not the same as knowing
         it is wrong.
       security:
@@ -6569,8 +6569,9 @@ paths:
       responses:
         '201':
           description: >-
-            Connection created. `status` is `connected` unless the provider proved
-            the identity is wrong, in which case it is `invalid`.
+            Connection created. `status` is `connected` when the probe verified
+            the identity, `unverified` when the probe could not reach a verdict,
+            or `invalid` when the provider proved the identity is wrong.
           content:
             application/json:
               schema:
@@ -6581,7 +6582,7 @@ paths:
                     type: string
                   status:
                     type: string
-                    enum: [connected, invalid]
+                    enum: [connected, unverified, invalid]
                   verification:
                     type: string
                     enum: [verified, invalid, unavailable]
@@ -6607,7 +6608,7 @@ paths:
         the moment a token expires. When the provider proves the identity does not
         exist the connection is stored with status `invalid` and the sync worker
         skips it. When the probe cannot reach a verdict — network error, rate limit,
-        or a missing process credential — the connection is stored as `connected`
+        or a missing process credential — the connection is stored as `unverified`
         and reported as `unavailable`, because not knowing is not the same as knowing
         it is wrong.
       security:
@@ -6630,8 +6631,9 @@ paths:
       responses:
         '201':
           description: >-
-            Connection created. `status` is `connected` unless the provider proved
-            the identity is wrong, in which case it is `invalid`.
+            Connection created. `status` is `connected` when the probe verified
+            the identity, `unverified` when the probe could not reach a verdict,
+            or `invalid` when the provider proved the identity is wrong.
           content:
             application/json:
               schema:
@@ -6642,7 +6644,7 @@ paths:
                     type: string
                   status:
                     type: string
-                    enum: [connected, invalid]
+                    enum: [connected, unverified, invalid]
                   verification:
                     type: string
                     enum: [verified, invalid, unavailable]
@@ -6668,7 +6670,7 @@ paths:
         the moment a token expires. When the provider proves the identity does not
         exist the connection is stored with status `invalid` and the sync worker
         skips it. When the probe cannot reach a verdict — network error, rate limit,
-        or a missing process credential — the connection is stored as `connected`
+        or a missing process credential — the connection is stored as `unverified`
         and reported as `unavailable`, because not knowing is not the same as knowing
         it is wrong.
       security:
@@ -6691,8 +6693,9 @@ paths:
       responses:
         '201':
           description: >-
-            Connection created. `status` is `connected` unless the provider proved
-            the identity is wrong, in which case it is `invalid`.
+            Connection created. `status` is `connected` when the probe verified
+            the identity, `unverified` when the probe could not reach a verdict,
+            or `invalid` when the provider proved the identity is wrong.
           content:
             application/json:
               schema:
@@ -6703,7 +6706,7 @@ paths:
                     type: string
                   status:
                     type: string
-                    enum: [connected, invalid]
+                    enum: [connected, unverified, invalid]
                   verification:
                     type: string
                     enum: [verified, invalid, unavailable]
@@ -6729,7 +6732,7 @@ paths:
         the moment a token expires. When the provider proves the identity does not
         exist the connection is stored with status `invalid` and the sync worker
         skips it. When the probe cannot reach a verdict — network error, rate limit,
-        or a missing process credential — the connection is stored as `connected`
+        or a missing process credential — the connection is stored as `unverified`
         and reported as `unavailable`, because not knowing is not the same as knowing
         it is wrong.
       security:
@@ -6752,8 +6755,9 @@ paths:
       responses:
         '201':
           description: >-
-            Connection created. `status` is `connected` unless the provider proved
-            the identity is wrong, in which case it is `invalid`.
+            Connection created. `status` is `connected` when the probe verified
+            the identity, `unverified` when the probe could not reach a verdict,
+            or `invalid` when the provider proved the identity is wrong.
           content:
             application/json:
               schema:
@@ -6764,7 +6768,7 @@ paths:
                     type: string
                   status:
                     type: string
-                    enum: [connected, invalid]
+                    enum: [connected, unverified, invalid]
                   verification:
                     type: string
                     enum: [verified, invalid, unavailable]
@@ -6790,7 +6794,7 @@ paths:
         the moment a token expires. When the provider proves the identity does not
         exist the connection is stored with status `invalid` and the sync worker
         skips it. When the probe cannot reach a verdict — network error, rate limit,
-        or a missing process credential — the connection is stored as `connected`
+        or a missing process credential — the connection is stored as `unverified`
         and reported as `unavailable`, because not knowing is not the same as knowing
         it is wrong.
       security:
@@ -6813,8 +6817,9 @@ paths:
       responses:
         '201':
           description: >-
-            Connection created. `status` is `connected` unless the provider proved
-            the identity is wrong, in which case it is `invalid`.
+            Connection created. `status` is `connected` when the probe verified
+            the identity, `unverified` when the probe could not reach a verdict,
+            or `invalid` when the provider proved the identity is wrong.
           content:
             application/json:
               schema:
@@ -6825,7 +6830,7 @@ paths:
                     type: string
                   status:
                     type: string
-                    enum: [connected, invalid]
+                    enum: [connected, unverified, invalid]
                   verification:
                     type: string
                     enum: [verified, invalid, unavailable]
