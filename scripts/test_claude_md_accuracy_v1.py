@@ -92,6 +92,28 @@ def within_band(documented: int, actual: int) -> bool:
     return abs(documented - actual) <= allowed
 
 
+API_SRC = ROOT / "crates" / "crowdrelay-api" / "src"
+
+
+def registration_files() -> list[Path]:
+    """Every file that registers routes, not just the one named `routing.rs`."""
+    candidates = sorted(API_SRC.glob("*.rs")) + sorted((API_SRC / "routing").glob("*.rs"))
+    return [
+        path
+        for path in candidates
+        if ".route(" in path.read_text(encoding="utf-8", errors="replace")
+    ]
+
+
+def all_routes() -> set[str]:
+    routes: set[str] = set()
+    for path in registration_files():
+        routes |= set(
+            re.findall(r'"(/v1/[a-z0-9/_{}-]+)"', path.read_text(encoding="utf-8", errors="replace"))
+        )
+    return routes
+
+
 def rust_inventory(crate: str) -> tuple[int, int]:
     """Returns (file count, line count) for a crate's `src` tree."""
     sources = sorted((ROOT / "crates" / crate / "src").rglob("*.rs"))
@@ -261,17 +283,42 @@ class LayoutIsRoughlyRight(ClaudeMdTestCase):
         )
 
     def test_route_prefix_counts(self) -> None:
-        routing = ROUTING.read_text()
+        """Counted across every registration file, not just `routing.rs`.
+
+        This test used to count `routing.rs` alone, which is where the map got
+        its numbers and where they went wrong: `routing.rs` holds 283 of 441
+        routes, so `/v1/admin` read as 142 rather than 172 and the 118-route
+        `/v1/control-plane` surface was absent entirely. A gate that measures
+        the same wrong denominator as the document it checks agrees with it
+        forever.
+        """
+        routes = all_routes()
         documented = dict(
             (prefix, int(count))
-            for prefix, count in re.findall(r"`(/v1/[a-z]+)` (\d+)", TEXT)
+            for prefix, count in re.findall(r"`?(/v1/[a-z-]+)`?\*{0,2} (\d+)", TEXT)
         )
         self.assertTrue(documented, "CLAUDE.md no longer lists the route prefix counts")
         for prefix, count in sorted(documented.items()):
-            actual = routing.count(f'"{prefix}')
+            actual = sum(1 for route in routes if route.split("/")[:3] == prefix.split("/")[:3])
             self.assertTrue(
                 within_band(count, actual),
-                f"CLAUDE.md says {prefix} has {count} routes, routing.rs has {actual}",
+                f"CLAUDE.md says {prefix} has {count} routes, the API registers {actual}",
+            )
+
+    def test_every_registration_file_is_named(self) -> None:
+        """A new router file has to be added to the map before it can hide in it.
+
+        Nine files register routes. Grepping only `routing.rs` for a handler has
+        repeatedly produced the conclusion that a live endpoint is unrouted --
+        against the ops timeline and against the autopilot dry-run preview, both
+        of which are live in production behind auth.
+        """
+        for path in registration_files():
+            self.assertIn(
+                path.name,
+                TEXT,
+                f"{path.relative_to(ROOT)} registers routes and CLAUDE.md does not "
+                f"name it, so anyone grepping the documented files will miss them",
             )
 
 
