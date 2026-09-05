@@ -60,6 +60,24 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
+                    // The referral invite template needs the fan's active
+                    // referral code so the executor can build the referral
+                    // link. The code is created at signup, so it always
+                    // exists by day 3 (referral_invite_after_days). Other
+                    // templates leave this null — the field is additive.
+                    let referral_code = if template_key == "crowdrelay.fan.referral_invite.v1" {
+                        sqlx::query_scalar::<_, Option<String>>(
+                            "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(fan_id.into_uuid())
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?
+                        .flatten()
+                    } else {
+                        None
+                    };
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
@@ -73,6 +91,7 @@ impl PostgresAutopilotRepository {
                                 "email": fan.0,
                                 "display_name": fan.1,
                                 "locale": fan.2,
+                                "referral_code": referral_code,
                             },
                         }),
                     )
