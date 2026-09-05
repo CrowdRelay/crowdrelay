@@ -34,6 +34,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/action_ledger.rs"
 TRIGGER = ROOT / "migrations/0190_action_ledger_trigger_unknown.sql"
+STATUS_CHECK = ROOT / "migrations/0189_autopilot_action_unknown_status.sql"
+
+
+def check_vocabulary() -> set[str]:
+    """The statuses the `viryaos_autopilot_actions` status CHECK admits.
+
+    This is the column's real alphabet. Rust and the trigger agreeing with
+    each other proves only that they drifted together; both can be missing a
+    status the database happily stores.
+    """
+    source = STATUS_CHECK.read_text()
+    start = source.index("viryaos_autopilot_actions_status_check\n    CHECK (status IN (")
+    body = source[start : source.index("));", start)]
+    values = set(re.findall(r"'([a-z_]+)'", body))
+    if not values:
+        raise AssertionError("the status CHECK has no values; the parser is wrong")
+    return values
 
 
 def rust_mapping() -> dict[str, str]:
@@ -86,6 +103,50 @@ class ActionStateParity(unittest.TestCase):
             "the resolver and the ledger trigger disagree about what an "
             "action status means. Reading the same column two ways is how the "
             "resolver ended up deciding from a constant",
+        )
+
+    def test_the_mapping_covers_the_whole_status_check(self) -> None:
+        """Every status the column can hold must map to a ledger state.
+
+        Rust and the trigger matching each other is agreement, not coverage:
+        a status added to the CHECK and to neither mapping leaves both sides
+        consistently blind. `from_action_status` returning `None` is the
+        resolver's signal that it cannot read the row, and the execution-report
+        path answers that by auditing the receipt and refusing to transition.
+        Correct, and a live action stuck unresolvable forever — so the drift is
+        caught here instead.
+        """
+        self.assertEqual(
+            check_vocabulary() - set(rust_mapping()),
+            set(),
+            "the status CHECK admits values `from_action_status` does not map. "
+            "The resolver cannot read those rows and will audit their receipts "
+            "without ever resolving them",
+        )
+        self.assertEqual(
+            set(rust_mapping()) - check_vocabulary(),
+            set(),
+            "`from_action_status` maps statuses the column cannot hold; either "
+            "the CHECK was narrowed or the mapping is describing a fiction",
+        )
+
+    def test_the_resolver_never_falls_back_to_a_state_it_did_not_read(self) -> None:
+        """An unmappable status is not a state; it is the absence of one.
+
+        `unwrap_or(ActionState::Running)` read an unknown status as
+        mid-execution. `Running` resolves to `Apply(Succeeded)` on a success
+        receipt and `Apply(Failed)` on a failure one, and the UPDATE is pinned
+        to the very status string the resolver could not read — so it lands.
+        Vocabulary drift would have silently rewritten action rows, and on the
+        success arm committed the whole set of success side effects, rather
+        than raising.
+        """
+        runtime = (ROOT / "crates/crowdrelay-infra/src/autopilot/runtime.rs").read_text()
+        self.assertNotIn(
+            "unwrap_or(ActionState::",
+            runtime,
+            "the execution-report resolver is defaulting an unreadable action "
+            "status to a concrete state and deciding from a constant again",
         )
 
     def test_the_resolver_does_not_reach_for_the_ledger_vocabulary(self) -> None:

@@ -559,12 +559,38 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // `from_action_status`, not `parse`: this is the
                         // action table's lowercase vocabulary, and `parse`
                         // reads the ledger's uppercase one. `parse` here
-                        // returned None for every legal status, so the
-                        // fallback below was the resolver's only input.
-                        let current_state = current_status
+                        // returned None for every legal status, so a fallback
+                        // was the resolver's only input.
+                        //
+                        // There is no fallback now. `None` means the action row
+                        // is gone or its status is a word this build does not
+                        // know, and neither is a state to decide from: the
+                        // previous `unwrap_or(Running)` read an unknown status
+                        // as mid-execution, which resolves to `Apply(Failed)`
+                        // and writes it, pinned to the very status it could not
+                        // read. Vocabulary drift would have silently rewritten
+                        // rows rather than raising. The report row above is the
+                        // audit trail; nothing else moves.
+                        let Some(current_state) = current_status
                             .as_deref()
                             .and_then(ActionState::from_action_status)
-                            .unwrap_or(ActionState::Running);
+                        else {
+                            tracing::error!(
+                                action_id = %command.action_id,
+                                workspace_id = %workspace_id.into_uuid(),
+                                status = ?current_status,
+                                "UNREADABLE: failure receipt arrived for an action whose \
+                                 status this build cannot map to a ledger state — audited, \
+                                 not applied. The action status vocabulary has drifted."
+                            );
+                            transaction.commit().await.map_err(map_sqlx)?;
+                            return Ok(ExecutionReportMutation {
+                                report_id: id,
+                                action_id: command.action_id,
+                                status: command.status,
+                                replayed: false,
+                            });
+                        };
                         // Is the persisted `Succeeded` worth anything? Two
                         // facts decide it, both of which already exist.
                         //
@@ -737,11 +763,36 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
                         // `from_action_status`, not `parse`: the action table's
                         // lowercase vocabulary, where `parse` reads the ledger's
                         // uppercase one and returned None for every legal
-                        // status, leaving the fallback to decide everything.
-                        let current_state = current_status
+                        // status, leaving a fallback to decide everything.
+                        //
+                        // The stakes are higher on this arm than on the failure
+                        // one. `unwrap_or(Running)` read an unmappable status as
+                        // mid-execution, which resolves to `Apply(Succeeded)` —
+                        // so a status this build cannot read committed the full
+                        // set of success side effects: outcome evidence, effect
+                        // measurement, the opportunity closing. An unreadable
+                        // state is not a state to claim success from. Audit the
+                        // receipt and stop.
+                        let Some(current_state) = current_status
                             .as_deref()
                             .and_then(ActionState::from_action_status)
-                            .unwrap_or(ActionState::Running);
+                        else {
+                            tracing::error!(
+                                action_id = %command.action_id,
+                                workspace_id = %workspace_id.into_uuid(),
+                                status = ?current_status,
+                                "UNREADABLE: success receipt arrived for an action whose \
+                                 status this build cannot map to a ledger state — audited, \
+                                 not applied. The action status vocabulary has drifted."
+                            );
+                            transaction.commit().await.map_err(map_sqlx)?;
+                            return Ok(ExecutionReportMutation {
+                                report_id: id,
+                                action_id: command.action_id,
+                                status: command.status,
+                                replayed: false,
+                            });
+                        };
                         let success_evidence =
                             success_evidence_for(&mut transaction, workspace_id, &command).await?;
                         let transition = legal_transition(
