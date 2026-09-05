@@ -291,7 +291,10 @@ async fn load_cycle_runs(
 /// including 29 Reddit feeds whose credential is invalid, so the column carries
 /// no information at all while reading like a health check.
 ///
-/// `health` is computed from what actually happened instead:
+/// `health` is a generated column on `fanbase_connections`, derived from what
+/// actually happened rather than from the creation-time probe. Generated, so no
+/// code path can forget to maintain it and it cannot disagree with the two
+/// columns it comes from:
 ///
 /// * `working` — synced at least once and not currently failing.
 /// * `failing` — the last attempt failed, and `last_error` says how.
@@ -335,26 +338,14 @@ async fn load_connection_health(ops: &OpsState) -> Result<Vec<ConnectionHealthEn
             platform,
             label,
             status,
-            CASE
-                WHEN last_sync_failed_at IS NOT NULL
-                     AND (last_sync_at IS NULL OR last_sync_failed_at > last_sync_at)
-                    THEN 'failing'
-                WHEN last_sync_at IS NOT NULL THEN 'working'
-                ELSE 'unverified'
-            END AS health,
+            health,
             to_char(last_sync_at, 'YYYY-MM-DD"T"HH24:MI:SSOF:00') AS last_sync_at,
             to_char(last_sync_failed_at, 'YYYY-MM-DD"T"HH24:MI:SSOF:00') AS last_sync_failed_at,
             left(last_sync_error, 200) AS last_error
         FROM fanbase_connections
         WHERE workspace_id = $1
         ORDER BY
-            CASE
-                WHEN last_sync_failed_at IS NOT NULL
-                     AND (last_sync_at IS NULL OR last_sync_failed_at > last_sync_at)
-                    THEN 0
-                WHEN last_sync_at IS NULL THEN 1
-                ELSE 2
-            END,
+            CASE health WHEN 'failing' THEN 0 WHEN 'unverified' THEN 1 ELSE 2 END,
             platform,
             label
         "#,

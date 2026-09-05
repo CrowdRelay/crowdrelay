@@ -658,7 +658,7 @@ impl TelegramExecutorWorker {
         let row: (String, Option<String>) = sqlx::query_as(
             r#"SELECT provider_account_id, encrypted_access_token
                FROM fanbase_connections
-               WHERE workspace_id = $1 AND platform = 'telegram' AND status = 'connected'
+               WHERE workspace_id = $1 AND platform = 'telegram' AND status NOT IN ('invalid', 'expired')
                LIMIT 1"#,
         )
         .bind(ws)

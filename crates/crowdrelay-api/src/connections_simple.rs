@@ -21,7 +21,9 @@
 //! is a diagnostic only — it is NOT persisted to the database and is NOT
 //! a durable health state. If the probe proves the identity is invalid,
 //! the connection is stored with `status = 'invalid'` so the sync worker
-//! skips it.
+//! skips it. If the probe could not establish identity (Unavailable), the
+//! connection is stored with `status = 'unverified'` — a successful sync
+//! promotes it to `'connected'`.
 //!
 //! All endpoints are admin-authenticated (operator-only).
 
@@ -252,7 +254,7 @@ pub async fn create_lastfm_connection(
     };
     let repo = repository(&state);
     match repo
-        .upsert_simple_connection(workspace(&state), "lastfm", artist, &label)
+        .upsert_simple_connection(workspace(&state), "lastfm", artist, &label, false)
         .await
     {
         Ok(()) => (
@@ -302,7 +304,7 @@ pub async fn create_deezer_connection(
     };
     let repo = repository(&state);
     match repo
-        .upsert_simple_connection(workspace(&state), "deezer", artist_id, &label)
+        .upsert_simple_connection(workspace(&state), "deezer", artist_id, &label, false)
         .await
     {
         Ok(()) => (
@@ -352,7 +354,7 @@ pub async fn create_discogs_connection(
     };
     let repo = repository(&state);
     match repo
-        .upsert_simple_connection(workspace(&state), "discogs", artist_id, &label)
+        .upsert_simple_connection(workspace(&state), "discogs", artist_id, &label, false)
         .await
     {
         Ok(()) => (
@@ -399,7 +401,7 @@ pub async fn create_bluesky_connection(
     };
     let repo = repository(&state);
     match repo
-        .upsert_simple_connection(workspace(&state), "bluesky", handle, &label)
+        .upsert_simple_connection(workspace(&state), "bluesky", handle, &label, false)
         .await
     {
         Ok(()) => (
@@ -453,7 +455,7 @@ pub async fn create_bandcamp_connection(
     };
     let repo = repository(&state);
     match repo
-        .upsert_simple_connection(workspace(&state), "bandcamp", subdomain, &label)
+        .upsert_simple_connection(workspace(&state), "bandcamp", subdomain, &label, false)
         .await
     {
         Ok(()) => (
@@ -477,7 +479,8 @@ pub async fn create_bandcamp_connection(
 // and normalizes the identifier, probes the provider via a
 // `ProviderVerifier` (behind a trait in `crowdrelay-infra`), and persists
 // the connection with the correct status:
-//   - Verified or Unavailable → status = 'connected'
+//   - Verified → status = 'connected'
+//   - Unavailable → status = 'unverified' (sync worker tries it, promotes on success)
 //   - Invalid → status = 'invalid' (sync worker skips it)
 //
 // The probe result (`verification`) is a creation-time diagnostic only.
@@ -542,8 +545,8 @@ fn normalize_reddit_subreddit(input: &str) -> Option<String> {
 }
 
 /// Persists a connection and returns the appropriate response based on the
-/// verification result. Verified/Unavailable → `status = 'connected'`,
-/// Invalid → `status = 'invalid'`.
+/// verification result. Verified → `status = 'connected'`, Unavailable →
+/// `status = 'unverified'`, Invalid → `status = 'invalid'`.
 async fn persist_verified_connection(
     state: &crate::AppState,
     request_id_value: Option<String>,
@@ -554,16 +557,26 @@ async fn persist_verified_connection(
 ) -> Response {
     let repo = repository(state);
     let is_invalid = verification.is_invalid();
+    let is_unverified = matches!(
+        &verification,
+        crowdrelay_infra::provider_verification::VerificationResult::Unavailable { .. }
+    );
     let persist_result = if is_invalid {
         repo.upsert_invalid_connection(workspace(state), platform, account_id, label)
             .await
     } else {
-        repo.upsert_simple_connection(workspace(state), platform, account_id, label)
+        repo.upsert_simple_connection(workspace(state), platform, account_id, label, is_unverified)
             .await
     };
     match persist_result {
         Ok(()) => {
-            let status = if is_invalid { "invalid" } else { "connected" };
+            let status = if is_invalid {
+                "invalid"
+            } else if is_unverified {
+                "unverified"
+            } else {
+                "connected"
+            };
             let response_body = match &verification {
                 crowdrelay_infra::provider_verification::VerificationResult::Verified {
                     display_name,

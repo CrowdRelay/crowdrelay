@@ -13,7 +13,8 @@
 //!   worker skips it.
 //! - `Unavailable` — could not establish identity (network error, rate
 //!   limit, missing credential). The connection is persisted with
-//!   `status = 'connected'` — we don't know yet.
+//!   `status = 'unverified'` — we don't know yet. A successful sync
+//!   promotes it to `status = 'connected'`.
 //!
 //! All probes have a 5-second timeout. If the probe times out, the result
 //! is `Unavailable`. The POST endpoint never hangs.
@@ -51,7 +52,8 @@ pub enum VerificationResult {
     Invalid { reason: String },
     /// Could not establish identity (network error, rate limit, missing
     /// credential, timeout). The connection is persisted with
-    /// `status = 'connected'` — we don't know yet.
+    /// `status = 'unverified'` — we don't know yet. A successful sync
+    /// promotes it to `status = 'connected'`.
     Unavailable { reason: String },
 }
 
