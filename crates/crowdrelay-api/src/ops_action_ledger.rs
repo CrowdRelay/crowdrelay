@@ -211,38 +211,49 @@ pub async fn list_cycles(
     Query(query): Query<ActionLedgerQuery>,
 ) -> Response {
     let limit = query.limit.unwrap_or(20).clamp(1, 200);
-    match run_with_timeout(
+    let cycles = run_with_timeout(
         state.ops.operation_timeout,
         load_cycle_runs(&state.ops, query.state.as_deref(), limit),
+    );
+    let samples = run_with_timeout(
+        state.ops.operation_timeout,
+        load_north_star_days(&state.ops),
+    );
+    let (cycles, samples) = tokio::join!(cycles, samples);
+    let entries = match cycles {
+        Ok(entries) => entries,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let samples = match samples {
+        Ok(samples) => samples,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+
+    let days_observed = samples.len();
+    let assessment = assess(samples);
+    private_json(
+        StatusCode::OK,
+        CycleReport {
+            brain_state: assessment.as_str(),
+            needs_attention: assessment.needs_attention(),
+            days_observed,
+            cycles: entries,
+        },
+    )
+}
+
+/// The daily series the assessment reads, from the repository that owns it.
+///
+/// Deliberately not derived from the rows this endpoint renders — see
+/// `crowdrelay_infra::autopilot::daily_north_star` for why that was wrong.
+async fn load_north_star_days(ops: &OpsState) -> Result<Vec<DailyNorthStar>, OpsError> {
+    crowdrelay_infra::autopilot::daily_north_star(
+        &ops.pool,
+        ops.workspace_id,
+        crowdrelay_infra::autopilot::NORTH_STAR_WINDOW_DAYS,
     )
     .await
-    {
-        Ok(entries) => {
-            let samples: Vec<DailyNorthStar> = entries
-                .iter()
-                .filter_map(|entry| {
-                    entry.north_star_value.map(|value| DailyNorthStar {
-                        day: i64::from(entry.started_at.to_julian_day()),
-                        value: f64::from(value),
-                    })
-                })
-                .collect();
-            let mut days: Vec<i64> = samples.iter().map(|sample| sample.day).collect();
-            days.sort_unstable();
-            days.dedup();
-            let state = assess(samples);
-            private_json(
-                StatusCode::OK,
-                CycleReport {
-                    brain_state: state.as_str(),
-                    needs_attention: state.needs_attention(),
-                    days_observed: days.len(),
-                    cycles: entries,
-                },
-            )
-        }
-        Err(error) => error.into_response(request_id(&headers)),
-    }
+    .map_err(|_| OpsError::Unexpected)
 }
 
 /// `state=degraded` narrows to the cycles worth looking at, which is the only

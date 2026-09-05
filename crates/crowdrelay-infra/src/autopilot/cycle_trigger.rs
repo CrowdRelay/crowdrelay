@@ -13,7 +13,7 @@
 //! letting it act.
 
 use crowdrelay_application::RepositoryError;
-use crowdrelay_brain::GrowthStrategy;
+use crowdrelay_brain::{GrowthStrategy, self_assessment::DailyNorthStar};
 use crowdrelay_domain::WorkspaceId;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -191,6 +191,62 @@ pub async fn close_cycle_run(
     if let Err(error) = closed {
         tracing::warn!(error = %error, "could not close an autopilot cycle run record");
     }
+}
+
+/// How far back `daily_north_star` looks.
+///
+/// `STAGNATION_AFTER_FLAT_DAYS` is 30, and a day on which no reading could be
+/// taken -- the worker was down, the cycle never closed -- contributes nothing.
+/// Sixty days of window leaves room for those gaps while still reaching thirty
+/// samples, so stagnation stays reachable rather than being defeated by a
+/// single missing day.
+pub const NORTH_STAR_WINDOW_DAYS: i32 = 60;
+
+/// One North Star reading per day, newest day first.
+///
+/// Exists because the assessment must not be computed from the cycle list an
+/// operator happens to be looking at. That list is capped at 200 rows and
+/// defaults to 20, and a cycle runs every five minutes by default, so the page
+/// spans at most sixteen hours: one or two distinct days against the six
+/// `self_assessment::assess` needs before it will claim a trend at all. Reading
+/// the trend off the page made `brain_state` permanently `initializing` --
+/// which reads as honest reticence and is really a window that can never be
+/// filled. The list is also filterable by outcome, so `?state=degraded` would
+/// have silently changed the reported health of the brain.
+///
+/// `DISTINCT ON` keeps the last reading of each day, because the fan count is
+/// cumulative and the end of the day is the day's result. The predicate matches
+/// `autopilot_cycle_runs_north_star_idx`.
+pub async fn daily_north_star(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    window_days: i32,
+) -> Result<Vec<DailyNorthStar>, RepositoryError> {
+    let rows = sqlx::query_as::<_, (time::Date, i32)>(
+        r#"
+        SELECT DISTINCT ON (started_at::date)
+               started_at::date AS day,
+               north_star_value
+        FROM viryaos_autopilot_cycle_runs
+        WHERE workspace_id = $1
+          AND north_star_value IS NOT NULL
+          AND started_at >= now() - ($2::int * interval '1 day')
+        ORDER BY started_at::date DESC, started_at DESC
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(window_days)
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(day, value)| DailyNorthStar {
+            day: i64::from(day.to_julian_day()),
+            value: f64::from(value),
+        })
+        .collect())
 }
 
 /// Reports what a cycle would decide, without running one.
