@@ -10,6 +10,146 @@
 use super::apply_evidence_to_model;
 use crowdrelay_brain::{CausalModel, DispatchContext, GrowthEvidence, TreatmentAssignment};
 
+/// A randomised contrast is earned per horizon, not per experiment.
+///
+/// Y14 and Y30 close sixteen days apart, so for most of an experiment's life
+/// the control arm is resolved on one horizon and pending on the other.
+/// `ControlMean` carries an `Option` per horizon to say so. The learner used to
+/// read only "does this experiment have a control arm at all", give the treated
+/// row full `RandomizedHoldout` weight on both horizons, and then subtract
+/// `0.0` for the horizon that had no mean — a raw pre/post difference, weighted
+/// as a randomised contrast.
+///
+/// Two runs with the **same** τ isolate the weighting from the arithmetic: the
+/// control's Y30 mean is `0.0` in one and absent in the other, so `y30_fans` is
+/// 10.0 either way and only the earned quality differs. A row that cannot name
+/// its counterfactual must move the Y30 posterior strictly less than one that
+/// can. Under the old code both runs earned `RandomizedHoldout` and the two
+/// posteriors landed on the same number.
+#[test]
+fn a_missing_control_mean_on_one_horizon_does_not_buy_randomised_weight() {
+    use crowdrelay_brain::EvidenceQuality;
+
+    let template = "community-engager";
+    let target = "community:aaaaaaaa-0000-0000-0000-000000000002";
+    let experiment = uuid::Uuid::from_u128(0x5eed_0001);
+    let ctx = DispatchContext::default();
+
+    let treated = GrowthEvidence {
+        opportunity_id: Some(format!("{template}:target:post:ctx")),
+        target_key: Some(target.to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        experiment_uuid: Some(experiment),
+        // Randomised by design and shown clean, so `effective_evidence_quality`
+        // does not cap it before the contrast question is even asked.
+        evidence_quality: EvidenceQuality::RandomizedHoldout,
+        final_contamination: Some(0.0),
+        observed_incremental_fans: Some(4.0),
+        observed_fans: Some(4.0),
+        durable_fans_30d: Some(10.0),
+        predicted_fans: 2.0,
+        ..GrowthEvidence::default()
+    };
+    let control = |y30: Option<f64>| GrowthEvidence {
+        opportunity_id: Some(format!("{template}:target:post:ctx")),
+        target_key: Some(target.to_owned()),
+        treatment: TreatmentAssignment::Control,
+        experiment_uuid: Some(experiment),
+        evidence_quality: EvidenceQuality::RandomizedHoldout,
+        final_contamination: Some(0.0),
+        // Y14 is resolved in both runs; only the Y30 horizon differs.
+        observed_incremental_fans: Some(0.0),
+        observed_fans: Some(0.0),
+        durable_fans_30d: y30,
+        action_id: None,
+        ..GrowthEvidence::default()
+    };
+
+    let y30_effect_after = |control_y30: Option<f64>| {
+        let mut model = CausalModel::new();
+        apply_evidence_to_model(&mut model, &[control(control_y30), treated.clone()]);
+        model
+            .predict_stats_with_treatment_for_target(template, Some(target), &ctx)
+            .treatment_effect_y30
+    };
+
+    let with_contrast = y30_effect_after(Some(0.0));
+    let without_contrast = y30_effect_after(None);
+
+    assert!(
+        with_contrast > 0.0,
+        "the fixture must actually teach the Y30 posterior, got {with_contrast}"
+    );
+    assert!(
+        without_contrast < with_contrast,
+        "a Y30 outcome with no Y30 control mean must carry less weight than one \
+         with a contrast — same tau, weaker evidence. contrast {with_contrast} \
+         vs no contrast {without_contrast}"
+    );
+}
+
+/// The Y14-to-Y30 bridge is fitted on pairs that carry the same contrast.
+///
+/// The bridge's slope is what converts a Y14 effect into a Y30 one. Fitting it
+/// on a control-adjusted Y30 against a raw Y14 fits the slope between two
+/// differently-defined quantities, and the bridged regime then applies that
+/// slope to real predictions. A pair that cannot be defined consistently is not
+/// weak evidence for the slope; it is evidence for a different slope, so the
+/// learner skips it rather than downweighting it.
+#[test]
+fn the_bridge_skips_a_pair_whose_horizons_disagree_about_the_contrast() {
+    use crowdrelay_brain::EvidenceQuality;
+
+    let template = "community-engager";
+    let target = "community:aaaaaaaa-0000-0000-0000-000000000003";
+    let experiment = uuid::Uuid::from_u128(0x5eed_0002);
+    let ctx = DispatchContext::default();
+
+    let treated = GrowthEvidence {
+        opportunity_id: Some(format!("{template}:target:post:ctx")),
+        target_key: Some(target.to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        experiment_uuid: Some(experiment),
+        evidence_quality: EvidenceQuality::RandomizedHoldout,
+        final_contamination: Some(0.0),
+        observed_incremental_fans: Some(4.0),
+        observed_fans: Some(4.0),
+        durable_fans_30d: Some(10.0),
+        predicted_fans: 2.0,
+        ..GrowthEvidence::default()
+    };
+    // Y14 resolved, Y30 pending: the mid-window state every experiment passes
+    // through, and the one that produced a mismatched pair.
+    let half_resolved_control = GrowthEvidence {
+        opportunity_id: Some(format!("{template}:target:post:ctx")),
+        target_key: Some(target.to_owned()),
+        treatment: TreatmentAssignment::Control,
+        experiment_uuid: Some(experiment),
+        evidence_quality: EvidenceQuality::RandomizedHoldout,
+        final_contamination: Some(0.0),
+        observed_incremental_fans: Some(1.0),
+        observed_fans: Some(1.0),
+        durable_fans_30d: None,
+        action_id: None,
+        ..GrowthEvidence::default()
+    };
+
+    let mut model = CausalModel::new();
+    let before = model
+        .predict_stats_with_treatment_for_target(template, Some(target), &ctx)
+        .bridge_confidence;
+    apply_evidence_to_model(&mut model, &[half_resolved_control, treated]);
+    let after = model
+        .predict_stats_with_treatment_for_target(template, Some(target), &ctx)
+        .bridge_confidence;
+
+    assert_eq!(
+        after, before,
+        "the bridge must not be fitted on a control-adjusted Y30 paired with a \
+         raw Y14 — that slope does not describe either quantity"
+    );
+}
+
 /// Brain-level evidence-eligibility invariant:
 ///
 /// Evidence with a treatment assignment but NO observed outcome

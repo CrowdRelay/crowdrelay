@@ -1030,17 +1030,32 @@ fn apply_evidence_to_model(
         if !ev.treatment.is_treatment() {
             continue;
         }
-        // The contrast this treated row is measured against, and whether one
-        // exists at all. Without a resolved control arm there is no randomised
-        // comparison to make, so the row falls back to its own difference-in-
-        // differences and is capped at the quasi-experiment it then is.
+        // The contrast this treated row is measured against. Without a
+        // resolved control arm there is no randomised comparison to make, so
+        // the row falls back to its own difference-in-differences and is capped
+        // at the quasi-experiment it then is.
+        //
+        // The contrast is earned *per horizon*, not per experiment.
+        // [`ControlMean`] carries `Option` per horizon precisely because a
+        // control arm can be resolved on Y14 and still pending on Y30 — the
+        // horizons close 16 days apart, so during that window every experiment
+        // is in exactly that state. Reading only `contrast.is_some()` gave a
+        // treated row full `RandomizedHoldout` weight on a horizon whose
+        // control mean did not exist, and then quietly subtracted `0.0` for it:
+        // a raw pre/post difference, labelled and weighted as a randomised
+        // contrast. That is the promotion of unknown evidence to clean
+        // evidence, and it biases τ away from zero by the control arm's own
+        // secular drift.
         let contrast = ev.experiment_uuid.and_then(|id| control_means.get(&id));
-        let earned_quality = if contrast.is_some() {
-            evidence_quality
-        } else {
-            evidence_quality.min_quasi_experimental()
+        let y14_contrast = contrast.and_then(|mean| mean.y14);
+        let y30_contrast = contrast.and_then(|mean| mean.y30);
+        let earned_quality_for = |horizon_contrast: Option<f64>| {
+            if horizon_contrast.is_some() {
+                evidence_quality
+            } else {
+                evidence_quality.min_quasi_experimental()
+            }
         };
-        let quality_multiplier = earned_quality.variance_multiplier();
 
         // Update the Y14 treatment-effect posterior from the incremental
         // outcome. The `observed_incremental_fans` field is the
@@ -1051,8 +1066,9 @@ fn apply_evidence_to_model(
         // Y14 treatment-effect calibration is recorded to the Y14Bridged
         // regime tracker — separate from Y30Direct and OutcomeModel.
         if let Some(outcome_y14) = ev.observed_incremental_fans {
-            let tau_y14 = outcome_y14 - contrast.and_then(|mean| mean.y14).unwrap_or(0.0);
-            let obs_var = 2.0 * tau_y14.abs().max(1.0) * quality_multiplier;
+            let earned_quality = earned_quality_for(y14_contrast);
+            let tau_y14 = outcome_y14 - y14_contrast.unwrap_or(0.0);
+            let obs_var = 2.0 * tau_y14.abs().max(1.0) * earned_quality.variance_multiplier();
             model.update_treatment_effect_for_target(
                 &template,
                 subreddit_type,
@@ -1080,9 +1096,12 @@ fn apply_evidence_to_model(
         // bridge.
         if let Some(outcome_y30) = ev.y30_outcome() {
             // Y30 treatment-effect update (North Star). Scaled by evidence
-            // quality — same rationale as Y14.
-            let y30_fans = outcome_y30 - contrast.and_then(|mean| mean.y30).unwrap_or(0.0);
-            let obs_var = 2.0 * y30_fans.abs().max(1.0) * quality_multiplier;
+            // quality — same rationale as Y14, and earned against the Y30
+            // control mean specifically. Y30 is the horizon that stays pending
+            // longest, so it is the one most often claimed without a contrast.
+            let earned_quality = earned_quality_for(y30_contrast);
+            let y30_fans = outcome_y30 - y30_contrast.unwrap_or(0.0);
+            let obs_var = 2.0 * y30_fans.abs().max(1.0) * earned_quality.variance_multiplier();
             model.update_treatment_effect_y30_for_target(
                 &template,
                 subreddit_type,
@@ -1107,14 +1126,24 @@ fn apply_evidence_to_model(
             );
             // Y14→Y30 bridge: update when both outcomes are available.
             //
-            // Both sides carry the same contrast. `y30_fans` has the control
-            // arm's mean subtracted, so feeding the raw `y14_outcome()` against
-            // it would fit a slope between two differently-defined quantities —
-            // and that slope is what carries a Y14 effect across to Y30 in the
+            // Both sides must carry the same contrast. `y30_fans` has the
+            // control arm's mean subtracted, so feeding a raw Y14 against it
+            // fits a slope between two differently-defined quantities — and
+            // that slope is what carries a Y14 effect across to Y30 in the
             // bridged regime. A regression is only a transformation between the
             // things it was fitted on.
-            if let Some(outcome_y14) = ev.observed_incremental_fans {
-                let paired_y14 = outcome_y14 - contrast.and_then(|mean| mean.y14).unwrap_or(0.0);
+            //
+            // "Same contrast" therefore means both horizons are contrasted or
+            // neither is. Falling back to `0.0` on one side satisfied the
+            // sentence above only when the control mean happened to exist;
+            // where it did not, the pair was exactly the mismatch this comment
+            // forbids. A pair we cannot define consistently is not weak
+            // evidence for the slope, it is evidence for a different slope, so
+            // it is skipped rather than downweighted.
+            if let Some(outcome_y14) = ev.observed_incremental_fans
+                && y14_contrast.is_some() == y30_contrast.is_some()
+            {
+                let paired_y14 = outcome_y14 - y14_contrast.unwrap_or(0.0);
                 model.update_bridge(paired_y14, y30_fans);
             }
         }
