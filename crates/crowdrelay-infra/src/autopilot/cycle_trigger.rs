@@ -143,12 +143,21 @@ pub async fn open_cycle_run(
 /// the phases are isolated on purpose, so one failing while the others complete
 /// is the design working, and calling that a failed cycle would train the
 /// operator to ignore the word.
+/// `north_star_observed` is the reading the cycle itself took, not a figure
+/// derived here. This used to be a hardcoded count of active fans, which is not
+/// the North Star for any tenant that has not chosen fans — and the default is
+/// signal installs. The result was two numbers under one name: the world model's
+/// on `/autopilot/cycle/preview`, this one on `/ops/cycles`, and the brain's
+/// self-assessment trending whichever of them the brain was not optimizing. The
+/// two populations did not even agree on what a fan is: the world model counts
+/// every fan that is not `suppressed`, this counted only `active`.
 pub async fn close_cycle_run(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     cycle_id: uuid::Uuid,
     degraded: bool,
     finished_at: OffsetDateTime,
+    north_star_observed: Option<u32>,
 ) {
     let closed = sqlx::query(
         r#"
@@ -170,15 +179,11 @@ pub async fn close_cycle_run(
                   AND action.created_at >= run.started_at
                   AND action.created_at <= $3
             ),
-            -- The North Star as it stood when this cycle finished. Fans, which
-            -- is what the tenant exists to grow, so the brain's assessment of
-            -- itself is measured against the thing it is for.
-            north_star_value = (
-                SELECT count(*)
-                FROM fans
-                WHERE fans.workspace_id = run.workspace_id
-                  AND fans.status = 'active'
-            )
+            -- The reading the cycle took, so the brain's assessment of itself is
+            -- measured against the metric the brain is actually optimizing. A
+            -- cycle whose evaluation phase never ran records NULL rather than a
+            -- zero, which would be indistinguishable from losing the audience.
+            north_star_value = $5
         WHERE run.workspace_id = $1 AND run.id = $2
         "#,
     )
@@ -186,6 +191,7 @@ pub async fn close_cycle_run(
     .bind(cycle_id)
     .bind(finished_at)
     .bind(degraded)
+    .bind(north_star_observed.and_then(|value| i32::try_from(value).ok()))
     .execute(pool)
     .await;
     if let Err(error) = closed {

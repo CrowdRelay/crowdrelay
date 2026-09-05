@@ -14,10 +14,19 @@
 //! day of five-minute cycles to one observation, keeps the last reading of each
 //! day rather than the first, and ignores the outcome filter the list applies --
 //! `?state=degraded` must not change the reported health of the brain.
+//!
+//! The write side is asserted here too. `close_cycle_run` used to derive
+//! `north_star_value` itself, as a count of active fans, which is the North Star
+//! only for a tenant that has chosen fans -- and the default is signal installs.
+//! That put two numbers under one name, and had the self-assessment trending
+//! whichever of them the brain was not optimizing. The cycle now records the
+//! reading it took, and records nothing when it took none.
 
 use crowdrelay_brain::self_assessment::{BrainState, assess};
 use crowdrelay_domain::WorkspaceId;
-use crowdrelay_infra::autopilot::{NORTH_STAR_WINDOW_DAYS, daily_north_star};
+use crowdrelay_infra::autopilot::{
+    CycleTrigger, NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star, open_cycle_run,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -257,6 +266,98 @@ async fn the_window_is_wide_enough_for_stagnation_to_be_reachable() -> Result<()
     assert!(
         state.needs_attention(),
         "stagnation is one of the two states that asks for a human"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_cycle_records_the_reading_it_was_given_not_a_fan_count() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    // Three active fans. The cycle record used to compute `north_star_value`
+    // itself, as `count(*) FROM fans WHERE status = 'active'`, which is not the
+    // North Star for any tenant that has not chosen fans -- and the default is
+    // signal installs. That left two numbers under one name: the world model's
+    // on `/autopilot/cycle/preview`, this one on `/ops/cycles`, with the
+    // self-assessment trending whichever the brain was not optimizing.
+    for index in 0..3 {
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,'active')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(format!("fan-{index}-{}@north-star.test", Uuid::now_v7().simple()))
+        .execute(&pool)
+        .await?;
+    }
+
+    let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
+        .await
+        .ok_or("the cycle run record must open")?;
+    // The reading the world model resolved: signal installs, not the three fans.
+    close_cycle_run(&pool, workspace_id, cycle_id, false, now, Some(1)).await;
+
+    let stored: Option<i32> = sqlx::query_scalar(
+        "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stored == Some(1),
+        "the record must store the reading the cycle took, not a count it \
+         derived for itself; expected Some(1), got {stored:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_cycle_that_took_no_reading_records_none() -> Result<()> {
+    let pool = pool().await?;
+    let workspace_id = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,'active')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!(
+        "only-fan-{}@north-star.test",
+        Uuid::now_v7().simple()
+    ))
+    .execute(&pool)
+    .await?;
+
+    let cycle_id = open_cycle_run(&pool, workspace_id, CycleTrigger::Scheduled, now)
+        .await
+        .ok_or("the cycle run record must open")?;
+    // The evaluation phase never got far enough to read anything.
+    close_cycle_run(&pool, workspace_id, cycle_id, true, now, None).await;
+
+    let stored: Option<i32> = sqlx::query_scalar(
+        "SELECT north_star_value FROM viryaos_autopilot_cycle_runs WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(cycle_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stored.is_none(),
+        "a cycle that took no reading records none -- a zero here cannot be \
+         told apart from having lost the whole audience; got {stored:?}"
+    );
+    // And the series must skip it rather than trending it as a collapse.
+    let samples = daily_north_star(&pool, workspace_id, NORTH_STAR_WINDOW_DAYS).await?;
+    assert!(
+        samples.is_empty(),
+        "an unread cycle contributes nothing to the series, got {} samples",
+        samples.len()
     );
     Ok(())
 }
