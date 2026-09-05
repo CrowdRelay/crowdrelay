@@ -371,3 +371,48 @@ async fn no_agents_schema_inner(pool: &PgPool) -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_outcome_appears_in_the_timeline_it_caused() -> Result<()> {
+    let database = DisposableDatabase::create().await?;
+    let result = outcome_joins_timeline_inner(&database.pool).await;
+    database.drop_database().await;
+    result
+}
+
+async fn outcome_joins_timeline_inner(pool: &PgPool) -> Result<()> {
+    // `/v1/admin/ops/trace/{trace_id}` reads `agent_outcomes` as one branch of
+    // the timeline. That branch returned nothing for every row, because the
+    // agents service is the only writer of the table and never populates
+    // `trace_id` — so the LLM step, the one an operator most wants to see, was
+    // missing from the chain it started. The mapper writes the resolved trace
+    // back onto the row it already updates when marking the outcome processed.
+    create_foreign_task_table(pool).await?;
+    let workspace_id = workspace(pool).await?;
+    let trace_id = Uuid::now_v7();
+    let action_id = traced_action(pool, workspace_id, trace_id).await?;
+    let task_id = task(pool, workspace_id, Some(action_id), Some(trace_id)).await?;
+    let outcome_id = untraced_outcome(pool, workspace_id, task_id).await?;
+
+    worker(pool, workspace_id)
+        .run_once()
+        .await
+        .map_err(|error| anyhow::anyhow!("ingestion cycle failed: {error}"))?;
+
+    // Exactly the predicate the timeline's agent branch applies.
+    let on_timeline: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM agent_outcomes WHERE workspace_id = $1 AND trace_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(trace_id)
+    .fetch_all(pool)
+    .await
+    .context("read the agent branch of the timeline")?;
+
+    ensure!(
+        on_timeline == vec![outcome_id],
+        "the outcome must appear in its own trace timeline, got {on_timeline:?}"
+    );
+    Ok(())
+}
