@@ -247,8 +247,19 @@ pub fn evaluate_growth_intelligence(
     // not hacked in after prediction.
     //
     // NOTE: `strategy` is used above for `strategy_rank` (eligibility/sort).
-    // `strategy_posterior` is used for exploration allocation in the caller.
-    let _ = &strategy_posterior; // used for exploration allocation, not scoring
+    //
+    // `strategy_posterior` is DORMANT, not "used elsewhere". This binding used
+    // to claim it was read for exploration allocation in the caller; the caller
+    // loads it, passes it down, and reads nothing off it, and
+    // `community_engager_candidates` takes it as `_strategy_posterior`. No
+    // `predict` or `confidence` call on it exists on any decision path in the
+    // workspace. It is learned every cycle and consumed by nothing.
+    //
+    // It stays threaded here because this is where a state-conditioned strategy
+    // belief would enter — as exploration allocation, never as a multiplier on
+    // predicted fan value, which is what it was before and what made a bad
+    // action with a good strategy rank look great. Until it is read, say so.
+    let _ = &strategy_posterior;
 
     // ── Time-to-feedback discount (P1.10) ──
     // Templates that produce feedback faster are slightly preferred because

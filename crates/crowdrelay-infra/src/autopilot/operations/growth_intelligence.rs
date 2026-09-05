@@ -841,7 +841,13 @@ pub(in crate::autopilot) async fn load_causal_model(
                 apply_evidence_to_model(&mut model, &delta);
                 // Also apply delta evidence to the strategy posterior so it
                 // stays in sync with the causal model's evidence replay.
-                apply_delta_to_strategy_posterior(repo, workspace_id, &delta).await;
+                apply_evidence_to_stored_strategy_posterior(
+                    repo,
+                    workspace_id,
+                    &delta,
+                    PosteriorReplay::Delta,
+                )
+                .await;
                 tracing::debug!(
                     delta_evidence = delta.len(),
                     "loaded causal model from checkpoint + delta"
@@ -1200,34 +1206,100 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
     }
 }
 
-/// Loads the strategy posterior from brain state, applies delta evidence to
-/// it, and saves it back. Called alongside `apply_evidence_to_model` during
-/// the causal model load so the strategy posterior stays in sync with the
-/// causal model's evidence replay.
-async fn apply_delta_to_strategy_posterior(
+/// Whether the strategy posterior is being extended or rebuilt.
+///
+/// The distinction is the whole difference between the two call sites and it
+/// used to be carried only by a comment. The checkpoint path replays the
+/// evidence written since the checkpoint, so it must accumulate onto what is
+/// stored. The full-replay path replays *all* evidence, so accumulating onto
+/// stored state counts every observation twice — once from the stored posterior
+/// and once from the row it was built from — and each full replay does it
+/// again. The call site said "from scratch" and the function it called loaded
+/// the saved posterior first.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PosteriorReplay {
+    /// Extend the stored posterior with evidence it has not seen.
+    Delta,
+    /// Rebuild from a skeptical prior; the caller is passing all evidence.
+    FromScratch,
+}
+
+/// Applies evidence to the state-conditioned strategy posterior in brain state.
+///
+/// Called alongside `apply_evidence_to_model` during the causal model load so
+/// the strategy posterior stays in sync with the causal model's evidence
+/// replay. This is the **only** writer of the `strategy_posterior` brain-state
+/// key — see [`apply_evidence_to_strategy_posterior`] for why that matters.
+async fn apply_evidence_to_stored_strategy_posterior(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-    delta: &[crowdrelay_brain::GrowthEvidence],
+    evidence: &[crowdrelay_brain::GrowthEvidence],
+    replay: PosteriorReplay,
 ) {
     use crowdrelay_brain::StateConditionedStrategyPosterior;
 
-    // Load the existing strategy posterior from brain state.
-    let posterior =
-        match super::evidence::load_brain_state(repo, workspace_id, "strategy_posterior").await {
-            Ok(Some((state, _ts))) => {
-                serde_json::from_value::<StateConditionedStrategyPosterior>(state)
-                    .unwrap_or_default()
+    let mut posterior = match replay {
+        PosteriorReplay::FromScratch => StateConditionedStrategyPosterior::default(),
+        PosteriorReplay::Delta => {
+            match super::evidence::load_brain_state(repo, workspace_id, "strategy_posterior").await
+            {
+                Ok(None) => StateConditionedStrategyPosterior::default(),
+                Ok(Some((state, _ts))) => {
+                    match serde_json::from_value::<StateConditionedStrategyPosterior>(state) {
+                        Ok(posterior) => posterior,
+                        Err(error) => {
+                            // Everything the posterior has learned is in that
+                            // row. Starting from a default here and saving the
+                            // result below would overwrite it with a delta's
+                            // worth of evidence and call that the whole history.
+                            // A row we cannot read is not an empty row.
+                            tracing::error!(
+                                error = %error,
+                                workspace_id = %workspace_id.into_uuid(),
+                                "stored strategy posterior could not be deserialized; \
+                                 skipping the delta rather than overwriting learned \
+                                 state with a default"
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        workspace_id = %workspace_id.into_uuid(),
+                        "could not read the stored strategy posterior; skipping the \
+                         delta rather than overwriting learned state with a default"
+                    );
+                    return;
+                }
             }
-            _ => StateConditionedStrategyPosterior::default(),
-        };
+        }
+    };
 
-    let mut posterior = posterior;
-    apply_evidence_to_strategy_posterior(&mut posterior, delta);
+    apply_evidence_to_strategy_posterior(&mut posterior, evidence);
 
-    // Save the updated posterior back to brain state. Best-effort.
-    if let Ok(state) = serde_json::to_value(&posterior) {
-        let _ = super::evidence::save_brain_state(repo, workspace_id, "strategy_posterior", &state)
-            .await;
+    match serde_json::to_value(&posterior) {
+        Ok(state) => {
+            if let Err(error) =
+                super::evidence::save_brain_state(repo, workspace_id, "strategy_posterior", &state)
+                    .await
+            {
+                // Best-effort, but not silent: the next cycle will re-derive
+                // this from a checkpoint that has already moved past the
+                // evidence, so a dropped save is lost learning, not a retry.
+                tracing::warn!(
+                    error = %error,
+                    workspace_id = %workspace_id.into_uuid(),
+                    "failed to save the strategy posterior; this cycle's strategy \
+                     learning is lost"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            error = %error,
+            "failed to serialize the strategy posterior"
+        ),
     }
 }
 
@@ -1272,8 +1344,15 @@ async fn full_replay(
     if !evidence.is_empty() {
         let mut model = CausalModel::default();
         apply_evidence_to_model(&mut model, &evidence);
-        // Also replay evidence into the strategy posterior from scratch.
-        apply_delta_to_strategy_posterior(repo, workspace_id, &evidence).await;
+        // Also replay evidence into the strategy posterior from scratch — this
+        // is every row, so it rebuilds rather than accumulates.
+        apply_evidence_to_stored_strategy_posterior(
+            repo,
+            workspace_id,
+            &evidence,
+            PosteriorReplay::FromScratch,
+        )
+        .await;
         return Ok(model);
     }
 

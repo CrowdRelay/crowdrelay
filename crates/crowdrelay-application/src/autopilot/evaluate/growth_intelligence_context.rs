@@ -22,13 +22,21 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.
         let causal_model = self.repository.load_causal_model(self.workspace_id).await?;
-        // Load the strategy posterior from brain state. The brain
-        // learns which growth strategies work best in each world
-        // state (growth trend × event proximity) via UCB
-        // exploration. The strategy posterior influences candidate
-        // eligibility and exploration allocation only — it never
-        // modifies predicted fan value, treatment effect, or
-        // DecisionValue.
+        // Load the strategy posterior from brain state. The infra loader folds
+        // resolved growth evidence into it each cycle, keyed by
+        // (strategy, growth_trend, event_proximity), and owns the write.
+        //
+        // It is DORMANT on the read side: it is threaded through candidate
+        // generation and nothing calls `predict` or `confidence` on it. It does
+        // not influence eligibility, ordering, predicted fan value, treatment
+        // effect or DecisionValue today — the first two of those were claimed
+        // here and were not true.
+        //
+        // The `unwrap_or_default()` below is therefore harmless, and would not
+        // be if anything read it: a read error and an absent posterior are
+        // different facts, and an empty posterior is a claim that the brain has
+        // observed nothing. It is no longer written back — see the end of this
+        // method for why that mattered.
         let strategy_posterior = self
             .repository
             .load_brain_state(self.workspace_id, "strategy_posterior")
@@ -512,14 +520,18 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .repository
             .save_brain_state_checkpoint(self.workspace_id, &causal_model)
             .await;
-        // Save the strategy posterior checkpoint. Best-effort —
-        // a failed save just means the next cycle starts fresh.
-        if let Ok(state) = serde_json::to_value(&strategy_posterior) {
-            let _ = self
-                .repository
-                .save_brain_state(self.workspace_id, "strategy_posterior", &state)
-                .await;
-        }
+        // The strategy posterior is deliberately NOT saved here. This cycle
+        // holds it by shared reference and never mutates it, so the write was
+        // a copy of what the load returned — and the load ends in
+        // `unwrap_or_default()`, so a deserialization failure or a read error
+        // turned into an empty posterior that was then written back over
+        // everything the learner had accumulated. One clobber, all history
+        // gone, no error anywhere.
+        //
+        // `apply_evidence_to_stored_strategy_posterior` in the infra loader is
+        // the single writer of this key. It runs earlier in this same cycle,
+        // as part of the causal model load, and it refuses to write at all
+        // when it cannot read what is already there.
         Ok(())
     }
 }

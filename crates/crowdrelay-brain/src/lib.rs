@@ -112,10 +112,7 @@ pub use standing::{
     AgentTier, agent_standing_policy, effective_agent_cooldown, effective_agent_tier,
 };
 pub use strategy::GrowthStrategy;
-pub use strategy_learning::{
-    CONFIDENCE_SATURATION_EVALUATIONS, MIN_EVALUATIONS_FOR_RECOMMENDATION,
-    StateConditionedStrategyPosterior, StrategyLearner, StrategyOutcome, StrategyPosterior,
-};
+pub use strategy_learning::StateConditionedStrategyPosterior;
 pub use tenant_preference::{
     PresentationMetadata, TemplatePreference, TenantPreferencePolicy, TenantPreferencePosterior,
 };
