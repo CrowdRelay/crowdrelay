@@ -658,7 +658,7 @@ impl DiscordExecutorWorker {
         let row: (Option<String>, Option<String>) = sqlx::query_as(
             r#"SELECT provider_account_id, encrypted_access_token
                FROM fanbase_connections
-               WHERE workspace_id = $1 AND platform = 'discord' AND status = 'connected'
+               WHERE workspace_id = $1 AND platform = 'discord' AND status NOT IN ('invalid', 'expired')
                  AND encrypted_access_token IS NOT NULL
                LIMIT 1"#,
         )

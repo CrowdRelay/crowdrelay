@@ -57,6 +57,9 @@ impl GrowthMetricSyncWorker {
     }
 
     /// Marks a connection as syncing cleanly, clearing any recorded failure.
+    /// A connection that was `'unverified'` (creation-time probe could not
+    /// confirm the identity) is promoted to `'connected'` — the successful
+    /// sync is the proof that the credential works.
     pub(super) async fn record_sync_success(
         &self,
         conn: &DueConnection,
@@ -67,6 +70,7 @@ impl GrowthMetricSyncWorker {
             SET last_sync_at = now(),
                 last_sync_error = NULL,
                 last_sync_failed_at = NULL,
+                status = CASE WHEN status = 'unverified' THEN 'connected' ELSE status END,
                 updated_at = now()
             WHERE workspace_id = $1 AND id = $2
             "#,

@@ -821,26 +821,37 @@ impl PostgresFanbaseRepository {
     /// Used by platforms like Last.fm where the API key is a shared env var
     /// and the only per-connection identifier is the artist/entity name
     /// stored in `provider_account_id`.
+    ///
+    /// When `unverified` is true, the connection is stored with
+    /// `status = 'unverified'` — the creation-time probe could not confirm
+    /// the identity (network error, rate limit). A successful sync promotes
+    /// it to `'connected'`.
     pub async fn upsert_simple_connection(
         &self,
         workspace_id: Uuid,
         platform: &str,
         account_id: &str,
         label: &str,
+        unverified: bool,
     ) -> Result<(), FanbaseError> {
         let credential_ref = format!("{platform}:{account_id}");
+        let status = if unverified {
+            "unverified"
+        } else {
+            "connected"
+        };
         sqlx::query(
             r#"
             INSERT INTO fanbase_connections (
                 workspace_id, platform, external_account_ref,
                 credential_ref, label, status, provider_account_id
             )
-            VALUES ($1, $2, $3, $4, $5, 'connected', $3)
+            VALUES ($1, $2, $3, $4, $5, $6, $3)
             ON CONFLICT (workspace_id, platform, external_account_ref)
             DO UPDATE SET
                 credential_ref = EXCLUDED.credential_ref,
                 label = EXCLUDED.label,
-                status = 'connected',
+                status = $6,
                 updated_at = now()
             "#,
         )
@@ -849,6 +860,7 @@ impl PostgresFanbaseRepository {
         .bind(account_id)
         .bind(&credential_ref)
         .bind(label)
+        .bind(status)
         .execute(&self.pool)
         .await
         .map_err(Self::unexpected)?;
@@ -864,7 +876,7 @@ impl PostgresFanbaseRepository {
     /// Registers a simple connection with `status = 'invalid'`. Used when
     /// the provider probe proved the external identity does not exist.
     /// The growth metric sync worker skips invalid connections (its
-    /// `DueConnection` query filters by `status = 'connected'`).
+    /// `DueConnection` query filters by `status NOT IN ('invalid', 'expired')`).
     pub async fn upsert_invalid_connection(
         &self,
         workspace_id: Uuid,

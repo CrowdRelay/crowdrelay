@@ -89,9 +89,11 @@ const USER_AGENT: &str = "CrowdRelay/1.0 (growth metric sync)";
 /// feeds the social coverage bucket.
 const SYNCED_PLATFORMS: &[&str] = &[
     "tiktok",
-    // No "reddit": see `Platform::polled_by_growth_metric_sync`. The poll
-    // scraped community sizes through proxies Reddit blocks, and that number
-    // is not this artist's audience.
+    // Reddit syncs via the agents service /reddit/observe endpoint, which
+    // uses the official OAuth API (not proxies). The proxy-based scrape was
+    // abandoned because Reddit blocks datacenter IPs, but the API path works.
+    // See `sync_reddit` below.
+    "reddit",
     "spotify",
     "youtube",
     "facebook",
@@ -238,7 +240,7 @@ impl GrowthMetricSyncWorker {
             return;
         }
         let connected: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT platform FROM fanbase_connections WHERE status = 'connected'",
+            "SELECT DISTINCT platform FROM fanbase_connections WHERE status NOT IN ('invalid', 'expired')",
         )
         .fetch_all(&self.pool)
         .await
@@ -381,7 +383,7 @@ impl GrowthMetricSyncWorker {
                 fc.id, fc.workspace_id, fc.platform, fc.provider_account_id,
                 fc.external_account_ref
             FROM fanbase_connections fc
-            WHERE fc.status = 'connected'
+            WHERE fc.status NOT IN ('invalid', 'expired')
               AND fc.platform = ANY($1)
               AND fc.provider_account_id IS NOT NULL
               AND NOT EXISTS (
@@ -482,7 +484,7 @@ impl GrowthMetricSyncWorker {
                       AND s.subject_kind = 'fanbase_connection'
                       AND s.subject_id = fc.id
                 ) latest ON true
-                WHERE fc.status = 'connected'
+                WHERE fc.status NOT IN ('invalid', 'expired')
                   AND fc.platform = ANY($1)
                   AND fc.provider_account_id IS NOT NULL
             ) schedule
