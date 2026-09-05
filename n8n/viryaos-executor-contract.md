@@ -32,6 +32,39 @@ It must not purchase placement, change ticket pricing, fabricate reviews/crowd/s
 
 CrowdRelay has already decided everything that matters: who is eligible, whether consent is current at the moment of dispatch, whether the step is still inside its window and whether the show is still on. The executor renders the named template from the supplied facts and sends it. It must not broaden the recipient list, substitute a different template, re-send a step it has already reported, or send at all once the event is past — a step delivered outside its moment is a different, worse message than one not delivered, and CrowdRelay records that omission as a skip rather than letting it arrive late.
 
+### Fan lifecycle messages
+
+`crowdrelay.fan_lifecycle.message_requested` carries one message for one
+consented fan, with the fan's contact details and a `template_key` naming
+which message it is. CrowdRelay has already decided that this fan should hear
+from us, that consent is current, and that the marketing cooldown allows it.
+The executor renders the named template and sends it.
+
+Seven keys exist. An executor that handles some by name and lets the rest fall
+through to a default is the failure this list exists to prevent: three of these
+were being rendered as the Synesthesia follow-up, including the one that thanks
+somebody for a referral that converted — the payoff of the only compounding
+loop the product has.
+
+| `template_key` | When it is sent |
+| --- | --- |
+| `crowdrelay.fan.welcome.v1` | First contact after signup. |
+| `crowdrelay.synesthesia.follow_up.v1` | Completed Synesthesia and has not bought a ticket. |
+| `crowdrelay.fan.reactivation.v1` | Gone quiet past the dormancy window. |
+| `crowdrelay.fan.first_ticket_thanks.v1` | Bought their first ticket. The single best moment to turn a buyer into a fan. |
+| `crowdrelay.fan.returning_thanks.v1` | Bought enough shows to count as a returning fan. |
+| `crowdrelay.fan.referral_thanks.v1` | A referral they made converted. |
+| `crowdrelay.fan.referral_invite.v1` | Has referred nobody; asks them to. Carries `fan.referral_code`, and only this key does — build the link as `https://virya.music/r/{code}`. |
+
+**Fail on a key you do not know.** A default branch sends the wrong message,
+which is worse than sending none: it is indistinguishable from working, and the
+fan reads a thank-you for something they did not do. Throw instead, and the
+failed execution says which key arrived.
+
+`scripts/test_lifecycle_template_contract_v1.py` fails when this table and the
+keys CrowdRelay can emit disagree, so a new template cannot ship without landing
+here first.
+
 ## Target discovery (candidates, not targets)
 
 Executors post what they found to `POST /v1/internal/autopilot/outreach/candidates` with the commerce key and an `Idempotency-Key`, up to 100 candidates per batch; CrowdRelay screens each one on write. The admin route of the same name stays for operator imports. Discovery is executor work, so it lives on the internal surface: requiring the admin key would hand an adapter authority over every admin route in order to post a list of playlist contacts.
