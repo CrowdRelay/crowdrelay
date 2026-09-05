@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors three conditions:
+//! The watchdog monitors five conditions:
 //! - `executor.offline` — the API is up but no executor has heartbeated
 //!   recently, so nothing can actually execute. This is a silent failure
 //!   that FakAP (external health probe) cannot detect.
@@ -20,6 +20,16 @@
 //!   action says the opposite of the action's persisted status. This is what
 //!   `LegalTransition::Conflict` refused to coerce, and until now the
 //!   refusal existed only as a log line. See below.
+//! - `growth.feed_failing` — a growth feed's last sync attempt failed while
+//!   others still work. A credential to go and repair.
+//! - `growth.all_feeds_failing` — every feed the tenant has is failing, so
+//!   `GrowthStrategy::discovery_channels_are_silent` holds and the brain will
+//!   not plan discovery through any of them. The acquisition side of the North
+//!   Star is shut until a person restores a credential, and nothing recovers it
+//!   automatically. Production stood in exactly this state for weeks — every
+//!   Reddit connection failing on an invalid credential — and none of the three
+//!   conditions above could see it, because all three watch the executor rather
+//!   than the channels the brain grows through.
 //!
 //! # Contradictions are the one condition nothing else can find
 //!
@@ -189,6 +199,17 @@ struct OpsSnapshot {
     /// threshold: nothing sweeps these, so a contradiction is as unresolved
     /// a minute after it appears as it is a day later.
     contradicted_actions: i64,
+    /// Platforms with at least one connection whose last sync attempt failed.
+    ///
+    /// Counted by platform, not by connection: twenty-nine subreddits behind
+    /// one invalid Reddit credential are one thing to go and fix, and reporting
+    /// twenty-nine would make the number look like a catastrophe and read like
+    /// noise.
+    failing_platforms: i64,
+    /// Platforms with at least one connection that has synced and is not
+    /// currently failing. Zero alongside a non-zero `failing_platforms` is the
+    /// state in which the brain can no longer plan any discovery at all.
+    working_platforms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -246,7 +267,18 @@ async fn load_snapshot(
              WHERE a.workspace_id=$1
                AND ((a.status = 'succeeded' AND latest.status = 'failed')
                  OR (a.status = 'failed' AND latest.status = 'succeeded'))
-            )::bigint AS contradicted_actions
+            )::bigint AS contradicted_actions,
+            -- Feed health, by platform. `health` is a generated column, so this
+            -- is the same answer `/ops/connections` gives and cannot drift from
+            -- it. Both halves are needed: failing feeds alone is a credential to
+            -- fix, failing feeds with nothing working is the brain having no
+            -- channel left to reason through.
+            (SELECT count(DISTINCT platform) FROM fanbase_connections c
+             WHERE c.workspace_id=$1 AND c.health='failing')::bigint
+                AS failing_platforms,
+            (SELECT count(DISTINCT platform) FROM fanbase_connections c
+             WHERE c.workspace_id=$1 AND c.health='working')::bigint
+                AS working_platforms
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -288,6 +320,38 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             active: snapshot.contradicted_actions > 0,
             details: json!({
                 "contradicted_actions": snapshot.contradicted_actions,
+            }),
+        },
+        Condition {
+            key: "growth.feed_failing",
+            // Warning: the tenant still has a channel the brain can work
+            // through, and nothing is being lost while this stands.
+            severity: "warning",
+            summary: "A growth feed's last sync attempt failed",
+            active: snapshot.failing_platforms > 0 && snapshot.working_platforms > 0,
+            details: json!({
+                "failing_platforms": snapshot.failing_platforms,
+                "working_platforms": snapshot.working_platforms,
+            }),
+        },
+        Condition {
+            // Every feed the tenant has is failing. The brain will not plan
+            // discovery through them -- see
+            // `GrowthStrategy::discovery_channels_are_silent` -- so the top of
+            // the funnel is shut until a person restores a credential. There is
+            // no automatic recovery from this and nothing else on this list
+            // says it.
+            //
+            // Critical rather than warning, and separate from
+            // `growth.feed_failing` rather than an escalation of it, because
+            // the two ask for different things: one is a feed to repair, this
+            // is the whole acquisition side of the North Star stopped.
+            key: "growth.all_feeds_failing",
+            severity: "critical",
+            summary: "Every growth feed is failing — the brain cannot discover through any channel",
+            active: snapshot.failing_platforms > 0 && snapshot.working_platforms == 0,
+            details: json!({
+                "failing_platforms": snapshot.failing_platforms,
             }),
         },
     ]
@@ -388,6 +452,8 @@ mod tests {
             unknown_actions: 0,
             stale_unknown_actions: 0,
             contradicted_actions: 0,
+            failing_platforms: 0,
+            working_platforms: 2,
         }
     }
 
@@ -471,5 +537,56 @@ mod tests {
         assert!(conditions(&snapshot).iter().all(|condition| condition.key
             != "execution.contradicted_outcome"
             || !condition.active));
+    }
+
+    /// The keys `conditions` reports as active for a snapshot.
+    fn active_keys(snapshot: &OpsSnapshot) -> Vec<&'static str> {
+        conditions(snapshot)
+            .into_iter()
+            .filter(|condition| condition.active)
+            .map(|condition| condition.key)
+            .collect()
+    }
+
+    #[test]
+    fn one_failing_feed_beside_a_working_one_is_a_warning() {
+        let mut snapshot = healthy();
+        snapshot.failing_platforms = 1;
+        snapshot.working_platforms = 2;
+        let active = active_keys(&snapshot);
+        assert!(active.contains(&"growth.feed_failing"));
+        assert!(!active.contains(&"growth.all_feeds_failing"));
+    }
+
+    #[test]
+    fn every_feed_failing_is_critical_and_not_also_a_warning() {
+        // Production's standing state: every Reddit connection failing on an
+        // invalid credential, for weeks, with nothing on the watchdog saying
+        // so. The brain will not plan discovery through silent feeds, so this
+        // is the whole acquisition side of the North Star stopped until a
+        // person restores a credential -- and nothing recovers it on its own.
+        //
+        // The two conditions are mutually exclusive on purpose: raising both
+        // would put the same fact on the operator's list twice, and an
+        // exception list that repeats itself stops being read.
+        let mut snapshot = healthy();
+        snapshot.failing_platforms = 1;
+        snapshot.working_platforms = 0;
+        let active = active_keys(&snapshot);
+        assert!(active.contains(&"growth.all_feeds_failing"));
+        assert!(!active.contains(&"growth.feed_failing"));
+    }
+
+    #[test]
+    fn a_tenant_with_no_feeds_at_all_raises_nothing() {
+        // Nothing connected is not a failure. A tenant who has not connected a
+        // feed yet has none that could be broken, and alerting on that would
+        // fire on every new workspace from its first cycle.
+        let mut snapshot = healthy();
+        snapshot.failing_platforms = 0;
+        snapshot.working_platforms = 0;
+        let active = active_keys(&snapshot);
+        assert!(!active.contains(&"growth.feed_failing"));
+        assert!(!active.contains(&"growth.all_feeds_failing"));
     }
 }
