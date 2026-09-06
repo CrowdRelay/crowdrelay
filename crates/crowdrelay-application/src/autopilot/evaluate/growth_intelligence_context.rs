@@ -383,6 +383,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             &experimental_keys,
         );
         let selected_keys = portfolio::selected_keys(&selection);
+        // The decision-time economic and epistemic record, per selected
+        // candidate. `DecisionValue` is computed here and dropped, so without
+        // this a later reader can only re-derive what the brain *would* decide
+        // against posteriors that have since moved — a different question that
+        // looks identical in a report. It rides in the decision's existing
+        // `input_snapshot`, so there is no schema change.
+        let decision_provenance = portfolio::decision_provenance(&selection, policy.version);
         // ── Dispatch phase ──
         let mut dispatched_count = 0usize;
         // Dispatch non-experiment candidates (scanner, strategist).
@@ -397,11 +404,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // atomically in one transaction. This guarantees the
             // prediction consistency invariant:
             // prediction_at_decision == prediction_persisted_in_initial_evidence.
+            let mut candidate = scored.candidate.clone();
+            attach_decision_provenance(&mut candidate, &decision_provenance);
             let persisted = self
                 .repository
                 .persist_candidate_with_evidence(
                     self.workspace_id,
-                    &scored.candidate,
+                    &candidate,
                     &scored.prediction,
                     Some(strategy.as_str()),
                     0.0,
@@ -442,11 +451,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             prediction,
                             None,
                         );
+                    let mut candidate = candidate.clone();
+                    attach_decision_provenance(&mut candidate, &decision_provenance);
                     let persisted = self
                         .repository
                         .persist_treatment_with_assignment(
                             self.workspace_id,
-                            candidate,
+                            &candidate,
                             &treatment_assignment,
                             prediction,
                             Some(strategy.as_str()),
@@ -605,5 +616,23 @@ fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str)
         WorkerTemplate::CommunityEngager => policy.community_engager_cooldown_hours,
         WorkerTemplate::SignalInviter => policy.signal_inviter_cooldown_hours,
         WorkerTemplate::GrowthStrategist => policy.growth_strategist_cooldown_hours,
+    }
+}
+
+/// Merges the decision-time record into a candidate's `input_snapshot`.
+///
+/// Additive under a single key. The snapshot is stored raw and returned raw by
+/// the decision-evidence endpoint, so a candidate that has no record — one
+/// dispatched outside the portfolio, or from a build before this existed —
+/// simply lacks the key rather than carrying an empty or invented one.
+fn attach_decision_provenance(
+    candidate: &mut DecisionCandidate,
+    provenance: &std::collections::HashMap<String, serde_json::Value>,
+) {
+    let Some(record) = provenance.get(&candidate.decision_key) else {
+        return;
+    };
+    if let Some(object) = candidate.input_snapshot.as_object_mut() {
+        object.insert("decision_value".to_owned(), record.clone());
     }
 }

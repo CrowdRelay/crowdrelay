@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::PortfolioCandidate;
+use std::collections::BTreeMap;
+
+use super::{MarginalAdjustments, PortfolioCandidate};
 
 /// The result of portfolio optimization.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -33,6 +35,23 @@ pub struct PortfolioSelection {
     /// Explains why waiting produces more expected Y30 fan value than
     /// dispatching any available candidate.
     pub wait_reason: Option<String>,
+    /// Why each selected candidate's marginal differs from its intrinsic
+    /// value, keyed by opportunity key.
+    ///
+    /// The optimizer ranks on the marginal, and the marginal is the intrinsic
+    /// value after overlap, fatigue and the uncalibrated-bridge discount. Those
+    /// were three bare multipliers inside one expression: a candidate that
+    /// scored 7.2 on an intrinsic 10.0 could only be explained by someone who
+    /// already knew all three existed. This is that explanation, recorded at
+    /// the moment it was true.
+    ///
+    /// Selected candidates only. A rejection carries its [`RejectionReason`],
+    /// which answers a different question — a candidate rejected for
+    /// `BudgetExhausted` never had a marginal computed against the final
+    /// portfolio, so a breakdown for it would be a number from a different
+    /// world.
+    #[serde(default)]
+    pub marginal_adjustments: BTreeMap<String, MarginalAdjustments>,
 }
 
 /// A rejected candidate and the reason for rejection.

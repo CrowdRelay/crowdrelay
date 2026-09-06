@@ -9,7 +9,7 @@
 //! value object. The optimizer computes marginal value from it after
 //! applying portfolio interactions (overlap, fatigue, budget).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crowdrelay_brain::{
     DecisionMode, DecisionValue, EfeSignal, GrowthIntelligencePolicy, OpportunityAction,
@@ -213,6 +213,73 @@ pub(super) fn selected_keys(selection: &PortfolioSelection) -> HashSet<String> {
         .collect()
 }
 
+/// The decision-time record for each selected candidate, keyed by decision key.
+///
+/// `DecisionValue` is computed per cycle and dropped. The prediction and the
+/// world-model snapshot are durable, so a later reader can re-derive what the
+/// brain *would* decide — against posteriors that have since moved. That is a
+/// different question from what it decided, and the two look identical in a
+/// report.
+///
+/// This is the smallest block that closes the difference. It rides in the
+/// decision's existing `input_snapshot` jsonb, so there is no schema change and
+/// `/v1/admin/autopilot/decisions/{id}/evidence` returns it already.
+///
+/// Three groups, kept separate because conflating them is the failure mode:
+///
+/// - **economic** — what the candidate was worth, intrinsic and marginal, and
+///   every adjustment between them.
+/// - **epistemic** — which estimator produced the number and how much it was
+///   standing on. Never combined into the economics.
+/// - **identity** — enough to know which code and which policy produced this.
+///   Not a reproducibility guarantee: the posteriors are not snapshotted, and
+///   claiming otherwise would be the exact lie this block exists to prevent.
+#[must_use]
+pub(super) fn decision_provenance(
+    selection: &PortfolioSelection,
+    policy_version: i64,
+) -> HashMap<String, serde_json::Value> {
+    selection
+        .selected
+        .iter()
+        .map(|candidate| {
+            let value = &candidate.decision_value;
+            let adjustments = selection
+                .marginal_adjustments
+                .get(&candidate.opportunity_id.to_string());
+            let record = serde_json::json!({
+                "economic": {
+                    "intrinsic_y30": value.total(),
+                    "pragmatic_value": value.pragmatic_value,
+                    "risk_penalty": value.risk_penalty,
+                    "opportunity_cost": value.opportunity_cost,
+                    "resource_cost_units": value.resource_cost.units,
+                    "adjustments": adjustments,
+                },
+                "epistemic": {
+                    "estimation_regime": value.estimation_regime.as_str(),
+                    "evidence_quality": value.evidence_quality.as_str(),
+                    "sample_size": value.sample_size,
+                    "uncertainty": value.uncertainty,
+                    "uses_y30": value.uses_y30,
+                    "bridge_confidence": value.bridge_confidence,
+                    "bridge_is_reliable": value.bridge_is_reliable,
+                },
+                "policy": {
+                    "decision_mode": value.decision_mode,
+                    "is_experimental": candidate.is_experimental,
+                    "policy_version": policy_version,
+                },
+                "identity": {
+                    "optimizer": "submodular_greedy_marginal_v1",
+                    "brain_version": env!("CARGO_PKG_VERSION"),
+                },
+            });
+            (candidate.opportunity_id.target.clone(), record)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +306,113 @@ mod tests {
             decision_key: decision_key.to_owned(),
             action_idempotency_key: decision_key.to_owned(),
         }
+    }
+
+    /// The decision-time record reaches the decision, and keeps its categories
+    /// apart.
+    ///
+    /// `DecisionValue` is computed per cycle and dropped. Everything durable —
+    /// the prediction, the world-model snapshot, the evidence row — describes
+    /// what the brain *saw*, not what it *concluded*, so a later reader could
+    /// only re-derive a conclusion against posteriors that had moved. That
+    /// reconstruction answers "what would the brain decide now" and is
+    /// indistinguishable in a report from "what did it decide".
+    ///
+    /// Two things are asserted, and the second is the one that decays. The
+    /// record must be present and reconstruct the marginal; and economic,
+    /// epistemic and policy facts must stay in separate objects. The failure
+    /// this prevents is someone flattening them into one bag of numbers, after
+    /// which `uncertainty` sits beside `intrinsic_y30` looking like a term.
+    #[test]
+    fn the_decision_time_record_is_attached_and_keeps_its_categories_apart() {
+        use crowdrelay_brain::{
+            DecisionMode, DecisionValue, EstimationRegime, EvidenceQuality, OpportunityAction,
+            OpportunityId, PortfolioCandidate, PortfolioOptimizer, ResourceCost,
+        };
+
+        let context = crowdrelay_brain::DispatchContext::default();
+        let mut decision_value = DecisionValue::from_stats(
+            &crowdrelay_brain::CausalModel::new().predict_stats_with_treatment("fixture", &context),
+            ResourceCost::configured(1.0),
+            DecisionMode::Exploit,
+        );
+        decision_value.estimation_regime = EstimationRegime::Y14Bridged;
+        decision_value.evidence_quality = EvidenceQuality::RandomizedHoldout;
+        decision_value.bridge_is_reliable = false;
+        decision_value.pragmatic_value = 10.0;
+        decision_value.expected_incremental_y30 = 10.0;
+
+        let decision_key = "decision:growth-intelligence:v7:fixture:target:0";
+        let pool = vec![PortfolioCandidate {
+            opportunity_id: OpportunityId {
+                template_id: "fixture".to_owned(),
+                target: decision_key.to_owned(),
+                action: OpportunityAction::Post,
+                context_hash: "ctx".to_owned(),
+            },
+            audience_key: "audience".to_owned(),
+            source_context: "GrowthIntelligence".to_owned(),
+            action_key: decision_key.to_owned(),
+            generation_signal: None,
+            is_experimental: false,
+            decision_value,
+        }];
+
+        let selection = PortfolioOptimizer::new(PortfolioConfig::default()).select(pool);
+        let provenance = decision_provenance(&selection, 7);
+
+        let mut subject = candidate(decision_key);
+        crate::autopilot::evaluate::attach_decision_provenance(&mut subject, &provenance);
+
+        let record = subject
+            .input_snapshot
+            .get("decision_value")
+            .expect("the decision must carry its own decision-time record");
+
+        // Economic: the breakdown reconstructs the marginal the optimizer used.
+        let economic = record.get("economic").expect("economic block");
+        let intrinsic = economic["intrinsic_y30"].as_f64().expect("intrinsic");
+        let adjustments = &economic["adjustments"];
+        let marginal = adjustments["marginal_y30"].as_f64().expect("marginal");
+        let summed = intrinsic
+            + adjustments["overlap_adjustment"].as_f64().expect("overlap")
+            + adjustments["fatigue_adjustment"].as_f64().expect("fatigue")
+            + adjustments["bridge_adjustment"].as_f64().expect("bridge");
+        assert!(
+            (summed - marginal).abs() < 1e-9,
+            "the persisted breakdown must reach the marginal: {summed} vs {marginal}"
+        );
+        assert!(
+            adjustments["bridge_adjustment"].as_f64().expect("bridge") < 0.0,
+            "an uncalibrated Y14Bridged candidate was docked, and the record \
+             must say so rather than showing an unexplained gap"
+        );
+
+        // Epistemic: which estimator, standing on how much. Not economics.
+        let epistemic = record.get("epistemic").expect("epistemic block");
+        assert_eq!(epistemic["estimation_regime"], "y14_bridged");
+        assert_eq!(epistemic["evidence_quality"], "randomized_holdout");
+        assert_eq!(epistemic["bridge_is_reliable"], false);
+
+        // Policy: what constrained the decision.
+        let policy = record.get("policy").expect("policy block");
+        assert_eq!(policy["policy_version"], 7);
+        assert_eq!(policy["is_experimental"], false);
+
+        // Identity: which code produced it.
+        let identity = record.get("identity").expect("identity block");
+        assert_eq!(identity["optimizer"], "submodular_greedy_marginal_v1");
+
+        // The categories must not be flattened into one another.
+        assert!(
+            economic.get("uncertainty").is_none() && economic.get("estimation_regime").is_none(),
+            "epistemic facts must not appear in the economic block, where they \
+             read as terms"
+        );
+        assert!(
+            epistemic.get("intrinsic_y30").is_none(),
+            "economic facts must not appear in the epistemic block"
+        );
     }
 
     fn key_for(template: &str) -> String {
