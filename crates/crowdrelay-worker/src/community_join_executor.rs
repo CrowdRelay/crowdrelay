@@ -284,7 +284,11 @@ impl CommunityJoinExecutorWorker {
             .as_deref()
             .ok_or(CommunityJoinError::NoAuthKey)?;
         let ws = self.workspace_id.into_uuid();
-        let token = crate::discovery::derive_agent_token(auth_key, ws);
+        let token = crate::discovery::derive_agent_token_with_capability(
+            auth_key,
+            ws,
+            crate::discovery::AgentCapability::SocialPublish,
+        );
         let url = format!("{}/reddit/join", self.agent_service_url);
 
         // Extract the subreddit name from the place name (stored without

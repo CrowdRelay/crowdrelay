@@ -1194,7 +1194,11 @@ impl GrowthMetricSyncWorker {
             ));
         };
         let url = format!("{}/reddit/observe", self.agent_service_url);
-        let token = crate::discovery::derive_agent_token(auth_key, conn.workspace_id);
+        let token = crate::discovery::derive_agent_token_with_capability(
+            auth_key,
+            conn.workspace_id,
+            crate::discovery::AgentCapability::Read,
+        );
         let response = self
             .http_client
             .post(&url)

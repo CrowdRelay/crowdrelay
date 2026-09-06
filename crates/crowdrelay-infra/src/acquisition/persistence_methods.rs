@@ -655,6 +655,10 @@ impl PostgresAcquisitionRepository {
         let Some(visitor_id) = signup.visitor_id() else {
             return Ok(());
         };
+        // occurred_at must be the fan's created_at — the actual conversion
+        // time — not now() (write time). If the fan does not exist, the JOIN
+        // produces no rows and no conversion is written: fail-closed rather
+        // than fabricating a timestamp for an event we cannot anchor.
         sqlx::query(
             r#"
             INSERT INTO fan_provenance_events (
@@ -665,20 +669,14 @@ impl PostgresAcquisitionRepository {
             SELECT $1, $2, 'conversion',
                    COALESCE(link.channel_source, 'smart_link'),
                    link.slug, link.channel_community, click.campaign_id,
-                   'last_community_click', 1.0,
-                   -- When the conversion happened, not when this row was
-                   -- written. `created_at` records the latter on its own.
-                   -- `now()` here put a replayed signup in the measurement
-                   -- window of the replay. `COALESCE` because the fan row is
-                   -- written in this same transaction and must be visible;
-                   -- if it somehow is not, the signup instant is still the
-                   -- closest true statement available.
-                   COALESCE((SELECT fan.created_at FROM fans AS fan
-                             WHERE fan.workspace_id = $1 AND fan.id = $2), now())
+                   'last_community_click', 1.0, fan.created_at
             FROM click_events AS click
             JOIN smart_links AS link
               ON link.workspace_id = click.workspace_id
              AND link.id = click.smart_link_id
+            JOIN fans AS fan
+              ON fan.workspace_id = $1
+             AND fan.id = $2
             WHERE click.workspace_id = $1
               AND click.anonymous_visitor_id = $3
               AND link.channel_community IS NOT NULL

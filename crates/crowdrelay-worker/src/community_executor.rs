@@ -648,7 +648,11 @@ impl CommunityExecutorWorker {
             CommunityExecutorError::RedditApi("agent service auth key not configured".to_owned())
         })?;
         let ws = self.workspace_id.into_uuid();
-        let token = crate::discovery::derive_agent_token(auth_key, ws);
+        let token = crate::discovery::derive_agent_token_with_capability(
+            auth_key,
+            ws,
+            crate::discovery::AgentCapability::SocialPublish,
+        );
         let url = format!("{}/reddit/post", self.agent_service_url);
         let payload = serde_json::json!({
             "subreddit": action.subreddit,
@@ -894,51 +898,14 @@ impl CommunityExecutorWorker {
         Ok(measured)
     }
 
-    /// Fetches Reddit session cookies from the agents service (obtained by
-    /// the Playwright scraper via Google OAuth). Returns None if the agents
-    /// service is unreachable or no cookies are stored.
+    /// Reads Reddit session cookies directly from the database (obtained by
+    /// the Playwright scraper via Google OAuth). Returns None if no active
+    /// cookies are stored. Reads the `agent_service_reddit_cookies` table
+    /// directly instead of calling the now-locked-down `/reddit/cookies`
+    /// endpoint, which returns status-only metadata.
     async fn fetch_reddit_cookies(&self) -> Option<String> {
-        let auth_key = self.agent_service_auth_key.as_ref()?;
-        let ws = self.workspace_id.into_uuid();
-        let token = crate::discovery::derive_agent_token(auth_key, ws);
-        let url = format!("{}/reddit/cookies", self.agent_service_url);
-        let client = self
-            .http_client
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let response = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("X-Workspace-Id", ws.to_string())
-            .timeout(Duration::from_secs(5))
-            .send()
+        crate::discovery::fetch_reddit_cookies_from_db(&self.pool, self.workspace_id.into_uuid())
             .await
-            .map_err(|e| tracing::warn!(%e, "reddit cookies fetch failed"))
-            .ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| tracing::warn!(%e, "reddit cookies response was not json"))
-            .ok()?;
-        let cookies = body.get("cookies")?.as_array()?;
-        let cookie_str = cookies
-            .iter()
-            .filter_map(|c| {
-                let name = c.get("name")?.as_str()?;
-                let value = c.get("value")?.as_str()?;
-                Some(format!("{name}={value}"))
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        if cookie_str.is_empty() {
-            None
-        } else {
-            Some(cookie_str)
-        }
     }
 
     /// Reads post metrics through the agents service's logged-in browser
@@ -953,7 +920,11 @@ impl CommunityExecutorWorker {
             .as_deref()
             .ok_or_else(|| CommunityExecutorError::NoAgentsService)?;
         let ws = self.workspace_id.into_uuid();
-        let token = crate::discovery::derive_agent_token(auth_key, ws);
+        let token = crate::discovery::derive_agent_token_with_capability(
+            auth_key,
+            ws,
+            crate::discovery::AgentCapability::Read,
+        );
         let url = format!("{}/reddit/metrics", self.agent_service_url);
         let payload = serde_json::json!({ "post_id": reddit_post_id });
 

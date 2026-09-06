@@ -16,6 +16,7 @@ use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use sqlx::Row;
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, timeout},
@@ -30,6 +31,11 @@ const AGENT_AUTH_NAMESPACE: &[u8] = b"crowdrelay-control-plane-v1:";
 
 /// Derives a per-workspace bearer token for the agents service.
 /// `token = hex(HMAC-SHA256(master_key, namespace + workspace_id))`
+///
+/// **Legacy** — produces an unscoped token accepted only when the agents
+/// service has `allowLegacyTokens` enabled. New call sites should use
+/// [`derive_agent_token_with_capability`] instead.
+#[allow(dead_code)]
 pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String {
     // HMAC-SHA256 accepts any key length; this never fails.
     let mut mac = match <Hmac<Sha256> as KeyInit>::new_from_slice(master_key.as_bytes()) {
@@ -39,6 +45,94 @@ pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String
     mac.update(AGENT_AUTH_NAMESPACE);
     mac.update(workspace_id.to_string().as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// Capability class for scoped agent-service tokens. Mirrors the enum in
+/// `crowdrelay-agents/src/auth.ts` and the control plane's
+/// `tenant_area_client.rs`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentCapability {
+    Read,
+    /// Used by the control plane, not the worker.
+    #[allow(dead_code)]
+    Dispatch,
+    /// Used by the control plane, not the worker.
+    #[allow(dead_code)]
+    Credentials,
+    SocialPublish,
+}
+
+impl AgentCapability {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Dispatch => "dispatch",
+            Self::Credentials => "credentials",
+            Self::SocialPublish => "social_publish",
+        }
+    }
+}
+
+/// Derives a per-workspace, per-capability bearer token for the agents
+/// service.
+/// `token = hex(HMAC-SHA256(master_key, namespace + workspace_id + ":" + capability))`
+pub(crate) fn derive_agent_token_with_capability(
+    master_key: &str,
+    workspace_id: Uuid,
+    capability: AgentCapability,
+) -> String {
+    let mut mac = match <Hmac<Sha256> as KeyInit>::new_from_slice(master_key.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return String::new(),
+    };
+    mac.update(AGENT_AUTH_NAMESPACE);
+    mac.update(workspace_id.to_string().as_bytes());
+    mac.update(b":");
+    mac.update(capability.as_str().as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Reads Reddit session cookies directly from the `agent_service_reddit_cookies`
+/// table, bypassing the HTTP endpoint entirely. Returns a `name=value; ...`
+/// Cookie header string, or `None` if no active cookies are stored.
+///
+/// This replaces the former `GET /reddit/cookies` HTTP call, which leaked raw
+/// cookie values to any bearer holder. The worker shares the same Postgres
+/// as the agents service, so a direct query is both safer and faster.
+pub(crate) async fn fetch_reddit_cookies_from_db(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+) -> Option<String> {
+    let row = sqlx::query(
+        "SELECT cookies FROM agent_service_reddit_cookies \
+         WHERE workspace_id = $1 AND status = 'active' AND expires_at > now()",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| tracing::warn!(?error, "reddit cookies DB query failed"))
+    .ok()??;
+
+    let cookies: serde_json::Value = row
+        .try_get("cookies")
+        .map_err(|error| tracing::warn!(?error, "reddit cookies column decode failed"))
+        .ok()?;
+
+    let cookies = cookies.as_array()?;
+    let cookie_str = cookies
+        .iter()
+        .filter_map(|c| {
+            let name = c.get("name")?.as_str()?;
+            let value = c.get("value")?.as_str()?;
+            Some(format!("{name}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if cookie_str.is_empty() {
+        None
+    } else {
+        Some(cookie_str)
+    }
 }
 
 /// Reddit's unauthenticated JSON API tolerates roughly one request per second
@@ -282,47 +376,13 @@ impl RedditDiscoveryWorker {
         Ok(imported)
     }
 
-    /// Fetches Reddit session cookies from the agents service (obtained by
-    /// the Playwright scraper via Google OAuth). Returns None if the agents
-    /// service is unreachable or no cookies are stored — the caller falls
-    /// back to an unauthenticated request.
-    async fn fetch_reddit_cookies(&self, client: &reqwest::Client) -> Option<String> {
-        let auth_key = self.agent_service_auth_key.as_ref()?;
-        let ws = self.workspace_id.into_uuid();
-        let token = derive_agent_token(auth_key, ws);
-        let url = format!("{}/reddit/cookies", self.agent_service_url);
-        let response = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("X-Workspace-Id", ws.to_string())
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|error| tracing::warn!(?error, "reddit cookies fetch failed"))
-            .ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|error| tracing::warn!(?error, "reddit cookies response was not json"))
-            .ok()?;
-        let cookies = body.get("cookies")?.as_array()?;
-        let cookie_str = cookies
-            .iter()
-            .filter_map(|c| {
-                let name = c.get("name")?.as_str()?;
-                let value = c.get("value")?.as_str()?;
-                Some(format!("{name}={value}"))
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        if cookie_str.is_empty() {
-            None
-        } else {
-            Some(cookie_str)
-        }
+    /// Reads Reddit session cookies directly from the database (obtained by
+    /// the Playwright scraper via Google OAuth). Returns None if no active
+    /// cookies are stored — the caller falls back to an unauthenticated
+    /// request. Reads the `agent_service_reddit_cookies` table directly
+    /// instead of calling the now-locked-down `/reddit/cookies` endpoint.
+    async fn fetch_reddit_cookies(&self, _client: &reqwest::Client) -> Option<String> {
+        fetch_reddit_cookies_from_db(&self.pool, self.workspace_id.into_uuid()).await
     }
 
     /// Reads stored scrape results from the agents service. Ok(None) means
@@ -418,7 +478,7 @@ impl RedditDiscoveryWorker {
             return Ok(None);
         };
         let ws = self.workspace_id.into_uuid();
-        let token = derive_agent_token(auth_key, ws);
+        let token = derive_agent_token_with_capability(auth_key, ws, AgentCapability::Read);
 
         let rows = match self.fetch_scrape_results(client, &token, query).await {
             Ok(Some(rows)) if !rows.is_empty() => rows,
@@ -840,7 +900,7 @@ impl XDiscoveryWorker {
             return Ok(vec![]);
         };
         let ws = self.workspace_id.into_uuid();
-        let token = derive_agent_token(auth_key, ws);
+        let token = derive_agent_token_with_capability(auth_key, ws, AgentCapability::Read);
 
         // Read stored scrape results.
         let url = format!("{}/x/scrape/results", self.agent_service_url);

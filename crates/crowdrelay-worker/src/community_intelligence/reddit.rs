@@ -164,8 +164,11 @@ impl SourceAdapter for RedditAdapter {
             AdapterError::Parse(format!("no subreddit in place url: {}", place.url))
         })?;
 
-        let token =
-            crate::discovery::derive_agent_token(&self.agent_service_auth_key, self.workspace_id);
+        let token = crate::discovery::derive_agent_token_with_capability(
+            &self.agent_service_auth_key,
+            self.workspace_id,
+            crate::discovery::AgentCapability::Read,
+        );
         let response = self
             .http_client
             .post(format!("{}/reddit/observe", self.agent_service_url))
