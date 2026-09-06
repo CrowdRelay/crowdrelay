@@ -9234,6 +9234,7 @@ components:
           type: object
           additionalProperties: { type: boolean }
           required: [area_wallet_postgres_v2, area_vouchers_v2, area_ticket_rewards_v2, ticketing_v1]
+        minimumSignalAppVersion: { type: string, pattern: '^\d+\.\d+\.\d+$', description: 'Lowest Signal app version (semver) that still works against this backend. Absent means no update gate.' }
     AreaPublicDrop:
       type: object
       additionalProperties: true

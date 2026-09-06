@@ -52,6 +52,12 @@ struct MetaResponse {
     build_timestamp: Option<&'static str>,
     minimum_postgres_server_version_num: i32,
     capabilities: BTreeMap<&'static str, bool>,
+    /// The lowest Signal app version (semver `major.minor.patch`) that still
+    /// works against this backend. Sourced from a deployment env var so it
+    /// stays absent until ops deliberately sets it — a missing field means
+    /// "no update gate", and the client never claims an update without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum_signal_app_version: Option<&'static str>,
 }
 
 pub async fn get() -> impl IntoResponse {
@@ -102,6 +108,8 @@ pub async fn get() -> impl IntoResponse {
             minimum_postgres_server_version_num:
                 crowdrelay_infra::database::MIN_POSTGRES_SERVER_VERSION_NUM,
             capabilities,
+            minimum_signal_app_version: option_env!("CROWDRELAY_MINIMUM_SIGNAL_APP_VERSION")
+                .filter(|value| !value.is_empty()),
         }),
     )
 }

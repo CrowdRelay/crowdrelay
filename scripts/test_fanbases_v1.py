@@ -18,6 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/fanbase.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/fanbase.rs"
+# The ingestion batch moved into a child module when the per-entry loop became
+# set-based phases. Read the whole module, not one file, so a later split does
+# not silently drop these assertions.
+INFRA_MODULE = [INFRA, *sorted((ROOT / "crates/crowdrelay-infra/src/fanbase").glob("*.rs"))]
+
+
+def infra_source() -> str:
+    return "\n".join(path.read_text() for path in INFRA_MODULE if path.exists())
 API = ROOT / "crates/crowdrelay-api/src/fanbase.rs"
 
 WRITE_SQL = re.compile(r"\b(INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM)\b")
@@ -42,7 +50,7 @@ class FanbasesContract(unittest.TestCase):
         self.assertIn("Some(_) => AdmissionAction::SkipSuppressed", source)
 
     def test_ingestion_uses_canonical_confirmation_and_membership(self):
-        infra = INFRA.read_text()
+        infra = infra_source()
         self.assertIn("fan.confirmation_requested", infra)
         self.assertIn("ON CONFLICT (fanbase_id, external_id) DO UPDATE SET", infra)
 

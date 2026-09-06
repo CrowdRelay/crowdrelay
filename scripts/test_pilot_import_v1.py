@@ -29,12 +29,28 @@ WRITE_SQL = re.compile(r"\b(INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM)\b", re.IGN
 
 class PilotImportContract(unittest.TestCase):
     def test_repository_creates_pending_only(self):
+        """An import may admit a fan as `pending` and nothing else.
+
+        Asserted against the status match arms rather than one statement's
+        exact text: the loop became a set-based batch, so the insert is now an
+        `INSERT ... SELECT FROM unnest(...)`. The property is unchanged and is
+        what the arms encode -- `active` is counted, never written.
+        """
         source = INFRA.read_text()
         self.assertIn("'pending'", source)
-        self.assertIn('"active" => {', source)
-        self.assertIn("already_active += 1", source)
-        # No code path writes an active status on import.
-        self.assertNotIn("'active')", source.replace("VALUES ($1, $2, $3, $4, 'pending')", ""))
+        self.assertIn('Some("active") => counts.already_active += 1', source)
+        # No code path writes an active status on import. The only status
+        # literal an INSERT may carry is 'pending'.
+        inserted_statuses = re.findall(
+            r"INSERT INTO fans\b.*?;", source, re.IGNORECASE | re.DOTALL
+        )
+        self.assertTrue(inserted_statuses, "the fans insert was not found; the parser is wrong")
+        for statement in inserted_statuses:
+            self.assertNotIn(
+                "'active'",
+                statement,
+                "an import must never insert a fan as active",
+            )
 
     def test_suppressed_never_resurrected(self):
         source = INFRA.read_text()
@@ -42,11 +58,24 @@ class PilotImportContract(unittest.TestCase):
         self.assertIn("skipped_suppressed", source)
 
     def test_confirmation_reuses_the_canonical_event_and_real_token(self):
+        """Only the hash is stored, and the raw token leaves only by outbox.
+
+        The batch rewrite mints one token per recipient instead of one per
+        loop iteration, so the payload now reads the token out of a map. What
+        must not change: the database holds `digest(...)` and the raw value
+        appears in exactly one place, the outbox payload.
+        """
         source = INFRA.read_text()
         self.assertIn("fan.confirmation_requested", source)
         self.assertIn("digest(material.token, 'sha256')", source)
-        # The raw token travels only through the outbox payload.
-        self.assertIn('"confirmation_token": raw_token', source)
+        self.assertIn('"confirmation_token": token_of.get(fan_id).copied()', source)
+        # One mention, in the payload. A second would be a log line or a
+        # return value carrying a live credential.
+        self.assertEqual(
+            source.count("confirmation_token"),
+            1,
+            "the raw confirmation token may appear only in the outbox payload",
+        )
 
     def test_resend_cooldown_applies(self):
         source = INFRA.read_text()
