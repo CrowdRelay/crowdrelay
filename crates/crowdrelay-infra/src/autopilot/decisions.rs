@@ -475,25 +475,12 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
         template_id: &str,
         unit_id: &str,
-    ) -> Result<f64, RepositoryError> {
+    ) -> Result<Option<f64>, RepositoryError> {
         super::operations::experiment_assignments::load_contamination_estimate(
             self,
             workspace_id,
             template_id,
             unit_id,
-        )
-        .await
-    }
-
-    async fn load_calibration_bias(
-        &self,
-        workspace_id: WorkspaceId,
-        template_id: &str,
-    ) -> Result<f64, RepositoryError> {
-        super::operations::experiment_assignments::load_calibration_bias(
-            self,
-            workspace_id,
-            template_id,
         )
         .await
     }

@@ -438,15 +438,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         template_id: &str,
         unit_id: &str,
-    ) -> Result<f64, RepositoryError>;
-
-    /// Loads the calibration bias for a template from the calibration
-    /// tracker in brain state. Returns 0.0 when no calibration data exists.
-    async fn load_calibration_bias(
-        &self,
-        workspace_id: WorkspaceId,
-        template_id: &str,
-    ) -> Result<f64, RepositoryError>;
+    ) -> Result<Option<f64>, RepositoryError>;
 
     /// Records a credit allocation — attributed credit for a fan outcome.
     /// CRITICAL: the raw observation in the evidence table is immutable.

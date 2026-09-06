@@ -875,14 +875,24 @@ pub(in crate::autopilot) async fn load_evidence_quality(
     })
 }
 
-/// Loads the contamination estimate for a unit+template from the
-/// experiment assignment state. Returns 0.0 when no assignments exist.
+/// Loads the contamination estimate for a unit+template from the experiment
+/// assignment state.
+///
+/// `None` means no assignment exists for this unit and template, which is not
+/// the same as contamination of zero. Zero says the unit received nothing else
+/// during its window — a measured claim about a clean comparison. Returning it
+/// for a unit that was never assigned would hand a caller the strongest
+/// possible evidence-quality signal on the strength of a missing row.
+///
+/// Nothing calls this today; `DecisionValue::contamination` is dormant. The
+/// distinction is drawn here anyway, because the shape of the return type is
+/// what will decide the question when something does.
 pub(in crate::autopilot) async fn load_contamination_estimate(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     template_id: &str,
     unit_id: &str,
-) -> Result<f64, RepositoryError> {
+) -> Result<Option<f64>, RepositoryError> {
     let pool = &repo.pool;
     // Prefer final_contamination (resolved over full window) over
     // assignment_time_contamination (snapshot at assignment time).
@@ -903,25 +913,5 @@ pub(in crate::autopilot) async fn load_contamination_estimate(
     .fetch_optional(pool)
     .await
     .map_err(map_sqlx)?;
-    Ok(contamination
-        .and_then(|(final_c, assign_c)| final_c.or(Some(assign_c)))
-        .unwrap_or(0.0))
-}
-
-/// Loads the calibration bias for a template from the calibration
-/// tracker in brain state. Returns 0.0 when no calibration data exists.
-#[allow(clippy::unused_async)]
-pub(in crate::autopilot) async fn load_calibration_bias(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    template_id: &str,
-) -> Result<f64, RepositoryError> {
-    let pool = &repo.pool;
-    // The calibration bias is stored in the brain state checkpoint.
-    // We read it from the viryaos_brain_state table's calibration data.
-    // For now, return 0.0 — the calibration tracker is in-memory in the
-    // causal model, and its bias is applied when the model is built.
-    // Phase 2 will persist calibration data to a dedicated table.
-    let _ = (pool, workspace_id, template_id);
-    Ok(0.0)
+    Ok(contamination.map(|(final_c, assign_c)| final_c.unwrap_or(assign_c)))
 }

@@ -160,8 +160,22 @@ pub struct DecisionValue {
     pub contamination: f64,
     /// Calibration bias for this template — the running mean of
     /// (predicted - observed) Y30. Positive = overestimating,
-    /// negative = underestimating. 0.0 when no calibration data.
-    /// Applied to make predictions more honest.
+    /// negative = underestimating.
+    ///
+    /// **Always 0.0.** There is no producer: `from_stats` writes zero, the
+    /// setter that used to write it is gone, and the port method behind it —
+    /// `load_calibration_bias` — was a stub that returned 0.0 regardless of
+    /// workspace or template while sitting on the trait as though it were a
+    /// capability. It is deleted rather than left, because the trap is
+    /// specific: the next caller wires it up, gets 0.0 everywhere, and
+    /// concludes the brain is perfectly calibrated.
+    ///
+    /// Calibration itself is not dead. `CalibrationTracker` records residuals
+    /// per regime and `correct_prediction_by_regime` shifts the outcome model's
+    /// prediction with them — upstream of any value, which is where a
+    /// correction belongs. This field is the *provenance* copy, and it is not
+    /// wired. It must never become an additive term: see
+    /// `prediction_error_does_not_change_the_economic_value`.
     #[serde(default)]
     pub calibration_bias: f64,
 
@@ -303,15 +317,6 @@ impl DecisionValue {
     #[must_use]
     pub fn with_contamination(mut self, contamination: f64) -> Self {
         self.contamination = contamination.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Sets the calibration bias on this DecisionValue. Called by the
-    /// application layer after loading calibration from the calibration
-    /// tracker. Returns `self` for chaining.
-    #[must_use]
-    pub fn with_calibration_bias(mut self, calibration_bias: f64) -> Self {
-        self.calibration_bias = calibration_bias;
         self
     }
 }
