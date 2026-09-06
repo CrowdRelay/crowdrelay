@@ -34,6 +34,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The portfolio state and configuration that determine one candidate's
+/// adjustments.
+///
+/// Taken as a struct rather than four positional floats: the previous
+/// signature was `apply(intrinsic, overlap, fatigue, bridge)` with the factors
+/// already computed by the caller, which meant the inputs that produced them
+/// lived only in the caller's locals and the recorded deltas could not be
+/// checked against anything. Passing the inputs and deriving the factors here
+/// puts the arithmetic and the record in the same place, so they cannot
+/// disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdjustmentInputs {
+    /// Selected candidates already sharing this candidate's audience.
+    pub audience_count: u32,
+    /// `PortfolioConfig::audience_overlap_penalty`.
+    pub overlap_penalty: f64,
+    /// `PortfolioConfig::fatigue_decay`.
+    pub fatigue_decay: f64,
+    /// The uncalibrated-bridge factor — `1.0` when it does not apply.
+    pub bridge_factor: f64,
+}
+
 /// The portfolio's adjustments to one candidate's intrinsic value, in expected
 /// incremental Y30 fans.
 ///
@@ -54,6 +76,28 @@ pub struct MarginalAdjustments {
     pub bridge_adjustment: f64,
     /// What the optimizer actually ranks on.
     pub marginal_y30: f64,
+
+    // ── The inputs that produced the deltas above ──
+    //
+    // A delta says what a factor cost. These say why it cost that. Without
+    // them `overlap_adjustment = -3.0` is a number a reader has to take on
+    // faith: the count and the penalty that produced it are portfolio state
+    // that does not survive the cycle, so the explanation would have to be
+    // reconstructed from a configuration that has since been edited.
+    //
+    // Four numbers, chosen because together with `intrinsic_y30` they
+    // determine all three deltas exactly. Nothing else about the portfolio is
+    // stored here.
+    /// Selected candidates already sharing this candidate's audience when it
+    /// was scored. Drives both the overlap and fatigue factors.
+    pub audience_count: u32,
+    /// `PortfolioConfig::audience_overlap_penalty` in force at decision time.
+    pub overlap_penalty: f64,
+    /// `PortfolioConfig::fatigue_decay` in force at decision time.
+    pub fatigue_decay: f64,
+    /// The uncalibrated-bridge factor applied — `1.0` when the regime is not
+    /// `Y14Bridged` or the bridge is calibrated.
+    pub bridge_factor: f64,
 }
 
 impl MarginalAdjustments {
@@ -65,16 +109,24 @@ impl MarginalAdjustments {
     /// the first, not a fixed number of fans fewer. The *record* is additive
     /// because "this cost 1.2 fans" is the answerable question.
     #[must_use]
-    pub fn apply(intrinsic_y30: f64, overlap: f64, fatigue: f64, bridge: f64) -> Self {
+    pub fn apply(intrinsic_y30: f64, inputs: AdjustmentInputs) -> Self {
+        let overlap = (1.0 - inputs.overlap_penalty * f64::from(inputs.audience_count)).max(0.0);
+        let fatigue = inputs
+            .fatigue_decay
+            .powi(i32::try_from(inputs.audience_count).unwrap_or(i32::MAX));
         let after_overlap = intrinsic_y30 * overlap;
         let after_fatigue = after_overlap * fatigue;
-        let after_bridge = after_fatigue * bridge;
+        let after_bridge = after_fatigue * inputs.bridge_factor;
         Self {
             intrinsic_y30,
             overlap_adjustment: after_overlap - intrinsic_y30,
             fatigue_adjustment: after_fatigue - after_overlap,
             bridge_adjustment: after_bridge - after_fatigue,
             marginal_y30: after_bridge,
+            audience_count: inputs.audience_count,
+            overlap_penalty: inputs.overlap_penalty,
+            fatigue_decay: inputs.fatigue_decay,
+            bridge_factor: inputs.bridge_factor,
         }
     }
 
@@ -93,6 +145,15 @@ impl MarginalAdjustments {
 mod tests {
     use super::*;
 
+    fn inputs(count: u32, penalty: f64, decay: f64, bridge: f64) -> AdjustmentInputs {
+        AdjustmentInputs {
+            audience_count: count,
+            overlap_penalty: penalty,
+            fatigue_decay: decay,
+            bridge_factor: bridge,
+        }
+    }
+
     /// The record must reconstruct the number the optimizer ranked on.
     ///
     /// This is the whole contract. A breakdown whose parts do not reach the
@@ -101,14 +162,17 @@ mod tests {
     /// why a candidate lost.
     #[test]
     fn the_parts_reach_the_total() {
-        for (intrinsic, overlap, fatigue, bridge) in [
-            (10.0, 1.0, 1.0, 1.0),
-            (10.0, 0.7, 0.9, 0.8),
-            (10.0, 0.4, 0.81, 1.0),
-            (-3.0, 0.7, 0.9, 0.8),
-            (0.0, 0.7, 0.9, 0.8),
+        for (intrinsic, count, penalty, decay, bridge) in [
+            (10.0, 0, 0.3, 0.9, 1.0),
+            (10.0, 1, 0.3, 0.9, 0.8),
+            (10.0, 2, 0.3, 0.9, 1.0),
+            (-3.0, 1, 0.3, 0.9, 0.8),
+            (0.0, 1, 0.3, 0.9, 0.8),
+            // Overlap clamps at zero rather than going negative.
+            (10.0, 9, 0.3, 0.9, 1.0),
         ] {
-            let adjustments = MarginalAdjustments::apply(intrinsic, overlap, fatigue, bridge);
+            let adjustments =
+                MarginalAdjustments::apply(intrinsic, inputs(count, penalty, decay, bridge));
             let summed = adjustments.intrinsic_y30
                 + adjustments.overlap_adjustment
                 + adjustments.fatigue_adjustment
@@ -116,21 +180,49 @@ mod tests {
             assert!(
                 (summed - adjustments.marginal_y30).abs() < 1e-9,
                 "parts sum to {summed} but the marginal is {} for \
-                 intrinsic={intrinsic} overlap={overlap} fatigue={fatigue} bridge={bridge}",
+                 intrinsic={intrinsic} count={count}",
                 adjustments.marginal_y30
             );
         }
+    }
+
+    /// The stored inputs reproduce the stored deltas.
+    ///
+    /// This is the replay contract, and it is stronger than the sum check: a
+    /// reader months later has the record and nothing else — the audience
+    /// count is portfolio state that vanished with the cycle, and the penalty
+    /// and decay are configuration that has since been edited. Recomputing
+    /// from the record must land on exactly what the record says.
+    #[test]
+    fn the_stored_inputs_reproduce_the_stored_deltas() {
+        let original = MarginalAdjustments::apply(10.0, inputs(2, 0.3, 0.9, 0.8));
+
+        // Everything a historical reader has.
+        let replayed = MarginalAdjustments::apply(
+            original.intrinsic_y30,
+            AdjustmentInputs {
+                audience_count: original.audience_count,
+                overlap_penalty: original.overlap_penalty,
+                fatigue_decay: original.fatigue_decay,
+                bridge_factor: original.bridge_factor,
+            },
+        );
+
+        assert_eq!(
+            replayed, original,
+            "a decision's adjustment record must be reproducible from itself"
+        );
     }
 
     /// An untouched candidate says so, rather than reporting three zeros a
     /// reader has to add up.
     #[test]
     fn an_untouched_candidate_is_unadjusted() {
-        let adjustments = MarginalAdjustments::apply(10.0, 1.0, 1.0, 1.0);
+        let adjustments = MarginalAdjustments::apply(10.0, inputs(0, 0.3, 0.9, 1.0));
         assert!(adjustments.is_unadjusted());
         assert!((adjustments.marginal_y30 - 10.0).abs() < f64::EPSILON);
 
-        let discounted = MarginalAdjustments::apply(10.0, 1.0, 1.0, 0.8);
+        let discounted = MarginalAdjustments::apply(10.0, inputs(0, 0.3, 0.9, 0.8));
         assert!(!discounted.is_unadjusted());
         assert!(
             (discounted.bridge_adjustment - (-2.0)).abs() < 1e-9,
@@ -146,12 +238,14 @@ mod tests {
     /// wrong thing.
     #[test]
     fn each_adjustment_tracks_its_own_factor() {
-        let overlap_only = MarginalAdjustments::apply(10.0, 0.5, 1.0, 1.0);
+        // Overlap only: one neighbour at a 0.5 penalty, no fatigue decay.
+        let overlap_only = MarginalAdjustments::apply(10.0, inputs(1, 0.5, 1.0, 1.0));
         assert!((overlap_only.overlap_adjustment - (-5.0)).abs() < 1e-9);
         assert_eq!(overlap_only.fatigue_adjustment, 0.0);
         assert_eq!(overlap_only.bridge_adjustment, 0.0);
 
-        let fatigue_only = MarginalAdjustments::apply(10.0, 1.0, 0.5, 1.0);
+        // Fatigue only: one neighbour, no overlap penalty, 0.5 decay.
+        let fatigue_only = MarginalAdjustments::apply(10.0, inputs(1, 0.0, 0.5, 1.0));
         assert_eq!(fatigue_only.overlap_adjustment, 0.0);
         assert!((fatigue_only.fatigue_adjustment - (-5.0)).abs() < 1e-9);
         assert_eq!(fatigue_only.bridge_adjustment, 0.0);

@@ -8,6 +8,9 @@ license.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Content-addressing the policy snapshot so a decision names the exact
+# configuration that constrained it. Pure compute; no I/O enters this layer.
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true

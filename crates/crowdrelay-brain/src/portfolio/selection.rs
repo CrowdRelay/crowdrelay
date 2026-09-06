@@ -54,11 +54,29 @@ pub struct PortfolioSelection {
     pub marginal_adjustments: BTreeMap<String, MarginalAdjustments>,
 }
 
-/// A rejected candidate and the reason for rejection.
+/// A rejected candidate, what it was worth, and why it lost.
+///
+/// The reason alone does not explain a loss. `BelowThreshold` on a candidate
+/// worth 9.8 fans and on one worth 0.2 are different stories, and the second
+/// number is the one that says whether the portfolio was being selective or
+/// the pool was empty.
+///
+/// `intrinsic_y30` and not the marginal, deliberately. The greedy loop computes
+/// a marginal for every remaining candidate on every pass and keeps only the
+/// winner's; the losers' are discarded before the loop ends, and several
+/// rejection reasons — `MaxDispatchesReached`, `BudgetExhausted` — fire without
+/// a marginal ever being computed against the final portfolio. Recording a
+/// number that was never used to reject the candidate would be a fabricated
+/// explanation. The intrinsic value is what the candidate was worth on its own
+/// and is known for every rejection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortfolioRejection {
     pub opportunity_key: String,
     pub reason: RejectionReason,
+    /// `DecisionValue::total()` — what the loser was worth before the
+    /// portfolio. Not its marginal: see the type's own documentation.
+    #[serde(default)]
+    pub intrinsic_y30: f64,
 }
 
 /// Why a candidate was not selected for the portfolio.

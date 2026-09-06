@@ -268,7 +268,30 @@ pub(super) fn decision_provenance(
                 "policy": {
                     "decision_mode": value.decision_mode,
                     "is_experimental": candidate.is_experimental,
+                    // A mutable row counter, kept as a label. The identity is
+                    // the hash beside it — see `policy_identity`.
                     "policy_version": policy_version,
+                },
+                // Why the winner won, in the only terms that answer it: what
+                // else was in the pool and what happened to each.
+                //
+                // `PortfolioSelection.rejected` lived for the length of the
+                // cycle and was dropped, so the honest answer to "why did this
+                // candidate win" was "because it was selected" — which is not
+                // an answer for an optimizer whose decision *is* a comparison.
+                "competition": {
+                    "considered": selection.selected.len() + selection.rejected.len(),
+                    "alternatives": selection
+                        .rejected
+                        .iter()
+                        .map(|rejection| {
+                            serde_json::json!({
+                                "opportunity_key": rejection.opportunity_key,
+                                "reason": rejection.reason,
+                                "intrinsic_y30": rejection.intrinsic_y30,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
                 },
                 "identity": {
                     "optimizer": "submodular_greedy_marginal_v1",
@@ -306,6 +329,135 @@ mod tests {
             decision_key: decision_key.to_owned(),
             action_idempotency_key: decision_key.to_owned(),
         }
+    }
+
+    /// A historical decision explains why the winner beat the losers.
+    ///
+    /// A portfolio decision *is* a comparison, and only the winner used to
+    /// survive it: `PortfolioSelection.rejected` lived for the length of the
+    /// cycle and was dropped. The honest answer to "why did this candidate
+    /// win" was "because it was selected", which is not an answer.
+    ///
+    /// Three candidates, one dispatch slot, so the pool produces a winner and
+    /// two losers. Everything asserted here is read back out of the record
+    /// attached to the decision — no optimizer is re-run, no configuration is
+    /// consulted.
+    #[test]
+    fn a_decision_records_the_alternatives_and_why_each_one_lost() {
+        use crowdrelay_brain::{
+            DecisionMode, DecisionValue, EstimationRegime, OpportunityAction, OpportunityId,
+            PortfolioCandidate, PortfolioOptimizer, ResourceCost,
+        };
+
+        let context = crowdrelay_brain::DispatchContext::default();
+        let valued = |fans: f64| {
+            let mut value = DecisionValue::from_stats(
+                &crowdrelay_brain::CausalModel::new()
+                    .predict_stats_with_treatment("fixture", &context),
+                ResourceCost::configured(1.0),
+                DecisionMode::Exploit,
+            );
+            value.estimation_regime = EstimationRegime::OutcomeModel;
+            value.pragmatic_value = fans;
+            value.expected_incremental_y30 = fans;
+            value
+        };
+        let entrant = |name: &str, fans: f64, audience: &str| PortfolioCandidate {
+            opportunity_id: OpportunityId {
+                template_id: "fixture".to_owned(),
+                target: format!("decision:{name}"),
+                action: OpportunityAction::Post,
+                context_hash: "ctx".to_owned(),
+            },
+            audience_key: audience.to_owned(),
+            source_context: "GrowthIntelligence".to_owned(),
+            action_key: format!("decision:{name}"),
+            generation_signal: None,
+            is_experimental: false,
+            decision_value: valued(fans),
+        };
+
+        // One slot. A wins; B and C are left over.
+        let selection = PortfolioOptimizer::new(PortfolioConfig {
+            max_dispatches: 1,
+            ..PortfolioConfig::default()
+        })
+        .select(vec![
+            entrant("a", 12.0, "audience-a"),
+            entrant("b", 8.0, "audience-b"),
+            entrant("c", 3.0, "audience-c"),
+        ]);
+        assert_eq!(
+            selection.selected.len(),
+            1,
+            "the fixture must produce one winner"
+        );
+
+        let provenance = decision_provenance(&selection, 7);
+        let mut subject = candidate("decision:a");
+        crate::autopilot::evaluate::attach_decision_provenance(&mut subject, &provenance);
+
+        // Everything below is read from the decision, not recomputed.
+        let record = subject
+            .input_snapshot
+            .get("decision_value")
+            .expect("decision-time record");
+        let competition = record.get("competition").expect("competition block");
+
+        assert_eq!(
+            competition["considered"], 3,
+            "the record must say how large the pool was; a winner with no \
+             recorded field is indistinguishable from a winner that ran alone"
+        );
+
+        let alternatives = competition["alternatives"]
+            .as_array()
+            .expect("alternatives array");
+        assert_eq!(alternatives.len(), 2, "both losers must survive");
+
+        for alternative in alternatives {
+            let key = alternative["opportunity_key"].as_str().expect("key");
+            assert!(
+                !key.contains("decision:a"),
+                "the winner must not appear among the alternatives"
+            );
+            assert!(
+                alternative.get("reason").is_some(),
+                "{key} lost without a recorded reason"
+            );
+            // The reason alone does not explain a loss: the same reason on a
+            // candidate worth 8.0 and on one worth 3.0 are different stories.
+            let intrinsic = alternative["intrinsic_y30"].as_f64().expect("intrinsic");
+            assert!(
+                intrinsic > 0.0,
+                "{key} must record what it was worth, got {intrinsic}"
+            );
+        }
+
+        // The winner's own economics, and the inputs that produced them.
+        let economic = record.get("economic").expect("economic block");
+        let adjustments = &economic["adjustments"];
+        assert!(
+            adjustments["audience_count"].as_u64().is_some()
+                && adjustments["overlap_penalty"].as_f64().is_some()
+                && adjustments["fatigue_decay"].as_f64().is_some()
+                && adjustments["bridge_factor"].as_f64().is_some(),
+            "the adjustment inputs must travel with the deltas — the audience \
+             count vanishes with the cycle and the coefficients are config a \
+             reader would otherwise take from a since-edited row"
+        );
+
+        // Policy identity: a content hash, not the mutable row counter.
+        let policy = record.get("policy").expect("policy block");
+        let identity = policy["policy_identity"].as_str().expect("policy identity");
+        assert!(
+            identity.starts_with("sha256:") && identity.len() > 16,
+            "the policy identity must be a content hash, got {identity}"
+        );
+        assert_eq!(
+            policy["policy_version"], 7,
+            "the counter stays as a label beside it"
+        );
     }
 
     /// The decision-time record reaches the decision, and keeps its categories

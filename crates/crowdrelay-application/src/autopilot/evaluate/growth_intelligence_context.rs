@@ -615,7 +615,47 @@ fn attach_decision_provenance(
     let Some(record) = provenance.get(&candidate.decision_key) else {
         return;
     };
+    let identity = policy_content_identity(&candidate.policy_snapshot);
     if let Some(object) = candidate.input_snapshot.as_object_mut() {
-        object.insert("decision_value".to_owned(), record.clone());
+        let mut record = record.clone();
+        if let Some(policy) = record
+            .get_mut("policy")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            policy.insert(
+                "policy_identity".to_owned(),
+                serde_json::Value::String(identity),
+            );
+        }
+        object.insert("decision_value".to_owned(), record);
     }
+}
+
+/// A deterministic content identity for the policy that constrained a decision.
+///
+/// `policy_version` is a counter on a mutable row. The row is updated in place
+/// and there is no history table, so the version a decision recorded resolves
+/// to whatever that row holds today — which is why the full `policy_snapshot`
+/// is captured beside it and remains the authoritative record.
+///
+/// What the snapshot could not do is answer "is this the same policy as that
+/// one" without a field-by-field comparison, or survive being summarised. The
+/// hash gives grouping and equality: identical semantic policy hashes
+/// identically, materially different policy does not, and neither answer
+/// changes when the row is later edited.
+///
+/// `serde_json` orders object keys, so serializing the snapshot is already
+/// canonical for a given value — no separate canonicaliser, and no new table.
+fn policy_content_identity(policy_snapshot: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+
+    let canonical = serde_json::to_string(policy_snapshot).unwrap_or_default();
+    let digest = Sha256::digest(canonical.as_bytes());
+    // Half the digest. Enough to identify a policy among a workspace's
+    // handful, short enough to read in a decision record.
+    let mut identity = String::from("sha256:");
+    for byte in digest.iter().take(16) {
+        identity.push_str(&format!("{byte:02x}"));
+    }
+    identity
 }

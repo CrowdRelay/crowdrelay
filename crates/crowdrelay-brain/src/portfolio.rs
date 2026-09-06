@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 mod adjustments;
 mod selection;
 mod wait_value;
-pub use adjustments::MarginalAdjustments;
+pub use adjustments::{AdjustmentInputs, MarginalAdjustments};
 pub use selection::{PortfolioRejection, PortfolioSelection, RejectionReason};
 pub use wait_value::WaitCandidateValue;
 
@@ -286,11 +286,6 @@ impl PortfolioOptimizer {
                     .get(&candidate.audience_key)
                     .copied()
                     .unwrap_or(0);
-                // Overlap penalty: diminishing returns for same audience.
-                let overlap_factor =
-                    1.0 - self.config.audience_overlap_penalty * audience_count as f64;
-                // Fatigue: exponential decay for repeated dispatches.
-                let fatigue_factor = self.config.fatigue_decay.powi(audience_count as i32);
                 // Marginal value = intrinsic total × portfolio interactions.
                 // DecisionValue.total() is the intrinsic value; the optimizer
                 // applies overlap and fatigue as multiplicative modifiers.
@@ -327,12 +322,19 @@ impl PortfolioOptimizer {
                 };
                 // Through the ledger rather than as a bare product, so the
                 // answer to "why 7.2 and not 10.0" is recorded rather than
-                // reconstructed. Same arithmetic, same order.
+                // reconstructed. Same arithmetic, same order — and the inputs
+                // travel with the deltas, because the audience count is
+                // portfolio state that vanishes with the cycle and the two
+                // coefficients are configuration a reader would otherwise have
+                // to take from a config that has since been edited.
                 let adjustments = MarginalAdjustments::apply(
                     intrinsic,
-                    overlap_factor.max(0.0),
-                    fatigue_factor,
-                    bridge_penalty,
+                    AdjustmentInputs {
+                        audience_count,
+                        overlap_penalty: self.config.audience_overlap_penalty,
+                        fatigue_decay: self.config.fatigue_decay,
+                        bridge_factor: bridge_penalty,
+                    },
                 );
                 if adjustments.marginal_y30 > best_marginal {
                     best_marginal = adjustments.marginal_y30;
@@ -348,6 +350,7 @@ impl PortfolioOptimizer {
                     rejected.push(PortfolioRejection {
                         opportunity_key: candidate.opportunity_id.to_string(),
                         reason: RejectionReason::BudgetExhausted,
+                        intrinsic_y30: candidate.decision_value.total(),
                     });
                 }
                 break;
@@ -363,6 +366,7 @@ impl PortfolioOptimizer {
                         } else {
                             RejectionReason::BelowThreshold
                         },
+                        intrinsic_y30: candidate.decision_value.total(),
                     });
                 }
                 break;
@@ -407,6 +411,7 @@ impl PortfolioOptimizer {
                     rejected.push(PortfolioRejection {
                         opportunity_key: candidate.opportunity_id.to_string(),
                         reason: RejectionReason::BudgetExhausted,
+                        intrinsic_y30: candidate.decision_value.total(),
                     });
                 }
                 break;
@@ -417,6 +422,7 @@ impl PortfolioOptimizer {
             rejected.push(PortfolioRejection {
                 opportunity_key: candidate.opportunity_id.to_string(),
                 reason: RejectionReason::MaxDispatchesReached,
+                intrinsic_y30: candidate.decision_value.total(),
             });
         }
         let do_nothing = selected.is_empty();
@@ -494,6 +500,7 @@ impl PortfolioOptimizer {
                 .map(|c| PortfolioRejection {
                     opportunity_key: c.opportunity_id.to_string(),
                     reason: RejectionReason::NegativeMarginalValue,
+                    intrinsic_y30: c.decision_value.total(),
                 })
                 .collect();
             return PortfolioSelection {
