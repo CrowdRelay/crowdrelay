@@ -1138,3 +1138,163 @@ async fn j_treated_rows_wait_for_their_control_arm() {
         replayed.len()
     );
 }
+
+/// H: a community outcome counts only this tenant's fans, and counts each fan
+/// once.
+///
+/// The two ways this measurement can silently overstate an effect, asserted
+/// against a real database because both are properties of one SQL statement.
+///
+/// **Cross-tenant.** The ledger is keyed by community *handle*, which is a
+/// Reddit name and not a tenant-scoped identifier. Two workspaces engaging
+/// `r/spinetest` produce conversion rows whose community column is identical,
+/// so the only thing separating them is the `workspace_id` predicate. If it
+/// were ever dropped or widened, one tenant's growth would be attributed to
+/// another's action and enter its causal posterior as a treatment effect.
+///
+/// **Duplicates.** `fan_provenance_events` has no unique constraint — its key
+/// is a generated uuid — so a retried signup transaction, a delayed provider
+/// callback and a poll can each write a conversion row for the same fan. The
+/// count is `DISTINCT fan_id` for that reason, and this pins it: one fan
+/// converted once is one fan however many times it was recorded.
+///
+/// Neither is theoretical for a system about to collect its first hundred real
+/// outcomes. Both would inflate an effect rather than deflate it, which is the
+/// direction that makes an action look worth repeating.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
+    let f = setup().await.expect("fixture");
+    let action_id = insert_dispatch(&f, "community-engager:h", f.now).await;
+    let target_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO agent_outreach_targets
+           (id, workspace_id, target_kind, display_name, subreddit, status)
+           VALUES ($1,$2,'community','r/spinetest','spinetest','promoted')"#,
+    )
+    .bind(target_id)
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("target");
+    let experiment_uuid = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_designs
+           (experiment_uuid, workspace_id, intervention_key, logical_cycle_key,
+            unit_kind, holdout_probability, interference_policy, experiment_status)
+           VALUES ($1,$2,'community-engager',$3,'target_community',0.1,'none','active')"#,
+    )
+    .bind(experiment_uuid)
+    .bind(f.workspace_id.into_uuid())
+    .bind(experiment_uuid.to_string())
+    .execute(&f.pool)
+    .await
+    .expect("design");
+    sqlx::query(
+        r#"INSERT INTO viryaos_experiment_assignments
+           (id, workspace_id, experiment_uuid, unit_id, unit_kind, arm,
+            intended_template_id, propensity, context, prediction,
+            contamination_estimate, is_interference_controllable, experiment_status,
+            execution_status, action_id, experiment_kind)
+           VALUES ($5,$1,$2,$3,'target_community','treatment','community-engager',0.9,
+                   '{}'::jsonb,'{}'::jsonb,0.0,false,'active','executed',$4,
+                   'randomized_holdout')"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(experiment_uuid)
+    .bind(target_id.to_string())
+    .bind(action_id)
+    .bind(uuid::Uuid::now_v7().to_string())
+    .execute(&f.pool)
+    .await
+    .expect("assignment");
+    sqlx::query(
+        r#"INSERT INTO community_posts
+           (workspace_id, action_id, target_id, subreddit, title, body, status, posted_at)
+           VALUES ($1,$2,$3,'r/spinetest','t','b','posted',$4)"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(target_id)
+    .bind(f.now)
+    .execute(&f.pool)
+    .await
+    .expect("post");
+
+    async fn conversion(
+        pool: &sqlx::PgPool,
+        workspace: uuid::Uuid,
+        fan: uuid::Uuid,
+        at: OffsetDateTime,
+    ) {
+        sqlx::query(
+            r#"INSERT INTO fan_provenance_events
+               (workspace_id, fan_id, event_kind, channel, community,
+                attribution_method, attribution_confidence, occurred_at)
+               VALUES ($1,$2,'conversion','reddit','r/spinetest',
+                       'last_community_click',1.0,$3)"#,
+        )
+        .bind(workspace)
+        .bind(fan)
+        .bind(at)
+        .execute(pool)
+        .await
+        .expect("conversion");
+    }
+    async fn fan_in(pool: &sqlx::PgPool, workspace: uuid::Uuid, fan: uuid::Uuid) {
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) \
+             VALUES ($1,$2,$3,'active')",
+        )
+        .bind(fan)
+        .bind(workspace)
+        .bind(format!("{fan}@example.test"))
+        .execute(pool)
+        .await
+        .expect("fan");
+    }
+
+    // One real fan for this tenant, recorded three times: a retry and a late
+    // callback on top of the original write.
+    let ours = uuid::Uuid::now_v7();
+    let converted_at = f.now + time::Duration::hours(1);
+    fan_in(&f.pool, f.workspace_id.into_uuid(), ours).await;
+    for _ in 0..3 {
+        conversion(&f.pool, f.workspace_id.into_uuid(), ours, converted_at).await;
+    }
+
+    // A second tenant engaging the same community handle, at the same time.
+    let other_workspace = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,$3)")
+        .bind(other_workspace)
+        .bind(format!("spine-other-{}", other_workspace.simple()))
+        .bind("Other tenant")
+        .execute(&f.pool)
+        .await
+        .expect("other workspace");
+    for _ in 0..5 {
+        let theirs = uuid::Uuid::now_v7();
+        fan_in(&f.pool, other_workspace, theirs).await;
+        conversion(&f.pool, other_workspace, theirs, converted_at).await;
+    }
+
+    let measurement = queue_measurement(
+        &f,
+        action_id,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.0,
+        f.now,
+    )
+    .await;
+    let observed = f
+        .repository
+        .observe_measurement(f.workspace_id, &measurement, f.now)
+        .await
+        .expect("observe the community outcome");
+
+    assert!(
+        (observed - 1.0).abs() < f64::EPSILON,
+        "one fan converted once: three recordings of the same fan are one fan, \
+         and five fans belonging to another tenant are none of ours. Got {observed}"
+    );
+}

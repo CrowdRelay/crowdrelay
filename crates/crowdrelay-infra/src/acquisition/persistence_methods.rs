@@ -616,6 +616,35 @@ impl PostgresAcquisitionRepository {
     /// thirty days, recorded as such. Naming the method is the point: this
     /// records an observed click, not a causal claim, and the causal layer is
     /// still the only thing entitled to make one.
+    ///
+    /// # Two timestamps, two meanings
+    ///
+    /// `occurred_at` is when the conversion happened — the signup — and
+    /// `created_at` defaults to when the row was written. They were the same
+    /// expression: `occurred_at` was bound to `now()`, which is observation
+    /// time wearing an occurrence-time name.
+    ///
+    /// Identical in the happy path, because this runs in the signup's own
+    /// transaction. Not identical on a backfill or a replayed signup, where
+    /// `now()` is the replay and the conversion would land in whichever
+    /// fourteen-day measurement window the replay happened to fall in rather
+    /// than the one it belongs to. The fan's own `created_at` is the
+    /// occurrence, and it is already durable.
+    ///
+    /// # `attribution_confidence` is the rule's weight, not a probability
+    ///
+    /// `1.0` here means "the last-community-click rule assigns this
+    /// conversion wholly to that community", not "this attribution is certain".
+    /// Last-touch over thirty days is a heuristic and can be wrong — a fan who
+    /// clicked on day one and arrived through a friend on day twenty-nine is
+    /// attributed entirely to the click.
+    ///
+    /// It does not reach learning as evidence strength: the measurement query
+    /// counts `DISTINCT fan_id` and ignores this column, and evidence quality
+    /// is decided by `measured_evidence_quality` from whether the outcome was
+    /// read at the level the randomisation was performed at. Said here because
+    /// a column called confidence holding 1.0 invites exactly the reading it
+    /// must not be given.
     async fn record_community_conversion(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
@@ -636,7 +665,16 @@ impl PostgresAcquisitionRepository {
             SELECT $1, $2, 'conversion',
                    COALESCE(link.channel_source, 'smart_link'),
                    link.slug, link.channel_community, click.campaign_id,
-                   'last_community_click', 1.0, now()
+                   'last_community_click', 1.0,
+                   -- When the conversion happened, not when this row was
+                   -- written. `created_at` records the latter on its own.
+                   -- `now()` here put a replayed signup in the measurement
+                   -- window of the replay. `COALESCE` because the fan row is
+                   -- written in this same transaction and must be visible;
+                   -- if it somehow is not, the signup instant is still the
+                   -- closest true statement available.
+                   COALESCE((SELECT fan.created_at FROM fans AS fan
+                             WHERE fan.workspace_id = $1 AND fan.id = $2), now())
             FROM click_events AS click
             JOIN smart_links AS link
               ON link.workspace_id = click.workspace_id
