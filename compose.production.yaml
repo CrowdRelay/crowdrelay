@@ -1,6 +1,65 @@
 name: crowdrelay
 
 services:
+  postgres:
+    image: ${CROWDRELAY_POSTGRES_IMAGE:-postgres:19beta3-alpine}
+    container_name: crowdrelay-db
+    env_file:
+      - ${CROWDRELAY_ENV_FILE:-deploy/.env.production}
+    shm_size: 64m
+    command:
+      - postgres
+      - -c
+      - io_method=worker
+      - -c
+      - io_min_workers=${CROWDRELAY_POSTGRES_IO_MIN_WORKERS:-2}
+      - -c
+      - io_max_workers=${CROWDRELAY_POSTGRES_IO_MAX_WORKERS:-6}
+      - -c
+      - effective_io_concurrency=${CROWDRELAY_POSTGRES_EFFECTIVE_IO_CONCURRENCY:-16}
+      - -c
+      - maintenance_io_concurrency=${CROWDRELAY_POSTGRES_MAINTENANCE_IO_CONCURRENCY:-16}
+      - -c
+      - max_connections=${CROWDRELAY_POSTGRES_MAX_CONNECTIONS:-40}
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - jit=off
+      - -c
+      - max_wal_size=512MB
+      - -c
+      - min_wal_size=80MB
+      - -c
+      - wal_compression=on
+    volumes:
+      - crowdrelay_postgres19:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    mem_limit: ${CROWDRELAY_POSTGRES_MEMORY:-384m}
+    cpus: ${CROWDRELAY_POSTGRES_CPUS:-0.80}
+    stop_grace_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      runtime:
+        aliases: [postgres, postgres18]
+      n8n:
+        aliases: [postgres]
+
   setup:
     image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
     command: ["setup"]
@@ -11,6 +70,9 @@ services:
     volumes:
       - ${CROWDRELAY_BOOTSTRAP_HOST_FILE:-./deploy/bootstrap.production.json}:/run/crowdrelay/bootstrap.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -145,3 +207,11 @@ networks:
   runtime:
     external: true
     name: ${CROWDRELAY_DOCKER_NETWORK:?Set CROWDRELAY_DOCKER_NETWORK}
+  n8n:
+    external: true
+    name: ${VIRYA_N8N_NETWORK:-virya-n8n-cloud_virya}
+
+volumes:
+  crowdrelay_postgres19:
+    external: true
+    name: crowdrelay_crowdrelay_postgres19
