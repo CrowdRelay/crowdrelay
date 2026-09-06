@@ -35,8 +35,10 @@ const AGENT_AUTH_NAMESPACE: &[u8] = b"crowdrelay-control-plane-v1:";
 /// **Legacy** — produces an unscoped token accepted only when the agents
 /// service has `allowLegacyTokens` enabled. New call sites should use
 /// [`derive_agent_token_with_capability`] instead.
+/// Public for the runtime boundary suite, which mints one to prove the
+/// service refuses it. Nothing in production calls it.
 #[allow(dead_code)]
-pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String {
+pub fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String {
     // HMAC-SHA256 accepts any key length; this never fails.
     let mut mac = match <Hmac<Sha256> as KeyInit>::new_from_slice(master_key.as_bytes()) {
         Ok(mac) => mac,
@@ -50,8 +52,13 @@ pub(crate) fn derive_agent_token(master_key: &str, workspace_id: Uuid) -> String
 /// Capability class for scoped agent-service tokens. Mirrors the enum in
 /// `crowdrelay-agents/src/auth.ts` and the control plane's
 /// `tenant_area_client.rs`.
+///
+/// Public rather than `pub(crate)` so the runtime boundary suite in
+/// `tests/agents_boundary_postgres.rs` — a separate crate — can mint tokens
+/// with the same code the worker ships, instead of a reimplementation that
+/// would prove only that the test agrees with itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AgentCapability {
+pub enum AgentCapability {
     Read,
     /// Used by the control plane, not the worker.
     #[allow(dead_code)]
@@ -76,7 +83,9 @@ impl AgentCapability {
 /// Derives a per-workspace, per-capability bearer token for the agents
 /// service.
 /// `token = hex(HMAC-SHA256(master_key, namespace + workspace_id + ":" + capability))`
-pub(crate) fn derive_agent_token_with_capability(
+///
+/// Public for the runtime boundary suite; see [`AgentCapability`].
+pub fn derive_agent_token_with_capability(
     master_key: &str,
     workspace_id: Uuid,
     capability: AgentCapability,

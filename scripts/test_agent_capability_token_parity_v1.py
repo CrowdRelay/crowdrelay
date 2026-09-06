@@ -11,17 +11,22 @@ things that must agree byte-for-byte — the namespace, the separator layout and
 the capability spellings — are literals on both sides.
 
 The failure mode is not an outage, which is why it needs a gate.
-`extractWorkspaceId` tries the scoped token, and on failure falls back to a
+`extractWorkspaceId` tries the scoped token, and on failure can fall back to a
 legacy token derived from `NAMESPACE + workspace_id` alone. The legacy token is
 still workspace-bound, so a namespace or spelling drift does not break
 authentication — it makes every scoped check miss, every caller land on the
 legacy path, and **every token grant all capabilities**. A `read` caller would
-silently hold `credentials` and `social_publish`. `AGENT_SERVICE_ALLOW_LEGACY_TOKENS`
-defaults to true, so that fallback is live.
+silently hold `credentials` and `social_publish`.
+
+That fallback used to be on by default. It is now opt-in, which is what the
+last test here pins: with it off, the drift above is a 401 an operator can see
+instead of a silent privilege grant.
 
 This is a static contract test. It reads the sibling checkout when one exists
 and skips when it does not, the same way `test-ecosystem-contract-v2.py` treats
 virya — CI checks out the ecosystem, a bare CrowdRelay clone does not have it.
+The runtime counterpart, which drives the real service over a real socket, is
+`crates/crowdrelay-worker/tests/agents_boundary_postgres.rs`.
 """
 from __future__ import annotations
 
@@ -114,7 +119,7 @@ class AgentCapabilityTokenParity(unittest.TestCase):
             "namespace, workspace id, a colon, then the capability",
         )
         rust = DISCOVERY.read_text()
-        derive = rust[rust.index("pub(crate) fn derive_agent_token_with_capability") :]
+        derive = rust[rust.index("fn derive_agent_token_with_capability") :]
         derive = derive[: derive.index("\n}")]
         for step in (
             "mac.update(AGENT_AUTH_NAMESPACE);",
@@ -158,21 +163,36 @@ class AgentCapabilityTokenParity(unittest.TestCase):
             "the agents side must use HMAC-SHA256",
         )
 
-    def test_the_legacy_fallback_is_still_a_known_transitional_state(self) -> None:
-        """A silent all-capability grant must stay deliberate and findable.
+    def test_the_legacy_fallback_is_opt_in(self) -> None:
+        """Drift must fail loudly, which means the fallback must be off.
 
-        `allowLegacyTokens` defaults to true, so a legacy token is accepted and
-        granted every capability. That is a documented rollout decision, not a
-        bug — but it is also what makes a namespace drift silent, so the flag
-        stays asserted until it is turned off.
+        The default used to be `true`. A legacy token is workspace-bound but
+        carries no capability, so with the fallback on, any drift in the three
+        literals above made every scoped check miss, landed every caller on
+        the legacy path, and granted every caller every capability — without
+        an error, a log line, or a failed request. Proven at runtime: with
+        `AGENT_SERVICE_ALLOW_LEGACY_TOKENS=true`, an unscoped token stored a
+        Reddit credential with HTTP 200.
+
+        Off by default, the same drift is a 401. The switch survives for
+        rollback, and `config.ts` requires the literal `"true"` to arm it, so
+        a deployment cannot acquire it by not knowing about it.
         """
         source = AGENTS_AUTH.read_text()
         self.assertIn(
-            "allowLegacyTokens: boolean = true",
+            "allowLegacyTokens: boolean = false",
             source,
-            "the legacy-token default changed. If scoped tokens are now "
-            "enforced, this gate's premise is obsolete and the drift it guards "
-            "would fail loudly instead of silently — update it deliberately",
+            "the legacy-token fallback must default to off. A `true` default "
+            "turns every drift this gate guards into a silent all-capability "
+            "grant instead of a rejection",
+        )
+        config = (AGENTS / "src/config.ts").read_text()
+        self.assertIn(
+            'optional("AGENT_SERVICE_ALLOW_LEGACY_TOKENS") === "true"',
+            config,
+            "the environment variable must be opt-in. `!== \"false\"` means "
+            "every deployment that has never heard of it runs with the "
+            "fallback live",
         )
 
 

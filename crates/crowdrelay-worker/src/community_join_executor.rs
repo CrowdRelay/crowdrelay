@@ -136,7 +136,18 @@ impl CommunityJoinExecutorWorker {
         }
     }
 
-    async fn run_once(&self) -> Result<usize, CommunityJoinError> {
+    /// One executor cycle: recover stale claims, claim eligible places, and
+    /// call the agents service for each.
+    ///
+    /// Public so the runtime boundary suite can drive exactly the cycle the
+    /// worker runs — the same claim, the same HTTP call, the same state
+    /// transitions — rather than a test-only reconstruction of it.
+    ///
+    /// # Errors
+    /// Returns [`CommunityJoinError`] if the claim or recovery queries fail.
+    /// Per-place agent-service failures are recorded on the place and do not
+    /// fail the cycle.
+    pub async fn run_once(&self) -> Result<usize, CommunityJoinError> {
         self.recover_stale_joining().await?;
 
         if !self.auto_join {

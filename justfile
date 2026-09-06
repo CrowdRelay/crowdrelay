@@ -168,6 +168,62 @@ test-postgres-env:
 # Alias kept for muscle memory from the Makefile days
 test-postgres: test-postgres-env
 
+# The CrowdRelay <-> crowdrelay-agents boundary, at runtime.
+#
+# Starts a disposable database and the REAL agents service from the sibling
+# checkout, then drives CrowdRelay's own executors and HTTP clients across a
+# real network hop. This is deliberately not part of `just ci`: it needs a
+# second repository and a Node toolchain, and it takes about a minute because
+# the hung-dependency test waits out the executor's real 60s request timeout.
+#
+# Skips cleanly when ../crowdrelay-agents is not checked out.
+test-agents-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    agents=../crowdrelay-agents
+    if [ ! -d "$agents" ]; then
+      echo "no crowdrelay-agents checkout beside this repository; skipping"
+      exit 0
+    fi
+    export CROWDRELAY_AGENTS_TEST_DATABASE_URL=postgres://crowdrelay:crowdrelay-local-only@127.0.0.1:5432/crowdrelay_agents_boundary_test
+    export CROWDRELAY_AGENTS_TEST_AUTH_KEY=agents-boundary-suite-master-key
+    export CROWDRELAY_AGENTS_TEST_URL=http://127.0.0.1:18095
+    {{COMPOSE}} up --detach --wait postgres
+    {{COMPOSE}} exec -T postgres psql -U crowdrelay -d postgres \
+        -c "DROP DATABASE IF EXISTS crowdrelay_agents_boundary_test;" \
+        -c "CREATE DATABASE crowdrelay_agents_boundary_test;"
+    # The agents service migrates its own tables on startup, so it has to run
+    # against the same database the tests read. Tickers off: this suite is
+    # about the request path, and a scraper tick would drive a real browser.
+    #
+    # AGENT_SERVICE_ALLOW_LEGACY_TOKENS is deliberately left unset. Its
+    # default is what the capability test asserts; setting it here would make
+    # the suite test a configuration nothing deploys.
+    (
+      cd "$agents"
+      AGENT_SERVICE_BIND=127.0.0.1:18095 \
+      DATABASE_URL="$CROWDRELAY_AGENTS_TEST_DATABASE_URL" \
+      AGENT_SERVICE_AUTH_KEY="$CROWDRELAY_AGENTS_TEST_AUTH_KEY" \
+      AGENT_SERVICE_ENCRYPTION_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff \
+      AGENT_SCHEDULER_ENABLED=false \
+      REDDIT_SCRAPER_ENABLED=false \
+      AGENT_OUTCOMES_ENABLED=false \
+      npx tsx src/server.ts
+    ) > /tmp/crowdrelay-agents-boundary.log 2>&1 &
+    agents_pid=$!
+    trap 'kill $agents_pid 2>/dev/null || true' EXIT
+    for _ in $(seq 1 60); do
+      if curl -fsS -m 2 -o /dev/null "$CROWDRELAY_AGENTS_TEST_URL/health"; then break; fi
+      sleep 1
+    done
+    if ! curl -fsS -m 2 -o /dev/null "$CROWDRELAY_AGENTS_TEST_URL/health"; then
+      echo "the agents service never became healthy; see /tmp/crowdrelay-agents-boundary.log" >&2
+      tail -30 /tmp/crowdrelay-agents-boundary.log >&2
+      exit 1
+    fi
+    {{CARGO}} test --locked --package crowdrelay-worker \
+        --test agents_boundary_postgres -- --ignored --test-threads=1
+
 # Copy .env.example if .env is missing
 @env:
     @test -f .env || cp .env.example .env
