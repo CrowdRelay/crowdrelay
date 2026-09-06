@@ -39,9 +39,15 @@ n8n/*
 !n8n/examples/
 !n8n/examples/**
 
-# Docs are local-only except for the canonical architecture document.
+# Docs are local-only except for the canonical architecture documents.
+# BRAIN_LEARNING_LOOP.md is one: `scripts/test_brain_learning_loop_v1.py` reads
+# it in CI to prove the symbols it names still exist and the edges it calls
+# dormant are still dormant, so a local-only copy would be a gate that cannot
+# run and a shared map nobody shares.
 docs/*
 !docs/ARCHITECTURE.md
+!docs/BRAIN_LEARNING_LOOP.md
+!docs/GOAL_DIRECTED_CONTROL.md
 !docs/GROWTH_INTELLIGENCE_RESEARCH.md
 
 # AppleDouble sidecars, written whenever a macOS copy reaches a host. They
