@@ -23,6 +23,13 @@ __pycache__/
 # refuses to run against a dirty worktree, so it has to be ignored or the
 # checkout that makes Phase 2 possible is what stops Phase 1 starting.
 .control-plane/
+# Same thing, same reason, for the agents checkout the workflow added later:
+# the deploy proves the published agent image is an ancestor of agents main,
+# so it needs that history in the workspace. It was not ignored, so every
+# ecosystem deploy since that step was added failed its own preflight on
+# `local worktree must be clean` -- the checkout that makes the ancestry proof
+# possible was what stopped the deploy starting.
+.agents/
 deploy/.env.*
 !deploy/env.production.example
 deploy/*.production.json
