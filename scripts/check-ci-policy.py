@@ -121,6 +121,7 @@ REQUIRED_GATE_SCRIPTS = [
     "scripts/api-sql-ratchet.py",
     "scripts/test_platform_vocabulary_v1.py",
     "scripts/test_sql_identifiers_v1.py",
+    "scripts/test_sql_columns_v1.py",
 ]
 for relative in REQUIRED_GATE_SCRIPTS:
     if not (ROOT / relative).exists():

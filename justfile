@@ -63,6 +63,7 @@ check: fmt lint test
     python3 scripts/test-modularity-contract.py
     python3 scripts/test_platform_vocabulary_v1.py
     python3 scripts/test_sql_identifiers_v1.py
+    python3 scripts/test_sql_columns_v1.py
     python3 scripts/test_alert_policy_v1.py
     python3 scripts/test_operator_reachability_v1.py
     python3 scripts/test_bluegreen_recovery_v1.py

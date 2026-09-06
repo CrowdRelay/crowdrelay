@@ -32,9 +32,14 @@ pub(in crate::autopilot) async fn execute_show_growth(
         r#"
         SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url, event.listen_url
         FROM events AS event
+        -- `cities` is a shared catalogue, not a tenant table: it has no
+        -- `workspace_id`, and `events_city_id_fkey` references `cities(id)`
+        -- alone. This join carried an `ON city.workspace_id = event.workspace_id`
+        -- predicate, which made the statement fail to parse at all. The
+        -- tenant boundary is the `event.workspace_id = $1` filter below, which
+        -- is what every other join to `cities` in the workspace relies on.
         LEFT JOIN cities AS city
-          ON city.workspace_id = event.workspace_id
-         AND city.id = event.city_id
+          ON city.id = event.city_id
         WHERE event.workspace_id = $1
           AND event.id = $2
           AND event.status IN ('published','completed')
