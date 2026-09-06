@@ -34,7 +34,6 @@ pub(super) fn community_engager_candidates(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
-    _strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
 ) -> Result<Vec<ScoredCandidate>, serde_json::Error> {
     // Check cooldown — if the template is not due, no candidates.
     // Apply tenant preference cadence multiplier (see

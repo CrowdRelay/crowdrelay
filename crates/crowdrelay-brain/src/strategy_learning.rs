@@ -17,13 +17,16 @@
 //!
 //! # Dormant, not consumed
 //!
-//! Be precise about what this posterior currently does, because its plumbing
-//! suggests more than its wiring delivers. It is written — the infra loader
-//! folds resolved evidence into it every cycle, and that write is real. It is
-//! also threaded through the whole candidate pipeline by shared reference. But
-//! no `predict` or `confidence` call reads it on any decision path: candidate
-//! generation binds it and discards it, and `community_engager_candidates`
-//! takes it as `_strategy_posterior`.
+//! Be precise about what this posterior currently does. It is written — the
+//! infra loader folds resolved evidence into it every cycle, and that write is
+//! real. Nothing reads it: no `predict` or `confidence` call on it exists on
+//! any decision path.
+//!
+//! It used to be threaded through the whole candidate pipeline by shared
+//! reference and discarded — bound with `let _ =` in one producer, taken as
+//! `_strategy_posterior` by the other. That plumbing is gone. Learning without
+//! a consumer is defensible; plumbing without a consumer is the part that made
+//! a reader conclude the belief was live.
 //!
 //! So this is a learner accumulating evidence for a consumer that does not
 //! exist yet. That is a defensible place to be — the belief has to have history

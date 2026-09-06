@@ -22,34 +22,18 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.
         let causal_model = self.repository.load_causal_model(self.workspace_id).await?;
-        // Load the strategy posterior from brain state. The infra loader folds
-        // resolved growth evidence into it each cycle, keyed by
-        // (strategy, growth_trend, event_proximity), and owns the write.
+        // The state-conditioned strategy posterior is NOT loaded here.
         //
-        // It is DORMANT on the read side: it is threaded through candidate
-        // generation and nothing calls `predict` or `confidence` on it. It does
-        // not influence eligibility, ordering, predicted fan value, treatment
-        // effect or DecisionValue today — the first two of those were claimed
-        // here and were not true.
+        // It is still learned: the infra loader folds resolved growth evidence
+        // into it during the causal model load and owns the write. It reaches
+        // no decision, and this cycle used to load it, thread it through
+        // candidate generation and discard it — which read as a belief
+        // informing generation while nothing consulted it.
         //
-        // The `unwrap_or_default()` below is therefore harmless, and would not
-        // be if anything read it: a read error and an absent posterior are
-        // different facts, and an empty posterior is a claim that the brain has
-        // observed nothing. It is no longer written back — see the end of this
-        // method for why that mattered.
-        let strategy_posterior = self
-            .repository
-            .load_brain_state(self.workspace_id, "strategy_posterior")
-            .await
-            .ok()
-            .flatten()
-            .and_then(|(state, _ts)| {
-                serde_json::from_value::<
-                    crowdrelay_brain::StateConditionedStrategyPosterior,
-                >(state)
-                .ok()
-            })
-            .unwrap_or_default();
+        // Learning without a consumer is a defensible place to be. Plumbing
+        // without a consumer is not: it is the part that makes a reader
+        // conclude the belief is live. Wiring it up is a deliberate change to
+        // these signatures — see `crowdrelay_brain::strategy_learning`.
         // Load the exploration memory from past dispatch
         // predictions. The brain uses this to compute novelty:
         // unexplored (template, context) pairs get an exploration
@@ -122,7 +106,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 &causal_model,
                 strategy,
                 novelty,
-                &strategy_posterior,
             )?;
             scored_candidates.extend(candidates);
         }

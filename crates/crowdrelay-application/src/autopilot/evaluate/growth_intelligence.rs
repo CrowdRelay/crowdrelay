@@ -161,7 +161,6 @@ pub fn evaluate_growth_intelligence(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
-    strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
     now: OffsetDateTime,
 ) -> Option<IntelligenceRequest> {
     // A retired worker is never dispatched. The standing is computed from
@@ -248,18 +247,16 @@ pub fn evaluate_growth_intelligence(
     //
     // NOTE: `strategy` is used above for `strategy_rank` (eligibility/sort).
     //
-    // `strategy_posterior` is DORMANT, not "used elsewhere". This binding used
-    // to claim it was read for exploration allocation in the caller; the caller
-    // loads it, passes it down, and reads nothing off it, and
-    // `community_engager_candidates` takes it as `_strategy_posterior`. No
-    // `predict` or `confidence` call on it exists on any decision path in the
-    // workspace. It is learned every cycle and consumed by nothing.
+    // `StateConditionedStrategyPosterior` is deliberately absent from this
+    // signature. It is still learned — the infra loader folds resolved evidence
+    // into it every cycle — but it reached no decision, and it used to be
+    // threaded through here and discarded with a `let _ =`. A parameter that
+    // exists only to be dropped is a claim the comments then had to retract.
     //
-    // It stays threaded here because this is where a state-conditioned strategy
-    // belief would enter — as exploration allocation, never as a multiplier on
-    // predicted fan value, which is what it was before and what made a bad
-    // action with a good strategy rank look great. Until it is read, say so.
-    let _ = &strategy_posterior;
+    // Re-introducing it is now a deliberate act rather than the removal of a
+    // discard, and it belongs in exploration allocation or eligibility — never
+    // as a multiplier on predicted fan value, which is what it was before and
+    // what let a bad action with a good strategy rank look great.
 
     // ── Time-to-feedback discount (P1.10) ──
     // Templates that produce feedback faster are slightly preferred because
@@ -855,7 +852,6 @@ pub(super) fn growth_intelligence_candidate(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
-    strategy_posterior: &crowdrelay_brain::StateConditionedStrategyPosterior,
 ) -> Result<Vec<ScoredCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::GrowthIntelligence(ref domain_policy) = policy.config else {
         return Ok(Vec::new());
@@ -875,7 +871,6 @@ pub(super) fn growth_intelligence_candidate(
             causal_model,
             strategy,
             exploration_novelty,
-            strategy_posterior,
         );
     }
     // All other templates: 0 or 1 workspace-wide candidate.
@@ -885,7 +880,6 @@ pub(super) fn growth_intelligence_candidate(
         causal_model,
         strategy,
         exploration_novelty,
-        strategy_posterior,
         now,
     ) else {
         return Ok(Vec::new());
