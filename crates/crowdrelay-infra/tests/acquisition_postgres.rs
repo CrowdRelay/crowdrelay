@@ -229,8 +229,8 @@ async fn phase_one_acquisition_is_atomic_and_tenant_safe() -> Result<(), Box<dyn
 /// carries the fan's `created_at` — not the current time.
 #[tokio::test]
 #[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
-async fn community_conversion_occurred_at_uses_fan_created_at() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn community_conversion_occurred_at_uses_fan_created_at()
+-> Result<(), Box<dyn std::error::Error>> {
     let database_url = std::env::var(TEST_DATABASE_URL_KEY)
         .map_err(|e| format!("set CROWDRELAY_TEST_DATABASE_URL: {e}"))?;
     let database_config = DatabaseConfig {
@@ -298,7 +298,9 @@ async fn community_conversion_occurred_at_uses_fan_created_at() -> Result<(), Bo
         Some("example.test".to_owned()),
         OffsetDateTime::now_utc(),
     )?;
-    repository.persist_click_batch(std::slice::from_ref(&click)).await?;
+    repository
+        .persist_click_batch(std::slice::from_ref(&click))
+        .await?;
 
     // Sign up a fan with the same visitor_id so the conversion links back.
     let email = format!("conv-{suffix}@example.test");
@@ -325,13 +327,12 @@ async fn community_conversion_occurred_at_uses_fan_created_at() -> Result<(), Bo
     let fan_id = result.fan_id.into_uuid();
 
     // Read the fan's created_at.
-    let fan_created_at: OffsetDateTime = sqlx::query_scalar(
-        "SELECT created_at FROM fans WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(fan_id)
-    .fetch_one(&pool)
-    .await?;
+    let fan_created_at: OffsetDateTime =
+        sqlx::query_scalar("SELECT created_at FROM fans WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace_id.into_uuid())
+            .bind(fan_id)
+            .fetch_one(&pool)
+            .await?;
 
     // Read the conversion provenance event.
     let conversion_row: Option<(OffsetDateTime,)> = sqlx::query_as(
@@ -364,8 +365,8 @@ async fn community_conversion_occurred_at_uses_fan_created_at() -> Result<(), Bo
 /// false semantic value.
 #[tokio::test]
 #[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
-async fn community_conversion_does_not_write_when_fan_is_missing() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn community_conversion_does_not_write_when_fan_is_missing()
+-> Result<(), Box<dyn std::error::Error>> {
     let database_url = std::env::var(TEST_DATABASE_URL_KEY)
         .map_err(|e| format!("set CROWDRELAY_TEST_DATABASE_URL: {e}"))?;
     let database_config = DatabaseConfig {
@@ -432,7 +433,9 @@ async fn community_conversion_does_not_write_when_fan_is_missing() -> Result<(),
         false,
         test_sensitive_response_codec(),
     );
-    repository.persist_click_batch(std::slice::from_ref(&click)).await?;
+    repository
+        .persist_click_batch(std::slice::from_ref(&click))
+        .await?;
 
     // Directly invoke the conversion recording with a non-existent fan_id.
     // This simulates the unreachable path: the fan was never created.
@@ -476,7 +479,8 @@ async fn community_conversion_does_not_write_when_fan_is_missing() -> Result<(),
 
     // The INSERT ... SELECT with a JOIN on a non-existent fan produces 0 rows.
     assert_eq!(
-        insert_result.rows_affected(), 0,
+        insert_result.rows_affected(),
+        0,
         "no conversion event must be written when the fan does not exist"
     );
     tx.rollback().await?;

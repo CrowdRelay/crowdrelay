@@ -616,12 +616,18 @@ mod tests {
             9_500,
         );
         assert_eq!(
-            outcome.self_reported_confidence.self_reported_basis_points(),
+            outcome
+                .self_reported_confidence
+                .self_reported_basis_points(),
             9_500
         );
         assert_eq!(evidence_confidence_basis_points(&outcome), 1);
         assert_ne!(
-            i32::from(outcome.self_reported_confidence.self_reported_basis_points()),
+            i32::from(
+                outcome
+                    .self_reported_confidence
+                    .self_reported_basis_points()
+            ),
             evidence_confidence_basis_points(&outcome),
         );
     }
@@ -673,7 +679,10 @@ mod tests {
             VerificationStatus::GroundingCheckPassed
         );
         assert!(!provenance.context.any_source_failed);
-        assert_eq!(provenance.confidence.source, ConfidenceSource::ModelSelfReport);
+        assert_eq!(
+            provenance.confidence.source,
+            ConfidenceSource::ModelSelfReport
+        );
         assert_eq!(provenance.model.actual, "b");
         assert_eq!(provenance.model.provider.as_deref(), Some("groq"));
     }
@@ -748,7 +757,12 @@ mod tests {
 
     #[test]
     fn a_grounded_actionable_outcome_on_a_healthy_context_is_admitted() {
-        for kind in ["press_pitch", "social_post", "signal_push", "outreach_targets"] {
+        for kind in [
+            "press_pitch",
+            "social_post",
+            "signal_push",
+            "outreach_targets",
+        ] {
             let outcome = outcome_with(kind, &provenance_json("grounding_check_passed", false), 1);
             assert_eq!(
                 provenance_admission(outcome.kind, outcome.payload.provenance.as_ref()),

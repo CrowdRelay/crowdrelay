@@ -165,7 +165,11 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
 
     // The model's own report about its own output. A cheap filter that a
     // failing connector happens to trip, not a statement about evidence.
-    if outcome.self_reported_confidence.self_reported_basis_points() == 0 {
+    if outcome
+        .self_reported_confidence
+        .self_reported_basis_points()
+        == 0
+    {
         return Err(OutcomeRejection::InsufficientEvidence {
             reason: "the model reported zero confidence in its own output".to_owned(),
         });
@@ -175,16 +179,15 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
     // so evidence URLs would be a schema nobody could fill. Its equivalent
     // invariant is the destination — the one field deciding where a fan who
     // taps the notification ends up.
-    if outcome.kind == OutcomeKind::SignalPush {
-        if let Some(item) = &outcome.payload.item {
-            if let Some(target) = item.get("target_path").and_then(Value::as_str) {
-                let target = target.trim();
-                if !target.is_empty() && !is_in_app_route(target) {
-                    return Err(OutcomeRejection::OffPlatformPushTarget {
-                        target: target.to_owned(),
-                    });
-                }
-            }
+    if outcome.kind == OutcomeKind::SignalPush
+        && let Some(item) = &outcome.payload.item
+        && let Some(target) = item.get("target_path").and_then(Value::as_str)
+    {
+        let target = target.trim();
+        if !target.is_empty() && !is_in_app_route(target) {
+            return Err(OutcomeRejection::OffPlatformPushTarget {
+                target: target.to_owned(),
+            });
         }
     }
 
@@ -1332,7 +1335,9 @@ struct OutcomeRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crowdrelay_application::agent_outcomes::{OutcomeKind, OutcomePayload};
+    use crowdrelay_application::agent_outcomes::{
+        ModelSelfReportedConfidence, OutcomeKind, OutcomePayload,
+    };
 
     fn make_outcome(kind: OutcomeKind, confidence: i32, item: Option<Value>) -> ValidatedOutcome {
         ValidatedOutcome {
@@ -1345,8 +1350,10 @@ mod tests {
             payload: OutcomePayload {
                 rationale: "test".to_owned(),
                 item,
+                provenance: None,
             },
-            confidence_basis_points: confidence,
+            self_reported_confidence: ModelSelfReportedConfidence::parse(confidence)
+                .expect("test confidence in range"),
             idempotency_key: "test-key".to_owned(),
             trace_id: None,
         }
