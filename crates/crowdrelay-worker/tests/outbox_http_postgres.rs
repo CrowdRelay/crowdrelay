@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use crowdrelay_worker::outbox::{
     CROWDRELAY_EVENT_ID, CROWDRELAY_EVENT_TYPE, CROWDRELAY_EVENT_VERSION, CROWDRELAY_SIGNATURE,
     CROWDRELAY_TIMESTAMP, MapSecretProvider, OutboxWorker, OutboxWorkerConfig, SecretValue,
@@ -98,7 +98,16 @@ async fn run_scenario(pool: &PgPool, fixture: FixtureIds) -> Result<()> {
         stats.deliveries_claimed == 1,
         "expected one claimed delivery"
     );
-    ensure!(stats.delivered == 1, "expected one delivered webhook");
+    if stats.delivered != 1 {
+        // A bare "expected one delivered webhook" says the delivery did not
+        // land and nothing about why, which is the whole question: a refused
+        // connection, a timeout under load, and a 5xx from the loopback
+        // receiver are three different bugs. The row is already written by the
+        // time this fails, so read it.
+        server.abort();
+        let diagnosis = delivery_diagnosis(pool, fixture).await;
+        bail!("expected one delivered webhook; stats={stats:?}; delivery row: {diagnosis}");
+    }
     ensure!(stats.retried == 0, "webhook must not be retried");
     ensure!(stats.dead == 0, "webhook must not be marked dead");
 
@@ -367,6 +376,34 @@ fn verify_hmac(timestamp: &[u8], body: &[u8], signature_header: &str) -> Result<
     verifier
         .verify_slice(&signature)
         .map_err(|_| anyhow::anyhow!("webhook HMAC verification failed"))
+}
+
+/// The delivery row as a one-line string, for failure messages.
+///
+/// Best effort by design: this only runs on a path that is already failing, and
+/// a second error here must not replace the first one.
+async fn delivery_diagnosis(pool: &PgPool, fixture: FixtureIds) -> String {
+    match sqlx::query_as::<_, (String, i32, Option<i16>, Option<String>)>(
+        r#"
+        SELECT status, attempt_count, last_response_status, last_error_kind
+        FROM webhook_deliveries
+        WHERE workspace_id = $1
+          AND outbox_event_id = $2
+          AND endpoint_id = $3
+        "#,
+    )
+    .bind(fixture.workspace_id)
+    .bind(fixture.event_id)
+    .bind(fixture.endpoint_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some((status, attempts, response, error_kind))) => format!(
+            "status={status} attempts={attempts} response={response:?} error_kind={error_kind:?}"
+        ),
+        Ok(None) => "no delivery row was written".to_owned(),
+        Err(error) => format!("could not read the delivery row: {error}"),
+    }
 }
 
 async fn verify_durable_result(pool: &PgPool, fixture: FixtureIds) -> Result<()> {
