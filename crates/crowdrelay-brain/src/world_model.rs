@@ -16,6 +16,45 @@ use crowdrelay_domain::growth_metrics::NorthStarMetric;
 /// This replaces the scattered per-template fields that were duplicated
 /// across `GrowthIntelligenceSnapshot` instances. The world model is loaded
 /// once per cycle and shared across all template evaluations.
+///
+/// # What is read, and what is only computed
+///
+/// `WorldModel` is never persisted and never returned from an endpoint, so a
+/// field nothing reads in this workspace is a field nothing reads anywhere.
+/// Fourteen of the twenty-two are in that position, and they do not all mean
+/// the same thing:
+///
+/// **Read by policy.** `total_fans`, `fan_growth_trend`,
+/// `signal_conversion_rate_bps`, `north_star`, `north_star_current`,
+/// `off_platform_audience`, `connected_platforms`, `fresh_platforms`,
+/// `platform_growth`, `days_to_next_event`, `has_upcoming_event`,
+/// `growth_target_progress`. These reach a decision: strategy selection,
+/// template priority, discovery planning, or the self-assessment.
+///
+/// **Computed anyway.** `fans_this_month`, `fan_growth_rate_bps`,
+/// `total_signal_installs`, `signal_installs_this_month`,
+/// `north_star_this_month`, `off_platform_audience_this_month`. Each exists as
+/// a local that a read field is derived from — the trend, the conversion rate,
+/// the target progress — so carrying it costs a struct field and no query.
+///
+/// **DORMANT — computed, stored, read by nothing.**
+/// `discovered_communities`, `active_communities`,
+/// `avg_community_engagement_bps`, `best_performing_community`,
+/// `worst_performing_community`, `pending_outreach_targets`,
+/// `promoted_outreach_targets`, `engaged_outreach_targets`. The first two and
+/// the last three cost a dedicated query per cycle each.
+///
+/// The dormant set is kept rather than deleted for one reason: the counters are
+/// *correct*, expensively so. Both were `COUNT(*)` over a LEFT JOIN onto
+/// `community_posts`, so every post added a phantom community or outreach
+/// target, and `pipeline_counts_count_places_not_posts` is the live-Postgres
+/// proof of the fix. Deleting the fields would delete that.
+///
+/// But be exact about what they are. A number on this struct reads as something
+/// the brain knows *and uses*, and the failure mode the counter test describes —
+/// posting more making the brain believe it needs fewer places — cannot happen
+/// today, because nothing consults the count. Wiring one of these up is the good
+/// outcome; it just has to move out of this list in the same change.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorldModel {
     // ── Fan aggregation state ──

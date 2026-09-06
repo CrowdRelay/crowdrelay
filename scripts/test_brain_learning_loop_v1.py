@@ -160,6 +160,52 @@ class BrainLearningLoopDoc(unittest.TestCase):
             f"its error instead of propagating: {swallowed}",
         )
 
+    def test_the_dormant_world_model_fields_are_still_dormant(self) -> None:
+        """`WorldModel`'s dormant set must stay out of the decision path.
+
+        `WorldModel` is never persisted and never returned from an endpoint, so
+        a field nothing reads in this workspace is a field nothing reads
+        anywhere. Eight are in that position and five of them cost a dedicated
+        query per cycle. They are kept rather than deleted because the counters
+        are correct — expensively so, after a LEFT JOIN fan-out made every post
+        add a phantom community — and `pipeline_counts_count_places_not_posts`
+        is the live-Postgres proof of that fix.
+
+        Kept, but not misrepresented. The failure mode that test describes —
+        posting more making the brain believe it needs fewer places — cannot
+        happen while nothing consults the count. Wiring one up is the good
+        outcome; it moves out of the doc's dormant list in the same change.
+        """
+        dormant = [
+            "discovered_communities",
+            "active_communities",
+            "avg_community_engagement_bps",
+            "best_performing_community",
+            "worst_performing_community",
+            "pending_outreach_targets",
+            "promoted_outreach_targets",
+            "engaged_outreach_targets",
+        ]
+        loader = (
+            ROOT
+            / "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs"
+        )
+        model = ROOT / "crates/crowdrelay-brain/src/world_model.rs"
+        for field in dormant:
+            readers = [
+                str(path.relative_to(ROOT))
+                for path, text in production_sources()
+                if path not in (loader, model)
+                and re.search(r"\.\s*" + field + r"\b", text)
+            ]
+            self.assertEqual(
+                readers,
+                [],
+                f"`WorldModel::{field}` is documented as dormant and {readers} "
+                f"now reads it. If the brain genuinely uses it, move it out of "
+                f"the dormant list in world_model.rs and out of this one",
+            )
+
     def test_the_dormant_edges_are_still_dormant(self) -> None:
         sources = production_sources()
         for label, pattern in DORMANT:
