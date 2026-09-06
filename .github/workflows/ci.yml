@@ -358,10 +358,27 @@ jobs:
                 config \
                 --images
           )"
-          image_count="$(printf '%s\n' "$production_images" | awk 'NF { count++ } END { print count }')"
+          # Every image CrowdRelay builds must be pinned to the build sha, and
+          # there must be exactly three of them (api, worker, and the worker
+          # image again for the migrate service). Upstream images are pinned by
+          # their own tag instead, which is a different rule -- asserting the
+          # sha over the whole list broke the moment `5c5e5a1` moved postgres
+          # into this compose file.
+          own_images="$(printf '%s\n' "$production_images" | grep '^ghcr.io/crowdrelay/' || true)"
+          image_count="$(printf '%s\n' "$own_images" | awk 'NF { count++ } END { print count+0 }')"
           [[ "$image_count" -eq 3 ]]
           while IFS= read -r image; do
+            [[ -n "$image" ]] || continue
             [[ "${image##*:}" == "sha-0000000000000000000000000000000000000000" ]]
+          done <<< "$own_images"
+          # Upstream images carry an explicit version, never a floating tag.
+          while IFS= read -r image; do
+            [[ -n "$image" ]] || continue
+            case "$image" in
+              ghcr.io/crowdrelay/*) continue ;;
+            esac
+            [[ "$image" == *:* ]]
+            [[ "${image##*:}" != "latest" ]]
           done <<< "$production_images"
           digest="sha256:$(printf '0%.0s' {1..64})"
           digest_images="$(
