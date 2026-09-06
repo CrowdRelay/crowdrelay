@@ -56,6 +56,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod wait_value;
+pub use wait_value::WaitCandidateValue;
+
 use crate::decision_value::DecisionValue;
 use crate::opportunity::OpportunityId;
 
@@ -159,83 +162,6 @@ pub struct PortfolioSelection {
     /// Explains why waiting produces more expected Y30 fan value than
     /// dispatching any available candidate.
     pub wait_reason: Option<String>,
-}
-
-/// The value of WAIT (doing nothing) expressed in expected incremental
-/// Y30 fans. Every term is in the **same fan-value utility space** —
-/// no mixed-unit scalar soup.
-///
-/// WAIT does NOT become more valuable merely because many expensive
-/// candidates exist. `avoided_cost` is NOT a term — resource cost is
-/// already captured in the action's value. WAIT's value comes from
-/// information, fatigue recovery, and option value, minus the
-/// opportunity cost of not acting.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
-pub struct WaitCandidateValue {
-    /// Value of information from pending measurements, expressed
-    /// in expected incremental Y30 fans. Computed as:
-    ///   VOI = count_pending * avg_treatment_std * DECISION_SENSITIVITY
-    /// where DECISION_SENSITIVITY converts uncertainty to expected
-    /// fan value — calibrated empirically later.
-    pub value_of_information: f64,
-    /// Fatigue recovery value in expected Y30 fans. Computed as:
-    ///   sum(audience_fatigue * fatigue_recovery_per_cycle * expected_fans)
-    /// This is in fan-value space because it multiplies fatigue count
-    /// by the expected fan value of a recovered audience.
-    pub fatigue_recovery_value: f64,
-    /// Opportunity cost of NOT acting now. This is NEGATIVE.
-    ///   -best_candidate_expected_y30
-    /// Waiting costs the fan value we could have gained now.
-    pub opportunity_cost: f64,
-    /// Preserved option value — placeholder, 0.0 for now.
-    /// Future: V(wait) = E[best_future_action] - immediate_action_value
-    pub option_value: f64,
-}
-
-impl WaitCandidateValue {
-    /// The total WAIT utility — sum of all components.
-    /// Every term is in expected incremental Y30 fans.
-    #[must_use]
-    pub fn total(&self) -> f64 {
-        self.value_of_information
-            + self.fatigue_recovery_value
-            + self.option_value
-            + self.opportunity_cost
-    }
-
-    /// The decision sensitivity constant — converts treatment uncertainty
-    /// to expected fan value. Conservative: 0.1 means VOI is small relative
-    /// to typical fan values (2-5). Monitor in production — if WAIT never
-    /// wins, increase; if it always wins, decrease.
-    const DECISION_SENSITIVITY: f64 = 0.1;
-
-    /// Computes the WAIT candidate value from the current state.
-    ///
-    /// - `best_candidate_expected_y30`: the highest expected Y30 among
-    ///   available action candidates (0.0 if no candidates).
-    /// - `count_pending_measurements`: number of measurements whose
-    ///   outcomes haven't been observed yet.
-    /// - `avg_treatment_std`: average treatment-effect std across
-    ///   pending candidates.
-    /// - `fatigue_recovery_value`: pre-computed fatigue recovery in
-    ///   fan-value space (sum of audience fatigue × recovery × expected
-    ///   fans per audience).
-    #[must_use]
-    pub fn compute(
-        best_candidate_expected_y30: f64,
-        count_pending_measurements: u32,
-        avg_treatment_std: f64,
-        fatigue_recovery_value: f64,
-    ) -> Self {
-        Self {
-            value_of_information: f64::from(count_pending_measurements)
-                * avg_treatment_std
-                * Self::DECISION_SENSITIVITY,
-            fatigue_recovery_value,
-            opportunity_cost: -best_candidate_expected_y30,
-            option_value: 0.0,
-        }
-    }
 }
 
 /// A rejected candidate and the reason for rejection.

@@ -122,6 +122,14 @@ NEXT DECISION
 
 - Ranking is `total()` alone, and is independent of input order (including on
   ties). WAIT competes as a candidate rather than being a fallback.
+- **WAIT competes with two of its four terms at zero.** `WaitCandidateValue`
+  declares value-of-information, fatigue recovery, option value and opportunity
+  cost. Only the first and the last are computed. The two that are not are both
+  terms that would make waiting *more* valuable, so the brain is biased toward
+  acting by however much a recovered audience is worth. Guessing a coefficient
+  would be worse than the gap: an invented fan-equivalent number is the
+  weighted soup `DecisionValue` refuses, and nothing downstream could tell it
+  from a measured one.
 - Tenant preference affects cadence, never economic value. A low-preference
   candidate with high `DecisionValue` stays selectable.
 
@@ -197,11 +205,14 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 2. **Dormant strategy learning.** The posterior accumulates history nothing
    consumes. Either wire it into exploration allocation or delete it; leaving
    it indefinitely is the state that invites someone to assume it works.
-3. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
+3. **WAIT is under-valued by construction.** Two of its four declared terms are
+   never computed, both in the direction that would favour waiting. The fix is
+   to measure fatigue recovery, not to pick a number for it.
+4. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
    baseline, a remaining delta, a feasible action space and a portfolio
    strategy. It has no expected trajectory and no replanning, so the deadline
    cannot change what the brain does. Deliberately not built — a second planner
    is worse than none.
-4. **The loop is correct and barely exercised.** Almost no outcome has
+5. **The loop is correct and barely exercised.** Almost no outcome has
    resolved. Most of the arithmetic above is right and untested by reality; no
    code change fixes that.
