@@ -140,7 +140,11 @@ async fn seed_joinable_place(pool: &PgPool, workspace: Uuid, name: &str) -> Resu
 
 /// `(membership_state, membership_note)` for one place, read back through the
 /// workspace the way every production query does.
-async fn membership(pool: &PgPool, workspace: Uuid, place: Uuid) -> Result<(String, Option<String>)> {
+async fn membership(
+    pool: &PgPool,
+    workspace: Uuid,
+    place: Uuid,
+) -> Result<(String, Option<String>)> {
     let row: (String, Option<String>) = sqlx::query_as(
         "SELECT membership_state, membership_note FROM discovery_places \
          WHERE workspace_id = $1 AND id = $2",
@@ -360,8 +364,11 @@ async fn a_read_token_cannot_write_credentials_or_publish() -> Result<()> {
 
     // And a correctly scoped token gets past authorization on the same route,
     // so the rejection above is about the capability and not about the route.
-    let publish =
-        derive_agent_token_with_capability(&env.auth_key, workspace, AgentCapability::SocialPublish);
+    let publish = derive_agent_token_with_capability(
+        &env.auth_key,
+        workspace,
+        AgentCapability::SocialPublish,
+    );
     let status = client
         .post(format!("{}/reddit/join", env.agents_url))
         .header("Authorization", format!("Bearer {publish}"))
@@ -753,13 +760,12 @@ async fn partial_outage_scenario(
 
     // No contamination in either direction: each workspace sees only its own
     // rows, and the counting stand-in received nothing from B.
-    let rows_a: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM discovery_places WHERE workspace_id = $1",
-    )
-    .bind(workspace_a)
-    .fetch_one(pool)
-    .await
-    .context("count tenant A's places")?;
+    let rows_a: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM discovery_places WHERE workspace_id = $1")
+            .bind(workspace_a)
+            .fetch_one(pool)
+            .await
+            .context("count tenant A's places")?;
     let joined_rows_b: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM discovery_places \
          WHERE workspace_id = $1 AND membership_state = 'joined'",

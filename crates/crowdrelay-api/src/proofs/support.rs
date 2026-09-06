@@ -14,6 +14,34 @@ fn proof_anchor_payload(batch: &BatchRow) -> Result<String, ProofError> {
     ))
 }
 
+/// Checks that a submitted Rekor receipt is about *this* batch and is
+/// internally consistent with what the submitter also sent.
+///
+/// # What this proves
+///
+/// The canonicalized Rekor body is a `rekord` v0.0.1 entry whose embedded
+/// payload — either inline or as a SHA-256 — is the exact payload CrowdRelay
+/// recomputed for this batch from its own rows, and whose embedded signature
+/// and public key are the ones the submitter presented alongside it. A receipt
+/// for a different batch, a different payload, a different signature or a
+/// different key is rejected, and so is a body that is not base64, not JSON,
+/// or not a rekord.
+///
+/// # What this does not prove
+///
+/// **The anchor is advisory, not authoritative.** Nothing here verifies the
+/// signature against the public key, verifies Rekor's signed entry timestamp,
+/// or checks the inclusion proof against a log root. A `confirmed` batch
+/// therefore means "the relayer reported a Rekor entry that is about this
+/// batch", not "this batch is provably in the Sigstore log".
+///
+/// That is a deliberate trust placement, not an oversight. The confirm
+/// endpoint lives behind `/v1/internal` and is reached only by the anchor
+/// relayer holding an internal bearer token, and the relayer is what talks to
+/// Rekor. The receipt is stored whole in `anchor_receipt` precisely so an
+/// auditor can verify the chain independently later. Treating `confirmed` as
+/// cryptographic proof of log inclusion would be reading more into it than
+/// this function checks.
 fn validate_rekor_receipt(
     payload: &ConfirmRequest,
     expected_payload: &[u8],
@@ -580,5 +608,162 @@ mod tests {
             }),
         );
         assert!(validate_rekor_receipt(&request, expected).is_err());
+    }
+
+    /// A receipt that is real, well formed, and about a different batch.
+    ///
+    /// This is the one an attacker or a confused relayer actually has:
+    /// anchoring is public, so a valid Rekor entry for *some* payload is easy
+    /// to obtain. It must not confirm this batch.
+    #[test]
+    fn rekor_receipt_rejects_another_batchs_anchor() {
+        let other_batch = b"crowdrelay canonical proof payload for another batch";
+        let request = receipt_request(
+            other_batch,
+            json!({
+                "hash": {
+                    "algorithm": "sha256",
+                    "value": hex::encode(Sha256::digest(other_batch))
+                }
+            }),
+        );
+        assert!(
+            validate_rekor_receipt(&request, b"crowdrelay canonical proof payload").is_err(),
+            "a receipt anchoring a different payload must not confirm this batch"
+        );
+    }
+
+    /// Malformed bodies fail closed rather than falling through the
+    /// `is_some_and` chains as an absent field.
+    #[test]
+    fn rekor_receipt_rejects_bodies_that_are_not_receipts() {
+        let expected = b"crowdrelay canonical proof payload";
+        let sound = |body: Value| {
+            let mut request = receipt_request(
+                expected,
+                json!({
+                    "hash": {"algorithm": "sha256", "value": hex::encode(Sha256::digest(expected))}
+                }),
+            );
+            request.canonicalized_body = BASE64_STANDARD
+                .encode(serde_json::to_vec(&body).expect("test body must serialize"));
+            request
+        };
+
+        // Not base64 at all.
+        let mut not_base64 = sound(json!({}));
+        not_base64.canonicalized_body = "!!! not base64 !!!".to_owned();
+        assert!(validate_rekor_receipt(&not_base64, expected).is_err());
+
+        // Base64, but not JSON.
+        let mut not_json = sound(json!({}));
+        not_json.canonicalized_body = BASE64_STANDARD.encode(b"this is not json");
+        assert!(validate_rekor_receipt(&not_json, expected).is_err());
+
+        // JSON, but empty: no signature, no key, no kind.
+        assert!(validate_rekor_receipt(&sound(json!({})), expected).is_err());
+
+        // Everything present and correct except one field each time. Each of
+        // these is a distinct way of not being a Sigstore rekord entry, and
+        // none may be treated as one.
+        for (label, body) in [
+            (
+                "wrong apiVersion",
+                json!({"apiVersion": "9.9.9", "kind": "rekord"}),
+            ),
+            (
+                "wrong kind",
+                json!({"apiVersion": "0.0.1", "kind": "intoto"}),
+            ),
+        ] {
+            assert!(
+                validate_rekor_receipt(&sound(body), expected).is_err(),
+                "{label} must be rejected"
+            );
+        }
+    }
+
+    /// The embedded signature and key must be the ones the submitter also
+    /// presented. Otherwise the stored receipt and the stored signer
+    /// fingerprint describe different things, and the record an auditor reads
+    /// later would not be self-consistent.
+    #[test]
+    fn rekor_receipt_rejects_a_signature_or_key_it_did_not_come_with() {
+        let expected = b"crowdrelay canonical proof payload";
+        let data = json!({
+            "hash": {"algorithm": "sha256", "value": hex::encode(Sha256::digest(expected))}
+        });
+
+        let mut swapped_signature = receipt_request(expected, data);
+        swapped_signature.signature_base64 = BASE64_STANDARD.encode(b"a-different-signature");
+        assert!(
+            validate_rekor_receipt(&swapped_signature, expected).is_err(),
+            "the submitted signature must match the one inside the receipt"
+        );
+
+        let mut swapped_key = receipt_request(
+            expected,
+            json!({
+                "hash": {"algorithm": "sha256", "value": hex::encode(Sha256::digest(expected))}
+            }),
+        );
+        swapped_key.public_key_pem = concat!(
+            "-----BEGIN PUBLIC KEY-----\n",
+            "a-different-public-key\n",
+            "-----END PUBLIC KEY-----\n"
+        )
+        .to_owned();
+        assert!(
+            validate_rekor_receipt(&swapped_key, expected).is_err(),
+            "the submitted public key must match the one inside the receipt"
+        );
+    }
+
+    /// The shape gate on the confirm request, exercised on the fields that
+    /// carry identity. A receipt that passes `validate_rekor_receipt` still
+    /// has to be a well-formed anchor claim.
+    #[test]
+    fn confirm_requests_must_name_a_rekor_anchor_over_https() {
+        let expected = b"crowdrelay canonical proof payload";
+        let fresh = || {
+            receipt_request(
+                expected,
+                json!({
+                    "hash": {
+                        "algorithm": "sha256",
+                        "value": hex::encode(Sha256::digest(expected))
+                    }
+                }),
+            )
+        };
+        assert!(valid_confirm(&fresh()), "the fixture itself must be valid");
+
+        let mut wrong_anchor = fresh();
+        wrong_anchor.anchor_kind = "sigstore.rekor.v2".to_owned();
+        assert!(
+            !valid_confirm(&wrong_anchor),
+            "only the anchor kind this code understands may be accepted"
+        );
+
+        let mut plaintext = fresh();
+        plaintext.anchor_url = "http://rekor.sigstore.dev".to_owned();
+        assert!(
+            !valid_confirm(&plaintext),
+            "an anchor reachable over plaintext is not an anchor"
+        );
+
+        let mut untimed = fresh();
+        untimed.integrated_time = 0;
+        assert!(
+            !valid_confirm(&untimed),
+            "an entry with no integration time cannot be placed in the log's history"
+        );
+
+        let mut unfingerprinted = fresh();
+        unfingerprinted.signer_fingerprint = "md5:whatever".to_owned();
+        assert!(
+            !valid_confirm(&unfingerprinted),
+            "the signer fingerprint must be a sha256 digest"
+        );
     }
 }
