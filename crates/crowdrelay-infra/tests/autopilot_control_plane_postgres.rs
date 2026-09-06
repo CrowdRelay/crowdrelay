@@ -809,3 +809,105 @@ async fn an_approved_action_without_a_live_executor_is_cancelled_after_the_grace
     .expect("supported action row");
     assert_eq!(status, "queued", "a live executor keeps its work claimable");
 }
+
+/// A posture change makes a concurrent policy edit fail, instead of being
+/// silently undone by it.
+///
+/// `set_authority` guards its write with `AND version = $expected` — optimistic
+/// concurrency on exactly the columns a posture change rewrites. The posture
+/// path set `enabled` and `autonomy_level` on every context row and left
+/// `version` alone, so an edit prepared before the posture landed still matched
+/// and overwrote it. The posture dial is the control that moves every authority
+/// surface at once; a stale edit reverting it unnoticed is the failure the
+/// version guard exists to prevent.
+///
+/// Asserted against a real database because the guard is a SQL predicate. The
+/// second half is the load-bearing one: the version moving is not the point,
+/// the stale edit being refused is.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_posture_change_refuses_a_policy_edit_prepared_before_it() {
+    use crowdrelay_application::autopilot::{
+        AutopilotContext, GrowthPosture, SetAutopilotAuthority, SetGrowthPosture,
+    };
+    use crowdrelay_domain::autonomy::{AutonomyLevel, Confidence};
+
+    let fixture = fixture("posture-version").await.expect("fixture");
+    let context = AutopilotContext::GrowthIntelligence;
+
+    let read_version = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT version FROM viryaos_autopilot_policies \
+             WHERE workspace_id = $1 AND context = $2",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(context.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("policy version")
+    };
+
+    // The version an operator would have read before the posture changed.
+    let stale_version = read_version().await;
+
+    fixture
+        .repository
+        .set_growth_posture(
+            fixture.workspace_id,
+            SetGrowthPosture {
+                posture: GrowthPosture::Working,
+                expected_version: 1,
+            },
+            &key(41),
+            None,
+        )
+        .await
+        .expect("apply working posture");
+
+    let after_posture = read_version().await;
+    assert!(
+        after_posture > stale_version,
+        "a posture change rewrites enabled and autonomy_level, so the row's \
+         revision must move: {stale_version} to {after_posture}"
+    );
+
+    // The edit that was prepared before the posture landed.
+    let result = fixture
+        .repository
+        .set_authority(
+            fixture.workspace_id,
+            SetAutopilotAuthority {
+                context,
+                enabled: true,
+                autonomy_level: AutonomyLevel::Observe,
+                minimum_confidence: Confidence::MAX,
+                max_actions_24h: 3,
+                expected_version: stale_version,
+                config: None,
+            },
+            &key(42),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a policy edit holding the pre-posture version must be refused, not \
+         applied on top of the posture"
+    );
+
+    // And the posture's authority level is still the one in force.
+    let level: String = sqlx::query_scalar(
+        "SELECT autonomy_level FROM viryaos_autopilot_policies \
+         WHERE workspace_id = $1 AND context = $2",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(context.as_str())
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("autonomy level");
+    assert_ne!(
+        level, "observe",
+        "the refused edit must not have reverted the posture's authority level"
+    );
+}

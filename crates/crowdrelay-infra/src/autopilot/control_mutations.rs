@@ -354,7 +354,27 @@ impl PostgresAutopilotRepository {
                 sqlx::query(
                     r#"
                     UPDATE viryaos_autopilot_policies
-                    SET enabled = true, autonomy_level = $3
+                    SET enabled = true,
+                        autonomy_level = $3,
+                        -- The row's own revision counter, and the reason this
+                        -- statement must touch it.
+                        --
+                        -- `set_authority` guards with `AND version = $expected`
+                        -- — optimistic concurrency on exactly these columns.
+                        -- Changing `autonomy_level` here without bumping it
+                        -- left a stale editor's `expected_version` still
+                        -- matching, so an edit prepared before the posture
+                        -- change landed on top of it and silently reverted the
+                        -- authority level. The posture dial is the control
+                        -- that sets every authority surface at once; a
+                        -- concurrent edit undoing it unnoticed is the failure
+                        -- the version guard exists to prevent.
+                        --
+                        -- This is the policy row's counter, not the posture
+                        -- row's `expected_version`. The two are separate
+                        -- sequences, and writing one into the other could move
+                        -- a policy version backwards.
+                        version = version + 1
                     WHERE workspace_id = $1 AND context = $2
                     "#,
                 )
