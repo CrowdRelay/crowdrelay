@@ -1336,10 +1336,28 @@ struct OutcomeRow {
 mod tests {
     use super::*;
     use crowdrelay_application::agent_outcomes::{
-        ModelSelfReportedConfidence, OutcomeKind, OutcomePayload,
+        ContextProvenance, ModelSelfReportedConfidence, OutcomeKind, OutcomePayload,
+        OutcomeProvenance, VerificationProvenance, VerificationStatus,
     };
 
+    /// Builds a valid provenance for actionable outcome kinds (those with
+    /// `require_approval` disposition). Observation kinds do not need it,
+    /// but including it does not change their admission.
+    fn valid_provenance() -> Option<OutcomeProvenance> {
+        Some(OutcomeProvenance {
+            verification: VerificationProvenance {
+                status: VerificationStatus::GroundingCheckPassed,
+            },
+            context: ContextProvenance {
+                any_source_failed: false,
+                any_source_truncated: false,
+            },
+            ..Default::default()
+        })
+    }
+
     fn make_outcome(kind: OutcomeKind, confidence: i32, item: Option<Value>) -> ValidatedOutcome {
+        let needs_provenance = kind.disposition() == "require_approval";
         ValidatedOutcome {
             id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
@@ -1350,7 +1368,11 @@ mod tests {
             payload: OutcomePayload {
                 rationale: "test".to_owned(),
                 item,
-                provenance: None,
+                provenance: if needs_provenance {
+                    valid_provenance()
+                } else {
+                    None
+                },
             },
             self_reported_confidence: ModelSelfReportedConfidence::parse(confidence)
                 .expect("test confidence in range"),

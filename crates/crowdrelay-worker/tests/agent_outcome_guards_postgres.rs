@@ -86,8 +86,22 @@ async fn insert_outcome(
     workspace_id: WorkspaceId,
     kind: &str,
     confidence: i32,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
 ) -> Result<Uuid> {
+    // Actionable kinds (require_approval) need provenance to pass the
+    // admission gate. Observation kinds (recommend_only) do not.
+    if matches!(
+        kind,
+        "outreach_targets" | "press_pitch" | "social_post" | "signal_push"
+    ) && let Some(obj) = payload.as_object_mut()
+    {
+        obj.entry("provenance").or_insert(json!({
+            "verification": { "status": "grounding_check_passed" },
+            "context": { "any_source_failed": false, "any_source_truncated": false },
+            "confidence": { "basis_points": confidence, "source": "model_self_report", "is_evidence_confidence": false },
+            "model": { "actual": "test-model", "provider": "test" }
+        }));
+    }
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
