@@ -21,7 +21,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // Load the causal model from past predictions + outcomes.
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.
-        let causal_model = self.repository.load_causal_model(self.workspace_id).await?;
+        // The model and the identity of the beliefs behind it. A decision
+        // persists the number the model gave it; without the identity it could
+        // not say which beliefs produced that number, and the posteriors move
+        // every cycle.
+        let loaded_model = self.repository.load_causal_model(self.workspace_id).await?;
+        let belief_origin = loaded_model.belief.clone();
+        let causal_model = loaded_model.model;
         // The state-conditioned strategy posterior is NOT loaded here.
         //
         // It is still learned: the infra loader folds resolved growth evidence
@@ -372,7 +378,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // against posteriors that have since moved — a different question that
         // looks identical in a report. It rides in the decision's existing
         // `input_snapshot`, so there is no schema change.
-        let decision_provenance = portfolio::decision_provenance(&selection, policy.version);
+        let decision_provenance =
+            portfolio::decision_provenance(&selection, policy.version, &belief_origin);
         // ── Dispatch phase ──
         let mut dispatched_count = 0usize;
         // Dispatch non-experiment candidates (scanner, strategist).
@@ -646,7 +653,7 @@ fn attach_decision_provenance(
 ///
 /// `serde_json` orders object keys, so serializing the snapshot is already
 /// canonical for a given value — no separate canonicaliser, and no new table.
-fn policy_content_identity(policy_snapshot: &serde_json::Value) -> String {
+pub(crate) fn policy_content_identity(policy_snapshot: &serde_json::Value) -> String {
     use sha2::{Digest, Sha256};
 
     let canonical = serde_json::to_string(policy_snapshot).unwrap_or_default();

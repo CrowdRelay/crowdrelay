@@ -206,16 +206,16 @@ async fn t29_delta_replay_reaches_a_control_arm_resolved_before_the_checkpoint()
         .expect("delta replay");
 
     assert!(
-        effect_of(&full).abs() > 1e-9,
+        effect_of(&full.model).abs() > 1e-9,
         "the fixture must teach the Y30 posterior something, otherwise the \
          comparison below holds vacuously"
     );
     assert!(
-        (effect_of(&full) - effect_of(&delta)).abs() < 1e-9,
+        (effect_of(&full.model) - effect_of(&delta.model)).abs() < 1e-9,
         "a checkpoint must not change what the model learns. Full replay saw \
          the control arm and got {}; delta replay had to fetch it and got {}",
-        effect_of(&full),
-        effect_of(&delta)
+        effect_of(&full.model),
+        effect_of(&delta.model)
     );
 }
 
@@ -264,7 +264,15 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
             "policy_version": 7,
             "policy_identity": "sha256:0123456789abcdef0123456789abcdef",
         },
-        "identity": { "optimizer": "submodular_greedy_marginal_v1" },
+        "identity": {
+            "optimizer": "submodular_greedy_marginal_v1",
+            "belief_state": {
+                "source": "checkpoint",
+                "checkpoint_content_hash": "sha256:aaaabbbbccccddddeeeeffff00001111",
+                "checkpoint_updated_at": "2026-01-01T00:00:00Z",
+                "delta_evidence": 4,
+            },
+        },
         "competition": {
             "considered": 3,
             "alternatives": [
@@ -286,6 +294,21 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
     .execute(&f.pool)
     .await
     .expect("attach the decision-time record");
+
+    // The belief state moves on. `viryaos_brain_state` keeps one row per
+    // module and updates it in place, so after this the checkpoint that
+    // produced the estimate is gone — which is exactly why the decision had to
+    // record its identity rather than a way to fetch it.
+    sqlx::query(
+        "INSERT INTO viryaos_brain_state (workspace_id, module, state) \
+         VALUES ($1, 'causal_model', $2) \
+         ON CONFLICT (workspace_id, module) DO UPDATE SET state = $2, updated_at = now()",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(serde_json::json!({"posteriors": "moved on"}))
+    .execute(&f.pool)
+    .await
+    .expect("advance the belief state after the decision");
 
     // The world moves on: the policy row is edited after the decision. A
     // record that reads current state would now answer a different question.
@@ -363,6 +386,41 @@ async fn t30_a_persisted_decision_explains_itself_without_current_state() {
     assert_eq!(
         stored["identity"]["optimizer"], "submodular_greedy_marginal_v1",
         "the optimizer identity must survive"
+    );
+
+    // 7. Which beliefs produced the estimate. The number was durable before
+    //    this; the belief behind it was not, so re-deriving the estimate later
+    //    answered "what would the brain predict now".
+    let belief = &stored["identity"]["belief_state"];
+    assert_eq!(
+        belief["source"], "checkpoint",
+        "the record must say whether a checkpoint or a full replay produced it"
+    );
+    assert_eq!(
+        belief["checkpoint_content_hash"], "sha256:aaaabbbbccccddddeeeeffff00001111",
+        "the exact checkpoint identity must survive the round trip, and must \
+         not be re-derived from the brain_state row — which now holds \
+         something else entirely"
+    );
+    assert_eq!(
+        belief["delta_evidence"], 4,
+        "the estimate came from the checkpoint plus this much evidence, not \
+         from the checkpoint alone"
+    );
+
+    // The current belief row says something else, which is the point.
+    let current_state: serde_json::Value = sqlx::query_scalar(
+        "SELECT state FROM viryaos_brain_state \
+         WHERE workspace_id = $1 AND module = 'causal_model'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await
+    .expect("current belief state");
+    assert_eq!(
+        current_state["posteriors"], "moved on",
+        "the fixture must actually have moved the belief state it is proving \
+         the record does not depend on"
     );
 
     // The current policy row now says something else entirely, which is the

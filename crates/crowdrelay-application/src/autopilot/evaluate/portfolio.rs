@@ -238,6 +238,7 @@ pub(super) fn selected_keys(selection: &PortfolioSelection) -> HashSet<String> {
 pub(super) fn decision_provenance(
     selection: &PortfolioSelection,
     policy_version: i64,
+    belief: &crate::autopilot::BeliefStateOrigin,
 ) -> HashMap<String, serde_json::Value> {
     selection
         .selected
@@ -296,6 +297,11 @@ pub(super) fn decision_provenance(
                 "identity": {
                     "optimizer": "submodular_greedy_marginal_v1",
                     "brain_version": env!("CARGO_PKG_VERSION"),
+                    // Which beliefs produced the estimate above. The number is
+                    // durable; without this the belief that generated it was
+                    // not nameable, and re-deriving it later answers "what
+                    // would the brain predict now".
+                    "belief_state": belief,
                 },
             });
             (candidate.opportunity_id.target.clone(), record)
@@ -329,6 +335,73 @@ mod tests {
             decision_key: decision_key.to_owned(),
             action_idempotency_key: decision_key.to_owned(),
         }
+    }
+
+    /// The policy identity is content, and content ordering does not change it.
+    ///
+    /// `policy_version` is a counter on a mutable row with no history table, so
+    /// the identity beside it has to be derived from the policy itself. Three
+    /// properties make that identity usable, and the third is the one that is
+    /// assumed rather than obvious: `serde_json` stores object keys in a
+    /// `BTreeMap`, so two snapshots built with their fields in different orders
+    /// serialize identically. That is a property of the dependency, not of this
+    /// code, so it is pinned here rather than trusted — if it ever changes, two
+    /// semantically identical policies would hash differently and every
+    /// grouping built on the identity would silently fragment.
+    #[test]
+    fn the_policy_identity_is_content_and_survives_field_ordering() {
+        use crate::autopilot::evaluate::policy_content_identity;
+
+        let policy = serde_json::json!({
+            "version": 7,
+            "enabled": true,
+            "autonomy_level": "bounded_auto",
+            "max_actions_24h": 12,
+        });
+
+        // 1. Deterministic: the same policy hashes the same way twice.
+        assert_eq!(
+            policy_content_identity(&policy),
+            policy_content_identity(&policy),
+            "an identity that changes between calls identifies nothing"
+        );
+
+        // 2. Ordering-insensitive: the same policy written in a different
+        //    order is the same policy.
+        let reordered = serde_json::json!({
+            "max_actions_24h": 12,
+            "autonomy_level": "bounded_auto",
+            "enabled": true,
+            "version": 7,
+        });
+        assert_eq!(
+            policy_content_identity(&policy),
+            policy_content_identity(&reordered),
+            "field order is not a material difference; two identical policies \
+             must not hash apart"
+        );
+
+        // 3. Sensitive to material change — including the one that matters
+        //    most, since it is the authority level.
+        let widened = serde_json::json!({
+            "version": 7,
+            "enabled": true,
+            "autonomy_level": "full_auto",
+            "max_actions_24h": 12,
+        });
+        assert_ne!(
+            policy_content_identity(&policy),
+            policy_content_identity(&widened),
+            "a different authority level is a different policy, even at the \
+             same version — which is exactly the case the counter cannot see"
+        );
+
+        // And the shape is a hash, not a copy of the policy.
+        let identity = policy_content_identity(&policy);
+        assert!(
+            identity.starts_with("sha256:") && identity.len() == 39,
+            "expected a truncated sha256 identity, got {identity}"
+        );
     }
 
     /// A historical decision explains why the winner beat the losers.
@@ -393,7 +466,12 @@ mod tests {
             "the fixture must produce one winner"
         );
 
-        let provenance = decision_provenance(&selection, 7);
+        let belief = crate::autopilot::BeliefStateOrigin::Checkpoint {
+            checkpoint_content_hash: "sha256:feedfacefeedfacefeedfacefeedface".to_owned(),
+            checkpoint_updated_at: time::OffsetDateTime::UNIX_EPOCH,
+            delta_evidence: 4,
+        };
+        let provenance = decision_provenance(&selection, 7, &belief);
         let mut subject = candidate("decision:a");
         crate::autopilot::evaluate::attach_decision_provenance(&mut subject, &provenance);
 
@@ -511,7 +589,12 @@ mod tests {
         }];
 
         let selection = PortfolioOptimizer::new(PortfolioConfig::default()).select(pool);
-        let provenance = decision_provenance(&selection, 7);
+        let belief = crate::autopilot::BeliefStateOrigin::Checkpoint {
+            checkpoint_content_hash: "sha256:feedfacefeedfacefeedfacefeedface".to_owned(),
+            checkpoint_updated_at: time::OffsetDateTime::UNIX_EPOCH,
+            delta_evidence: 4,
+        };
+        let provenance = decision_provenance(&selection, 7, &belief);
 
         let mut subject = candidate(decision_key);
         crate::autopilot::evaluate::attach_decision_provenance(&mut subject, &provenance);

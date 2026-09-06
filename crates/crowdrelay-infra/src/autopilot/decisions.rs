@@ -340,7 +340,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
     async fn load_causal_model(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
+    ) -> Result<LoadedCausalModel, RepositoryError> {
         super::operations::load_causal_model(self, workspace_id).await
     }
 

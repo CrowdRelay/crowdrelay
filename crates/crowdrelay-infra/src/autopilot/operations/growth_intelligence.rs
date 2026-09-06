@@ -38,6 +38,7 @@ use evidence_replay::{
 #[cfg(test)]
 mod learning_tests;
 mod worker_signals;
+use crowdrelay_application::autopilot::{BeliefStateOrigin, LoadedCausalModel};
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
     GrowthTrend, RecentInsight, TenantPreferencePosterior, WorldModel, agent_standing_policy,
@@ -828,12 +829,18 @@ pub(in crate::autopilot) async fn mark_insights_consumed(
 pub(in crate::autopilot) async fn load_causal_model(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
+) -> Result<LoadedCausalModel, RepositoryError> {
     use crowdrelay_brain::CausalModel;
 
     // Try to load a brain state checkpoint for fast startup.
     let checkpoint = super::evidence::load_brain_state(repo, workspace_id, "causal_model").await?;
-    let model = if let Some((state_json, checkpoint_time)) = checkpoint {
+    let (model, belief) = if let Some((state_json, checkpoint_time)) = checkpoint {
+        // Hashed before deserialization, from the bytes the row actually held.
+        // `viryaos_brain_state` keeps one row per module and updates it in
+        // place, so `checkpoint_time` says when and cannot say which — the
+        // state it labelled is gone by the next cycle. The content hash stays
+        // true after the row moves on.
+        let checkpoint_content_hash = checkpoint_content_hash(&state_json);
         match serde_json::from_value::<CausalModel>(state_json) {
             Ok(mut model) => {
                 // Load only delta evidence since the checkpoint.
@@ -874,19 +881,61 @@ pub(in crate::autopilot) async fn load_causal_model(
                     delta_evidence = delta.len(),
                     "loaded causal model from checkpoint + delta"
                 );
-                model
+                let belief = BeliefStateOrigin::Checkpoint {
+                    checkpoint_content_hash,
+                    checkpoint_updated_at: checkpoint_time,
+                    // The estimate came from the checkpoint plus these, not
+                    // from the checkpoint alone.
+                    delta_evidence: u32::try_from(delta.len()).unwrap_or(u32::MAX),
+                };
+                (model, belief)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to deserialize brain checkpoint, falling back to full replay");
-                full_replay(repo, workspace_id).await?
+                full_replay_with_origin(repo, workspace_id).await?
             }
         }
     } else {
         // No checkpoint — full replay from evidence table or legacy view.
-        full_replay(repo, workspace_id).await?
+        full_replay_with_origin(repo, workspace_id).await?
     };
 
-    Ok(model)
+    Ok(LoadedCausalModel { model, belief })
+}
+
+/// A full replay and the honest statement that no checkpoint produced it.
+///
+/// Reporting a checkpoint identity here would be a fabricated one: there was
+/// no checkpoint, and the model is whatever the evidence table rebuilt.
+async fn full_replay_with_origin(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<(crowdrelay_brain::CausalModel, BeliefStateOrigin), RepositoryError> {
+    let evidence_replayed = super::evidence::load_growth_evidence(repo, workspace_id, None)
+        .await
+        .map(|rows| u32::try_from(rows.len()).unwrap_or(u32::MAX))
+        .unwrap_or(0);
+    let model = full_replay(repo, workspace_id).await?;
+    Ok((model, BeliefStateOrigin::FullReplay { evidence_replayed }))
+}
+
+/// The identity of a stored checkpoint: a hash of the state the row held.
+///
+/// Not the row's `updated_at`, which the next cycle overwrites, and not a new
+/// column. Identical belief state hashes identically; a different one does
+/// not; and neither answer changes when the row is later replaced.
+fn checkpoint_content_hash(state: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+
+    // `serde_json` orders object keys, so serializing is already canonical for
+    // a given value — the same state always produces the same bytes.
+    let canonical = serde_json::to_string(state).unwrap_or_default();
+    let digest = Sha256::digest(canonical.as_bytes());
+    let mut identity = String::from("sha256:");
+    for byte in digest.iter().take(16) {
+        identity.push_str(&format!("{byte:02x}"));
+    }
+    identity
 }
 
 /// Saves a causal model checkpoint to the brain state table for fast
