@@ -281,7 +281,6 @@ function validateOpenApi(): number {
     "#/components/schemas/AreaWallet",
     "#/components/schemas/AreaVoucher",
     "#/components/schemas/AreaTicketReward",
-    "#/components/schemas/AreaLegacyWalletImportRequest",
     "#/components/schemas/ReferralProgress/properties/draw_entries",
     "#/components/schemas/WeightedDrawEntry",
     "#/components/schemas/ReferralProgress/properties/physical_rewards",

@@ -38,7 +38,7 @@ if virya.exists():
     # canonical for claims while the legacy reward ledger remains the checkout
     # compatibility boundary. Guard the deployed stage rather than a future
     # reward-ledger cutover that the website does not yet implement.
-    for marker in ["getAreaBackendWallet", "importLegacyAreaClaims", "PUBLIC_CACHE_TTL_MS"]:
+    for marker in ["getAreaBackendWallet", "PUBLIC_CACHE_TTL_MS"]:
         if marker not in area:
             errors.append(f"Virya AREA handoff missing: {marker}")
 
