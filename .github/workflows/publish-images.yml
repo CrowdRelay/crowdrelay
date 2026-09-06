@@ -37,22 +37,11 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
 
-    # Production runs on both linux/amd64 (virya-oracle, E2.1.Micro) and
-    # linux/arm64 (virya-crowdrelay, Ampere A1.Flex). Every platform is built on
-    # its own native runner and pushed under an arch-suffixed tag; the merge job
-    # joins them into the single manifest list the deploy tag resolves to.
+    # Production runs on virya-crowdrelay (linux/arm64, Ampere A1.Flex).
+    # The image is built natively and pushed under an arch-suffixed tag;
+    # the merge job joins it into the release tag the deploy resolves to.
     # QEMU is deliberately absent: emulating a Rust release build costs hours.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-            arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
     steps:
@@ -93,18 +82,18 @@ jobs:
         id: images
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
-          API_IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-api:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
-          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
+          API_IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-api:sha-${{ env.IMAGE_SHA }}-arm64
+          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-worker:sha-${{ env.IMAGE_SHA }}-arm64
           CROWDRELAY_GIT_SHA: ${{ env.IMAGE_SHA }}
           CROWDRELAY_BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
           # One cache tag per architecture. A shared tag would have the two
           # matrix legs overwrite each other's mode=max export every run.
-          CACHE_REF: ${{ env.CACHE_REF }}:${{ matrix.arch }}
+          CACHE_REF: ${{ env.CACHE_REF }}:arm64
         with:
           files: docker-bake.hcl
           targets: api,worker
           set: |
-            *.platform=${{ matrix.platform }}
+            *.platform=linux/arm64
           push: true
           provenance: mode=max
           sbom: true
@@ -114,10 +103,10 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: proofs/rekor-anchor/relayer
-          platforms: ${{ matrix.platform }}
+          platforms: linux/arm64
           push: true
           tags: >-
-            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}-${{ matrix.arch }}
+            ${{ env.REGISTRY }}/${{ env.OWNER_LOWER }}/crowdrelay-rekor-proof-anchor:sha-${{ env.IMAGE_SHA }}-arm64
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.IMAGE_SHA }}
@@ -142,7 +131,7 @@ jobs:
             [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid image digest: $value" >&2; exit 1; }
           done
           printf '%s api=%s worker=%s rekor=%s\n' \
-            "${{ matrix.arch }}" "$API_DIGEST" "$WORKER_DIGEST" "$REKOR_DIGEST"
+            "arm64" "$API_DIGEST" "$WORKER_DIGEST" "$REKOR_DIGEST"
 
   merge:
     needs: build
@@ -176,7 +165,7 @@ jobs:
           merge() {
             local repo="$1" var="$2" target digest platforms
             target="${REGISTRY}/${owner_lower}/${repo}:sha-${IMAGE_SHA}"
-            docker buildx imagetools create --tag "$target" "${target}-amd64" "${target}-arm64"
+            docker buildx imagetools create --tag "$target" "${target}-arm64"
 
             digest="$(docker buildx imagetools inspect "$target" --format '{{.Manifest.Digest}}')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
@@ -186,7 +175,7 @@ jobs:
             platforms="$(docker buildx imagetools inspect "$target" --raw \
               | jq -r '[.manifests[].platform | select(.os == "linux")
                         | "\(.os)/\(.architecture)"] | unique | join(" ")')"
-            for required in linux/amd64 linux/arm64; do
+            for required in linux/arm64; do
               [[ " $platforms " == *" $required "* ]] || {
                 echo "${repo}: published manifest lacks ${required} (has: ${platforms})" >&2; exit 1; }
             done
@@ -223,7 +212,7 @@ jobs:
           name: crowdrelay-image-digests-${{ env.IMAGE_SHA }}
           path: image-digests/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
 
       # GHCR packages inherit the org's default visibility (private) on first
       # publish. The production host pulls anonymously, so every package must

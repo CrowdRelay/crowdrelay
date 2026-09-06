@@ -390,21 +390,9 @@ jobs:
   containers:
     name: Build container targets
     if: github.event_name == 'pull_request'
-    # linux/amd64 and linux/arm64 are both published production targets, so this
-    # gate must build each on its own native runner. Keeping the PR gate and the
-    # publish workflow on the same platform set prevents green CI from producing
-    # a release one of the production hosts cannot pull.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-            arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+    # Production runs on virya-crowdrelay (linux/arm64). The PR gate builds
+    # the same platform that ships, so green CI means a deployable image.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
       contents: read
@@ -443,9 +431,9 @@ jobs:
       - name: Build both runtime targets once
         run: |
           owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          build_cache_ref="ghcr.io/${owner_lower}/crowdrelay-buildcache:${{ matrix.arch }}"
+          build_cache_ref="ghcr.io/${owner_lower}/crowdrelay-buildcache:arm64"
           docker buildx bake --file docker-bake.hcl \
-            --set '*.platform=${{ matrix.platform }}' \
+            --set '*.platform=linux/arm64' \
             --set "*.cache-from=type=registry,ref=${build_cache_ref}" \
             --set '*.output=type=cacheonly'
 

@@ -9,8 +9,6 @@ on:
       - "scripts/publish-n8n-heartbeat.sh"
       - "scripts/verify-production-readiness.py"
       - ".github/workflows/production-readiness.yml"
-  schedule:
-    - cron: "11 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -41,4 +39,4 @@ jobs:
             artifacts/operational-readiness.json
             artifacts/virya-os-release-receipt.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 3

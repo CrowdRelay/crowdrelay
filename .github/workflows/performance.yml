@@ -1,8 +1,6 @@
 name: Runtime performance report
 
 on:
-  schedule:
-    - cron: "41 2 * * 1"
   workflow_dispatch:
     inputs:
       requests:
@@ -163,4 +161,4 @@ jobs:
             artifacts/metrics.prom
             artifacts/crowdrelay-api.log
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 3

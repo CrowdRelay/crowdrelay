@@ -1,8 +1,6 @@
 name: Dependency security
 
 on:
-  schedule:
-    - cron: "23 4 * * 1"
   workflow_dispatch:
   # Called by ci.yml so per-change audits share this single definition.
   workflow_call:
@@ -30,7 +28,7 @@ jobs:
           name: crowdrelay-sbom-${{ github.sha }}
           path: artifacts/crowdrelay-sbom.cdx.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
       # Prebuilt release binary instead of compiling cargo-audit from source;
       # the version pin and the action SHA together fix the supply chain.
       - name: Install pinned cargo-audit
