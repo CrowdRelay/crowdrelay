@@ -23,7 +23,10 @@
 
 use std::time::Duration;
 
-use crowdrelay_application::agent_outcomes::{OutcomeKind, ValidatedOutcome, validate};
+use crowdrelay_application::agent_outcomes::{
+    OutcomeKind, ProvenanceRejection, ValidatedOutcome, evidence_confidence_basis_points,
+    provenance_admission, validate,
+};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::target_discovery::{
     CommunityCandidateSnapshot, ScreeningVerdict, TargetDiscoveryPolicy, screen_community_candidate,
@@ -83,6 +86,23 @@ enum OutcomeRejection {
     /// The outreach target has no usable identity — display_name is
     /// missing, empty, or the literal "Unnamed target" fallback.
     MissingTargetIdentity,
+    /// The row's provenance bars it from becoming a pending action: nothing
+    /// recorded how it was produced, it was never grounding-checked, or a
+    /// data source behind it did not complete.
+    ///
+    /// Unlike every other variant here, this one reads what the agents
+    /// service recorded about the RUN rather than what the model wrote in the
+    /// item. That is the difference that matters: a model answering
+    /// confidently from a dead connector clears every item-level test,
+    /// because every item-level test reads fields the model authored.
+    UnsupportedProvenance(ProvenanceRejection),
+    /// A signal push whose deep link leaves the app.
+    ///
+    /// `target_path` is an in-app route (`/events/{id}`). A model that writes
+    /// an absolute URL or a scheme there is proposing to send the fanbase to
+    /// a destination nobody approved, and the approval click shows the copy,
+    /// not the link.
+    OffPlatformPushTarget { target: String },
 }
 
 impl std::fmt::Display for OutcomeRejection {
@@ -97,6 +117,11 @@ impl std::fmt::Display for OutcomeRejection {
                     "MISSING_TARGET_IDENTITY: display_name is missing or unnamed"
                 )
             }
+            Self::UnsupportedProvenance(rejection) => write!(f, "{rejection}"),
+            Self::OffPlatformPushTarget { target } => write!(
+                f,
+                "OFF_PLATFORM_PUSH_TARGET: target_path {target:?} is not an in-app route"
+            ),
         }
     }
 }
@@ -120,10 +145,47 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
         return Ok(());
     }
 
-    if outcome.confidence_basis_points == 0 {
+    // What the RUN recorded, before anything the model wrote about itself.
+    //
+    // This is the check the item-level guards below cannot make. They read
+    // fields the model authored, so a model answering confidently from a dead
+    // connector clears all of them. The provenance block is authored by the
+    // agents service from what actually happened: whether a second model
+    // checked the output against the context, and whether that context loaded
+    // at all.
+    //
+    // Fail-closed. A row with no provenance, an unreadable status, or an
+    // unrecorded context is rejected rather than admitted, so an agents
+    // deploy predating the contract shows up as a queue of explained
+    // rejections instead of a stream of silent admissions.
+    if let Err(rejection) = provenance_admission(outcome.kind, outcome.payload.provenance.as_ref())
+    {
+        return Err(OutcomeRejection::UnsupportedProvenance(rejection));
+    }
+
+    // The model's own report about its own output. A cheap filter that a
+    // failing connector happens to trip, not a statement about evidence.
+    if outcome.self_reported_confidence.self_reported_basis_points() == 0 {
         return Err(OutcomeRejection::InsufficientEvidence {
-            reason: "confidence is 0 — no evidence to support a decision".to_owned(),
+            reason: "the model reported zero confidence in its own output".to_owned(),
         });
+    }
+
+    // A push is not an outreach contact: there is no external party to cite,
+    // so evidence URLs would be a schema nobody could fill. Its equivalent
+    // invariant is the destination — the one field deciding where a fan who
+    // taps the notification ends up.
+    if outcome.kind == OutcomeKind::SignalPush {
+        if let Some(item) = &outcome.payload.item {
+            if let Some(target) = item.get("target_path").and_then(Value::as_str) {
+                let target = target.trim();
+                if !target.is_empty() && !is_in_app_route(target) {
+                    return Err(OutcomeRejection::OffPlatformPushTarget {
+                        target: target.to_owned(),
+                    });
+                }
+            }
+        }
     }
 
     // Outreach targets need a real identity and evidence URLs.
@@ -153,6 +215,16 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
     }
 
     Ok(())
+}
+
+/// True for a relative in-app route the Signal app can resolve.
+///
+/// Rejects anything carrying a scheme or an authority — `https://`,
+/// `javascript:`, `//evil.example` — and anything not anchored at the root.
+/// Deliberately a shape test: whether `/events/{id}` names a row that exists
+/// is a database question, and this guard is pure so it stays unit-testable.
+fn is_in_app_route(target: &str) -> bool {
+    target.starts_with('/') && !target.starts_with("//") && !target.contains("://")
 }
 
 /// Row shape of the audience-graph lookup for a proposed community.
@@ -450,7 +522,8 @@ impl AgentOutcomeWorker {
             tracing::warn!(
                 outcome_id = %outcome.id,
                 kind = %outcome.kind.as_str(),
-                confidence = outcome.confidence_basis_points,
+                self_reported_confidence =
+                    outcome.self_reported_confidence.self_reported_basis_points(),
                 rejection = %rejection,
                 "rejecting outcome: data-quality guard — no decision or action created"
             );
@@ -470,6 +543,24 @@ impl AgentOutcomeWorker {
             "result_id": outcome.result_id,
             "schema_version": outcome.schema_version,
             "payload": outcome.payload,
+            // The model's opinion of itself, kept where it reads as exactly
+            // that.
+            //
+            // `viryaos_autopilot_decisions.confidence_basis_points` used to
+            // receive this number directly. That column holds the brain's own
+            // evidence confidence everywhere else, and `next_best_action`
+            // parses it into `Confidence` and ranks on it — so a self-report
+            // sat in the same column, in the same units, feeding the same
+            // ranker as a measurement. The column now receives
+            // `evidence_confidence_basis_points`, which does not read this
+            // value, and the self-report lives here, named.
+            //
+            // Not authority either way: `disposition` is a per-kind constant,
+            // so a model cannot talk its way to auto-execute by reporting
+            // 9500.
+            "self_reported_confidence_basis_points":
+                outcome.self_reported_confidence.self_reported_basis_points(),
+            "confidence_provenance": "model_self_report",
         });
 
         // Insert the decision row. decision_key mirrors the outcome's
@@ -493,7 +584,10 @@ impl AgentOutcomeWorker {
         .bind("agent_outcome")
         .bind(outcome.id)
         .bind(outcome.kind.decision_kind())
-        .bind(outcome.confidence_basis_points)
+        // NOT the self-report. See `evidence_confidence_basis_points`: an LLM
+        // proposal carries no measured evidence confidence, so this column gets
+        // the constant saying so rather than a number the model chose for itself.
+        .bind(evidence_confidence_basis_points(outcome))
         .bind(outcome.kind.disposition())
         .bind({
             // The autopilot_decisions.reason column has a CHECK constraint
