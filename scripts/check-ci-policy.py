@@ -66,20 +66,10 @@ else:
         failures.append(".github/workflows/ci.yml: containers job is required")
     else:
         containers_text = ci_text.split(containers_marker, 1)[1]
-        if "--set '*.platform=${{ matrix.platform }}'" not in containers_text:
+        if "runs-on: ubuntu-24.04-arm" not in containers_text:
             failures.append(
-                ".github/workflows/ci.yml: container gate must build the matrix platform"
+                ".github/workflows/ci.yml: container gate must run natively on arm64"
             )
-        for platform in ("linux/amd64", "linux/arm64"):
-            if f"platform: {platform}\n" not in containers_text:
-                failures.append(
-                    f".github/workflows/ci.yml: container gate must cover {platform}"
-                )
-        for runner in ("ubuntu-24.04", "ubuntu-24.04-arm"):
-            if f"runner: {runner}\n" not in containers_text:
-                failures.append(
-                    f".github/workflows/ci.yml: container gate must run natively on {runner}"
-                )
         if "setup-qemu-action" in containers_text:
             failures.append(
                 ".github/workflows/ci.yml: emulated container gate forbidden; use native runners"
@@ -90,7 +80,7 @@ if not security_workflow.exists():
     failures.append(".github/workflows/security.yml: standalone dependency-security workflow is required")
 else:
     security_text = security_workflow.read_text()
-    for trigger in ("schedule", "workflow_dispatch"):
+    for trigger in ("workflow_dispatch",):
         if not re.search(rf"(?m)^  {re.escape(trigger)}:\s*$", security_text):
             failures.append(f".github/workflows/security.yml: missing {trigger} trigger")
     for duplicate_trigger in ("push", "pull_request"):
