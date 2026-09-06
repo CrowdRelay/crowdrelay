@@ -187,5 +187,55 @@ class CommerceCampaignsV1(unittest.TestCase):
         self.assertNotRegex(COMMERCE, r"\b(todo|unimplemented|panic)!\s*\(")
 
 
+    def test_the_catalog_upsert_batches_only_because_validation_forbids_duplicates(self):
+        """The set-based catalog upsert has one precondition; pin it.
+
+        `upsert_catalog_inner` writes all products in one statement and all
+        variants in a second, instead of two statements per product plus one
+        per variant -- the payload caps at 100 products of 50 variants, so the
+        loop it replaced could issue 5,100 round trips inside one transaction.
+
+        A multi-row `ON CONFLICT DO UPDATE` raises "cannot affect row a second
+        time" if one statement touches the same conflict target twice. That
+        cannot happen here only because `validate_catalog` refuses a payload
+        that repeats a slug or a SKU. Relax either check and the batched
+        upsert starts failing at runtime on input it used to accept, so the
+        two are pinned together.
+        """
+        # The validator rejects repeats across the whole payload, not per
+        # product -- `skus` is built once, outside the product loop.
+        self.assertRegex(
+            COMMERCE,
+            r"let mut slugs = BTreeSet::new\(\);\s*\n\s*let mut skus = BTreeSet::new\(\);",
+            "catalog validation must collect slugs and SKUs across the whole "
+            "payload before the product loop",
+        )
+        for guard in (
+            "if !slugs.insert(slug) {",
+            "if !skus.insert(sku) {",
+        ):
+            self.assertIn(
+                guard,
+                COMMERCE,
+                "the batched catalog upsert depends on this duplicate check",
+            )
+
+        catalog = read_rust_module(
+            ROOT, "crates/crowdrelay-api/src/commerce/inventory/catalog.rs"
+        )
+        # One statement per table, both driven by `unnest`, and the product
+        # statement must hand back the ids the variants are attached to.
+        self.assertIn("FROM unnest(", catalog)
+        self.assertIn("RETURNING slug, id", catalog)
+        self.assertIn("ON CONFLICT (workspace_id, slug) DO UPDATE SET", catalog)
+        self.assertIn("ON CONFLICT (workspace_id, sku) DO UPDATE SET", catalog)
+        self.assertNotIn(
+            "for product in payload.products {\n        let product_id",
+            catalog,
+            "the per-product write loop is back; it costs a round trip per "
+            "product and one per variant",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -156,72 +156,152 @@ async fn upsert_catalog_inner(
         .await
         .map_err(CommerceError::sqlx)?;
 
+    // Two statements, not two per product plus one per variant. The payload
+    // caps at 100 products of 50 variants, so the loop this replaces could
+    // issue 5,100 round trips inside one transaction.
+    //
+    // Safe as a set-based upsert precisely because `validate_catalog` has
+    // already refused duplicate slugs and duplicate SKUs across the whole
+    // payload. A multi-row `ON CONFLICT DO UPDATE` fails with "cannot affect
+    // row a second time" when one statement touches the same conflict target
+    // twice, and that is the one thing the validator makes impossible.
+    let mut slugs = Vec::with_capacity(payload.products.len());
+    let mut names = Vec::with_capacity(payload.products.len());
+    let mut descriptions = Vec::with_capacity(payload.products.len());
+    let mut image_urls = Vec::with_capacity(payload.products.len());
+    let mut currencies = Vec::with_capacity(payload.products.len());
+    let mut prices = Vec::with_capacity(payload.products.len());
+    let mut product_active = Vec::with_capacity(payload.products.len());
+    let mut product_public = Vec::with_capacity(payload.products.len());
+    // Variants carry their owner's slug; the product ids come back from the
+    // first statement, because a slug that already existed keeps its id.
+    let mut variant_slugs = Vec::new();
+    let mut skus = Vec::new();
+    let mut labels = Vec::new();
+    let mut attributes = Vec::new();
+    let mut variant_active = Vec::new();
+    let mut thresholds = Vec::new();
+    let mut sell_without_stock = Vec::new();
+
     for product in payload.products {
-        let product_id: Uuid = sqlx::query_scalar(
+        let slug = normalize_slug(&product.slug)?;
+        names.push(clean_text(&product.name, 200)?);
+        descriptions.push(optional_text(
+            product.description.as_deref(),
+            MAX_TEXT_CHARS,
+        )?);
+        image_urls.push(validate_optional_https_url(product.image_url.as_deref())?);
+        currencies.push(product.currency.trim().to_ascii_uppercase());
+        prices.push(product.price_gross_minor);
+        product_active.push(product.active);
+        product_public.push(product.public);
+
+        for variant in product.variants {
+            variant_slugs.push(slug.clone());
+            skus.push(clean_text(&variant.sku, 128)?);
+            labels.push(clean_text(&variant.label, 160)?);
+            attributes.push(variant.attributes);
+            variant_active.push(variant.active);
+            thresholds.push(variant.low_stock_threshold);
+            sell_without_stock.push(variant.sell_without_stock);
+        }
+        slugs.push(slug);
+    }
+
+    let product_ids: Vec<(String, Uuid)> = sqlx::query_as(
+        r#"
+        INSERT INTO merch_products (
+            workspace_id, slug, name, description, image_url,
+            currency, price_gross_minor, active, public
+        )
+        SELECT $1, product.slug, product.name, product.description,
+               product.image_url, product.currency, product.price_gross_minor,
+               product.active, product.public
+        FROM unnest(
+            $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+            $7::bigint[], $8::boolean[], $9::boolean[]
+        ) AS product(
+            slug, name, description, image_url, currency,
+            price_gross_minor, active, public
+        )
+        ON CONFLICT (workspace_id, slug) DO UPDATE SET
+            name = EXCLUDED.name,
+            description = EXCLUDED.description,
+            image_url = EXCLUDED.image_url,
+            currency = EXCLUDED.currency,
+            price_gross_minor = EXCLUDED.price_gross_minor,
+            active = EXCLUDED.active,
+            public = EXCLUDED.public,
+            updated_at = now()
+        RETURNING slug, id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&slugs)
+    .bind(&names)
+    .bind(&descriptions)
+    .bind(&image_urls)
+    .bind(&currencies)
+    .bind(&prices)
+    .bind(&product_active)
+    .bind(&product_public)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(CommerceError::sqlx)?;
+
+    let id_of: std::collections::HashMap<&str, Uuid> = product_ids
+        .iter()
+        .map(|(slug, id)| (slug.as_str(), *id))
+        .collect();
+    // Every product was just upserted, so every slug resolves. A miss would
+    // mean the statement above returned fewer rows than it wrote, which is
+    // not a case to paper over with a default id.
+    let mut variant_products = Vec::with_capacity(variant_slugs.len());
+    for slug in &variant_slugs {
+        let Some(id) = id_of.get(slug.as_str()).copied() else {
+            return Err(CommerceError::Unexpected);
+        };
+        variant_products.push(id);
+    }
+
+    if !skus.is_empty() {
+        sqlx::query(
             r#"
-            INSERT INTO merch_products (
-                workspace_id, slug, name, description, image_url,
-                currency, price_gross_minor, active, public
+            INSERT INTO merch_variants (
+                workspace_id, product_id, sku, label, attributes,
+                active, low_stock_threshold, sell_without_stock
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (workspace_id, slug) DO UPDATE SET
-                name = EXCLUDED.name,
-                description = EXCLUDED.description,
-                image_url = EXCLUDED.image_url,
-                currency = EXCLUDED.currency,
-                price_gross_minor = EXCLUDED.price_gross_minor,
+            SELECT $1, variant.product_id, variant.sku, variant.label,
+                   variant.attributes, variant.active,
+                   variant.low_stock_threshold, variant.sell_without_stock
+            FROM unnest(
+                $2::uuid[], $3::text[], $4::text[], $5::jsonb[],
+                $6::boolean[], $7::int4[], $8::boolean[]
+            ) AS variant(
+                product_id, sku, label, attributes, active,
+                low_stock_threshold, sell_without_stock
+            )
+            ON CONFLICT (workspace_id, sku) DO UPDATE SET
+                product_id = EXCLUDED.product_id,
+                label = EXCLUDED.label,
+                attributes = EXCLUDED.attributes,
                 active = EXCLUDED.active,
-                public = EXCLUDED.public,
+                low_stock_threshold = EXCLUDED.low_stock_threshold,
+                sell_without_stock = EXCLUDED.sell_without_stock,
                 updated_at = now()
-            RETURNING id
             "#,
         )
         .bind(workspace_id)
-        .bind(normalize_slug(&product.slug)?)
-        .bind(clean_text(&product.name, 200)?)
-        .bind(optional_text(
-            product.description.as_deref(),
-            MAX_TEXT_CHARS,
-        )?)
-        .bind(validate_optional_https_url(product.image_url.as_deref())?)
-        .bind(product.currency.trim().to_ascii_uppercase())
-        .bind(product.price_gross_minor)
-        .bind(product.active)
-        .bind(product.public)
-        .fetch_one(&mut *transaction)
+        .bind(&variant_products)
+        .bind(&skus)
+        .bind(&labels)
+        .bind(&attributes)
+        .bind(&variant_active)
+        .bind(&thresholds)
+        .bind(&sell_without_stock)
+        .execute(&mut *transaction)
         .await
         .map_err(CommerceError::sqlx)?;
-
-        for variant in product.variants {
-            sqlx::query(
-                r#"
-                INSERT INTO merch_variants (
-                    workspace_id, product_id, sku, label, attributes,
-                    active, low_stock_threshold, sell_without_stock
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (workspace_id, sku) DO UPDATE SET
-                    product_id = EXCLUDED.product_id,
-                    label = EXCLUDED.label,
-                    attributes = EXCLUDED.attributes,
-                    active = EXCLUDED.active,
-                    low_stock_threshold = EXCLUDED.low_stock_threshold,
-                    sell_without_stock = EXCLUDED.sell_without_stock,
-                    updated_at = now()
-                "#,
-            )
-            .bind(workspace_id)
-            .bind(product_id)
-            .bind(clean_text(&variant.sku, 128)?)
-            .bind(clean_text(&variant.label, 160)?)
-            .bind(variant.attributes)
-            .bind(variant.active)
-            .bind(variant.low_stock_threshold)
-            .bind(variant.sell_without_stock)
-            .execute(&mut *transaction)
-            .await
-            .map_err(CommerceError::sqlx)?;
-        }
     }
 
     transaction.commit().await.map_err(CommerceError::sqlx)?;
