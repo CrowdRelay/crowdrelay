@@ -11,6 +11,7 @@ CHUNK_MAX = 1000
 CONTRACT = {
     "crates/crowdrelay-infra/tests/acquisition_postgres.rs": [
         "acquisition_postgres/helpers.rs",
+        "acquisition_postgres/attribution.rs",
     ],
     "crates/crowdrelay-api/src/audience.rs": [
         "audience/models.rs",
