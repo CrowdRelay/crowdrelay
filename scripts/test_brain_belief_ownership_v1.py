@@ -84,6 +84,48 @@ class BrainBeliefOwnership(unittest.TestCase):
                 "answers, two unreachable, is not redundancy",
             )
 
+    def test_the_dormant_posterior_is_not_plumbed_through_the_decision_path(
+        self,
+    ) -> None:
+        """Learning without a consumer is fine. Plumbing without one is not.
+
+        The posterior was loaded by the growth-intelligence cycle, threaded
+        through both candidate producers, and discarded — `let _ = ` in one,
+        `_strategy_posterior` in the other. Nothing read it, and the signature
+        said otherwise, so the comments had to spend a paragraph each retracting
+        what the code shape claimed.
+
+        The write path is untouched and still real. This pins the read path: the
+        cycle must not load the key, so re-introducing the belief is a
+        deliberate change to these signatures rather than the deletion of a
+        discard. When it happens it belongs in exploration allocation or
+        eligibility, never as a multiplier on predicted fan value.
+        """
+        cycle = (
+            ROOT
+            / "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs"
+        ).read_text()
+        self.assertNotIn(
+            'load_brain_state(self.workspace_id, "strategy_posterior")',
+            cycle,
+            "the growth-intelligence cycle is loading the strategy posterior "
+            "again. Nothing consumes it, so the load is plumbing that makes it "
+            "read as decision-active",
+        )
+        for producer in (
+            "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence.rs",
+            "crates/crowdrelay-application/src/autopilot/evaluate/"
+            "growth_intelligence/community_engager.rs",
+        ):
+            source = (ROOT / producer).read_text()
+            self.assertNotIn(
+                "StateConditionedStrategyPosterior",
+                source,
+                f"{producer} takes the strategy posterior as a parameter again. "
+                f"If it is genuinely consumed now, say where in "
+                f"strategy_learning.rs and update this gate in the same change",
+            )
+
     def test_the_dormant_posterior_is_labelled_dormant(self) -> None:
         """A learner nothing reads must say so where a reader will see it.
 
