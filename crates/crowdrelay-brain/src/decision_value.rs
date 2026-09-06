@@ -54,21 +54,29 @@ use crate::resource_cost::ResourceCost;
 /// that would paralyze a young learning system where different templates
 /// have different evidence maturity.
 ///
-/// It does not currently account for the difference either, and this comment
-/// used to claim otherwise ("the regime's reliability is accounted for via
-/// `uncertainty` and `bridge_is_reliable`"). Nothing reads those fields.
-/// [`DecisionValue::total`] is `pragmatic_value + risk_penalty +
-/// opportunity_cost`, `risk_penalty` is `None`, and `opportunity_cost` is set
-/// by the optimizer — so ranking is the posterior mean alone. A candidate
-/// with wide uncertainty and observational evidence ranks level with a tight
-/// randomised one carrying the same mean.
+/// It accounts for the difference in exactly one place, and this comment has
+/// now been wrong in both directions about it. It first claimed "the regime's
+/// reliability is accounted for via `uncertainty` and `bridge_is_reliable`",
+/// which overstated it; the correction said "nothing reads those fields",
+/// which understated it. Both were written from this file alone.
 ///
-/// That is a real gap, and it is a decision rather than an oversight: a risk
-/// penalty suppresses uncertain candidates, and suppressing uncertain
-/// candidates in a system that has not yet resolved a single outcome is how
-/// a young learner stops learning. The fields are carried so the decision can
-/// be made from evidence when there is some. Until then this comment says
-/// what is true rather than what was intended.
+/// What is true: [`DecisionValue::total`] is `pragmatic_value + risk_penalty +
+/// opportunity_cost`, `risk_penalty` is `None`, and `opportunity_cost` is set
+/// by the optimizer — so **intrinsic** value is the posterior mean alone, and
+/// `uncertainty`, `evidence_quality`, `sample_size`, `contamination` and
+/// `calibration_bias` do not enter it.
+///
+/// But `bridge_is_reliable` is read, one layer out.
+/// [`crate::portfolio::PortfolioOptimizer`] multiplies a `Y14Bridged`
+/// candidate's marginal value by `0.8` when the bridge is not yet reliable, so
+/// such a candidate is docked 20% at ranking time. That is a real economic
+/// effect and it is not visible from `total()`.
+///
+/// The remaining gap — that a wide observational estimate ranks level with a
+/// tight randomised one carrying the same mean — is a decision rather than an
+/// oversight: suppressing uncertain candidates in a system that has resolved
+/// almost no outcomes is how a young learner stops learning. The fields are
+/// carried so that decision can be made from evidence when there is some.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EstimationRegime {

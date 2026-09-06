@@ -56,7 +56,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod selection;
 mod wait_value;
+pub use selection::{PortfolioRejection, PortfolioSelection, RejectionReason};
 pub use wait_value::WaitCandidateValue;
 
 use crate::decision_value::DecisionValue;
@@ -145,46 +147,6 @@ pub struct PortfolioCandidate {
     /// The intrinsic decision value — one source of truth for all value
     /// semantics. The optimizer computes marginal value from this.
     pub decision_value: DecisionValue,
-}
-
-/// The result of portfolio optimization.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PortfolioSelection {
-    /// The selected candidates, in dispatch priority order.
-    pub selected: Vec<PortfolioCandidate>,
-    /// The candidates that were not selected (and why).
-    pub rejected: Vec<PortfolioRejection>,
-    /// The total expected fans from the selected portfolio.
-    pub total_expected_fans: f64,
-    /// Whether "DO NOTHING" was selected (all candidates had negative value).
-    pub do_nothing: bool,
-    /// When `do_nothing` is true, the economic rationale for WAIT.
-    /// Explains why waiting produces more expected Y30 fan value than
-    /// dispatching any available candidate.
-    pub wait_reason: Option<String>,
-}
-
-/// A rejected candidate and the reason for rejection.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PortfolioRejection {
-    pub opportunity_key: String,
-    pub reason: RejectionReason,
-}
-
-/// Why a candidate was not selected for the portfolio.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RejectionReason {
-    /// The marginal value was negative (not worth dispatching).
-    NegativeMarginalValue,
-    /// The marginal value was positive but below the minimum threshold.
-    BelowThreshold,
-    /// The dispatch count budget (max_dispatches) was exhausted.
-    MaxDispatchesReached,
-    /// The cost budget was exhausted.
-    BudgetExhausted,
-    /// The candidate was superseded by a better candidate for the same audience.
-    Superseded,
 }
 
 /// Configuration for the portfolio optimizer.
@@ -328,10 +290,28 @@ impl PortfolioOptimizer {
                 // DecisionValue.total() is the intrinsic value; the optimizer
                 // applies overlap and fatigue as multiplicative modifiers.
                 let intrinsic = candidate.decision_value.total();
-                // Bridge reliability penalty: when the bridge is unreliable
-                // and the regime is Y14Bridged, apply a confidence penalty.
-                // The bridge is a temporary belief, not a semi-factual
-                // substitute for Y30.
+                // Bridge reliability penalty: a `Y14Bridged` estimate whose
+                // bridge is not yet calibrated is a Y14 number wearing a Y30
+                // label, so it is discounted here rather than trusted at face
+                // value.
+                //
+                // Be exact about what this is, because it is the one place an
+                // epistemic fact reaches economic ranking. `0.8` is hand-tuned:
+                // nothing measured it, and it is not a probability, a variance
+                // or a fan count. It survives the `DecisionValue` invariant
+                // only because it is applied to the **marginal**, alongside
+                // overlap and fatigue, and never to the intrinsic value —
+                // `total()` stays a sum of commensurate fan-equivalent terms
+                // and a reader can still see what a candidate is worth before
+                // the portfolio touched it.
+                //
+                // That is a defensible place for it and not a free pass. A
+                // multiplier here reorders candidates exactly as one inside
+                // `total()` would; the difference is that this one is visible
+                // as a portfolio interaction rather than hidden in the
+                // candidate's own value. If more of these accumulate, the
+                // marginal becomes the weighted soup `total()` refuses, one
+                // defensible coefficient at a time.
                 let bridge_penalty = if !candidate.decision_value.bridge_is_reliable
                     && candidate.decision_value.estimation_regime
                         == crate::decision_value::EstimationRegime::Y14Bridged
@@ -554,6 +534,72 @@ mod tests {
             is_experimental: false,
             decision_value,
         }
+    }
+
+    /// Turns a candidate into a `Y14Bridged` estimate with a stated bridge
+    /// reliability, leaving every economic term alone.
+    fn bridged(mut candidate: PortfolioCandidate, reliable: bool) -> PortfolioCandidate {
+        candidate.decision_value.estimation_regime =
+            crate::decision_value::EstimationRegime::Y14Bridged;
+        candidate.decision_value.bridge_is_reliable = reliable;
+        candidate.decision_value.bridge_confidence = if reliable { 15 } else { 0 };
+        candidate
+    }
+
+    /// The bridge penalty is economically live, and it applies to one regime.
+    ///
+    /// `DecisionValue::total()` is the posterior mean alone, which reads as
+    /// "epistemic facts do not move ranking" — and for `uncertainty`,
+    /// `evidence_quality` and `sample_size` that is true. `bridge_is_reliable`
+    /// is the exception: the optimizer docks an uncalibrated `Y14Bridged`
+    /// candidate 20% at the marginal, because such an estimate is a Y14 number
+    /// wearing a Y30 label.
+    ///
+    /// It was reachable by no test. The shared fixture builds `OutcomeModel`
+    /// candidates, so the branch never fired, and a hand-tuned coefficient
+    /// that reorders candidates had neither a test nor an accurate comment.
+    /// Pin both halves: that it bites, and that it bites nothing else.
+    #[test]
+    fn an_uncalibrated_bridge_is_discounted_and_only_that_regime_is() {
+        let optimizer = PortfolioOptimizer::new(PortfolioConfig {
+            max_dispatches: 1,
+            ..PortfolioConfig::default()
+        });
+
+        // Same expected fans, different audiences so neither overlaps the
+        // other. The only difference between the two is the bridge.
+        let contest = |challenger: PortfolioCandidate| {
+            let selection = optimizer.select(vec![
+                challenger,
+                make_candidate("defender", "t2", 10.0, "audience-b"),
+            ]);
+            selection
+                .selected
+                .first()
+                .map(|c| c.opportunity_id.to_string())
+                .unwrap_or_else(|| "none".to_owned())
+        };
+
+        let uncalibrated = bridged(
+            make_candidate("challenger", "t1", 11.0, "audience-a"),
+            false,
+        );
+        let calibrated = bridged(make_candidate("challenger", "t1", 11.0, "audience-a"), true);
+        let observational = make_candidate("challenger", "t1", 11.0, "audience-a");
+
+        // 11.0 x 0.8 = 8.8, which loses to 10.0. Without the penalty it wins.
+        assert!(
+            !contest(uncalibrated).contains("challenger"),
+            "an uncalibrated Y14Bridged candidate must be discounted enough to              lose to a lower-mean candidate it would otherwise beat"
+        );
+        assert!(
+            contest(calibrated).contains("challenger"),
+            "a calibrated bridge carries no penalty, so the higher mean wins"
+        );
+        assert!(
+            contest(observational).contains("challenger"),
+            "the penalty is scoped to Y14Bridged — an OutcomeModel candidate              with an unreliable-bridge flag must not be docked for it"
+        );
     }
 
     #[test]

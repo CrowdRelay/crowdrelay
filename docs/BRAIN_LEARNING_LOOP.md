@@ -182,6 +182,38 @@ NEXT DECISION
 
 ---
 
+## Provenance: what survives a decision
+
+"What exactly did the brain know when it decided this?" is answerable, but only
+partly, and not from one place.
+
+**Persisted at dispatch.** `viryaos_dispatch_predictions` holds the expected
+fans, the expected Signal installs, the `DispatchContext` and the timestamps.
+`viryaos_growth_evidence` holds the evidence quality, the sample size, the
+contamination estimate, the strategy, the target key and the creative family.
+Between them, most of the provenance a reader needs is durable.
+
+**Not persisted at all.** `DecisionValue` is computed per cycle, ranked on, and
+dropped. So `estimation_regime`, `bridge_confidence`, `bridge_is_reliable`,
+`decision_mode`, and the `total()` the portfolio actually sorted by exist only
+for the length of the cycle that produced them.
+
+Re-deriving them later does not recover them: the posteriors have moved, so a
+re-derivation answers "what would the brain decide now", which is a different
+question and looks identical in a report.
+
+`estimation_regime` is the one that matters most, and it is one column. Without
+it you cannot tell whether a prediction of 3.2 fans came from the outcome
+model, from a Y14 bridge — which the optimizer docks 20% when the bridge is
+uncalibrated — or from Y30 directly. Those are three different claims and the
+brain treats them differently. The vocabulary already exists and is stable:
+`EstimationRegime::as_str` / `parse`, and `y30_direct` / `y14_bridged` /
+`outcome_model` are already written to the calibration trackers.
+
+Deliberately not added here. A column is a migration and a write path, and the
+question of whether the rest of `DecisionValue` should travel with it is a
+design decision rather than a correctness fix.
+
 ## Dormant edges
 
 Written, never read on a decision path. Listed so nobody has to discover it.
@@ -208,11 +240,16 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 3. **WAIT is under-valued by construction.** Two of its four declared terms are
    never computed, both in the direction that would favour waiting. The fix is
    to measure fatigue recovery, not to pick a number for it.
-4. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
+4. **A decision's own reasoning is not durable.** `DecisionValue` never
+   reaches storage, so `estimation_regime`, the bridge confidence and the
+   `total()` the portfolio sorted by survive only the cycle. Re-deriving them
+   answers "what would the brain decide now" and looks the same in a report.
+   See the provenance section.
+5. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
    baseline, a remaining delta, a feasible action space and a portfolio
    strategy. It has no expected trajectory and no replanning, so the deadline
    cannot change what the brain does. Deliberately not built — a second planner
    is worse than none.
-5. **The loop is correct and barely exercised.** Almost no outcome has
+6. **The loop is correct and barely exercised.** Almost no outcome has
    resolved. Most of the arithmetic above is right and untested by reality; no
    code change fixes that.
