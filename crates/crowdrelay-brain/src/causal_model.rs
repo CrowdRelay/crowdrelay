@@ -30,7 +30,27 @@ use crate::world_model::GrowthTrend;
 /// Context features that the causal model uses to predict fan acquisition
 /// outcomes. These are the variables the brain believes influence whether
 /// a dispatch will produce new fans.
+///
+/// # Why `serde(default)` at the container
+///
+/// This is stored as `viryaos_growth_evidence.context` and read back months
+/// later, so the row on disk is always older than the code reading it. Without
+/// a default, adding one field makes every existing row fail to deserialize —
+/// and the loader answered that failure with `DispatchContext::default()`, so
+/// one new field would have silently re-contexted the entire evidence history.
+///
+/// That is not a small loss. `subreddit_type` is the audience level of the
+/// causal hierarchy, and `context_hash` — the exploration memory's key — is
+/// built from `days_to_event`, `fan_growth_trend`, `post_format` and
+/// `time_of_day_bps`. A defaulted context does not read as absent; it reads as
+/// a *specific* context (no event, steady growth, no format, midnight) and
+/// collides with the rows genuinely in it.
+///
+/// Per-field defaults make a new field cost that field, not the row. The
+/// loader logs what it could not read either way — see
+/// `operations/evidence.rs`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DispatchContext {
     /// Days until the nearest upcoming event, if any. Event proximity
     /// boosts fan acquisition potential.

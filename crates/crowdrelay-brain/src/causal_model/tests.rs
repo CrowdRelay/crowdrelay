@@ -925,3 +925,45 @@ fn prediction_error_only_updates_belief_not_economics() {
         "raw posterior predict_std must be identical regardless of prediction error"
     );
 }
+
+/// A stored context older than this build costs the fields it lacks, not the row.
+///
+/// `DispatchContext` lives in `viryaos_growth_evidence.context` and is read
+/// back months later, so the row on disk is always older than the code reading
+/// it. Without a container-level `serde(default)`, adding one non-`Option`
+/// field makes every existing row fail to deserialize — and the loader answers
+/// a failure with `DispatchContext::default()`, so one new field would silently
+/// re-context the whole evidence history.
+///
+/// The damage is not "the context is missing". `subreddit_type` is the audience
+/// level of the causal hierarchy, and `context_hash` is built from
+/// `days_to_event`, `fan_growth_trend`, `post_format` and `time_of_day_bps` —
+/// so the default is a *specific* cell (no event, steady growth, no format,
+/// midnight) that real dispatches also occupy. The outcome would be attributed
+/// there, and nothing downstream could tell the difference.
+///
+/// The fixture is the shape of a genuinely older row: the two fields that
+/// existed, and none of the ones added since.
+#[test]
+fn a_context_written_before_a_field_existed_keeps_the_fields_it_has() {
+    let older_row = serde_json::json!({
+        "subreddit_type": "metal",
+        "days_to_event": 3,
+    });
+
+    let context: DispatchContext =
+        serde_json::from_value(older_row).expect("a context missing later fields must still load");
+
+    assert_eq!(
+        context.subreddit_type.as_deref(),
+        Some("metal"),
+        "the audience level of the hierarchy must survive; losing it moves the \
+         outcome to the workspace bucket"
+    );
+    assert_eq!(context.days_to_event, Some(3));
+    // The fields the row predates fall back individually, which is the point:
+    // the cost of a new field is that field.
+    assert_eq!(context.fan_growth_trend, GrowthTrend::default());
+    assert_eq!(context.post_format, None);
+    assert_eq!(context.time_of_day_bps, 0);
+}

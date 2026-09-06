@@ -372,17 +372,74 @@ async fn load_evidence(
     let evidence: Vec<GrowthEvidence> = rows
         .into_iter()
         .map(|row| {
-            let context: DispatchContext = serde_json::from_value(row.context).unwrap_or_default();
-            let channel = ReachChannel::parse(&row.channel).unwrap_or(ReachChannel::Other);
+            // A defaulted context is not an absent one. `subreddit_type` is the
+            // audience level of the causal hierarchy, and `context_hash` — the
+            // exploration memory's key — is built from `days_to_event`,
+            // `fan_growth_trend`, `post_format` and `time_of_day_bps`, so the
+            // default reads as a *specific* context (no event, steady growth,
+            // no format, midnight) and collides with the rows genuinely in it.
+            // `DispatchContext` is `serde(default)` so a new field costs that
+            // field rather than the row; anything that still fails here is
+            // malformed, and the outcome is being attributed to a context
+            // nobody observed.
+            let context: DispatchContext = match serde_json::from_value(row.context) {
+                Ok(context) => context,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        action_id = ?row.action_id,
+                        workspace_id = %workspace_id.into_uuid(),
+                        "stored dispatch context could not be parsed; this outcome \
+                         will teach the default context, which is a real cell of the \
+                         hierarchy and not this row's"
+                    );
+                    DispatchContext::default()
+                }
+            };
+            // An unknown channel reads as `Other`, which is the widest bucket
+            // and claims the least. The vocabulary is small and stable; a miss
+            // here is drift, so say so rather than quietly widening.
+            let channel = ReachChannel::parse(&row.channel).unwrap_or_else(|| {
+                tracing::warn!(
+                    channel = %row.channel,
+                    "stored reach channel is not in this build's vocabulary; \
+                     recording it as Other"
+                );
+                ReachChannel::Other
+            });
             let treatment = match row.treatment.as_str() {
                 "control" => crowdrelay_brain::TreatmentAssignment::Control,
                 _ => crowdrelay_brain::TreatmentAssignment::Treatment,
             };
-            let execution_status = row.execution_status.as_deref().and_then(|s| {
+            // `None` means the row has no assignment — a legacy row, or
+            // non-experiment evidence — and the causal layer defaults those
+            // deliberately. A status this build cannot parse is a different
+            // fact and must not borrow that default: it is stored vocabulary
+            // the code has drifted from, and the legacy default for a
+            // treatment row is `Executed`, so an unreadable execution would
+            // have been read as a realized treatment.
+            //
+            // Inert under intent-to-treat, which includes every assigned unit
+            // regardless of execution. Not inert under per-protocol, where the
+            // treatment arm must have executed — and switching estimand is one
+            // line, guarded by a contract test, which is to say intended.
+            // `Unknown` is what "we cannot establish whether the treatment was
+            // realized" already means.
+            let execution_status = row.execution_status.as_deref().map(|stored| {
                 serde_json::from_value::<crowdrelay_brain::ExecutionStatus>(
-                    serde_json::Value::String(s.to_owned()),
+                    serde_json::Value::String(stored.to_owned()),
                 )
-                .ok()
+                .unwrap_or_else(|error| {
+                    tracing::error!(
+                        error = %error,
+                        stored = stored,
+                        workspace_id = %workspace_id.into_uuid(),
+                        "stored experiment execution_status could not be parsed; \
+                         treating it as unknown execution rather than as a legacy \
+                         row. The execution-status vocabulary has drifted."
+                    );
+                    crowdrelay_brain::ExecutionStatus::Unknown
+                })
             });
             GrowthEvidence {
                 workspace_id: workspace_id.into_uuid(),

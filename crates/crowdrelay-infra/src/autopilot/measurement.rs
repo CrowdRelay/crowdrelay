@@ -656,10 +656,31 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // committed. `Some` here means the observation above came from the
             // community ledger rather than the workspace fallback, which is
             // what the evidence quality has to reflect.
-            let community = observable_community(&self.pool, workspace_id, measurement.action_id)
-                .await
-                .ok()
-                .flatten();
+            //
+            // A read failure is answered the same way as "not a community":
+            // the row falls back to the workspace comparison and earns the
+            // weaker evidence quality that goes with it. That is the safe
+            // direction — it under-claims rather than over-claims — and it is
+            // better than failing the whole measurement completion over a
+            // transient read. But it is a downgrade taken on no evidence, so
+            // it is logged rather than swallowed; a run of these is a
+            // measurement window silently recording weaker evidence than it
+            // observed.
+            let community =
+                match observable_community(&self.pool, workspace_id, measurement.action_id).await {
+                    Ok(community) => community,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            action_id = %measurement.action_id.into_uuid(),
+                            workspace_id = %workspace_id.into_uuid(),
+                            "could not establish whether this measurement's unit is an \
+                             observable community; recording it against the workspace \
+                             fallback, which earns weaker evidence quality"
+                        );
+                        None
+                    }
+                };
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
