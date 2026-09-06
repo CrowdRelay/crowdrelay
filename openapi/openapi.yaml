@@ -12216,7 +12216,7 @@ components:
     OpsSummary:
       type: object
       additionalProperties: false
-      required: [outbox, deliveries, push, watchdog, http, database, area, schema_version, release]
+      required: [outbox, deliveries, push, watchdog, worker, http, database, area, schema_version, release, checkedAt]
       properties:
         release: { type: string, minLength: 1, maxLength: 128 }
         schema_version: { type: integer, minimum: 36 }
@@ -12224,9 +12224,18 @@ components:
         deliveries: { $ref: '#/components/schemas/OpsQueueSummary' }
         push: { $ref: '#/components/schemas/OpsQueueSummary' }
         watchdog: { $ref: '#/components/schemas/OpsWatchdogSummary' }
+        worker: { $ref: '#/components/schemas/OpsWorkerSummary' }
         http: { $ref: '#/components/schemas/HttpRequestSummary' }
         database: { $ref: '#/components/schemas/DatabaseRuntimeSummary' }
         area: { $ref: '#/components/schemas/OpsAreaRuntimeSummary' }
+        checkedAt: { type: string, format: date-time, description: 'When this summary was assembled' }
+    OpsWorkerSummary:
+      type: object
+      additionalProperties: false
+      required: [lease_age_seconds, alive]
+      properties:
+        lease_age_seconds: { type: integer, minimum: 0 }
+        alive: { type: boolean }
     OpsOutboxItem:
       type: object
       additionalProperties: false

@@ -43,7 +43,10 @@ pub struct OpsSummary {
     release: String,
     /// When this summary was assembled. The control plane uses this to
     /// classify freshness (live/stale/unknown) instead of reporting
-    /// "recency unknown" for every section.
+    /// "recency unknown" for every section. Serialized as `checkedAt`
+    /// (camelCase) to match the control plane's `oldest_upstream_timestamp`
+    /// field name list.
+    #[serde(rename = "checkedAt")]
     checked_at: String,
 }
 
