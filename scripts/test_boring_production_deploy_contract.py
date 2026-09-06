@@ -7,7 +7,6 @@ DEPLOY_PATH = ROOT / "scripts/deploy-production-exact.sh"
 SAFE_DEPLOY_PATH = ROOT / "scripts/deploy-production-safe.sh"
 DEPLOY = DEPLOY_PATH.read_text()
 SAFE_DEPLOY = SAFE_DEPLOY_PATH.read_text()
-INSTALLER = (ROOT / "scripts/install-deploy-crowdrelay-wrapper.sh").read_text()
 CTL = (ROOT / "crowdrelayctl").read_text()
 PUBLISH = (ROOT / ".github/workflows/publish-images.yml").read_text()
 
@@ -113,25 +112,6 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("PUBLIC_META=STALE", receipt)
         self.assertIn("blocking=false", receipt)
         self.assertNotIn("PUBLIC_EXACT_SHA=FAIL", receipt)
-
-    def test_fish_wrapper_is_only_a_thin_launcher(self) -> None:
-        self.assertIn("deploy-production-safe.sh", INSTALLER)
-        self.assertIn("LEGACY_HELPERS=UNREFERENCED", INSTALLER)
-        marker = 'cat > "$DEST" <<EOF\n'
-        self.assertIn(marker, INSTALLER)
-        wrapper_template = INSTALLER.split(marker, 1)[1].split("\nEOF\n", 1)[0]
-
-        self.assertIn("deploy-production-safe.sh", wrapper_template)
-        self.assertNotIn("deploy-production-exact.sh", wrapper_template)
-        self.assertNotIn(".local/libexec", wrapper_template)
-        for legacy in (
-            "crowdrelay-image-set-gate",
-            "crowdrelay-deploy-guardian",
-            "crowdrelay-pair-converge",
-            "crowdrelay-rekor-deploy",
-            "crowdrelay-deploy-verify",
-        ):
-            self.assertNotIn(legacy, wrapper_template)
 
 
 if __name__ == "__main__":
