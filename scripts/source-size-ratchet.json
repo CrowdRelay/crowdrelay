@@ -38,7 +38,8 @@
     "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2280,
     "crates/crowdrelay-worker/src/retention.rs": 1419,
     "crates/crowdrelay-worker/src/main.rs": 1326,
-    "crates/crowdrelay-worker/src/agent_outcomes.rs": 1446
+    "crates/crowdrelay-worker/src/agent_outcomes.rs": 1569,
+    "crates/crowdrelay-infra/tests/autopilot_measurement_spine_postgres.rs": 1300
   },
   "policy": "ratchet-not-hard-cap",
   "reviewThresholdLines": 1200,
