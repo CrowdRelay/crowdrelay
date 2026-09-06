@@ -2887,10 +2887,21 @@ paths:
       summary: Read the agent scorecard — is it running, what did it do, did it work
       description: >
         One endpoint that shows the agent's status (enabled, posture, live capabilities),
-        a 7-day action summary (executed, succeeded, failed, parked), the all-time track
-        record (improved vs worsened outcomes, measurement coverage), actions broken down
-        by context, and the last 10 completed actions with their measured outcomes.
-        Not logs — results.
+        a 7-day action summary (executed, succeeded, failed, parked, unknown), the
+        all-time track record (improved vs worsened outcomes, measurement coverage),
+        actions broken down by context, and the last 10 completed actions with their
+        measured outcomes. Not logs — results.
+
+
+        Read `success_rate_basis_points` as "of the actions that resolved, how many
+        resolved well". Its denominator is `executed`, which counts only terminal
+        states, so `unknown` actions — where the external side effect can neither be
+        confirmed nor ruled out — are excluded from both parts of the ratio and
+        reported separately. A high rate beside a large `unknown` is not a good week;
+        it is a week whose ambiguous cases were not counted. The numerator is also
+        recorded success rather than provider-confirmed success: an externally
+        executed action is marked succeeded at dispatch and corrected later if the
+        provider contradicts it.
       security:
       - adminBearer: []
       responses:

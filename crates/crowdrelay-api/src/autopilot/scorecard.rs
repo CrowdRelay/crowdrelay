@@ -48,13 +48,37 @@ pub struct AgentStatus {
 
 #[derive(Debug, Serialize)]
 pub struct WeekSummary {
+    /// Actions that reached a terminal state this week: `succeeded` or
+    /// `failed`. Does NOT include `unknown` — see that field.
     pub executed: i64,
+    /// Actions whose recorded state is `succeeded`.
+    ///
+    /// That is what the system currently believes, which is not always the
+    /// same as what a provider confirmed: `actions_execution.rs` marks an
+    /// externally executed action `succeeded` at dispatch, and the provider's
+    /// confirmation arrives later as an execution report. A premature success
+    /// is correctable — see `SuccessEvidence` — and counted here until it is
+    /// corrected.
     pub succeeded: i64,
     pub failed: i64,
     pub parked: i64,
     pub awaiting_approval: i64,
-    /// Share of executed actions that succeeded, in basis points.
-    /// None when there are no executed actions.
+    /// Actions this week whose outcome could not be established — the external
+    /// side effect may or may not have happened.
+    ///
+    /// These are excluded from `executed`, and therefore from the rate below.
+    /// A rate of 10000 next to a large `unknown` is not a week that went
+    /// perfectly; it is a week where the ambiguous cases were not counted. They
+    /// are shown rather than folded in either direction, because "we cannot
+    /// tell" is neither a success nor a failure.
+    pub unknown: i64,
+    /// Share of `executed` actions recorded as `succeeded`, in basis points.
+    /// `None` when nothing reached a terminal state.
+    ///
+    /// Read it as "of the actions that resolved, how many resolved well",
+    /// not as "how often the agent works". The denominator omits `unknown`,
+    /// and the numerator counts believed success, not provider-confirmed
+    /// success.
     pub success_rate_basis_points: Option<u32>,
 }
 
@@ -139,6 +163,7 @@ struct WeekRow {
     failed: i64,
     parked: i64,
     awaiting_approval: i64,
+    unknown: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -255,7 +280,13 @@ async fn load_agent_scorecard(
             )::bigint AS parked,
             count(*) FILTER (
                 WHERE status = 'awaiting_approval'
-            )::bigint AS awaiting_approval
+            )::bigint AS awaiting_approval,
+            -- `unknown` is not terminal and carries no `finished_at`, so it is
+            -- windowed on `updated_at` — the moment the state was recorded.
+            count(*) FILTER (
+                WHERE status = 'unknown'
+                  AND updated_at >= $2 - INTERVAL '7 days'
+            )::bigint AS unknown
         FROM viryaos_autopilot_actions
         WHERE workspace_id = $1
         "#,
@@ -434,6 +465,7 @@ async fn load_agent_scorecard(
             failed: week_row.failed,
             parked: week_row.parked,
             awaiting_approval: week_row.awaiting_approval,
+            unknown: week_row.unknown,
             success_rate_basis_points: success_rate,
         },
         track_record: TrackRecord {
