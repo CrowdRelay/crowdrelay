@@ -40,7 +40,7 @@ class SynesthesiaModuleContract(unittest.TestCase):
     def test_flag_default_off_for_new_workspaces(self):
         eco = ECOSYSTEM.read_text()
         self.assertIn('("synesthesia_module", false)', eco)
-        self.assertIn("FLAG_KEYS: [(&str, bool); 17]", eco)
+        self.assertIn("FLAG_KEYS: [(&str, bool); 16]", eco)
 
     def test_public_surface_is_gated_and_privacy_is_not(self):
         gated = SYNESTHESIA.read_text()
