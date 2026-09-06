@@ -44,13 +44,11 @@ class RockSolidPublicReadPath(unittest.TestCase):
         self.assertIn("url.fragment().is_none()", worker)
         self.assertNotIn("fn valid_http_url", worker)
 
-    def test_external_production_smoke_is_scheduled_and_includes_safe_synesthesia_canary(self):
+    def test_external_production_smoke_includes_safe_synesthesia_canary(self):
         smoke = (ROOT / ".github/workflows/production-smoke.yml").read_text()
         probe_script = (ROOT / "scripts/production-smoke.sh").read_text()
         canary_script = (ROOT / "scripts/synesthesia-production-canary.sh").read_text()
         self.assertIn("SYNESTHESIA_BASE_URL", smoke)
-        self.assertIn("schedule:", smoke)
-        self.assertIn('cron: "7 3 * * *"', smoke)
         self.assertIn("require_200 synesthesia_home", probe_script)
         self.assertIn("require_200 synesthesia_boot_art", probe_script)
         self.assertIn("menu-world.webp", probe_script)

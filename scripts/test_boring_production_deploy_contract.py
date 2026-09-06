@@ -95,12 +95,11 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("CROWDRELAY_SAFE_DEPLOY=PASS", SAFE_DEPLOY)
 
     def test_publication_matches_the_real_production_architecture(self) -> None:
-        # Production spans both hosts, so a release must carry both platforms
-        # and merge them into one manifest list the deploy tag resolves to.
-        for platform in ("linux/amd64", "linux/arm64"):
-            self.assertIn(f"platform: {platform}", PUBLISH)
-        self.assertIn("*.platform=${{ matrix.platform }}", PUBLISH)
-        self.assertIn("platforms: ${{ matrix.platform }}", PUBLISH)
+        # Production runs on virya-crowdrelay (linux/arm64). The release
+        # carries that platform and merges it into the manifest list the
+        # deploy tag resolves to. amd64 was dropped to stay within
+        # private-repo Actions minute limits.
+        self.assertIn("runs-on: ubuntu-24.04-arm", PUBLISH)
         self.assertIn("imagetools create", PUBLISH)
         # Native runners only: emulating the Rust release build costs hours.
         self.assertNotIn("setup-qemu-action", PUBLISH)
