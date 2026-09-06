@@ -552,7 +552,8 @@ pub(in crate::autopilot) async fn update_execution_status_by_action_id(
 ///
 /// This scans ALL treatment actions on the same unit during the full
 /// window, computes `final_contamination`, and downgrades
-/// `final_evidence_quality` if contamination is high (> 0.1).
+/// `final_evidence_quality` when contamination reaches
+/// [`CONTAMINATION_CEILING`].
 ///
 /// Runs inside the caller's transaction. It used to run after the measurement
 /// transaction had committed, with its result dropped by `let _ =`, so a
@@ -598,11 +599,21 @@ pub(in crate::autopilot) async fn evaluate_contamination(
     } else {
         (concurrent_count as f64 / (concurrent_count as f64 + 1.0)).min(1.0)
     };
-    // Downgrade evidence quality if contamination is high.
-    let final_evidence_quality = if final_contamination > 0.1 {
-        "matched_quasi_experiment"
-    } else {
+    // The stamp must agree with every consumer of it about where clean ends.
+    //
+    // This wrote `> 0.1` while `GrowthEvidence::effective_evidence_quality` and
+    // `mark_causal_credits` both accept only `< CONTAMINATION_CEILING`. At
+    // exactly the ceiling the three disagreed: the row was stamped
+    // `randomized_holdout` and then refused causal status and capped to
+    // quasi-experimental by everything that read it. The stored claim was the
+    // one that was wrong, and it is the one an operator reads.
+    //
+    // Expressed as the negation of the accept condition, and bound from the
+    // same constant, so the boundary cannot drift or invert again.
+    let final_evidence_quality = if final_contamination < crowdrelay_brain::CONTAMINATION_CEILING {
         "randomized_holdout"
+    } else {
+        "matched_quasi_experiment"
     };
     sqlx::query(
         r#"

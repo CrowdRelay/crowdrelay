@@ -616,6 +616,52 @@ impl Default for EvidenceEvent {
 
 #[cfg(test)]
 mod tests {
+
+    /// Exactly at the ceiling is not clean, and every side must agree.
+    ///
+    /// The endpoint is where a threshold expressed twice goes wrong.
+    /// `evaluate_contamination` stamped `final_evidence_quality` with
+    /// `> 0.1` while this reads `< CONTAMINATION_CEILING`, so a row at exactly
+    /// the ceiling was stored as `randomized_holdout` and then treated as
+    /// quasi-experimental by everything that read it — including the causal
+    /// credit flag. The stored claim was the wrong one, and the stored claim is
+    /// what an operator reads.
+    ///
+    /// Both sides now derive from the accept condition asserted here.
+    #[test]
+    fn contamination_exactly_at_the_ceiling_is_not_a_clean_experiment() {
+        let at_ceiling = GrowthEvidence {
+            evidence_quality: EvidenceQuality::RandomizedHoldout,
+            final_contamination: Some(CONTAMINATION_CEILING),
+            ..GrowthEvidence::default()
+        };
+        assert_eq!(
+            at_ceiling.effective_evidence_quality(),
+            EvidenceQuality::MatchedQuasiExperiment,
+            "the ceiling is the first value that is no longer clean"
+        );
+
+        let just_under = GrowthEvidence {
+            final_contamination: Some(CONTAMINATION_CEILING - 1e-9),
+            ..at_ceiling.clone()
+        };
+        assert_eq!(
+            just_under.effective_evidence_quality(),
+            EvidenceQuality::RandomizedHoldout,
+            "and everything below it still is"
+        );
+
+        let unevaluated = GrowthEvidence {
+            final_contamination: None,
+            ..at_ceiling.clone()
+        };
+        assert_eq!(
+            unevaluated.effective_evidence_quality(),
+            EvidenceQuality::MatchedQuasiExperiment,
+            "an assignment whose contamination was never established has not \
+             been shown to be clean; unknown fails closed"
+        );
+    }
     use super::*;
     use crate::reach::ReachChannel;
 

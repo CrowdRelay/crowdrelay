@@ -168,9 +168,10 @@ async fn process_one(
     // Upgrade the credits whose action was a clean randomized treatment.
     //
     // The allocator sets `is_causal_evidence: false` on every credit and
-    // documents the upgrade as this worker's job — "true only when the
-    // experiment assignment's final_evidence_quality = 'randomized_holdout'
-    // and final_contamination < 0.1" — and the upgrade was never written. So
+    // documents the upgrade as this worker's job — true only when the
+    // experiment assignment's final_evidence_quality is 'randomized_holdout'
+    // and its contamination is under the ceiling — and the upgrade was never
+    // written. So
     // the flag migration 0176 added to separate attribution artifacts from
     // causal claims has been constant `false` since it landed, and the
     // community-engager holdout now running would have filed its first real
@@ -198,6 +199,13 @@ async fn process_one(
 /// an experiment at all. `final_contamination` is NULL until the measurement
 /// resolves it, and NULL is not "clean" — an unevaluated assignment stays
 /// non-causal, because the flag exists to mark what has been established.
+///
+/// The threshold is bound from [`CONTAMINATION_CEILING`] rather than written
+/// as a literal. That constant's own doc claims "one number, three call sites,
+/// so they cannot drift into disagreeing about what clean means" — and this,
+/// the site that decides whether a credit may be called *causal*, was a `0.1`
+/// in a SQL string that happened to match. Identical today; the drift the
+/// constant exists to prevent is exactly the drift a literal permits.
 async fn mark_causal_credits(
     pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
@@ -216,11 +224,12 @@ async fn mark_causal_credits(
           AND arm = 'treatment'
           AND final_evidence_quality = 'randomized_holdout'
           AND final_contamination IS NOT NULL
-          AND final_contamination < 0.1
+          AND final_contamination < $3
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(&action_ids)
+    .bind(crowdrelay_brain::CONTAMINATION_CEILING)
     .fetch_all(pool)
     .await
     .map_err(map_sqlx)?;
