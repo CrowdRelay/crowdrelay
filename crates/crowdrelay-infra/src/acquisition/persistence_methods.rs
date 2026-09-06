@@ -659,16 +659,28 @@ impl PostgresAcquisitionRepository {
         // time — not now() (write time). If the fan does not exist, the JOIN
         // produces no rows and no conversion is written: fail-closed rather
         // than fabricating a timestamp for an event we cannot anchor.
+        //
+        // action_id is recovered via the smart_link chain:
+        //   click_events.smart_link_id → smart_links.slug
+        //   → community_posts.smart_link = '/l/' || slug → community_posts.action_id
+        // The LATERAL join picks the most recently *posted* community_posts
+        // row for the slug — the row whose Reddit post was live when the fan
+        // clicked is the one that caused the exposure. A pending/failed row
+        // with the same slug never reached the community. When no
+        // community_posts row exists (manually created smart links, or links
+        // dropped by the executor), action_id is NULL — unattributable rather
+        // than fabricated.
         sqlx::query(
             r#"
             INSERT INTO fan_provenance_events (
                 workspace_id, fan_id, event_kind, channel, source_target,
-                community, campaign_id, attribution_method,
+                community, campaign_id, action_id, attribution_method,
                 attribution_confidence, occurred_at
             )
             SELECT $1, $2, 'conversion',
                    COALESCE(link.channel_source, 'smart_link'),
                    link.slug, link.channel_community, click.campaign_id,
+                   post.action_id,
                    'last_community_click', 1.0, fan.created_at
             FROM click_events AS click
             JOIN smart_links AS link
@@ -677,6 +689,15 @@ impl PostgresAcquisitionRepository {
             JOIN fans AS fan
               ON fan.workspace_id = $1
              AND fan.id = $2
+            LEFT JOIN LATERAL (
+                SELECT post.action_id
+                FROM community_posts AS post
+                WHERE post.workspace_id = $1
+                  AND post.smart_link = '/l/' || link.slug
+                ORDER BY post.posted_at DESC NULLS LAST,
+                         post.created_at DESC
+                LIMIT 1
+            ) AS post ON true
             WHERE click.workspace_id = $1
               AND click.anonymous_visitor_id = $3
               AND link.channel_community IS NOT NULL
