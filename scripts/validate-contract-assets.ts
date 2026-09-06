@@ -14,7 +14,6 @@ const REQUIRED_PATHS = [
   "/me/area/claim",
   "/internal/area/players",
   "/internal/area/players/{player_id}",
-  "/internal/area/players/{player_id}/wallet/import",
   "/internal/area/players/{player_id}/vouchers",
   "/internal/area/rewards/preview",
   "/internal/area/rewards/reserve",
