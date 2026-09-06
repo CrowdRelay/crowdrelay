@@ -369,6 +369,9 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
         release: option_env!("CROWDRELAY_RELEASE")
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_owned(),
+        checked_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
     })
 }
 

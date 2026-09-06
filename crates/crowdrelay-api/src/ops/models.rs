@@ -41,6 +41,10 @@ pub struct OpsSummary {
     /// The newest migration this build embeds. A property of the binary.
     schema_version: u32,
     release: String,
+    /// When this summary was assembled. The control plane uses this to
+    /// classify freshness (live/stale/unknown) instead of reporting
+    /// "recency unknown" for every section.
+    checked_at: String,
 }
 
 #[derive(Debug, Default, Serialize)]
