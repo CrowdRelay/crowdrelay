@@ -247,7 +247,7 @@ pub fn evaluate_growth_intelligence(
     //
     // NOTE: `strategy` is used above for `strategy_rank` (eligibility/sort).
     //
-    // `StateConditionedStrategyPosterior` is deliberately absent from this
+    // The strategy posterior is deliberately absent from this
     // signature. It is still learned — the infra loader folds resolved evidence
     // into it every cycle — but it reached no decision, and it used to be
     // threaded through here and discarded with a `let _ =`. A parameter that
