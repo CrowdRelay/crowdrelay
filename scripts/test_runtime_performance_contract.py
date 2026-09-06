@@ -173,7 +173,6 @@ class RuntimePerformanceContract(unittest.TestCase):
             "load_drops(state, Some(player_id))",
             "load_claims(state, player_id)",
             "area_credit_balance(state, player_id)",
-            "legacy_migration,",
             "load_vouchers(state, player_id)",
             "load_ticket_rewards(state, player_id)",
         ):

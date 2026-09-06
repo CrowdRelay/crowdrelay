@@ -3,8 +3,6 @@
 //! Exact claim coordinates never leave this module. Public and player-facing
 //! responses contain only coarse city coordinates suitable for navigation.
 
-use std::collections::HashSet;
-
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
@@ -99,22 +97,6 @@ pub struct ClaimRequest {
     drop_id: String,
     challenge: String,
     samples: Vec<PositionSample>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LegacyClaimRequest {
-    drop_id: String,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    claimed_at: Option<OffsetDateTime>,
-    #[serde(default)]
-    edition_number: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ImportClaimsRequest {
-    claims: Vec<LegacyClaimRequest>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -261,55 +243,6 @@ pub struct ReleaseRewardRequest {
     checkout_session_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LegacyVoucherImport {
-    request_id: Uuid,
-    code: String,
-    tokens: u32,
-    benefit: String,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    expires_at: i64,
-    status: String,
-    #[serde(default)]
-    reservation_id: Option<String>,
-    #[serde(default)]
-    reserved_until: Option<i64>,
-    #[serde(default)]
-    checkout_session_id: Option<String>,
-    #[serde(default)]
-    free_product_id: Option<String>,
-    #[serde(default)]
-    free_product_label: Option<String>,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    redeemed_at: Option<OffsetDateTime>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LegacyTicketRewardImport {
-    request_id: Uuid,
-    event_slug: String,
-    credits: u32,
-    fan_email: String,
-    #[serde(default)]
-    public_reference: Option<String>,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    issued_at: Option<OffsetDateTime>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ImportLegacyWalletRequest {
-    migration_id: String,
-    token_balance: u32,
-    #[serde(default)]
-    vouchers: Vec<LegacyVoucherImport>,
-    #[serde(default)]
-    ticket_rewards: Vec<LegacyTicketRewardImport>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReserveTicketRewardRequest {
@@ -348,7 +281,6 @@ fn one_credit() -> u32 {
 struct AreaWallet {
     authenticated: bool,
     migration_required: bool,
-    legacy_migration_applied: bool,
     token_balance: u32,
     reward_credits: u32,
     reward: RewardSummary,
@@ -398,7 +330,9 @@ struct DropRow {
     exact_lng: Option<f64>,
     radius_meters: i32,
     max_claims: i32,
+    #[allow(dead_code)]
     starts_at: OffsetDateTime,
+    #[allow(dead_code)]
     ends_at: OffsetDateTime,
     clue_en: String,
     clue_pl: String,
@@ -530,5 +464,4 @@ include!("area/challenge.rs");
 include!("area/claims.rs");
 include!("area/rewards.rs");
 include!("area/ticket_rewards.rs");
-include!("area/legacy_wallet.rs");
 include!("area/tests.rs");

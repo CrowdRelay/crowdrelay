@@ -357,25 +357,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AreaWallet' }
-  /internal/area/players/{player_id}/wallet/import:
-    post:
-      operationId: importLegacyAreaWallet
-      summary: One-way idempotent import bridge from the former Netlify Blob wallet
-      security: [{ commerceBearer: [] }]
-      parameters:
-      - { $ref: '#/components/parameters/AreaPlayerId' }
-      - { $ref: '#/components/parameters/IdempotencyKey' }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AreaLegacyWalletImportRequest' }
-      responses:
-        '200':
-          description: Imported canonical wallet.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AreaWallet' }
   /internal/area/players/{player_id}/vouchers:
     post:
       operationId: createInternalAreaVoucher
@@ -8767,42 +8748,6 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
-  /internal/area/players/{player_id}/claims/import:
-    post:
-      operationId: importInternalAreaClaims
-      summary: Idempotently import bounded legacy AREA claims
-      security: [{ commerceBearer: [] }]
-      parameters:
-      - { $ref: '#/components/parameters/AreaPlayerId' }
-      - { $ref: '#/components/parameters/IdempotencyKey' }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [claims]
-              properties:
-                claims:
-                  type: array
-                  maxItems: 12
-                  uniqueItems: true
-                  items:
-                    type: object
-                    additionalProperties: false
-                    required: [dropId]
-                    properties:
-                      dropId: { type: string }
-                      claimedAt: { type: [string, 'null'], format: date-time }
-                      editionNumber: { type: [integer, 'null'], minimum: 1, maximum: 500 }
-      responses:
-        '200': { description: Imported claims reflected in the canonical AREA wallet. }
-        '400': { $ref: '#/components/responses/PrivateProblem' }
-        '401': { $ref: '#/components/responses/PrivateProblem' }
-        '404': { $ref: '#/components/responses/PrivateProblem' }
-        '409': { $ref: '#/components/responses/PrivateProblem' }
-        '503': { $ref: '#/components/responses/PrivateProblem' }
 components:
   headers:
     RequestId:
@@ -9336,11 +9281,10 @@ components:
     AreaWallet:
       type: object
       additionalProperties: true
-      required: [authenticated, migrationRequired, legacyMigrationApplied, tokenBalance, rewardCredits, claims, vouchers, ticketRewards, drops]
+      required: [authenticated, migrationRequired, tokenBalance, rewardCredits, claims, vouchers, ticketRewards, drops]
       properties:
         authenticated: { type: boolean }
         migrationRequired: { type: boolean }
-        legacyMigrationApplied: { type: boolean }
         tokenBalance: { type: integer, minimum: 0 }
         rewardCredits: { type: integer, minimum: 0 }
         claims: { type: array, items: { type: object, additionalProperties: true } }
@@ -9369,15 +9313,6 @@ components:
         dropId: { type: string }
         challenge: { type: string }
         samples: { type: array, minItems: 3, maxItems: 8, items: { $ref: '#/components/schemas/AreaPositionSample' } }
-    AreaLegacyWalletImportRequest:
-      type: object
-      additionalProperties: false
-      required: [migrationId, tokenBalance]
-      properties:
-        migrationId: { type: string, minLength: 1, maxLength: 160 }
-        tokenBalance: { type: integer, minimum: 0 }
-        vouchers: { type: array, default: [], items: { type: object, additionalProperties: true } }
-        ticketRewards: { type: array, default: [], items: { type: object, additionalProperties: true } }
     MerchCatalog:
       type: object
       additionalProperties: false
@@ -12242,14 +12177,13 @@ components:
     OpsAreaRuntimeSummary:
       type: object
       additionalProperties: false
-      required: [credits_total, vouchers_issued, stale_voucher_reservations, ticket_rewards_issued, stale_ticket_reward_reservations, legacy_imported_players]
+      required: [credits_total, vouchers_issued, stale_voucher_reservations, ticket_rewards_issued, stale_ticket_reward_reservations]
       properties:
         credits_total: { type: integer, format: int64 }
         vouchers_issued: { type: integer, format: int64, minimum: 0 }
         stale_voucher_reservations: { type: integer, format: int64, minimum: 0 }
         ticket_rewards_issued: { type: integer, format: int64, minimum: 0 }
         stale_ticket_reward_reservations: { type: integer, format: int64, minimum: 0 }
-        legacy_imported_players: { type: integer, format: int64, minimum: 0 }
     OpsOperationTimeline:
       type: object
       additionalProperties: false

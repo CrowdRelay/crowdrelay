@@ -69,7 +69,6 @@ class AreaGameContract(unittest.TestCase):
             '"/v1/me/area/challenge"',
             '"/v1/me/area/claim"',
             '"/v1/internal/area/players"',
-            '"/v1/internal/area/players/{player_id}/claims/import"',
         ]:
             self.assertIn(route, ROUTER)
         self.assertIn("fan_session_from_headers", API)
@@ -80,11 +79,8 @@ class AreaGameContract(unittest.TestCase):
         self.assertIn("Uuid::parse_str(value).is_ok()", API)
         self.assertGreaterEqual(API.count("valid_idempotency_key(&headers)"), 4)
 
-    def test_legacy_import_preserves_available_metadata(self):
-        self.assertIn("claimed_at: Option<OffsetDateTime>", API)
+    def test_claim_preserves_available_metadata(self):
         self.assertIn("edition_number: Option<u32>", API)
-        self.assertIn("'legacy_import'", API)
-        self.assertIn("fallback_claimed_at", API)
 
 
 if __name__ == "__main__":

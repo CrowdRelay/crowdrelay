@@ -319,8 +319,7 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             COALESCE((SELECT count(*)::bigint FROM area_reward_vouchers WHERE workspace_id = $1 AND status = 'issued'), 0) AS vouchers_issued,
             COALESCE((SELECT count(*)::bigint FROM area_reward_vouchers WHERE workspace_id = $1 AND status = 'reserved' AND reserved_until < now()), 0) AS stale_voucher_reservations,
             COALESCE((SELECT count(*)::bigint FROM area_ticket_rewards WHERE workspace_id = $1 AND status = 'issued'), 0) AS ticket_rewards_issued,
-            COALESCE((SELECT count(*)::bigint FROM area_ticket_rewards WHERE workspace_id = $1 AND status = 'reserved' AND reservation_expires_at < now()), 0) AS stale_ticket_reward_reservations,
-            COALESCE((SELECT count(*)::bigint FROM area_legacy_wallet_imports WHERE workspace_id = $1), 0) AS legacy_imported_players
+            COALESCE((SELECT count(*)::bigint FROM area_ticket_rewards WHERE workspace_id = $1 AND status = 'reserved' AND reservation_expires_at < now()), 0) AS stale_ticket_reward_reservations
         "#,
     )
     .bind(state.workspace_id.into_uuid())
@@ -365,7 +364,6 @@ async fn load_summary(state: &OpsState) -> Result<OpsSummary, OpsError> {
             stale_voucher_reservations: area.stale_voucher_reservations,
             ticket_rewards_issued: area.ticket_rewards_issued,
             stale_ticket_reward_reservations: area.stale_ticket_reward_reservations,
-            legacy_imported_players: area.legacy_imported_players,
         },
         schema_version: crate::meta::SCHEMA_VERSION,
         release: option_env!("CROWDRELAY_RELEASE")

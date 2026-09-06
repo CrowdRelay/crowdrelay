@@ -63,13 +63,12 @@ class AreaDesignerContract(unittest.TestCase):
         self.assertNotIn("fn area_is_enabled", runtime_source)
         self.assertNotIn("async fn area_is_enabled", runtime_source)
 
-    def test_challenge_and_claim_enforce_entitlement_but_legacy_import_can_repair_history(self):
+    def test_challenge_and_claim_enforce_entitlement(self):
         self.assertIn("published_at IS NOT NULL", CHALLENGE)
         self.assertIn("archived_at IS NULL", CHALLENGE)
         self.assertIn("area_settings.enabled", CHALLENGE)
         self.assertRegex(CLAIMS, r"lock_drop\([\s\S]*?require_enabled: bool")
         self.assertIn("player_id, true).await", CLAIMS)
-        self.assertIn("player_id, false).await", ENDPOINTS)
 
     def test_management_namespace_uses_dedicated_role(self):
         self.assertIn('path == "/v1/control-plane/area" || path.starts_with("/v1/control-plane/area/")', API_LIB)

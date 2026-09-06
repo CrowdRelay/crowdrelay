@@ -198,14 +198,6 @@ pub(super) fn application_routes(state: AppState) -> Router {
             post(area::internal_claim),
         )
         .route(
-            "/v1/internal/area/players/{player_id}/claims/import",
-            post(area::internal_import_claims),
-        )
-        .route(
-            "/v1/internal/area/players/{player_id}/wallet/import",
-            post(area::internal_import_legacy_wallet),
-        )
-        .route(
             "/v1/internal/area/players/{player_id}/vouchers",
             post(area::internal_create_voucher),
         )

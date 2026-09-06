@@ -50,7 +50,6 @@ pub struct AreaRuntimeSummary {
     stale_voucher_reservations: i64,
     ticket_rewards_issued: i64,
     stale_ticket_reward_reservations: i64,
-    legacy_imported_players: i64,
 }
 
 #[derive(Debug, Default, FromRow)]
@@ -60,7 +59,6 @@ struct AreaRuntimeRow {
     stale_voucher_reservations: i64,
     ticket_rewards_issued: i64,
     stale_ticket_reward_reservations: i64,
-    legacy_imported_players: i64,
 }
 
 #[derive(Debug, Default, Serialize)]

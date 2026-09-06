@@ -187,19 +187,11 @@ async fn wallet_for_player(
     state: &crate::AppState,
     player_id: Uuid,
 ) -> Result<AreaWallet, sqlx::Error> {
-    let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let legacy_migration = sqlx::query_scalar::<_, bool>(
-        r#"SELECT EXISTS (SELECT 1 FROM area_legacy_wallet_imports WHERE workspace_id=$1 AND player_id=$2)"#,
-    )
-    .bind(workspace_id)
-    .bind(player_id)
-    .fetch_one(state.ticketing.pool());
-    let (drops, claims, token_balance, legacy_migration_applied, vouchers, ticket_rewards) =
+    let (drops, claims, token_balance, vouchers, ticket_rewards) =
         tokio::try_join!(
             load_drops(state, Some(player_id)),
             load_claims(state, player_id),
             area_credit_balance(state, player_id),
-            legacy_migration,
             load_vouchers(state, player_id),
             load_ticket_rewards(state, player_id),
         )?;
@@ -224,7 +216,6 @@ async fn wallet_for_player(
     Ok(AreaWallet {
         authenticated: true,
         migration_required: false,
-        legacy_migration_applied,
         token_balance,
         reward_credits: token_balance,
         reward: RewardSummary {

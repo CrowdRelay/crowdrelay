@@ -77,7 +77,7 @@ const MAX_SHOW_PASSES: i64 = 10_000;
 const MAX_LIST_LIMIT: i64 = 100;
 const FLAG_CACHE_TTL: StdDuration = StdDuration::from_secs(1);
 const MAX_FLAG_CACHE_ENTRIES: usize = 256;
-const FLAG_KEYS: [(&str, bool); 17] = [
+const FLAG_KEYS: [(&str, bool); 16] = [
     ("ticket_sales_enabled", true),
     ("ticket_delivery_enabled", true),
     ("gate_redemption_enabled", true),
@@ -93,7 +93,6 @@ const FLAG_KEYS: [(&str, bool); 17] = [
     ("merch_inventory_enabled", false),
     ("reward_campaigns_enabled", false),
     ("merch_inventory_writes_enabled", false),
-    ("area_legacy_imports_enabled", true),
     // Optional per-tenant module. Default OFF so a fresh label workspace does
     // not expose Virya's album surface; migration 0112 enabled it for every
     // workspace that existed before gating, which keeps rollout a no-op.
