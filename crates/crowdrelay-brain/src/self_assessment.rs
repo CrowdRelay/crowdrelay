@@ -259,7 +259,7 @@ impl MetacognitionMonitor {
                 BrainState::Learning => self.learning_cycles = 0,
                 BrainState::Stagnant => self.stagnant_cycles = 0,
                 BrainState::Regressing => self.regressing_cycles = 0,
-                _ => {}
+                BrainState::Improving | BrainState::Initializing => {}
             }
             // Set new counter to 1 (this is the first cycle in the new state).
             match state {

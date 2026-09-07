@@ -87,7 +87,7 @@ impl HypothesisState {
     /// Active = 10_000 (full), Degraded = 2_500 (quarter),
     /// MicroLive = 3_000 (small live size, earning trust),
     /// Paper = 1_000 (tenth), Testing = 500 (minimal learning size),
-    /// all others = 0.
+    /// Discovered and Retired = 0.
     ///
     /// This is applied to the dispatch budget: a `Testing` template
     /// gets 5% of the budget an `Active` template would get.
@@ -99,7 +99,8 @@ impl HypothesisState {
             Self::MicroLive => 3_000,
             Self::Paper => 1_000,
             Self::Testing => 500,
-            _ => 0,
+            Self::Discovered => 0,
+            Self::Retired => 0,
         }
     }
 
