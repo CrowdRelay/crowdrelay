@@ -65,7 +65,7 @@ pub struct AutopilotCycleReport {
 
 #[derive(Debug, Error)]
 pub enum AutopilotError {
-    #[error("autopilot repository failed")]
+    #[error("autopilot repository failed: {0}")]
     Repository(#[from] RepositoryError),
     #[error("autopilot decision serialization failed")]
     Serialization(#[from] serde_json::Error),
