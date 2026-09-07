@@ -168,7 +168,7 @@ services:
       # unactionable while compose dropped the variable.
       CROWDRELAY_DISCOVERY_REDDIT_QUERIES: ${CROWDRELAY_DISCOVERY_REDDIT_QUERIES:-}
     volumes:
-      - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
+      - ${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./secrets/virya-signal-firebase-service-account.json}:/run/secrets/firebase-service-account.json:ro
       - ${CROWDRELAY_WEBHOOK_SECRETS_HOST_FILE:-./deploy/webhook-secrets.production.json}:/run/secrets/crowdrelay-webhooks.json:ro
     depends_on:
       setup:
