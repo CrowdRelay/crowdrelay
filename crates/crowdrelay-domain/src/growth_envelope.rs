@@ -39,6 +39,11 @@ pub struct GrowthEnvelope {
     pub subject_cooldown_hours: u32,
     /// Most recipients one step may reach. Bounds the cost of a wrong segment.
     pub max_recipients_per_step: u32,
+    /// Tenant is parked: the autopilot cycle returns immediately without
+    /// evaluating or producing anything. Set by the Control Plane on park,
+    /// cleared on resume. Distinct from `agent_enabled` (which only holds
+    /// outward contact) — parked stops the entire cycle.
+    pub parked: bool,
 }
 
 impl Default for GrowthEnvelope {
@@ -52,6 +57,7 @@ impl Default for GrowthEnvelope {
             weekly_third_party_touches: 10,
             subject_cooldown_hours: 168,
             max_recipients_per_step: 250,
+            parked: false,
         }
     }
 }

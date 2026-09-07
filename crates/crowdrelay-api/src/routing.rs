@@ -689,7 +689,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         )
         .route(
             "/v1/admin/autopilot/growth-envelope",
-            post(autopilot::set_growth_envelope),
+            get(autopilot::growth_envelope).post(autopilot::set_growth_envelope),
         )
         .route(
             "/v1/admin/autopilot/posture",

@@ -54,6 +54,11 @@ pub struct GrowthEnvelopeRequest {
     pub(super) subject_cooldown_hours: u32,
     pub(super) max_recipients_per_step: u32,
     pub(super) expected_version: i64,
+    /// Tenant park flag. When true, the autopilot cycle skips entirely.
+    /// Defaults to false for backward compatibility with existing callers
+    /// that don't send it.
+    #[serde(default)]
+    pub(super) parked: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -112,6 +112,9 @@ pub struct TenantProfile {
     pub products: TenantProducts,
     pub regional: TenantRegionalProfile,
     pub regional_provenance: TenantRegionalProvenance,
+    /// Whether the tenant is parked (brain stopped by the Control Plane).
+    /// Always `false` for tenants not managed by the Control Plane.
+    pub parked: bool,
 }
 
 #[derive(Debug)]
@@ -218,6 +221,9 @@ impl TenantProfile {
                 number_format: number_source,
                 data_region: data_region_source,
             },
+            // Park status is a runtime value, read from the growth envelope on
+            // each public_config request. Initialized false here.
+            parked: false,
         })
     }
 
@@ -230,12 +236,26 @@ impl TenantProfile {
 pub async fn public_config(
     axum::extract::State(state): axum::extract::State<crate::AppState>,
 ) -> impl axum::response::IntoResponse {
+    // Read the park flag from the growth envelope so the tenant app can show
+    // a "parked" banner. A single-row PK lookup — cheap enough for a cached
+    // endpoint. A missing envelope row means the workspace was never
+    // configured, which reads as not parked.
+    let parked = sqlx::query_scalar::<_, bool>(
+        "SELECT parked FROM viryaos_growth_envelope WHERE workspace_id = $1",
+    )
+    .bind(state.ops.workspace_id().into_uuid())
+    .fetch_optional(state.autopilot.pool())
+    .await
+    .unwrap_or(None)
+    .unwrap_or(false);
+    let mut profile = state.tenant.clone();
+    profile.parked = parked;
     (
         [(
             axum::http::header::CACHE_CONTROL,
             "public, max-age=300, s-maxage=300",
         )],
-        axum::Json(state.tenant),
+        axum::Json(profile),
     )
 }
 
@@ -381,6 +401,7 @@ mod tests {
                 number_format: RegionalSource::PlatformDefault,
                 data_region: RegionalSource::Unclassified,
             },
+            parked: false,
         };
         assert_eq!(profile.palette.accent, "#f3c51a");
         assert_eq!(profile.palette.background, "#080808");
@@ -426,6 +447,7 @@ mod tests {
                 number_format: RegionalSource::PlatformDefault,
                 data_region: RegionalSource::Unclassified,
             },
+            parked: false,
         };
         assert!(!profile.synesthesia_enabled());
     }

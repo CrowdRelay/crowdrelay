@@ -705,7 +705,7 @@ macro_rules! decision_opportunity_reads {
                 r#"
                 SELECT agent_enabled, dry_run, weekly_owned_audience_touches,
                        weekly_third_party_touches, subject_cooldown_hours,
-                       max_recipients_per_step
+                       max_recipients_per_step, parked
                 FROM viryaos_growth_envelope
                 WHERE workspace_id = $1
                 "#,
@@ -730,6 +730,7 @@ macro_rules! decision_opportunity_reads {
                     .unwrap_or(0),
                 max_recipients_per_step: bounded_u32(i64::from(row.max_recipients_per_step))
                     .unwrap_or(1),
+                parked: row.parked,
             });
 
             // Cancelled actions are excluded: an approval that was refused is

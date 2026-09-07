@@ -565,6 +565,9 @@ pub struct SetGrowthEnvelope {
     pub subject_cooldown_hours: u32,
     pub max_recipients_per_step: u32,
     pub expected_version: i64,
+    /// Tenant park flag: when true, the autopilot cycle skips entirely.
+    /// Set by the Control Plane on park, cleared on resume.
+    pub parked: bool,
 }
 
 /// Applies one of the three named postures atomically.

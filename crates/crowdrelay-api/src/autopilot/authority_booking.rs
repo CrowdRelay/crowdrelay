@@ -147,6 +147,7 @@ pub async fn set_growth_envelope(
                 subject_cooldown_hours: request.subject_cooldown_hours,
                 max_recipients_per_step: request.max_recipients_per_step,
                 expected_version: request.expected_version,
+                parked: request.parked,
             },
             &idempotency_key,
             request_id_value.as_ref(),
@@ -405,6 +406,48 @@ pub async fn growth_posture(State(state): State<AppState>, headers: HeaderMap) -
         .await
     {
         Ok(view) => private_json(StatusCode::OK, view),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
+/// Reads the current growth envelope: kill switch, dry-run, budgets, cooldown,
+/// blast radius, park flag and the row version for optimistic concurrency.
+///
+/// The Control Plane reads this before parking a tenant so it can snapshot the
+/// exact state and restore it on resume.
+pub async fn growth_envelope(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match state
+        .autopilot
+        .load_growth_envelope(state.ops.workspace_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok((envelope, _usage)) => {
+            // The version is needed for optimistic concurrency on write, but
+            // the domain `GrowthEnvelope` does not carry it — it is a
+            // per-row concern, not a policy concern. Read it directly so the
+            // caller can pass it back as `expected_version`.
+            let version = sqlx::query_scalar::<_, i64>(
+                "SELECT version FROM viryaos_growth_envelope WHERE workspace_id = $1",
+            )
+            .bind(state.ops.workspace_id().into_uuid())
+            .fetch_optional(state.autopilot.pool())
+            .await
+            .unwrap_or(None)
+            .unwrap_or(0);
+            private_json(
+                StatusCode::OK,
+                serde_json::json!({
+                    "agentEnabled": envelope.agent_enabled,
+                    "dryRun": envelope.dry_run,
+                    "weeklyOwnedAudienceTouches": envelope.weekly_owned_audience_touches,
+                    "weeklyThirdPartyTouches": envelope.weekly_third_party_touches,
+                    "subjectCooldownHours": envelope.subject_cooldown_hours,
+                    "maxRecipientsPerStep": envelope.max_recipients_per_step,
+                    "parked": envelope.parked,
+                    "version": version,
+                }),
+            )
+        }
         Err(error) => repository_problem(error, request_id(&headers)),
     }
 }

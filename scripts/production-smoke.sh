@@ -79,7 +79,29 @@ printf 'crowdrelay_tenant_config=ok\n'
 meta_file="$(mktemp)"
 curl --fail-with-body --silent --show-error --location --connect-timeout 4 --max-time 10 \
   --retry 1 --retry-delay 1 --retry-all-errors --output "$meta_file" "${CROWDRELAY_BASE_URL%/}/v1/meta"
-jq -e '.apiVersion == "1" and (.schemaVersion >= 45) and (.gitSha | type == "string" and test("^[0-9a-f]{40}$")) and (.buildTimestamp | type == "string" and length > 0) and (.minimumPostgresServerVersionNum >= 180000) and .capabilities.area_wallet_postgres_v2 and .capabilities.area_vouchers_v2 and .capabilities.area_ticket_rewards_v2 and .capabilities.signal_fan_context_v1 and .capabilities.synesthesia_rewards_v1 and .capabilities.synesthesia_leaderboard_v1 and .capabilities.ticketing_v1 and .capabilities.communication_delivery_ledger_v1 and .capabilities.tenant_regional_profile_v1' "$meta_file" >/dev/null
+# One jq expression covering fourteen assertions fails as one opaque line:
+# the alert quotes the whole expression and names none of the fields, so a
+# missing buildTimestamp and a missing capability look identical and cost the
+# same twenty minutes to tell apart. Same assertions, reported individually.
+meta_failures="$(jq -r '
+  . as $meta
+  | [
+    (if .apiVersion == "1" then empty else "apiVersion=\(.apiVersion // "null")" end),
+    (if (.schemaVersion // 0) >= 45 then empty else "schemaVersion=\(.schemaVersion // "null")" end),
+    (if (.gitSha | type == "string" and test("^[0-9a-f]{40}$")) then empty else "gitSha=\(.gitSha // "null")" end),
+    (if (.buildTimestamp | type == "string" and length > 0) then empty else "buildTimestamp=\(.buildTimestamp // "null") (image not built by CI?)" end),
+    (if (.minimumPostgresServerVersionNum // 0) >= 180000 then empty else "minimumPostgresServerVersionNum=\(.minimumPostgresServerVersionNum // "null")" end)
+  ]
+  + ([
+      "area_wallet_postgres_v2","area_vouchers_v2","area_ticket_rewards_v2",
+      "signal_fan_context_v1","synesthesia_rewards_v1","synesthesia_leaderboard_v1",
+      "ticketing_v1","communication_delivery_ledger_v1","tenant_regional_profile_v1"
+    ] | map(. as $c | if ($meta.capabilities[$c] // false) then empty else "capability:\($c)" end))
+  | join(", ")' "$meta_file")"
+if [[ -n "$meta_failures" ]]; then
+  printf 'crowdrelay meta contract failed: %s\n' "$meta_failures" >&2
+  exit 1
+fi
 printf 'crowdrelay_meta_contract=ok\n'
 require_200 crowdrelay_area_catalog "${CROWDRELAY_BASE_URL%/}/v1/public/area/drops"
 require_200 crowdrelay_events "${CROWDRELAY_BASE_URL%/}/v1/public/events"

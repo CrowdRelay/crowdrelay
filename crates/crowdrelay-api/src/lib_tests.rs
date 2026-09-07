@@ -440,6 +440,7 @@ mod tests {
                     number_format: crate::tenant::RegionalSource::TenantProfile,
                     data_region: crate::tenant::RegionalSource::TenantProfile,
                 },
+                parked: false,
             },
             crowdrelay_infra::sensitive_response::SensitiveResponseKey::derive_from_secret(
                 b"test-encryption-key",

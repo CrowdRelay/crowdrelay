@@ -347,7 +347,7 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         )
         .route(
             "/v1/control-plane/autopilot/growth-envelope",
-            post(crate::autopilot::set_growth_envelope),
+            get(crate::autopilot::growth_envelope).post(crate::autopilot::set_growth_envelope),
         )
         // ── Outreach & booking discovery ──────────────────────────────
         // Candidate queues for the growth pipeline: what the agent found,

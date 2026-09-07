@@ -148,6 +148,48 @@ impl AutopilotWorker {
     /// because losing the note of what the brain did must not cost the doing.
     async fn run_recorded_cycle(&self, trigger: CycleTrigger) {
         let started = OffsetDateTime::now_utc();
+
+        // Park check: if the tenant is parked, the cycle opens, records that
+        // it was skipped, and closes — no evaluation, no actions, no
+        // measurements. The flag lives on the growth envelope row, set by the
+        // Control Plane on park and cleared on resume. A read failure must not
+        // gate the cycle: the agent stays live if the park check itself breaks.
+        let parked = match AutopilotDecisionRepository::load_growth_envelope(
+            &self.repository,
+            self.workspace_id,
+            started,
+        )
+        .await
+        {
+            Ok((envelope, _)) => envelope.parked,
+            Err(error) => {
+                tracing::warn!(error = %error, "park check failed; cycle continues");
+                false
+            }
+        };
+        if parked {
+            tracing::info!("autopilot cycle skipped — tenant is parked");
+            let cycle_id = crowdrelay_infra::autopilot::open_cycle_run(
+                self.repository.pool(),
+                self.workspace_id,
+                trigger,
+                started,
+            )
+            .await;
+            if let Some(cycle_id) = cycle_id {
+                crowdrelay_infra::autopilot::close_cycle_run(
+                    self.repository.pool(),
+                    self.workspace_id,
+                    cycle_id,
+                    false,
+                    OffsetDateTime::now_utc(),
+                    None,
+                )
+                .await;
+            }
+            return;
+        }
+
         let cycle_id = crowdrelay_infra::autopilot::open_cycle_run(
             self.repository.pool(),
             self.workspace_id,
