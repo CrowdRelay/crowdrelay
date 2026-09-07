@@ -160,9 +160,33 @@ async fn persist_decision_and_action_tx(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    let real_action_id = inserted.unwrap_or(action_id);
+    // When ON CONFLICT DO NOTHING fires (idempotency key collision), the
+    // generated action_id was NOT inserted. Using it for downstream writes
+    // (prediction, evidence, assignment) causes a FK violation because that
+    // UUID does not exist in viryaos_autopilot_actions. Fetch the real id of
+    // the existing action so downstream writes reference the correct row.
+    let (real_action_id, action_inserted) = match inserted {
+        Some(id) => (id, true),
+        None => {
+            let existing_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT id FROM viryaos_autopilot_actions
+                WHERE workspace_id = $1 AND idempotency_key = $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&candidate.action_idempotency_key)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            (
+                existing_id.unwrap_or(action_id),
+                false,
+            )
+        }
+    };
     // ── Outbox event (approval requested) ──
-    if inserted.is_some() && status == "awaiting_approval" {
+    if action_inserted && status == "awaiting_approval" {
         sqlx::query(
             r#"
             INSERT INTO outbox_events (workspace_id, event_type, event_version, payload, max_attempts, trace_id, causation_id, action_id)
@@ -202,7 +226,7 @@ async fn persist_decision_and_action_tx(
     Ok(DecisionActionOutcome::ActionReady {
         decision_created: true,
         action_id: real_action_id,
-        inserted: inserted.is_some(),
+        inserted: action_inserted,
     })
 }
 
