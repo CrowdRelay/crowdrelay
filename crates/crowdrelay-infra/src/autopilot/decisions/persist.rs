@@ -218,14 +218,6 @@ async fn persist_decision_and_action_tx(
                 }
             };
 
-            tracing::warn!(
-                generated_action_id = %action_id,
-                existing_action_id = ?existing_id,
-                idempotency_key = %candidate.action_idempotency_key,
-                decision_key = %candidate.decision_key,
-                "action INSERT conflicted; fetching existing action_id"
-            );
-
             match existing_id {
                 Some(id) => (id, false),
                 // Neither constraint found the existing row — this should not
@@ -311,11 +303,6 @@ async fn record_prediction_and_evidence_tx(
     // ── Dispatch prediction ──
     let pred_context_json = serde_json::to_value(&prediction.context)
         .unwrap_or(serde_json::json!({}));
-    tracing::info!(
-        action_id = %action_id,
-        template_id = %prediction.template_id,
-        "inserting dispatch prediction"
-    );
     sqlx::query(
         r#"
         INSERT INTO viryaos_dispatch_predictions
