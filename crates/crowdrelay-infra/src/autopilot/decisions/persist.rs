@@ -8,6 +8,12 @@ enum DecisionActionOutcome {
     DecisionConflict,
     /// Decision created, but disposition doesn't produce an action.
     NoAction,
+    /// Action INSERT conflicted on an uncovered unique index (e.g. the
+    /// inflight-subject partial index) and the existing row could not be
+    /// located. The decision was created but no action is safe to reference.
+    /// Callers skip downstream writes and continue the cycle — this is a
+    /// single-candidate skip, not an abort.
+    ActionConflict,
     /// Decision + action created (or action already existed). The caller
     /// may now add treatment-specific writes (assignment, prediction,
     /// evidence) in the same transaction.
@@ -220,10 +226,10 @@ async fn persist_decision_and_action_tx(
 
             match existing_id {
                 Some(id) => (id, false),
-                // Neither constraint found the existing row — this should not
-                // happen, but if it does, fail closed rather than using a
-                // non-inserted UUID that would cause a downstream FK violation.
-                None => return Err(RepositoryError::Conflict),
+                // Neither constraint found the existing row — the conflict
+                // is unrecoverable. Return ActionConflict so the caller
+                // skips this candidate without aborting the entire cycle.
+                None => return Ok(DecisionActionOutcome::ActionConflict),
             }
         }
     };
@@ -247,7 +253,7 @@ async fn persist_decision_and_action_tx(
                 ),
                 12,
                 $9,
-                $2,
+                $10,
                 $2
             )
             "#,
@@ -261,6 +267,7 @@ async fn persist_decision_and_action_tx(
         .bind(candidate.reason)
         .bind(i32::from(candidate.confidence.basis_points()))
         .bind(trace.trace_id().into_uuid())
+        .bind(action_trace.causation_id().map(|c| c.into_uuid()))
         .execute(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
@@ -407,6 +414,12 @@ macro_rules! decision_persist {
                     action_id: None,
                     ..Default::default()
                 },
+                DecisionActionOutcome::ActionConflict => CandidatePersistence {
+                    decision_created: true,
+                    action_created: false,
+                    quota_throttled: false,
+                    action_id: None,
+                },
                 DecisionActionOutcome::NoAction => CandidatePersistence {
                     decision_created: true,
                     action_created: false,
@@ -475,6 +488,15 @@ macro_rules! decision_persist {
                     return Ok(CandidatePersistence {
                         action_id: None,
                         ..Default::default()
+                    });
+                }
+                DecisionActionOutcome::ActionConflict => {
+                    transaction.commit().await.map_err(map_sqlx)?;
+                    return Ok(CandidatePersistence {
+                        decision_created: true,
+                        action_created: false,
+                        quota_throttled: false,
+                        action_id: None,
                     });
                 }
                 DecisionActionOutcome::NoAction => {
@@ -640,6 +662,12 @@ macro_rules! decision_persist {
                     action_id: None,
                     ..Default::default()
                 },
+                DecisionActionOutcome::ActionConflict => CandidatePersistence {
+                    decision_created: true,
+                    action_created: false,
+                    quota_throttled: false,
+                    action_id: None,
+                },
                 DecisionActionOutcome::NoAction => CandidatePersistence {
                     decision_created: true,
                     action_created: false,
@@ -651,6 +679,20 @@ macro_rules! decision_persist {
                     action_id,
                     inserted,
                 } => {
+                    // When the action already existed, the prediction and
+                    // evidence were recorded in a prior cycle. Skip them:
+                    // the ON CONFLICT INSERTs are no-ops but the post-commit
+                    // audit trail would append duplicate events.
+                    if !inserted {
+                        let persistence = CandidatePersistence {
+                            decision_created,
+                            action_created: false,
+                            quota_throttled: false,
+                            action_id: Some(action_id),
+                        };
+                        transaction.commit().await.map_err(map_sqlx)?;
+                        return Ok(persistence);
+                    }
                     // ── Prediction + evidence (same tx) ──
                     let evidence = record_prediction_and_evidence_tx(
                         &mut transaction,
