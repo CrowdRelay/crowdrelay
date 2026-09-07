@@ -138,7 +138,7 @@ async fn persist_decision_and_action_tx(
             CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END,
             $12, $13
         )
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
         RETURNING id
         "#,
     )
@@ -505,6 +505,24 @@ macro_rules! decision_persist {
                     inserted,
                 } => (decision_created, action_id, inserted),
             };
+            // When the action already existed (inserted=false), the
+            // assignment, prediction, and evidence were recorded in a
+            // prior cycle. Skip them: the assignment INSERT would hit
+            // idx_experiment_assignments_action_id_unique (a partial
+            // unique index on (workspace_id, action_id) WHERE action_id
+            // IS NOT NULL) because the existing action already has an
+            // assignment. That constraint is NOT the one named in the
+            // ON CONFLICT clause below, so the conflict is not caught
+            // and surfaces as a silent RepositoryError::Conflict.
+            if !inserted {
+                transaction.commit().await.map_err(map_sqlx)?;
+                return Ok(CandidatePersistence {
+                    decision_created,
+                    action_created: false,
+                    quota_throttled: false,
+                    action_id: Some(real_action_id),
+                });
+            }
             // ── Experiment assignment INSERT (atomic with action) ──
             // P0-2: The assignment is recorded with the real action_id,
             // inside the same transaction. If this fails, the action is
