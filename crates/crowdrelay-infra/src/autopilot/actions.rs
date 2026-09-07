@@ -473,6 +473,13 @@ async fn partition_by_executor_capability(
 /// Returns gated work to the queue without spending an attempt on it, and says
 /// so once per cycle per capability, because that is a thing an operator can
 /// act on. Retrying an operator's decision is not.
+///
+/// Only `queued` actions are parked. A stale `processing` action whose
+/// executor capability is unavailable is left in `processing` — parking it
+/// would require `RUNNING → QUEUED`, which the action ledger trigger
+/// rejects as an illegal transition. The stale-recovery sweep will reap
+/// it after `attempt_count` reaches 5, which is the correct outcome for
+/// an action whose executor never comes back.
 async fn park_gated_actions(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -487,7 +494,7 @@ async fn park_gated_actions(
             started_at = NULL,
             available_at = $2 + INTERVAL '{GATED_ACTION_PARK}',
             last_error_kind = 'awaiting_executor'
-        WHERE workspace_id = $1 AND id = ANY($3)
+        WHERE workspace_id = $1 AND id = ANY($3) AND status = 'queued'
         "#
     ))
     .bind(workspace_id.into_uuid())
