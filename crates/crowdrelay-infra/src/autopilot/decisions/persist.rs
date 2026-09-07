@@ -160,14 +160,28 @@ async fn persist_decision_and_action_tx(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    // When ON CONFLICT DO NOTHING fires (idempotency key collision), the
-    // generated action_id was NOT inserted. Using it for downstream writes
-    // (prediction, evidence, assignment) causes a FK violation because that
-    // UUID does not exist in viryaos_autopilot_actions. Fetch the real id of
-    // the existing action so downstream writes reference the correct row.
+    // When ON CONFLICT DO NOTHING fires, the generated action_id was NOT
+    // inserted. Using it for downstream writes (prediction, evidence,
+    // assignment) causes a FK violation because that UUID does not exist in
+    // viryaos_autopilot_actions. Fetch the real id of the existing action so
+    // downstream writes reference the correct row.
+    //
+    // ON CONFLICT DO NOTHING (without a conflict target) catches ALL unique
+    // constraint violations on the table. There are two that can fire here:
+    //   1. UNIQUE (workspace_id, idempotency_key) — same action re-evaluated
+    //   2. viryaos_autopilot_actions_inflight_subject_uidx — a partial unique
+    //      index on (workspace_id, context, action_kind, subject_id) WHERE
+    //      status IN ('awaiting_approval', 'queued', 'processing'). This fires
+    //      when a different action for the same subject is already inflight.
+    //
+    // We search by idempotency_key first, then by the inflight-subject columns.
+    // If neither finds the existing row, the conflict is unrecoverable and we
+    // must NOT fall back to the non-inserted UUID — that causes an FK violation
+    // on the prediction INSERT.
     let (real_action_id, action_inserted) = match inserted {
         Some(id) => (id, true),
         None => {
+            // Try 1: idempotency_key conflict
             let existing_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT id FROM viryaos_autopilot_actions
@@ -179,10 +193,46 @@ async fn persist_decision_and_action_tx(
             .fetch_optional(&mut **transaction)
             .await
             .map_err(map_sqlx)?;
-            (
-                existing_id.unwrap_or(action_id),
-                false,
-            )
+
+            // Try 2: inflight-subject partial unique index conflict
+            let existing_id = match existing_id {
+                Some(id) => Some(id),
+                None => {
+                    sqlx::query_scalar::<_, Uuid>(
+                        r#"
+                        SELECT id FROM viryaos_autopilot_actions
+                        WHERE workspace_id = $1
+                          AND context = $2
+                          AND action_kind = $3
+                          AND subject_id = $4
+                          AND status IN ('awaiting_approval', 'queued', 'processing')
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(candidate.context.as_str())
+                    .bind(candidate.action.action_kind())
+                    .bind(candidate.subject.uuid())
+                    .fetch_optional(&mut **transaction)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+            };
+
+            tracing::warn!(
+                generated_action_id = %action_id,
+                existing_action_id = ?existing_id,
+                idempotency_key = %candidate.action_idempotency_key,
+                decision_key = %candidate.decision_key,
+                "action INSERT conflicted; fetching existing action_id"
+            );
+
+            match existing_id {
+                Some(id) => (id, false),
+                // Neither constraint found the existing row — this should not
+                // happen, but if it does, fail closed rather than using a
+                // non-inserted UUID that would cause a downstream FK violation.
+                None => return Err(RepositoryError::Conflict),
+            }
         }
     };
     // ── Outbox event (approval requested) ──
@@ -261,6 +311,11 @@ async fn record_prediction_and_evidence_tx(
     // ── Dispatch prediction ──
     let pred_context_json = serde_json::to_value(&prediction.context)
         .unwrap_or(serde_json::json!({}));
+    tracing::info!(
+        action_id = %action_id,
+        template_id = %prediction.template_id,
+        "inserting dispatch prediction"
+    );
     sqlx::query(
         r#"
         INSERT INTO viryaos_dispatch_predictions
