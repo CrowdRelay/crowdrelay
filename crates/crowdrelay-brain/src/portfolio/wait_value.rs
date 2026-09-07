@@ -68,6 +68,19 @@ impl WaitCandidateValue {
     /// wins, increase; if it always wins, decrease.
     const DECISION_SENSITIVITY: f64 = 0.1;
 
+    /// Cap on the number of pending measurements that contribute to VOI.
+    ///
+    /// The marginal information value of each additional pending measurement
+    /// diminishes — the 34th measurement teaches less than the 1st. Without
+    /// a cap, a large measurement backlog inflates VOI and WAIT wins every
+    /// cycle, creating a cold-start deadlock: the brain won't act because
+    /// it's waiting for measurements, but measurements only resolve after
+    /// the brain acts and the measurement window elapses.
+    ///
+    /// The cap keeps VOI proportional to the information the brain can
+    /// actually absorb in one cycle, not the total backlog size.
+    const VOI_PENDING_MEASUREMENT_CAP: u32 = 10;
+
     /// Computes the WAIT candidate value from the current state.
     ///
     /// - `best_candidate_expected_y30`: the highest expected Y30 among
@@ -85,8 +98,9 @@ impl WaitCandidateValue {
         avg_treatment_std: f64,
         fatigue_recovery_value: f64,
     ) -> Self {
+        let capped_pending = count_pending_measurements.min(Self::VOI_PENDING_MEASUREMENT_CAP);
         Self {
-            value_of_information: f64::from(count_pending_measurements)
+            value_of_information: f64::from(capped_pending)
                 * avg_treatment_std
                 * Self::DECISION_SENSITIVITY,
             fatigue_recovery_value,
