@@ -86,6 +86,7 @@ impl PostgresFanbaseRepository {
         // the admission decision; every later one is a repeat.
         let mut candidates: Vec<(&FanbaseEntry, &str, bool)> = Vec::new();
         let mut emails: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         for entry in entries {
             let Some(email) = entry
                 .email
@@ -96,7 +97,7 @@ impl PostgresFanbaseRepository {
                 counts.invalid += 1;
                 continue;
             };
-            let repeat = emails.contains(&email);
+            let repeat = !seen.insert(email);
             if !repeat {
                 emails.push(email);
             }

@@ -73,11 +73,14 @@ impl PostgresFanImportRepository {
         let batch_request_id = format!("fan-import-{}", Uuid::now_v7().simple());
 
         // Distinct addresses in first-seen order; a repeat is every later
-        // occurrence of one already claimed.
+        // occurrence of one already claimed. The Vec preserves order for the
+        // stable `ANY($2)` binding; the HashSet gives O(1) membership checks
+        // so the dedup loop stays O(n) instead of O(n²).
         let mut emails: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut candidates: Vec<(&ImportEntry, bool)> = Vec::with_capacity(entries.len());
         for entry in entries {
-            let repeat = emails.contains(&entry.email.as_str());
+            let repeat = !seen.insert(entry.email.as_str());
             if !repeat {
                 emails.push(entry.email.as_str());
             }

@@ -359,11 +359,19 @@ impl OutboxWorker {
             Duration::ZERO
         };
         let finished_at = OffsetDateTime::now_utc().max(started_at);
+        // `disposition` is Copy and was already consumed above; move the rest
+        // out of `result` instead of cloning `response_excerpt`.
+        let DispatchResult {
+            disposition: _,
+            response_status,
+            error_kind,
+            response_excerpt,
+        } = result;
         let resolution = AttemptResolution {
             outcome,
-            response_status: result.response_status,
-            error_kind: result.error_kind,
-            response_excerpt: result.response_excerpt.clone(),
+            response_status,
+            error_kind,
+            response_excerpt,
             retry_delay_ms: i64::try_from(retry_delay.as_millis()).unwrap_or(i64::MAX),
             started_at,
             finished_at,
