@@ -384,7 +384,44 @@ doctor() {
   compose config --quiet
   check_unreachable_config
   if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then compose run --rm -T --no-deps --entrypoint caddy area-management-proxy validate --config /etc/caddy/Caddyfile >/dev/null </dev/null; fi
+  check_edge_caddyfile_stale_green
+  check_heartbeat_config
   echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
+}
+
+# Detect dead green upstream references in the edge Caddyfile. A regular
+# (non-blue-green) deploy brings up blue only; a stale green reference in
+# the Caddyfile causes Caddy's health checker to spam DNS errors and
+# occasionally route to a dead upstream → 502/503. This is a warning, not
+# a hard failure: the deploy will call reconcile_edge_caddyfile() to fix it.
+check_edge_caddyfile_stale_green() {
+  local edge_caddyfile="/opt/crowdrelay/ops/edge/Caddyfile"
+  [[ -f "$edge_caddyfile" ]] || return 0
+  local green_api_running green_cp_running
+  green_api_running="$(docker inspect crowdrelay-api-green-1 --format '{{.State.Running}}' 2>/dev/null || echo false)"
+  green_cp_running="$(docker inspect crowdrelay-control-plane-app-green-1 --format '{{.State.Running}}' 2>/dev/null || echo false)"
+  if [[ "$green_api_running" != "true" ]] && grep -qF "crowdrelay-api-green-1:8080" "$edge_caddyfile"; then
+    echo "WARNING: edge Caddyfile references crowdrelay-api-green-1 but no green API container is running." >&2
+    echo "  reconcile_edge_caddyfile() will strip it during deploy." >&2
+  fi
+  if [[ "$green_cp_running" != "true" ]] && grep -qF "crowdrelay-control-plane-app-green-1:8090" "$edge_caddyfile"; then
+    echo "WARNING: edge Caddyfile references crowdrelay-control-plane-app-green-1 but no green CP container is running." >&2
+    echo "  reconcile_edge_caddyfile() will strip it during deploy." >&2
+  fi
+}
+
+# Warn when heartbeat config is missing — the control plane will show the
+# tenant as stale after 180s, but the operator sees no error until then.
+check_heartbeat_config() {
+  [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]] || return 0
+  local missing=()
+  [[ -n "$CROWDRELAY_CONTROL_PLANE_BASE_URL" ]] || missing+=("CROWDRELAY_CONTROL_PLANE_BASE_URL")
+  [[ -n "$CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN" ]] || missing+=("CROWDRELAY_CONTROL_PLANE_TELEMETRY_TOKEN")
+  [[ -n "$CROWDRELAY_CONTROL_PLANE_TENANT_SLUG" ]] || missing+=("CROWDRELAY_CONTROL_PLANE_TENANT_SLUG")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "WARNING: heartbeat is inert — missing: ${missing[*]} in .crowdrelay.local.sh" >&2
+    echo "  Without these, crowdrelayctl heartbeat reports nothing and the control plane shows the tenant as stale." >&2
+  fi
 }
 
 pin_sha() {
@@ -538,28 +575,73 @@ deploy() {
 }
 
 # The blue-green deploy script (deploy-bluegreen.sh) switches the edge Caddyfile
-# between crowdrelay-api (blue) and crowdrelay-api-green (green). This deploy
+# between crowdrelay-api-1 (blue) and crowdrelay-api-green-1 (green). This deploy
 # function always brings up blue, so if the Caddyfile was left pointing to green
 # from a previous blue-green deploy, it must be reset to the blue upstream.
 # Without this, the edge proxy returns 503 because the green container doesn't
 # exist after a regular (non-blue-green) deploy.
+#
+# This also strips green control-plane upstreams (crowdrelay-control-plane-app-green-1)
+# for the same reason: a regular deploy brings up blue only, and a stale green
+# reference causes Caddy's health checker to spam DNS errors and occasionally
+# route to a dead upstream → 502/503.
 reconcile_edge_caddyfile() {
   local edge_caddyfile="/opt/crowdrelay/ops/edge/Caddyfile"
   local edge_container="virya-edge-caddy"
   [[ -f "$edge_caddyfile" ]] || return 0
-  if grep -qF "reverse_proxy crowdrelay-api-green:8080" "$edge_caddyfile"; then
-    echo "Reconciling edge Caddyfile: crowdrelay-api-green → crowdrelay-api"
+
+  # Only reconcile if the green containers are actually absent. If a blue-green
+  # deploy is in progress (green is running), leave the Caddyfile alone.
+  local green_api_running green_cp_running
+  green_api_running="$(docker inspect crowdrelay-api-green-1 --format '{{.State.Running}}' 2>/dev/null || echo false)"
+  green_cp_running="$(docker inspect crowdrelay-control-plane-app-green-1 --format '{{.State.Running}}' 2>/dev/null || echo false)"
+
+  local changed=false
+  local tmp
+  tmp="$(mktemp)"
+  cp "$edge_caddyfile" "$tmp"
+
+  if [[ "$green_api_running" != "true" ]]; then
+    # Strip green API upstream references. Handles both forms:
+    #   crowdrelay-api-1:8080 crowdrelay-api-green-1:8080  →  crowdrelay-api-1:8080
+    #   crowdrelay-api-green-1:8080 crowdrelay-api-1:8080  →  crowdrelay-api-1:8080
+    if grep -qF "crowdrelay-api-green-1:8080" "$tmp"; then
+      sed -i \
+        -e 's|crowdrelay-api-1:8080 crowdrelay-api-green-1:8080|crowdrelay-api-1:8080|' \
+        -e 's|crowdrelay-api-green-1:8080 crowdrelay-api-1:8080|crowdrelay-api-1:8080|' \
+        "$tmp"
+      changed=true
+      echo "Reconciling edge Caddyfile: stripped dead crowdrelay-api-green-1 upstream"
+    fi
+  fi
+
+  if [[ "$green_cp_running" != "true" ]]; then
+    # Strip green control-plane upstream references in the cp_upstream snippet.
+    if grep -qF "crowdrelay-control-plane-app-green-1:8090" "$tmp"; then
+      sed -i \
+        -e 's|crowdrelay-control-plane-app-1:8090 crowdrelay-control-plane-app-green-1:8090|crowdrelay-control-plane-app-1:8090|' \
+        -e 's|crowdrelay-control-plane-app-green-1:8090 crowdrelay-control-plane-app-1:8090|crowdrelay-control-plane-app-1:8090|' \
+        "$tmp"
+      changed=true
+      echo "Reconciling edge Caddyfile: stripped dead crowdrelay-control-plane-app-green-1 upstream"
+    fi
+  fi
+
+  if [[ "$changed" == "true" ]]; then
     # Inode-safe rewrite: sed -i creates a new inode, breaking Docker bind mounts.
-    local tmp
-    tmp="$(mktemp)"
-    sed "s|reverse_proxy crowdrelay-api-green:8080|reverse_proxy crowdrelay-api:8080|" "$edge_caddyfile" > "$tmp"
     cat "$tmp" > "$edge_caddyfile"
-    rm -f "$tmp"
     docker exec "$edge_container" caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1 || true
     # Verify the container saw the update
-    grep -Fq "reverse_proxy crowdrelay-api:8080" <(docker exec "$edge_container" cat /etc/caddy/Caddyfile 2>/dev/null) || \
-      echo "WARNING: edge Caddyfile may not have updated inside container" >&2
+    local container_config
+    container_config="$(docker exec "$edge_container" cat /etc/caddy/Caddyfile 2>/dev/null || true)"
+    if ! grep -qF "crowdrelay-api-green-1" <<<"$container_config" && \
+       ! grep -qF "crowdrelay-control-plane-app-green-1" <<<"$container_config"; then
+      echo "EDGE_RECONCILE=PASS"
+    else
+      echo "WARNING: edge Caddyfile may not have updated inside container — green refs still present" >&2
+    fi
   fi
+  rm -f "$tmp"
 }
 
 package_deploy() (

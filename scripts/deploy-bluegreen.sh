@@ -131,9 +131,13 @@ docker inspect "$EDGE_CONTAINER" --format '{{.State.Status}}' 2>/dev/null | grep
 
 grep -Fq '# CROWDRELAY_ACTIVE=' "$EDGE_CADDYFILE" || \
   fail 'edge Caddyfile is not release-ready: missing active release marker; apply edge config separately'
-grep -Fq 'reverse_proxy crowdrelay-api-1:8080 crowdrelay-api-green-1:8080' "$EDGE_CADDYFILE" \
-  || grep -Fq 'reverse_proxy crowdrelay-api-green-1:8080 crowdrelay-api-1:8080' "$EDGE_CADDYFILE" \
-  || fail 'edge Caddyfile does not contain the static blue-green upstream pair'
+# The Caddyfile may have a single upstream (blue-only, the default after a
+# regular deploy) or a blue-green pair (left over from a previous blue-green
+# deploy). The sed at step 4 handles both forms by matching
+# `reverse_proxy crowdrelay-api[^{]*`. Here we only assert the marker exists.
+grep -Fq 'reverse_proxy crowdrelay-api-1:8080' "$EDGE_CADDYFILE" \
+  || grep -Fq 'reverse_proxy crowdrelay-api-green-1:8080' "$EDGE_CADDYFILE" \
+  || fail 'edge Caddyfile does not contain a crowdrelay-api upstream'
 # The edge Caddyfile is a **single-file** bind mount, and Docker resolves those
 # to an inode once, at container start; the container follows that inode for
 # its whole life. Anything that *replaces* the file rather than writing into it

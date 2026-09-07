@@ -136,6 +136,8 @@ class GrowthEnvelopeControlContract(unittest.TestCase):
             set(FIELDS) | {"expected_version"},
             "the published contract drifted from the envelope",
         )
+        # parked is optional (defaults to false) but must be published.
+        self.assertIn("parked:", schema, "parked field is missing from OpenAPI")
 
 
 if __name__ == "__main__":
