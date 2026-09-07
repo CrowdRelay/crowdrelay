@@ -84,6 +84,8 @@ pub(super) struct AttemptResolution {
     pub outcome: AttemptOutcome,
     pub response_status: Option<i16>,
     pub error_kind: Option<&'static str>,
+    /// Bounded excerpt of the receiver's response body for a failed attempt.
+    pub response_excerpt: Option<String>,
     pub retry_delay_ms: i64,
     pub started_at: OffsetDateTime,
     pub finished_at: OffsetDateTime,

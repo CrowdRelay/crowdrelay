@@ -444,9 +444,10 @@ impl PgOutboxStore {
                 outcome,
                 response_status,
                 error_kind,
-                duration_ms
+                duration_ms,
+                response_excerpt
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(claim.workspace_id)
@@ -458,6 +459,7 @@ impl PgOutboxStore {
         .bind(resolution.response_status)
         .bind(resolution.error_kind)
         .bind(resolution.duration_ms)
+        .bind(resolution.response_excerpt.as_deref())
         .execute(&mut *transaction)
         .await
         .map_err(StoreError::Database)?;
@@ -983,6 +985,7 @@ mod postgres_tests {
                     outcome: AttemptOutcome::Delivered,
                     response_status: Some(204),
                     error_kind: None,
+                    response_excerpt: None,
                     retry_delay_ms: 0,
                     started_at: now,
                     finished_at: now,

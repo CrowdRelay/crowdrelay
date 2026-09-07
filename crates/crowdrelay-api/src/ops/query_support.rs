@@ -549,7 +549,7 @@ async fn load_delivery(state: &OpsState, id: Uuid) -> Result<Option<DeliveryDeta
     let attempts = sqlx::query_as::<_, DeliveryAttempt>(
         r#"
         SELECT attempt_number, started_at, finished_at, outcome,
-               response_status, error_kind, duration_ms
+               response_status, error_kind, duration_ms, response_excerpt
         FROM webhook_delivery_attempts
         WHERE workspace_id = $1 AND delivery_id = $2
         ORDER BY attempt_number DESC

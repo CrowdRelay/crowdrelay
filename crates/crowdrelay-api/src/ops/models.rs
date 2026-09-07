@@ -266,6 +266,10 @@ pub struct DeliveryAttempt {
     response_status: Option<i16>,
     error_kind: Option<String>,
     duration_ms: i32,
+    /// What the receiver said when it refused. The console showed a bare
+    /// status code, so "HTTP 422" was the whole diagnosis available for a
+    /// dead letter; the endpoint's own explanation was read and thrown away.
+    response_excerpt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

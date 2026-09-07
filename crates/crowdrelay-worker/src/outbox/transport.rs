@@ -100,10 +100,50 @@ impl WebhookDispatcher {
             .send()
             .await
         {
-            Ok(response) => classify_http_status(response.status()),
+            Ok(response) => {
+                let status = response.status();
+                let mut result = classify_http_status(status);
+                // A failing receiver usually says why in the body — n8n answers
+                // `{"accepted":false,"error":"..."}` — and that sentence was
+                // read off the socket and dropped, leaving the operator with a
+                // bare status code to act on. Only read it when the attempt
+                // failed, and only a bounded prefix: this is an excerpt for a
+                // human, not a payload store.
+                if !status.is_success() {
+                    result.response_excerpt = read_response_excerpt(response).await;
+                }
+                result
+            }
             Err(error) => classify_transport_error(&error),
         }
     }
+}
+
+/// Bytes of a failed response worth keeping. Long enough for a JSON error
+/// object, short enough that a misbehaving endpoint cannot write a row that
+/// hurts to read or to store.
+const RESPONSE_EXCERPT_LIMIT: usize = 500;
+
+/// Reads a bounded, printable prefix of a failed response body.
+///
+/// Returns `None` for an empty body, a body that is not valid UTF-8, or a read
+/// that fails — none of which should turn a classified HTTP failure into a
+/// transport error.
+async fn read_response_excerpt(response: reqwest::Response) -> Option<String> {
+    let body = response.text().await.ok()?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut excerpt: String = trimmed
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .take(RESPONSE_EXCERPT_LIMIT)
+        .collect();
+    if trimmed.chars().count() > RESPONSE_EXCERPT_LIMIT {
+        excerpt.push('…');
+    }
+    Some(excerpt)
 }
 
 fn protocol_headers(
@@ -228,11 +268,13 @@ pub(super) enum DispatchDisposition {
     Ambiguous,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DispatchResult {
     pub disposition: DispatchDisposition,
     pub response_status: Option<i16>,
     pub error_kind: Option<&'static str>,
+    /// What the receiver said, when it failed and bothered to say anything.
+    pub response_excerpt: Option<String>,
 }
 
 impl DispatchResult {
@@ -241,6 +283,7 @@ impl DispatchResult {
             disposition: DispatchDisposition::Delivered,
             response_status: Some(status.as_u16() as i16),
             error_kind: None,
+            response_excerpt: None,
         }
     }
 
@@ -252,6 +295,7 @@ impl DispatchResult {
                 None => None,
             },
             error_kind: Some(error_kind),
+            response_excerpt: None,
         }
     }
 
@@ -260,6 +304,7 @@ impl DispatchResult {
             disposition: DispatchDisposition::Permanent,
             response_status: None,
             error_kind: Some(error_kind),
+            response_excerpt: None,
         }
     }
 
@@ -268,6 +313,7 @@ impl DispatchResult {
             disposition: DispatchDisposition::Permanent,
             response_status: Some(status.as_u16() as i16),
             error_kind: Some(error_kind),
+            response_excerpt: None,
         }
     }
 
@@ -276,6 +322,7 @@ impl DispatchResult {
             disposition: DispatchDisposition::Ambiguous,
             response_status: None,
             error_kind: Some(error_kind),
+            response_excerpt: None,
         }
     }
 }

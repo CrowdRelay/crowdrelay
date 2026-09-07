@@ -363,6 +363,7 @@ impl OutboxWorker {
             outcome,
             response_status: result.response_status,
             error_kind: result.error_kind,
+            response_excerpt: result.response_excerpt.clone(),
             retry_delay_ms: i64::try_from(retry_delay.as_millis()).unwrap_or(i64::MAX),
             started_at,
             finished_at,
