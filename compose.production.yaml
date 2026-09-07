@@ -57,6 +57,8 @@ services:
     networks:
       runtime:
         aliases: [postgres, postgres18]
+      crowdrelay-shared:
+        aliases: [postgres, crowdrelay-db]
       n8n:
         aliases: [postgres]
 
@@ -119,6 +121,8 @@ services:
     networks:
       runtime:
         aliases: [crowdrelay-api, crowdrelay-api-active]
+      crowdrelay-shared:
+        aliases: [crowdrelay-api, crowdrelay-api-1]
 
   worker:
     image: ${CROWDRELAY_WORKER_IMAGE:-ghcr.io/crowdrelay/crowdrelay-worker}:${CROWDRELAY_IMAGE_TAG:?Set CROWDRELAY_IMAGE_TAG to sha-<full commit SHA>}
@@ -207,6 +211,9 @@ networks:
   runtime:
     external: true
     name: ${CROWDRELAY_DOCKER_NETWORK:?Set CROWDRELAY_DOCKER_NETWORK}
+  crowdrelay-shared:
+    external: true
+    name: crowdrelay-shared
   n8n:
     external: true
     name: ${VIRYA_N8N_NETWORK:-virya-n8n-cloud_virya}
