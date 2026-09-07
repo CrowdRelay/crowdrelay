@@ -312,7 +312,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             };
             let key_window_hours = key_window_for_template(&gi_policy, template_id);
             let logical_cycle_key = cooldown_window(now, key_window_hours).to_string();
-            let mut design = self
+            let mut design = match self
                 .repository
                 .get_or_create_experiment_design(
                     self.workspace_id,
@@ -327,7 +327,17 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     gi_policy.min_expected_treatment_units,
                     now,
                 )
-                .await?;
+                .await
+            {
+                Ok(d) => d,
+                // Experiment design conflict — skip this group. The design
+                // already exists from a prior cycle; the next cycle will
+                // SELECT it successfully.
+                Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let is_insufficient_power =
                 design.experiment_status == crowdrelay_brain::ExperimentStatus::InsufficientPower;
             if is_insufficient_power {
