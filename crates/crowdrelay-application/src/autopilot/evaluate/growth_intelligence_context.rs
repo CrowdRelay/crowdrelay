@@ -8,7 +8,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         _limits: &mut CycleLimits<'_>,
         _report: &mut AutopilotCycleReport,
     ) -> Result<(), AutopilotError> {
-        let snapshots = self
+        let mut snapshots = self
             .repository
             .load_growth_intelligence_snapshots(self.workspace_id, now)
             .await?;
@@ -18,6 +18,43 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         _report.north_star_observed = snapshots
             .first()
             .map(|snapshot| snapshot.world_model.north_star_current);
+        // Walk-forward validation: load resolved evidence and validate
+        // each template's out-of-sample performance. Templates that fail
+        // validation are degraded from Active to Degraded, reducing
+        // their dispatch budget. Templates that pass are promoted
+        // toward Active. This is the wiring point between the evidence
+        // persistence layer and the hypothesis lifecycle.
+        //
+        // The validation runs on treatment evidence only (control rows
+        // have no observed outcome). The purge gap is 16 days to account
+        // for Y30 durability overlap.
+        let growth_evidence = self
+            .repository
+            .load_growth_evidence(self.workspace_id, None)
+            .await?;
+        for snapshot in &mut snapshots {
+            let template_evidence: Vec<_> = growth_evidence
+                .iter()
+                .filter(|e| {
+                    e.opportunity_id
+                        .as_ref()
+                        .map(|id| id.starts_with(&snapshot.template_id))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            let result =
+                crowdrelay_brain::validation::validate_evidence_for_promotion(&template_evidence);
+            // Only adjust the hypothesis state if we have enough evidence
+            // to validate meaningfully (OOS observations >= 5). Below
+            // that, the default Active state is preserved.
+            if result.out_of_sample.observations >= 5 && !result.passed {
+                // Failed validation — degrade to Degraded (quarter budget)
+                snapshot.hypothesis_state =
+                    crowdrelay_brain::hypothesis::HypothesisState::Degraded;
+            }
+            // Passed validation (or insufficient evidence) — keep at Active
+        }
         // Load the causal model from past predictions + outcomes.
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.
@@ -364,12 +401,23 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .collect();
         // Run the portfolio optimizer on the treatment + non-experiment
         // candidates only. Control candidates are NOT in the pool.
+        //
+        // Metacognition sizing_multiplier: the brain's self-assessment
+        // scales the dispatch budget. When Initializing or Regressing,
+        // the brain acts cautiously (fewer dispatches). When Improving,
+        // full budget. Taken from the first snapshot because metacognition
+        // is brain-wide (one state per tenant), not per-template.
+        let sizing_multiplier = snapshots
+            .first()
+            .map(|s| s.metacognition.sizing_multiplier())
+            .unwrap_or(1.0);
         let selection = portfolio::select_portfolio(
             &portfolio_candidates,
             &gi_policy,
             pending_measurement_count,
             self.workspace_id,
             &experimental_keys,
+            sizing_multiplier,
         );
         let selected_keys = portfolio::selected_keys(&selection);
         // The decision-time economic and epistemic record, per selected

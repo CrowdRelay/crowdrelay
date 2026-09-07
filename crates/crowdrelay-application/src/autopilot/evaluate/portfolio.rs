@@ -102,6 +102,7 @@ pub(super) fn select_portfolio(
     pending_measurement_count: u32,
     workspace_id: WorkspaceId,
     experimental_keys: &std::collections::HashSet<String>,
+    sizing_multiplier: f64,
 ) -> PortfolioSelection {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
@@ -194,7 +195,18 @@ pub(super) fn select_portfolio(
     // P0-2: Wire the experimental dispatch budget from the policy into the
     // optimizer config. This allows additional treatment dispatches beyond
     // max_dispatches when the candidate is part of an active experiment.
+    //
+    // Metacognition sizing_multiplier scales max_dispatches: when the brain
+    // is Initializing or Regressing, it acts cautiously (fewer dispatches).
+    // When Improving, it gets full budget. This is a constraint, not a value
+    // term — it does not enter DecisionValue.total().
+    let base_max_dispatches = PortfolioConfig::default().max_dispatches;
+    let scaled_max_dispatches = ((f64::from(base_max_dispatches) * sizing_multiplier)
+        .round()
+        .max(1.0) as u32)
+        .max(1);
     let config = PortfolioConfig {
+        max_dispatches: scaled_max_dispatches,
         experimental_dispatch_budget: policy.experimental_dispatch_budget,
         ..Default::default()
     };

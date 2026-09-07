@@ -772,6 +772,25 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 .unwrap_or(Standing::Untested { measured: 0 }),
             world_model: world_model.clone(),
             tenant_preference: tenant_preference.clone(),
+            // Hypothesis lifecycle: defaults to Active for templates
+            // without a persisted lifecycle state, preserving current
+            // behavior (full budget, may_act=true). The evaluator uses
+            // may_act() to gate dispatch and sizing_multiplier() to
+            // scale budget. Persistence will be added in a follow-up
+            // that creates viryaos_growth_hypotheses and loads state
+            // from it; until then all templates act as Active.
+            hypothesis_state: crowdrelay_brain::hypothesis::HypothesisState::Active,
+            // Metacognition: defaults to a monitor in the Improving
+            // state (sizing_multiplier=1.0, exploration_boost=0.0),
+            // preserving current behavior. The cycle trigger will
+            // record daily North Star readings and update the monitor
+            // in a follow-up; until then the monitor stays at Improving
+            // so dispatch budget and EFE weights are unchanged.
+            metacognition: {
+                let mut m = crowdrelay_brain::self_assessment::MetacognitionMonitor::new();
+                m.observe(crowdrelay_brain::self_assessment::BrainState::Improving);
+                m
+            },
         });
     }
 

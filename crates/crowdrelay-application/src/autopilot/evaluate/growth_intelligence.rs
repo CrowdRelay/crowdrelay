@@ -170,6 +170,15 @@ pub fn evaluate_growth_intelligence(
         return None;
     }
 
+    // Hypothesis lifecycle gate: a Retired or Discovered hypothesis
+    // does not generate dispatches. Retired means the brain has
+    // concluded this template does not work for this tenant.
+    // Discovered means it has not yet been tested. Only Testing+ states
+    // may act.
+    if !snapshot.hypothesis_state.may_act() {
+        return None;
+    }
+
     // Build the enriched dispatch context (shared with the novelty lookup
     // in evaluate.rs so both use the same context hash).
     let dispatch_context = build_dispatch_context(snapshot, now);
@@ -210,7 +219,17 @@ pub fn evaluate_growth_intelligence(
     // - Exploration: novelty from the exploration memory (Go-Explore bonus).
     // - Risk: penalizes uncertain outcomes (risk aversion).
     let info_gain = information_gain(confidence, predict_std);
-    let efe_weights = EfeWeights::default();
+    // Metacognition behavior feedback: the brain's self-assessment
+    // modulates exploration and sizing. When stagnating or regressing,
+    // exploration_boost increases the EFE exploration weight (the brain
+    // tries more novel actions). When initializing or regressing,
+    // sizing_multiplier reduces dispatch budget (the brain acts
+    // cautiously). These terms enter EFE weights and budget — NEVER
+    // DecisionValue.total(), because there is no fan-equivalent
+    // conversion for "the brain feels uncertain".
+    let meta_exploration_boost = snapshot.metacognition.exploration_boost();
+    let mut efe_weights = EfeWeights::default();
+    efe_weights.exploration *= 1.0 + meta_exploration_boost;
 
     // Strategy rank — used for candidate ELIGIBILITY and sort ordering,
     // NOT for modifying expected fan value. The rank is the position of

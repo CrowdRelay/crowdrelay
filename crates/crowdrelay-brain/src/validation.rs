@@ -233,6 +233,52 @@ fn record_from(fans: &[f64]) -> GrowthPerformanceRecord {
     }
 }
 
+/// Converts `GrowthEvidence` records into the `(timestamp, incremental_fans)`
+/// tuples that `split_walk_forward` consumes.
+///
+/// Only treatment rows with a resolved `observed_incremental_fans` are
+/// included — control rows have no observed outcome, and unresolved rows
+/// have no outcome at all. The evidence is ordered oldest-first by the
+/// repository, so the caller does not need to re-sort.
+#[must_use]
+pub fn evidence_to_walk_forward(
+    evidence: &[crate::evidence::GrowthEvidence],
+) -> Vec<(time::OffsetDateTime, f64)> {
+    evidence
+        .iter()
+        .filter(|e| {
+            e.observed_incremental_fans.is_some()
+                && matches!(
+                    e.treatment,
+                    crate::experiment::TreatmentAssignment::Treatment
+                )
+        })
+        .map(|e| (e.timestamp, e.observed_incremental_fans.unwrap_or(0.0)))
+        .collect()
+}
+
+/// Runs walk-forward validation on a template's evidence history and
+/// returns the result. This is the wiring point between the evidence
+/// persistence layer and the hypothesis lifecycle: the caller uses
+/// `passed` to decide whether to promote or degrade the hypothesis.
+///
+/// The split date is chosen as the midpoint of the evidence range.
+/// The purge gap defaults to 16 days (Y30 durability overlap).
+#[must_use]
+pub fn validate_evidence_for_promotion(
+    evidence: &[crate::evidence::GrowthEvidence],
+) -> WalkForwardResult {
+    let observations = evidence_to_walk_forward(evidence);
+    if observations.is_empty() {
+        return WalkForwardResult::default();
+    }
+    let earliest = observations.first().unwrap().0;
+    let latest = observations.last().unwrap().0;
+    let split_date = earliest + (latest - earliest) / 2;
+    let (in_sample, out_of_sample) = split_walk_forward(&observations, split_date, 16);
+    validate_template(in_sample, out_of_sample)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

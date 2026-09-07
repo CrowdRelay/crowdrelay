@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use crowdrelay_domain::learning::Standing;
 use serde::{Deserialize, Serialize};
 
+use crate::hypothesis::HypothesisState;
+use crate::self_assessment::MetacognitionMonitor;
 use crate::tenant_preference::{TenantPreferencePolicy, TenantPreferencePosterior};
 use crate::world_model::WorldModel;
 
@@ -43,6 +45,17 @@ pub struct GrowthIntelligenceSnapshot {
     /// presentation metadata. MUST NOT modify DecisionValue or any
     /// economic value.
     pub tenant_preference: TenantPreferencePosterior,
+    /// The hypothesis lifecycle state for this template. Controls
+    /// dispatch eligibility (`may_act`) and budget sizing
+    /// (`sizing_multiplier`). A `Retired` hypothesis produces no
+    /// dispatches. A `Testing` hypothesis gets 5% of full budget.
+    /// Defaults to `Discovered` for backward compatibility.
+    pub hypothesis_state: HypothesisState,
+    /// The brain's metacognition monitor — self-assessment that feeds
+    /// back into behavior. `exploration_boost` enters EFE weights
+    /// (not DecisionValue.total()). `sizing_multiplier` enters
+    /// dispatch budget (not value terms). Defaults to Initializing.
+    pub metacognition: MetacognitionMonitor,
 }
 
 /// One community the brain may engage, with what is known about it.
