@@ -359,13 +359,27 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         prediction,
                         None,
                     );
-                    self.repository
+                    match self
+                        .repository
                         .record_experiment_assignment(
                             self.workspace_id,
                             &assignment,
                             Some(strategy.as_str()),
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(()) => {}
+                        // Assignment already exists — skip without aborting.
+                        Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                            control_indices.insert(*idx);
+                            arm_map.insert(
+                                candidate.decision_key.clone(),
+                                (ArmAssignment::Control, design.clone(), unit_id, effective_holdout),
+                            );
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
                     control_indices.insert(*idx);
                     arm_map.insert(
                         candidate.decision_key.clone(),
@@ -444,7 +458,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // prediction_at_decision == prediction_persisted_in_initial_evidence.
             let mut candidate = scored.candidate.clone();
             attach_decision_provenance(&mut candidate, &decision_provenance);
-            let persisted = self
+            let persisted = match self
                 .repository
                 .persist_candidate_with_evidence(
                     self.workspace_id,
@@ -454,7 +468,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     0.0,
                     &TraceContext::root(self.workspace_id),
                 )
-                .await?;
+                .await
+            {
+                Ok(p) => p,
+                // Conflict = candidate already exists or is in-flight. Skip
+                // this candidate and continue dispatching the rest.
+                Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             if persisted.action_id.is_some() {
                 dispatched_count += 1;
             }
@@ -491,7 +514,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         );
                     let mut candidate = candidate.clone();
                     attach_decision_provenance(&mut candidate, &decision_provenance);
-                    let persisted = self
+                    let persisted = match self
                         .repository
                         .persist_treatment_with_assignment(
                             self.workspace_id,
@@ -502,7 +525,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             *effective_holdout,
                             &TraceContext::root(self.workspace_id),
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(p) => p,
+                        // Conflict = action or assignment already exists. Skip
+                        // this candidate and continue dispatching the rest.
+                        Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
                     if let Some(action_id) = persisted.action_id {
                         // P1: The prediction and initial evidence are now
                         // recorded atomically inside
@@ -559,13 +591,22 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             prediction,
                             None, // action_id=None — not dispatched
                         );
-                    self.repository
+                    match self
+                        .repository
                         .record_experiment_assignment(
                             self.workspace_id,
                             &withheld_assignment,
                             Some(strategy.as_str()),
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(()) => {}
+                        // Assignment already exists — skip without aborting.
+                        Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
                 }
             }
         }

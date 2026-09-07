@@ -144,7 +144,7 @@ async fn persist_decision_and_action_tx(
             CASE WHEN $10 = 'awaiting_approval' THEN now() + INTERVAL '72 hours' ELSE NULL END,
             $12, $13
         )
-        ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+        ON CONFLICT DO NOTHING
         RETURNING id
         "#,
     )

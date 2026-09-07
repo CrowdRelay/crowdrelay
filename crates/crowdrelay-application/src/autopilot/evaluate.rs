@@ -800,14 +800,25 @@ where
             disposition: clamped,
             ..candidate.clone()
         };
-        let persisted = self
+        let persisted = match self
             .repository
             .persist_candidate(
                 self.workspace_id,
                 candidate,
                 &TraceContext::root(self.workspace_id),
             )
-            .await?;
+            .await
+        {
+            Ok(p) => p,
+            // A conflict means the candidate already exists or is in-flight.
+            // Skip it and continue the cycle rather than aborting all remaining
+            // candidates. This is the same semantics as ActionConflict in the
+            // infra layer, but catches any remaining uncovered index conflicts.
+            Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
         if persisted.decision_created {
             report.decisions = report.decisions.saturating_add(1);
         }
