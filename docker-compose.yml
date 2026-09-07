@@ -91,6 +91,16 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+    # Join crowdrelay-shared so the control plane can reach the API at
+    # crowdrelay-api-1:8080. Without this, the API only lives on the
+    # compose-internal default network and the control plane gets 503s.
+    # The network is NOT external — Compose creates it if it doesn't exist
+    # and reuses it if it does, so this works in both local dev and production.
+    networks:
+      default:
+        aliases: [crowdrelay-api]
+      crowdrelay-shared:
+        aliases: [crowdrelay-api, crowdrelay-api-1]
     restart: unless-stopped
 
   worker:
@@ -136,7 +146,16 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+    networks:
+      default:
+        aliases: [crowdrelay-worker]
+      crowdrelay-shared:
+        aliases: [crowdrelay-worker, crowdrelay-worker-1]
     restart: unless-stopped
 
 volumes:
   crowdrelay_postgres19:
+
+networks:
+  crowdrelay-shared:
+    name: crowdrelay-shared

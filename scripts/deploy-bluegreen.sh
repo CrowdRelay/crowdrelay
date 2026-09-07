@@ -563,7 +563,31 @@ printf 'SOAK=PASS seconds=30 probes=%s errors=%s fallback=%s\n' "$soak_total" "$
 python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
   --release-id "$RELEASE_ID" --phase soak --status pass >/dev/null
 
-# --- 6. Stop old containers, finalize ---------------------------------------
+# --- 6. Cross-service connectivity check -------------------------------------
+
+# The control plane reaches the API at crowdrelay-api-1:8080 via the
+# crowdrelay-shared network. If the API isn't on that network, every
+# read-model fan-out fails with 503 AllSectionsFailed. This check catches
+# that regardless of which compose file was used for the deploy.
+printf '\n==> 6/7 — Cross-service connectivity (control plane → API)\n'
+control_plane_container="crowdrelay-control-plane-app-1"
+if docker inspect "$control_plane_container" >/dev/null 2>&1; then
+  cp_meta="$(docker exec "$control_plane_container" wget -qO- \
+    --timeout=5 "http://${NEW_API}:8080/v1/meta" 2>/dev/null || true)"
+  if [[ -n "$cp_meta" ]]; then
+    cp_sha="$(printf '%s' "$cp_meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
+    [[ "$cp_sha" == "$TARGET" ]] || \
+      fail "control plane sees wrong API SHA: got=${cp_sha:-unknown} expected=$TARGET — check crowdrelay-shared network membership"
+    printf 'CROSS_SERVICE=PASS control_plane=%s → api=%s sha=%s\n' \
+      "$control_plane_container" "$NEW_API" "$cp_sha"
+  else
+    fail "control plane cannot reach API at ${NEW_API}:8080 — API is likely not on crowdrelay-shared network"
+  fi
+else
+  printf 'CROSS_SERVICE=SKIP control_plane_not_found=%s\n' "$control_plane_container"
+fi
+
+# --- 7. Stop old containers, finalize ---------------------------------------
 
 printf '\n==> 7/7 — Stop old containers, finalize\n'
 docker stop --time 30 "$CURRENT_API" "$CURRENT_WORKER" >/dev/null 2>&1 || true

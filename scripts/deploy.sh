@@ -358,4 +358,17 @@ fi
 TUNNEL_FINAL="$(control_plane_tunnel_fingerprint)" || fail 'Control Plane tunnel is unavailable at final receipt'
 [[ "$TUNNEL_FINAL" == "$TUNNEL_BEFORE" ]] || fail "CrowdRelay deploy changed Control Plane tunnel before final receipt: before=$TUNNEL_BEFORE after=$TUNNEL_FINAL"
 printf 'CONTROL_PLANE_TUNNEL_FINAL=PASS unchanged=true\n'
+
+# Final cross-service connectivity check: the control plane must be able to
+# reach the API via the crowdrelay-shared network. This catches the recurring
+# 503 AllSectionsFailed issue regardless of which deploy path was used.
+if ssh -T "$ORACLE" docker inspect crowdrelay-control-plane-app-1 >/dev/null 2>&1; then
+  cp_sha="$(ssh -T "$ORACLE" docker exec crowdrelay-control-plane-app-1 \
+    wget -qO- --timeout=5 http://crowdrelay-api-1:8080/v1/meta 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
+  [[ "$cp_sha" == "$TARGET" ]] || \
+    fail "post-deploy cross-service check failed: control plane sees API SHA=${cp_sha:-unreachable} expected=$TARGET — API may not be on crowdrelay-shared network"
+  printf 'CROSS_SERVICE_FINAL=PASS control_plane_reaches_api=true sha=%s\n' "$cp_sha"
+fi
+
 printf 'MAKE_DEPLOY=PASS repo=crowdrelay sha=%s tunnel=preserved exact-runtime=true\n' "$TARGET"
