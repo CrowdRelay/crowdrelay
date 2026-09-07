@@ -332,15 +332,20 @@ impl GrowthMetricSyncWorker {
     /// A shared personal access token (CROWDRELAY_DISCOGS_TOKEN) is used for
     /// higher rate limits; the endpoint also works unauthenticated at a lower
     /// rate.
+    ///
+    /// The artist endpoint omits `stats` for small/new artists, so we aggregate
+    /// from the releases endpoint instead — each release carries its own
+    /// `stats.community.in_collection` / `in_wantlist`. This is more accurate
+    /// for artists with few releases and works even when the artist endpoint
+    /// returns no stats at all.
     pub(super) async fn sync_discogs(
         &self,
         conn: &DueConnection,
     ) -> Result<(), GrowthMetricSyncError> {
         let artist_id = &conn.provider_account_id;
-        let url = format!("https://api.discogs.com/artists/{artist_id}");
         let mut request = self
             .http_client
-            .get(&url)
+            .get(format!("https://api.discogs.com/artists/{artist_id}"))
             .header("User-Agent", "CrowdRelay/1.0 +https://crowdrelay.com");
         // The token is optional — the endpoint works without it at a lower
         // rate limit. When present, authenticate for the higher tier.
@@ -355,26 +360,63 @@ impl GrowthMetricSyncWorker {
             )));
         }
         let body: serde_json::Value = response.json().await?;
-        // Discogs returns `stats.community.in_collection` and
-        // `stats.community.in_wantlist` — how many users own or want the
-        // artist's releases. Both are absolute levels.
-        let stats = body.get("stats").and_then(|s| s.get("community"));
-        let stat = |key: &str| -> Result<i64, GrowthMetricSyncError> {
-            stats
-                .and_then(|s| s.get(key))
-                .and_then(serde_json::Value::as_i64)
-                .ok_or_else(|| {
-                    GrowthMetricSyncError::ProviderApi(format!(
-                        "Discogs API returned no {key} for artist {artist_id}"
-                    ))
-                })
-        };
-        let in_collection = stat("in_collection")?;
-        let in_wantlist = stat("in_wantlist")?;
         let name = body
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("Discogs artist");
+
+        // Aggregate collection/wantlist counts from the releases endpoint.
+        // The artist endpoint omits `stats` for artists with few releases or
+        // low data quality, but each release carries its own community stats.
+        let mut in_collection: i64 = 0;
+        let mut in_wantlist: i64 = 0;
+        let mut page = 1;
+        loop {
+            let releases_url = format!(
+                "https://api.discogs.com/artists/{artist_id}/releases?page={page}&per_page=100"
+            );
+            let mut rel_request = self
+                .http_client
+                .get(&releases_url)
+                .header("User-Agent", "CrowdRelay/1.0 +https://crowdrelay.com");
+            if let Some(ref token) = self.discogs_token {
+                rel_request = rel_request.header("Authorization", format!("Discogs token={token}"));
+            }
+            let rel_response = rel_request.send().await?;
+            if !rel_response.status().is_success() {
+                return Err(GrowthMetricSyncError::ProviderApi(format!(
+                    "Discogs releases API returned HTTP {} for artist {artist_id} page {page}",
+                    rel_response.status()
+                )));
+            }
+            let rel_body: serde_json::Value = rel_response.json().await?;
+            let empty = Vec::new();
+            let releases = rel_body
+                .get("releases")
+                .and_then(|r| r.as_array())
+                .unwrap_or(&empty);
+            for release in releases {
+                let stats = release.get("stats").and_then(|s| s.get("community"));
+                in_collection += stats
+                    .and_then(|s| s.get("in_collection"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0);
+                in_wantlist += stats
+                    .and_then(|s| s.get("in_wantlist"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0);
+            }
+            let pages = rel_body
+                .get("pagination")
+                .and_then(|p| p.get("pages"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1);
+            if page >= pages {
+                break;
+            }
+            page += 1;
+        }
+
         record_metric_point(
             &self.pool,
             conn.workspace_id,

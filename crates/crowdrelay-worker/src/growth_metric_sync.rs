@@ -1880,23 +1880,74 @@ mod tests {
     }
 
     #[test]
-    fn discogs_response_parses_community_stats() {
-        let json = serde_json::json!({
-            "id": 18839,
-            "name": "Iron Maiden",
-            "stats": {"community": {"in_collection": 45678, "in_wantlist": 12345}}
+    fn discogs_releases_aggregate_community_stats() {
+        // The releases endpoint carries per-release community stats. The
+        // sync worker sums these across all releases on all pages.
+        let releases = serde_json::json!({
+            "pagination": {"page": 1, "pages": 1, "per_page": 100, "items": 2},
+            "releases": [
+                {
+                    "id": 38335197,
+                    "title": "Echoes Of The Modern Mind",
+                    "stats": {"community": {"in_collection": 1, "in_wantlist": 0}}
+                },
+                {
+                    "id": 99999999,
+                    "title": "Another Release",
+                    "stats": {"community": {"in_collection": 3, "in_wantlist": 2}}
+                }
+            ]
         });
-        let stats = json.get("stats").and_then(|s| s.get("community"));
-        let in_collection = stats
-            .and_then(|s| s.get("in_collection"))
-            .and_then(serde_json::Value::as_i64)
-            .expect("in_collection");
-        let in_wantlist = stats
-            .and_then(|s| s.get("in_wantlist"))
-            .and_then(serde_json::Value::as_i64)
-            .expect("in_wantlist");
-        assert_eq!(in_collection, 45_678);
-        assert_eq!(in_wantlist, 12_345);
+        let mut in_collection = 0i64;
+        let mut in_wantlist = 0i64;
+        for release in releases
+            .get("releases")
+            .and_then(|r| r.as_array())
+            .unwrap_or(&Vec::new())
+        {
+            let stats = release.get("stats").and_then(|s| s.get("community"));
+            in_collection += stats
+                .and_then(|s| s.get("in_collection"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            in_wantlist += stats
+                .and_then(|s| s.get("in_wantlist"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+        }
+        assert_eq!(in_collection, 4);
+        assert_eq!(in_wantlist, 2);
+    }
+
+    #[test]
+    fn discogs_releases_with_no_stats_default_to_zero() {
+        // A release with no stats contributes 0/0 — the artist still syncs
+        // successfully instead of erroring.
+        let releases = serde_json::json!({
+            "pagination": {"page": 1, "pages": 1, "per_page": 100, "items": 1},
+            "releases": [
+                {"id": 1, "title": "No Stats Release"}
+            ]
+        });
+        let mut in_collection = 0i64;
+        let mut in_wantlist = 0i64;
+        for release in releases
+            .get("releases")
+            .and_then(|r| r.as_array())
+            .unwrap_or(&Vec::new())
+        {
+            let stats = release.get("stats").and_then(|s| s.get("community"));
+            in_collection += stats
+                .and_then(|s| s.get("in_collection"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            in_wantlist += stats
+                .and_then(|s| s.get("in_wantlist"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+        }
+        assert_eq!(in_collection, 0);
+        assert_eq!(in_wantlist, 0);
     }
 
     #[test]
