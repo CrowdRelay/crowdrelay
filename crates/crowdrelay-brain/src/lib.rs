@@ -51,6 +51,7 @@ pub mod efe;
 pub mod evidence;
 pub mod experiment;
 pub mod exploration;
+pub mod hypothesis;
 pub mod opportunity;
 pub mod platform_yield;
 pub mod portfolio;
@@ -63,6 +64,7 @@ pub mod strategy;
 pub mod strategy_learning;
 pub mod tenant_preference;
 pub mod treatment_effect;
+pub mod validation;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.

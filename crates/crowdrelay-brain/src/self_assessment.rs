@@ -1,4 +1,5 @@
-//! What the brain thinks of its own performance, in its own words.
+//! What the brain thinks of its own performance, in its own words — and
+//! how that assessment feeds back into behavior.
 //!
 //! Ported from Kern's `brain::metacognition`, which is the same author's
 //! engine applied to capital. The transferable part is not the arithmetic —
@@ -13,14 +14,24 @@
 //! a fan count sit at ten had to infer the difference, and the obvious
 //! inference — that the thing is broken — was wrong.
 //!
-//! # What is deliberately not ported
+//! # Behavior feedback (now wired in)
 //!
 //! Kern's states carry `exploration_boost` and `sizing_multiplier`, which feed
-//! back into ranking and position size. Those are behaviour, and CrowdRelay's
-//! `DecisionValue` has an explicit invariant against terms entering `total()`
-//! without a defined conversion into fan-equivalent utility. So this reports
-//! and changes nothing. Wiring it into exploration is a separate decision,
-//! made deliberately, with the evidence this produces in hand.
+//! back into ranking and position size. CrowdRelay's `DecisionValue` has an
+//! explicit invariant against terms entering `total()` without a defined
+//! conversion into fan-equivalent utility. This module respects that
+//! invariant:
+//!
+//! - `exploration_boost()` enters **EFE weights** (exploration), not
+//!   `DecisionValue.total()`. EFE decides what is worth learning about;
+//!   DecisionValue decides what is worth doing.
+//! - `sizing_multiplier()` enters **dispatch budget** (a constraint), not
+//!   a value term. It scales how many dispatches a template gets, not
+//!   how much each dispatch is worth.
+//!
+//! This is the same separation Kern uses. The brain's self-assessment
+//! changes how hard it explores and how much budget it allocates, but
+//! does not inflate the value of any individual action.
 //!
 //! # Timescale
 //!
@@ -95,6 +106,40 @@ impl BrainState {
     pub const fn needs_attention(self) -> bool {
         matches!(self, Self::Regressing | Self::Stagnant)
     }
+
+    /// Additive bonus to EFE exploration weight. When the brain is
+    /// stagnant or regressing, it explores harder — seeking new edges.
+    ///
+    /// This enters **EFE weights**, not `DecisionValue.total()`. EFE
+    /// decides what is worth learning about; DecisionValue decides
+    /// what is worth doing.
+    #[must_use]
+    pub const fn exploration_boost(self) -> f64 {
+        match self {
+            Self::Improving => 0.0,    // working — no extra exploration needed
+            Self::Learning => 0.5,     // looking for an edge
+            Self::Stagnant => 0.3,     // current approach exhausted, explore
+            Self::Regressing => 0.6,   // losing ground — explore urgently
+            Self::Initializing => 0.4, // young system, explore to learn
+        }
+    }
+
+    /// Multiplier for dispatch budget (0.0–1.0). When the brain is
+    /// regressing, it reduces dispatch budget to limit damage.
+    ///
+    /// This enters **dispatch budget** (a constraint), not a value
+    /// term. It scales how many dispatches a template gets, not how
+    /// much each dispatch is worth.
+    #[must_use]
+    pub const fn sizing_multiplier(self) -> f64 {
+        match self {
+            Self::Improving => 1.0,    // full budget — it's working
+            Self::Learning => 0.9,     // nearly full — still earning trust
+            Self::Stagnant => 0.7,     // reduced — current approach is flat
+            Self::Regressing => 0.5,   // half — limit damage while exploring
+            Self::Initializing => 0.3, // minimal — young system, be careful
+        }
+    }
 }
 
 /// One day's North Star reading. `day` is a day number, so callers decide the
@@ -158,6 +203,118 @@ fn mean(samples: &[DailyNorthStar]) -> f64 {
         return 0.0;
     }
     samples.iter().map(|sample| sample.value).sum::<f64>() / samples.len() as f64
+}
+
+/// Tracks the brain's self-assessment over time and provides behavior
+/// outputs that feed back into the brain cycle.
+///
+/// Ported from Kern's `MetacognitionMonitor`. The monitor records each
+/// assessment and tracks how long the brain has been in each state.
+/// The `stagnation_escape_boost()` grows with learning cycles, driving
+/// the brain to seek new edges harder the longer it goes without
+/// improvement.
+///
+/// # DecisionValue invariant
+///
+/// `exploration_boost()` and `sizing_multiplier()` do NOT enter
+/// `DecisionValue.total()`. They enter EFE weights (exploration) and
+/// dispatch budget (sizing), which are separate from the value
+/// calculation. This is the same separation Kern uses.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct MetacognitionMonitor {
+    /// The current assessed state.
+    pub state: BrainState,
+    /// Consecutive cycles the brain has been in the Learning state.
+    pub learning_cycles: u32,
+    /// Consecutive cycles the brain has been Stagnant.
+    pub stagnant_cycles: u32,
+    /// Consecutive cycles the brain has been Regressing.
+    pub regressing_cycles: u32,
+    /// Total cycles the brain has been Improving (lifetime).
+    pub improving_cycles_total: u32,
+    /// Whether the monitor was reset after a prolonged halt.
+    pub reset_after_halt: bool,
+}
+
+impl MetacognitionMonitor {
+    /// Creates a new monitor in the Initializing state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a new assessment and updates cycle counters.
+    pub fn observe(&mut self, state: BrainState) {
+        if state == self.state {
+            match state {
+                BrainState::Learning => self.learning_cycles += 1,
+                BrainState::Stagnant => self.stagnant_cycles += 1,
+                BrainState::Regressing => self.regressing_cycles += 1,
+                BrainState::Improving => self.improving_cycles_total += 1,
+                BrainState::Initializing => {}
+            }
+        } else {
+            // State changed — reset counters for the old state.
+            match self.state {
+                BrainState::Learning => self.learning_cycles = 0,
+                BrainState::Stagnant => self.stagnant_cycles = 0,
+                BrainState::Regressing => self.regressing_cycles = 0,
+                _ => {}
+            }
+            // Set new counter to 1 (this is the first cycle in the new state).
+            match state {
+                BrainState::Learning => self.learning_cycles = 1,
+                BrainState::Stagnant => self.stagnant_cycles = 1,
+                BrainState::Regressing => self.regressing_cycles = 1,
+                BrainState::Improving => self.improving_cycles_total += 1,
+                BrainState::Initializing => {}
+            }
+        }
+        self.state = state;
+        self.reset_after_halt = false;
+    }
+
+    /// Returns the current exploration boost, including the stagnation
+    /// escape bonus.
+    ///
+    /// The base boost comes from `BrainState::exploration_boost()`. The
+    /// stagnation escape bonus grows with `learning_cycles`, driving the
+    /// brain to seek new edges harder the longer it goes without
+    /// improvement. The bonus saturates at 0.5 (doubled exploration).
+    #[must_use]
+    pub fn exploration_boost(&self) -> f64 {
+        let base = self.state.exploration_boost();
+        let escape = self.stagnation_escape_boost();
+        base + escape
+    }
+
+    /// Returns the current sizing multiplier for dispatch budget.
+    #[must_use]
+    pub fn sizing_multiplier(&self) -> f64 {
+        self.state.sizing_multiplier()
+    }
+
+    /// Progressive bonus that grows with learning_cycles, driving the
+    /// brain to seek new edges harder the longer it goes without
+    /// improvement. Saturates at 0.5.
+    #[must_use]
+    pub fn stagnation_escape_boost(&self) -> f64 {
+        if self.learning_cycles == 0 {
+            return 0.0;
+        }
+        // 0.02 per learning cycle, saturating at 0.5 (25 cycles).
+        (0.02 * self.learning_cycles as f64).min(0.5)
+    }
+
+    /// Resets the monitor after a prolonged halt. Clears stale
+    /// zero-alpha observations and returns to Initializing.
+    pub fn reset_after_halt(&mut self) {
+        self.state = BrainState::Initializing;
+        self.learning_cycles = 0;
+        self.stagnant_cycles = 0;
+        self.regressing_cycles = 0;
+        self.reset_after_halt = true;
+    }
 }
 
 #[cfg(test)]
@@ -260,5 +417,111 @@ mod tests {
         assert!(!BrainState::Learning.needs_attention());
         assert!(!BrainState::Improving.needs_attention());
         assert!(!BrainState::Initializing.needs_attention());
+    }
+
+    // ─── Behavior feedback tests ───
+
+    #[test]
+    fn exploration_boost_is_zero_when_improving() {
+        assert_eq!(BrainState::Improving.exploration_boost(), 0.0);
+    }
+
+    #[test]
+    fn exploration_boost_is_highest_when_regressing() {
+        assert!(
+            BrainState::Regressing.exploration_boost() > BrainState::Stagnant.exploration_boost()
+        );
+        assert!(BrainState::Stagnant.exploration_boost() > 0.0);
+    }
+
+    #[test]
+    fn sizing_multiplier_is_full_when_improving() {
+        assert_eq!(BrainState::Improving.sizing_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn sizing_multiplier_is_half_when_regressing() {
+        assert_eq!(BrainState::Regressing.sizing_multiplier(), 0.5);
+    }
+
+    #[test]
+    fn sizing_multiplier_is_minimal_when_initializing() {
+        assert_eq!(BrainState::Initializing.sizing_multiplier(), 0.3);
+    }
+
+    // ─── MetacognitionMonitor tests ───
+
+    #[test]
+    fn monitor_starts_initializing() {
+        let monitor = MetacognitionMonitor::new();
+        assert_eq!(monitor.state, BrainState::Initializing);
+        assert_eq!(monitor.learning_cycles, 0);
+    }
+
+    #[test]
+    fn monitor_tracks_learning_cycles() {
+        let mut monitor = MetacognitionMonitor::new();
+        monitor.observe(BrainState::Learning);
+        assert_eq!(monitor.learning_cycles, 1);
+        monitor.observe(BrainState::Learning);
+        assert_eq!(monitor.learning_cycles, 2);
+    }
+
+    #[test]
+    fn monitor_resets_cycles_on_state_change() {
+        let mut monitor = MetacognitionMonitor::new();
+        for _ in 0..5 {
+            monitor.observe(BrainState::Learning);
+        }
+        assert_eq!(monitor.learning_cycles, 5);
+        monitor.observe(BrainState::Improving);
+        assert_eq!(monitor.learning_cycles, 0);
+        assert_eq!(monitor.state, BrainState::Improving);
+    }
+
+    #[test]
+    fn monitor_stagnation_escape_grows_with_learning_cycles() {
+        let mut monitor = MetacognitionMonitor::new();
+        for _ in 0..10 {
+            monitor.observe(BrainState::Learning);
+        }
+        let boost = monitor.stagnation_escape_boost();
+        assert!(boost > 0.0);
+        // 10 cycles * 0.02 = 0.2
+        assert!((boost - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn monitor_stagnation_escape_saturates() {
+        let mut monitor = MetacognitionMonitor::new();
+        for _ in 0..100 {
+            monitor.observe(BrainState::Learning);
+        }
+        let boost = monitor.stagnation_escape_boost();
+        assert!((boost - 0.5).abs() < 0.01); // saturated at 0.5
+    }
+
+    #[test]
+    fn monitor_exploration_boost_includes_escape() {
+        let mut monitor = MetacognitionMonitor::new();
+        for _ in 0..10 {
+            monitor.observe(BrainState::Learning);
+        }
+        // Base Learning boost = 0.5, escape = 0.2, total = 0.7
+        let boost = monitor.exploration_boost();
+        assert!((boost - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn monitor_reset_after_halt_clears_state() {
+        let mut monitor = MetacognitionMonitor::new();
+        for _ in 0..10 {
+            monitor.observe(BrainState::Learning);
+        }
+        assert_eq!(monitor.state, BrainState::Learning);
+        monitor.reset_after_halt();
+        assert_eq!(monitor.state, BrainState::Initializing);
+        assert_eq!(monitor.learning_cycles, 0);
+        assert!(monitor.reset_after_halt);
     }
 }
