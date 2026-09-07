@@ -37,6 +37,14 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+    # Join crowdrelay-shared so the agent service can reach the database at
+    # crowdrelay-db:5432. The alias matches what compose.production.yaml
+    # defines — the agent service expects this hostname.
+    networks:
+      default:
+        aliases: [postgres]
+      crowdrelay-shared:
+        aliases: [postgres, crowdrelay-db]
     restart: unless-stopped
 
   migrate:
