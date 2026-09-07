@@ -108,7 +108,7 @@ services:
       default:
         aliases: [crowdrelay-api]
       crowdrelay-shared:
-        aliases: [crowdrelay-api, crowdrelay-api-1]
+        aliases: [crowdrelay-api, crowdrelay-api-1, crowdrelay-api-active]
     restart: unless-stopped
 
   worker:
