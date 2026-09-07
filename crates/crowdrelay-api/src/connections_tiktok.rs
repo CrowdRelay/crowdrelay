@@ -261,7 +261,7 @@ pub async fn callback(
     // defense in depth.
     let validated_redirect = validate_post_redirect(post_redirect);
     let clear_cookie = format!("{STATE_COOKIE}=; Max-Age=0; {STATE_COOKIE_FLAGS}");
-    let redirect_url = format!("https://control.virya.music{validated_redirect}");
+    let redirect_url = format!("https://control.crowdrelay.music{validated_redirect}");
 
     (
         StatusCode::FOUND,

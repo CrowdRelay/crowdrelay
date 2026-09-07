@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-base="${CONTROL_PLANE_BASE_URL:-https://control.virya.music}"
+base="${CONTROL_PLANE_BASE_URL:-https://control.crowdrelay.music}"
 base="${base%/}"
 [[ "$base" == https://* ]] || { echo 'CONTROL_PLANE_SMOKE=FAIL reason=base-url-must-be-https' >&2; exit 2; }
 [[ "$base" != *'@'* ]] || { echo 'CONTROL_PLANE_SMOKE=FAIL reason=credentials-in-url' >&2; exit 2; }

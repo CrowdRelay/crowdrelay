@@ -30,6 +30,7 @@ services:
       - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/crowdrelay/landing/dist:/var/www/landing:ro
       - caddy_data:/data
       - caddy_config:/config
     healthcheck:
