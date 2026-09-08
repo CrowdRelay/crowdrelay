@@ -294,24 +294,40 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let mut control_indices: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
         for (template_id, group_candidates) in &experiment_groups {
-            let unit_kind = if template_id == "community-engager" {
-                crowdrelay_brain::ExperimentUnitKind::TargetCommunity
+            let (unit_kind, eligible_units) = if template_id == "community-engager" {
+                (
+                    crowdrelay_brain::ExperimentUnitKind::TargetCommunity,
+                    group_candidates
+                        .iter()
+                        .map(|(_, c, _)| unit_id_from_decision_key(&c.decision_key))
+                        .collect::<Vec<_>>(),
+                )
             } else {
-                crowdrelay_brain::ExperimentUnitKind::Workspace
+                // Direct-action templates (social-post, telegram-poster,
+                // discord-poster, press-pitch, signal-inviter) use Campaign
+                // as the unit kind. Each dispatch is a separate campaign —
+                // the unit_id is the action_idempotency_key, which is unique
+                // per dispatch because it includes the cooldown bucket.
+                //
+                // The experiment window spans 30 days (720 hours) instead of
+                // the cooldown window, so multiple dispatches within that
+                // window pool into one experiment. With a 2-7 day cooldown,
+                // that yields 4-15 campaigns per experiment — enough for a
+                // control arm at 10% holdout.
+                (
+                    crowdrelay_brain::ExperimentUnitKind::Campaign,
+                    group_candidates
+                        .iter()
+                        .map(|(_, c, _)| c.action_idempotency_key.clone())
+                        .collect::<Vec<_>>(),
+                )
             };
-            let eligible_units: Vec<String> = if template_id == "community-engager" {
-                group_candidates
-                    .iter()
-                    .map(|(_, c, _)| unit_id_from_decision_key(&c.decision_key))
-                    .collect()
+            let experiment_window_hours = if template_id == "community-engager" {
+                key_window_for_template(&gi_policy, template_id)
             } else {
-                group_candidates
-                    .iter()
-                    .map(|(_, c, _)| c.decision_key.clone())
-                    .collect()
+                EXPERIMENT_WINDOW_HOURS
             };
-            let key_window_hours = key_window_for_template(&gi_policy, template_id);
-            let logical_cycle_key = cooldown_window(now, key_window_hours).to_string();
+            let logical_cycle_key = cooldown_window(now, experiment_window_hours).to_string();
             let mut design = match self
                 .repository
                 .get_or_create_experiment_design(
@@ -352,7 +368,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 let unit_id = if template_id == "community-engager" {
                     unit_id_from_decision_key(&candidate.decision_key)
                 } else {
-                    candidate.decision_key.clone()
+                    // Campaign unit: each dispatch is a separate campaign,
+                    // identified by its action_idempotency_key (unique per
+                    // dispatch because it includes the cooldown bucket).
+                    candidate.action_idempotency_key.clone()
                 };
                 let roll = deterministic_roll(&format!(
                     "{}:{}:{}:{}",
@@ -654,6 +673,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         Ok(())
     }
 }
+
+/// The experiment window for direct-action templates (social-post,
+/// telegram-poster, discord-poster, press-pitch, signal-inviter).
+///
+/// Each dispatch is a separate campaign unit. The experiment window spans
+/// 30 days so that multiple dispatches (governed by 2-7 day cooldowns) pool
+/// into one experiment design. With a 2-day cooldown, that yields ~15
+/// campaigns per experiment — enough for a control arm at 10% holdout.
+///
+/// Community-engager uses its own cooldown window as the experiment window
+/// because each target community is itself a unit, so one cycle already
+/// contains multiple units.
+const EXPERIMENT_WINDOW_HOURS: u32 = 24 * 30;
 
 /// Extracts the community unit_id from a community-engager decision_key.
 ///
