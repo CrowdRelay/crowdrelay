@@ -121,7 +121,10 @@ const OPERATOR_FEEDBACK_MAX_ROWS: i64 = 5_000;
 /// `discord-poster` reached production present in this one and missing from
 /// the other two.
 fn worker_templates() -> Vec<&'static str> {
-    WorkerTemplate::ALL.iter().map(|t| t.as_str()).collect()
+    WorkerTemplate::active()
+        .into_iter()
+        .map(|t| t.as_str())
+        .collect()
 }
 
 pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(

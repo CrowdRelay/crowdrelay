@@ -136,6 +136,29 @@ impl WorkerTemplate {
             | Self::SignalInviter => TemplateAudience::Workspace,
         }
     }
+
+    /// Whether this template is currently disabled because the agent service
+    /// lacks the tools (web access, browser) to execute it.
+    ///
+    /// Disabled templates are never dispatched by the autopilot. They remain
+    /// in the enum so that historical data, experiment designs, and match
+    /// arms stay valid — but `evaluate_growth_intelligence` skips them.
+    ///
+    /// When the agent service gains the required tools, remove the template
+    /// from this list.
+    #[must_use]
+    pub const fn is_disabled(self) -> bool {
+        matches!(
+            self,
+            Self::TelegramScanner | Self::MetalArchivesScanner | Self::BandcampScanner
+        )
+    }
+
+    /// Every template that is not disabled, in the order the evaluator checks.
+    #[must_use]
+    pub fn active() -> Vec<Self> {
+        Self::ALL.into_iter().filter(|t| !t.is_disabled()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +242,37 @@ mod tests {
         // string the agent service dispatches on, not the variant name.
         let json = serde_json::to_string(&WorkerTemplate::DiscordPoster).expect("serialize");
         assert_eq!(json, "\"discord-poster\"");
+    }
+
+    #[test]
+    fn disabled_templates_are_not_in_active() {
+        for template in WorkerTemplate::ALL {
+            if template.is_disabled() {
+                assert!(
+                    !WorkerTemplate::active().contains(&template),
+                    "{template:?} is disabled but appeared in active()"
+                );
+            } else {
+                assert!(
+                    WorkerTemplate::active().contains(&template),
+                    "{template:?} is not disabled but missing from active()"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn web_scanners_are_disabled() {
+        // These templates require web access the agent service does not
+        // provide. They must not be dispatched until the tools are added.
+        assert!(WorkerTemplate::TelegramScanner.is_disabled());
+        assert!(WorkerTemplate::MetalArchivesScanner.is_disabled());
+        assert!(WorkerTemplate::BandcampScanner.is_disabled());
+    }
+
+    #[test]
+    fn reddit_scanner_is_not_disabled() {
+        // Reddit scanner uses the Reddit API, not web scraping.
+        assert!(!WorkerTemplate::RedditScanner.is_disabled());
     }
 }
