@@ -321,11 +321,22 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     };
     let workspace_id = trusted_workspace_id(&database, config).await?;
     let push_delivery_worker = if config.push_delivery.runtime_enabled {
-        Some(PushDeliveryWorker::from_env(
+        match PushDeliveryWorker::from_env(
             database.clone(),
             workspace_id,
             config.database.operation_timeout,
-        )?)
+        ) {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "push delivery failed to initialize — starting without it. \
+                     The autopilot and outbox will continue; fan push notifications \
+                     will not be delivered until the configuration is fixed."
+                );
+                None
+            }
+        }
     } else {
         tracing::info!("fan push delivery is disabled by process configuration");
         None

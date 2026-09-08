@@ -50,17 +50,36 @@ pub(crate) async fn load_watchdog_summary(
 ///
 /// This exists because the worker was killed by a deploy and stayed dead for
 /// over fifteen minutes while every dashboard showed green.
+///
+/// `cycle_age_seconds` and `crash_looping` exist because a worker can keep
+/// restarting and renewing its lease while never completing an autopilot
+/// cycle — a crash-loop that looks alive on the lease but is functionally
+/// dead. This happened for 7+ hours while the dashboard said "healthy".
 #[derive(Debug, Serialize)]
 pub(crate) struct WorkerSummary {
     /// Seconds since the last lease renewal. Renewal is every 15s.
     pub(crate) lease_age_seconds: i64,
     /// False once the lease is stale enough that the process cannot be running.
     pub(crate) alive: bool,
+    /// Seconds since the last autopilot decision was evaluated. 999999 if no
+    /// decision has ever been recorded.
+    pub(crate) cycle_age_seconds: i64,
+    /// True when the lease is fresh but no autopilot cycle has completed in
+    /// [`WORKER_CYCLE_STALE_AFTER_SECONDS`]. This is the crash-loop signal:
+    /// the worker keeps restarting and acquiring leadership but never gets
+    /// far enough to run the evaluator.
+    pub(crate) crash_looping: bool,
 }
 
 /// Twice the renewal interval plus the lease term: unambiguous death, not a
 /// slow cycle.
 const WORKER_LEASE_DEAD_AFTER_SECONDS: i64 = 120;
+
+/// If the lease is fresh but no autopilot cycle has completed in this many
+/// seconds, the worker is crash-looping. 30 minutes is generous: a normal
+/// cycle runs every ~60s, and even a slow cycle with heavy provider calls
+/// finishes in under 5 minutes.
+const WORKER_CYCLE_STALE_AFTER_SECONDS: i64 = 1800;
 
 pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, sqlx::Error> {
     // Not workspace-scoped: leadership is per deployment. A missing row means
@@ -77,8 +96,28 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
     )
     .fetch_one(pool)
     .await?;
+
+    // Last autopilot decision timestamp — the honest signal that the worker
+    // actually completed a cycle, not just acquired a lease.
+    let cycle_age_seconds: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            EXTRACT(EPOCH FROM (now() - MAX(evaluated_at)))::bigint,
+            999999
+        )
+        FROM viryaos_autopilot_decisions
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let alive = lease_age_seconds <= WORKER_LEASE_DEAD_AFTER_SECONDS;
+    let crash_looping = alive && cycle_age_seconds > WORKER_CYCLE_STALE_AFTER_SECONDS;
+
     Ok(WorkerSummary {
         lease_age_seconds,
-        alive: lease_age_seconds <= WORKER_LEASE_DEAD_AFTER_SECONDS,
+        alive,
+        cycle_age_seconds,
+        crash_looping,
     })
 }
