@@ -410,7 +410,9 @@ jobs:
     if: github.event_name == 'pull_request'
     # Production runs on virya-crowdrelay (linux/arm64). The PR gate builds
     # the same platform that ships, so green CI means a deployable image.
-    runs-on: ubuntu-24.04-arm
+    # Uses a self-hosted runner on virya-crowdrelay itself — free, unlimited,
+    # and the same ARM64 hardware that production deploys to.
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 45
     permissions:
       contents: read
