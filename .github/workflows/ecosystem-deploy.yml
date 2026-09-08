@@ -44,15 +44,15 @@ jobs:
       # Phase 2 deploys the Control Plane from source, so the runner needs its
       # checkout. `actions/checkout` will not write outside `$GITHUB_WORKSPACE`,
       # which is where the script's default sibling path points, so it lands in
-      # the workspace and the script is told where to look. Public repo, so the
-      # job token is enough and no PAT is introduced.
+      # the workspace and the script is told where to look. CROWDRELAY_PAT is
+      # used so the checkout works regardless of repo visibility.
       - name: Check out Control Plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: CrowdRelay/crowdrelay-control-plane
           ref: main
           path: .control-plane
-          token: ${{ github.token }}
+          token: ${{ secrets.CROWDRELAY_PAT }}
           persist-credentials: false
 
       # The agent-service ships as an overlay on the Control Plane stack. The
@@ -65,7 +65,7 @@ jobs:
           ref: main
           path: .agents
           fetch-depth: 0
-          token: ${{ github.token }}
+          token: ${{ secrets.CROWDRELAY_PAT }}
           persist-credentials: false
 
       - name: Resolve target SHA
