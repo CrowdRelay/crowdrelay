@@ -41,6 +41,7 @@
 //! and decides.
 
 pub mod bayesian;
+pub mod beta;
 pub mod bridge;
 pub mod calibration;
 pub mod causal_model;
@@ -56,6 +57,7 @@ pub mod opportunity;
 pub mod platform_yield;
 pub mod portfolio;
 pub mod reach;
+pub mod reply_model;
 pub mod resource_cost;
 pub mod self_assessment;
 pub mod snapshot;
@@ -72,6 +74,7 @@ pub use bayesian::{
     HierarchicalNegBinPosterior, HierarchicalPosterior, NegBinPosterior, NormalPosterior,
     normal_cdf, normal_pdf,
 };
+pub use beta::{BetaPosterior, HierarchicalBetaPosterior};
 pub use bridge::Y14Y30Bridge;
 pub use calibration::{
     CalibrationByRegime, CalibrationReport, CalibrationTracker, PredictionRecord, ReliabilityBucket,
@@ -105,6 +108,10 @@ pub use portfolio::{
     PortfolioRejection, PortfolioSelection, RejectionReason, WaitCandidateValue,
 };
 pub use reach::{ReachChannel, ReachMetrics};
+pub use reply_model::{
+    FEATURE_VERSION, MODEL_VERSION, ReplyOutcome, ReplyPrediction, ReplyProbabilityModel,
+    disposition_to_label, kind_key, target_key,
+};
 pub use resource_cost::{CostSource, ResourceCost};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,

@@ -606,6 +606,29 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         model: &crowdrelay_brain::CausalModel,
     ) -> Result<(), RepositoryError>;
 
+    /// Loads the reply probability model from its brain-state checkpoint,
+    /// then updates it from outreach interaction outcomes observed since
+    /// the checkpoint. Returns the updated model.
+    ///
+    /// The model is an additive, reversible advisory signal: it reorders
+    /// eligible outreach targets by predicted P(positive reply), it does
+    /// not change eligibility, authority, or approval. An empty model
+    /// (cold start) returns the global prior for every prediction, so the
+    /// system falls back to `relevance_basis_points` ranking.
+    async fn load_reply_model(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crowdrelay_brain::ReplyProbabilityModel, RepositoryError>;
+
+    /// Saves the reply probability model checkpoint for fast startup on
+    /// the next cycle. Best-effort: a failed checkpoint just means the
+    /// next cycle rebuilds from full history.
+    async fn save_reply_model(
+        &self,
+        workspace_id: WorkspaceId,
+        model: &crowdrelay_brain::ReplyProbabilityModel,
+    ) -> Result<(), RepositoryError>;
+
     /// What the pitcher currently has to work with. One row per workspace
     /// rather than a list: supply is not a property of any single target, and
     /// counting it per target is how a starved pipeline stays invisible.

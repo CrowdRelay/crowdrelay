@@ -273,7 +273,24 @@ where
                         .repository
                         .load_outreach_snapshots(self.workspace_id, now)
                         .await?;
+                    // Shadow-mode reply probability model. Loaded once per
+                    // cycle, used to log a P(positive reply) prediction
+                    // alongside the existing relevance/confidence. This is
+                    // an additive, reversible advisory signal: it does NOT
+                    // change eligibility, ordering, disposition, or action.
+                    // A load failure or cold start produces the global prior
+                    // for every target, which is a no-op for ranking.
+                    let reply_model = self
+                        .repository
+                        .load_reply_model(self.workspace_id)
+                        .await
+                        .unwrap_or_default();
                     for snapshot in snapshots {
+                        // Extract target identifiers before the snapshot is
+                        // moved into outreach_candidate, so the shadow
+                        // prediction can use them.
+                        let kind_str = snapshot.target_kind.as_str();
+                        let target_id_str = snapshot.target_id.to_string();
                         // At most one open wave takes each pitch, and only
                         // while it still has room under the budget it was sized
                         // against. Everything else pitches exactly as before.
@@ -291,12 +308,33 @@ where
                                 wave.snapshot.pitches = wave.snapshot.pitches.saturating_add(1);
                                 wave.wave_id
                             });
-                        if let Some(candidate) =
+                        if let Some(mut candidate) =
                             outreach_candidate(snapshot, &policy, wave_id, now)?
                         {
+                            // Shadow prediction: log P(positive reply) alongside
+                            // the existing input_snapshot. This does NOT change
+                            // the candidate's confidence, disposition, action,
+                            // or decision_key — those are all derived from the
+                            // deterministic outreach evaluation, not from the
+                            // input_snapshot JSON.
+                            let shadow_pred = reply_model.predict(kind_str, &target_id_str);
+                            if let Some(obj) = candidate.input_snapshot.as_object_mut() {
+                                obj.insert(
+                                    "shadow_reply_prediction".to_owned(),
+                                    serde_json::to_value(&shadow_pred)
+                                        .unwrap_or(serde_json::Value::Null),
+                                );
+                            }
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
+                    // Save the reply model checkpoint for fast startup on
+                    // the next cycle. Best-effort: a failure just means the
+                    // next cycle rebuilds from full history.
+                    let _ = self
+                        .repository
+                        .save_reply_model(self.workspace_id, &reply_model)
+                        .await;
                     self.settle_outreach_waves(&waves, wave_policy, &mut report, now)
                         .await?;
                     self.follow_through_placements(&policy, &mut limits, &mut report, now)

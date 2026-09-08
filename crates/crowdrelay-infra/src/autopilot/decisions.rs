@@ -598,6 +598,21 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn load_reply_model(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crowdrelay_brain::ReplyProbabilityModel, RepositoryError> {
+        super::operations::reply_model::load_reply_model(self, workspace_id).await
+    }
+
+    async fn save_reply_model(
+        &self,
+        workspace_id: WorkspaceId,
+        model: &crowdrelay_brain::ReplyProbabilityModel,
+    ) -> Result<(), RepositoryError> {
+        super::operations::reply_model::save_reply_model(self, workspace_id, model).await
+    }
+
     async fn load_outreach_supply_snapshot(
         &self,
         workspace_id: WorkspaceId,

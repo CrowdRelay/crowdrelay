@@ -44,6 +44,7 @@ mod next_best_action;
 mod push_segments;
 pub(in crate::autopilot) mod reach;
 mod release_links;
+pub(in crate::autopilot) mod reply_model;
 mod reply_triage;
 mod show_growth;
 mod show_growth_execution;
