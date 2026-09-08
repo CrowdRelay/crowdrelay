@@ -125,6 +125,12 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     // `execution_status = executed` with "TOT is identified".
     let estimand = CausalEstimand::IntentToTreat;
 
+    // Counters for the replay summary — make a no-op replay visible.
+    let mut outcome_updates = 0u32;
+    let mut y14_treatment_updates = 0u32;
+    let mut y30_treatment_updates = 0u32;
+    let mut bridge_updates = 0u32;
+
     // Intent-to-treat compares the arms. The control rows in this batch are
     // that comparison, so they are gathered first and the treated rows are
     // measured against them.
@@ -198,6 +204,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             };
             let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
             model.update(&outcome);
+            outcome_updates += 1;
         }
 
         // Determine whether this evidence row contributes to the
@@ -274,6 +281,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                 obs_var,
                 earned_quality,
             );
+            y14_treatment_updates += 1;
             // Record Y14Bridged calibration with the actual measurement-
             // determined evidence quality, not a synthesized one.
             model.calibration.record_by_regime(
@@ -307,6 +315,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                 obs_var,
                 earned_quality,
             );
+            y30_treatment_updates += 1;
             // Y30Direct calibration — isolated from Y14Bridged and
             // OutcomeModel. A bad OutcomeModel calibration cannot distort
             // Y30Direct uncertainty. Uses the actual measurement-determined
@@ -342,8 +351,24 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             {
                 let paired_y14 = outcome_y14 - y14_contrast.unwrap_or(0.0);
                 model.update_bridge(paired_y14, y30_fans);
+                bridge_updates += 1;
             }
         }
+    }
+
+    // Summary: make a no-op replay visible. If evidence was non-empty but all
+    // counters are zero, the replay learned nothing and the bug is upstream
+    // (missing outcomes, parse failures, or all rows filtered by the estimand).
+    if !evidence.is_empty() {
+        tracing::info!(
+            evidence_rows = evidence.len(),
+            contrast_rows = extra_contrast.len(),
+            outcome_updates,
+            y14_treatment_updates,
+            y30_treatment_updates,
+            bridge_updates,
+            "evidence replay: posterior update summary"
+        );
     }
 }
 

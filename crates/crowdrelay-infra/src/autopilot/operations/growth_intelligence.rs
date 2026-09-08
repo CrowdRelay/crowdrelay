@@ -896,8 +896,11 @@ pub(in crate::autopilot) async fn load_causal_model(
                     PosteriorReplay::Delta,
                 )
                 .await;
-                tracing::debug!(
+                tracing::info!(
                     delta_evidence = delta.len(),
+                    contrast_evidence = contrast.len(),
+                    experiments = experiments.len(),
+                    checkpoint_time = %checkpoint_time,
                     "loaded causal model from checkpoint + delta"
                 );
                 let belief = BeliefStateOrigin::Checkpoint {

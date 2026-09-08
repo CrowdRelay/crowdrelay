@@ -53,10 +53,19 @@ pub(in crate::autopilot) async fn load_reply_model(
     let outcomes = load_outreach_reply_outcomes(repo, workspace_id, checkpoint_time).await?;
     if !outcomes.is_empty() {
         model.update_all(&outcomes);
-        tracing::debug!(
-            outcomes = outcomes.len(),
+        tracing::info!(
+            outcomes_loaded = outcomes.len(),
             cold_start = checkpoint_time.is_none(),
-            "updated reply model from outreach outcomes"
+            global_base_rate = model.global_base_rate(),
+            global_confidence = model.global_confidence(),
+            "reply model: updated from outreach outcomes"
+        );
+    } else {
+        tracing::info!(
+            cold_start = checkpoint_time.is_none(),
+            global_base_rate = model.global_base_rate(),
+            global_confidence = model.global_confidence(),
+            "reply model: no new outcomes loaded"
         );
     }
     Ok(model)

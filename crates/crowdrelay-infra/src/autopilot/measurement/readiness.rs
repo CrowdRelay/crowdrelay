@@ -104,7 +104,7 @@ pub(super) async fn refresh_evidence_readiness(
     action_id: AutopilotActionId,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
-    sqlx::query(
+    let evidence_result = sqlx::query(
         r#"
         UPDATE viryaos_growth_evidence AS evidence
         SET resolved_at = $3
@@ -154,6 +154,15 @@ pub(super) async fn refresh_evidence_readiness(
     .execute(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
+    let evidence_resolved = evidence_result.rows_affected();
+    if evidence_resolved > 0 {
+        tracing::info!(
+            workspace_id = %workspace_id.into_uuid(),
+            action_id = %action_id.into_uuid(),
+            rows = evidence_resolved,
+            "evidence readiness: resolved evidence row(s)"
+        );
+    }
     sqlx::query(
         r#"
         UPDATE viryaos_dispatch_predictions AS prediction

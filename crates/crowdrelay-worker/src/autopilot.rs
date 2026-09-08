@@ -384,6 +384,9 @@ impl AutopilotWorker {
             .await
         {
             Ok(measurements) => {
+                let claimed = measurements.len();
+                let mut succeeded = 0u32;
+                let mut failed = 0u32;
                 for measurement in measurements {
                     let observed_at = OffsetDateTime::now_utc();
                     let result = async {
@@ -405,27 +408,39 @@ impl AutopilotWorker {
                     }
                     .await;
 
-                    if let Err(error) = result {
-                        phase_failed = true;
-                        let error_kind = repository_error_kind(error);
-                        let retryable = repository_error_retryable(error);
-                        tracing::warn!(
-                            measurement_id = %measurement.id,
-                            measurement_kind = measurement.kind.as_str(),
-                            error_kind,
-                            "ViryaOS Autopilot delayed effect measurement failed"
-                        );
-                        let _ = self
-                            .repository
-                            .fail_measurement(
-                                self.workspace_id,
-                                measurement.id,
+                    match result {
+                        Ok(()) => succeeded += 1,
+                        Err(error) => {
+                            failed += 1;
+                            phase_failed = true;
+                            let error_kind = repository_error_kind(error);
+                            let retryable = repository_error_retryable(error);
+                            tracing::warn!(
+                                measurement_id = %measurement.id,
+                                measurement_kind = measurement.kind.as_str(),
                                 error_kind,
-                                retryable,
-                                OffsetDateTime::now_utc(),
-                            )
-                            .await;
+                                "ViryaOS Autopilot delayed effect measurement failed"
+                            );
+                            let _ = self
+                                .repository
+                                .fail_measurement(
+                                    self.workspace_id,
+                                    measurement.id,
+                                    error_kind,
+                                    retryable,
+                                    OffsetDateTime::now_utc(),
+                                )
+                                .await;
+                        }
                     }
+                }
+                if claimed > 0 {
+                    tracing::info!(
+                        claimed,
+                        succeeded,
+                        failed,
+                        "ViryaOS Autopilot measurement phase completed"
+                    );
                 }
             }
             Err(error) => {
