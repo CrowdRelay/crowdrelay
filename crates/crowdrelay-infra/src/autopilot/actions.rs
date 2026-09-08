@@ -305,7 +305,12 @@ impl PostgresAutopilotRepository {
                       AND status = 'processing'
                       AND ($3::text IS NULL OR action_kind = $3)
                       AND ($4::text IS NULL OR action_kind <> $4)
-                      AND started_at <= $2 - INTERVAL '15 minutes'
+                      AND (
+                          (action_kind = 'agent.run.request'
+                           AND started_at <= $2 - INTERVAL '2 hours')
+                          OR (action_kind <> 'agent.run.request'
+                              AND started_at <= $2 - INTERVAL '15 minutes')
+                      )
                       AND attempt_count >= 5
                     RETURNING id, attempt_count
                 )
@@ -329,6 +334,14 @@ impl PostgresAutopilotRepository {
             // advertises is an operator's decision, and claiming the action
             // anyway would spend one of its five attempts on a state that no
             // amount of retrying changes.
+            //
+            // Agent-run actions get a 2-hour stale threshold instead of 15
+            // minutes. These are dispatched to the agent service (a separate
+            // TS process) which may take 30+ minutes to scan multiple
+            // channels. The 15-min threshold re-claims the action while the
+            // agent service is still working, incrementing `attempt_count`
+            // and eventually reaping the action as `failed` even though the
+            // agent service is still running.
             let candidates = sqlx::query_as::<_, ClaimedActionRow>(
                 r#"
                 SELECT id, payload, attempt_count AS attempt_number
@@ -341,7 +354,12 @@ impl PostgresAutopilotRepository {
                       (status = 'queued' AND available_at <= $2)
                       OR (
                           status = 'processing'
-                          AND started_at <= $2 - INTERVAL '15 minutes'
+                          AND (
+                              (action_kind = 'agent.run.request'
+                               AND started_at <= $2 - INTERVAL '2 hours')
+                              OR (action_kind <> 'agent.run.request'
+                                  AND started_at <= $2 - INTERVAL '15 minutes')
+                          )
                       )
                   )
                 ORDER BY available_at, id
