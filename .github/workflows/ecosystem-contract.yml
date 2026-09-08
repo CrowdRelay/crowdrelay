@@ -30,7 +30,7 @@ concurrency:
 jobs:
   public-consumers:
     name: Signal + Synesthesia compatibility
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 10
     steps:
       - name: Check out CrowdRelay under canonical ecosystem layout
@@ -76,7 +76,7 @@ jobs:
   # still have their polling upstream-contract workflows as a fallback.
   propagate:
     name: Notify downstream repos
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 5
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: public-consumers

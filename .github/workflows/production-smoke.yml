@@ -14,7 +14,7 @@ jobs:
   smoke:
     name: External ecosystem smoke
     if: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL != '' && vars.VIRYA_PRODUCTION_BASE_URL != '' }}
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 8
     env:
       CROWDRELAY_BASE_URL: ${{ vars.CROWDRELAY_PRODUCTION_BASE_URL }}

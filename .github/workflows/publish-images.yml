@@ -138,7 +138,7 @@ jobs:
   merge:
     needs: build
     name: Merge release manifests
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 15
     permissions:
       contents: read

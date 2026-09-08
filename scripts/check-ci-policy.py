@@ -66,7 +66,7 @@ else:
         failures.append(".github/workflows/ci.yml: containers job is required")
     else:
         containers_text = ci_text.split(containers_marker, 1)[1]
-        if "runs-on: ubuntu-24.04-arm" not in containers_text:
+        if "[self-hosted, arm64]" not in containers_text:
             failures.append(
                 ".github/workflows/ci.yml: container gate must run natively on arm64"
             )

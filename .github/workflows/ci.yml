@@ -23,7 +23,7 @@ jobs:
   # checks" to the summary job); execution itself is fully parallel.
   rust-tests:
     name: Unit tests and contracts
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 40
 
     env:
@@ -156,7 +156,7 @@ jobs:
 
   rust-checks:
     name: Format and lint
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 20
 
     steps:
@@ -181,7 +181,7 @@ jobs:
 
   rust-postgres:
     name: PostgreSQL integration
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 40
 
     services:
@@ -333,7 +333,7 @@ jobs:
 
   deploy-config:
     name: Compose and bake validation
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 15
 
     steps:
@@ -464,7 +464,7 @@ jobs:
     name: All checks passed
     needs: [rust-tests, rust-checks, rust-postgres, deploy-config, dependency-security, containers]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 5
     steps:
       - name: Aggregate job results

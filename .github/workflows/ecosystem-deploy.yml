@@ -30,7 +30,7 @@ concurrency:
 jobs:
   deploy:
     name: Ecosystem blue-green deploy
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, arm64]
     timeout-minutes: 60
     environment:
       name: production

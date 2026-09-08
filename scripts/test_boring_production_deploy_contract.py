@@ -98,8 +98,7 @@ class BoringProductionDeployContract(unittest.TestCase):
         # carries that platform and merges it into the manifest list the
         # deploy tag resolves to. amd64 was dropped to stay within
         # private-repo Actions minute limits.
-        # The build job uses self-hosted arm64 runners; the merge job
-        # uses ubuntu-24.04 (GitHub-hosted, for manifest merging only).
+        # The build and merge jobs both use the self-hosted arm64 runner.
         self.assertIn("[self-hosted, arm64]", PUBLISH)
         self.assertIn("imagetools create", PUBLISH)
         # Native runners only: emulating the Rust release build costs hours.
