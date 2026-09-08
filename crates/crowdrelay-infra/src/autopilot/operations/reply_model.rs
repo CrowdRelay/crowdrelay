@@ -160,6 +160,7 @@ pub(in crate::autopilot) async fn load_outreach_reply_outcomes(
         SELECT target_kind, target_id, disposition
         FROM observed
         WHERE $2::timestamptz IS NULL OR observed_at > $2
+        ORDER BY observed_at
         "#,
     )
     .bind(workspace_id.into_uuid())

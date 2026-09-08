@@ -218,7 +218,7 @@ async fn c_positive_reply_moves_posterior_above_prior() {
         responsive,
         f.now - time::Duration::days(30),
         "positive",
-        "wave-responsive",
+        "wave-responsive-reply",
     )
     .await;
 

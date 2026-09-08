@@ -163,7 +163,7 @@ pub(super) async fn refresh_evidence_readiness(
             "evidence readiness: resolved evidence row(s)"
         );
     }
-    sqlx::query(
+    let prediction_result = sqlx::query(
         r#"
         UPDATE viryaos_dispatch_predictions AS prediction
         SET resolved_at = $3
@@ -185,6 +185,14 @@ pub(super) async fn refresh_evidence_readiness(
     .execute(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
+    if prediction_result.rows_affected() > 0 {
+        tracing::info!(
+            workspace_id = %workspace_id.into_uuid(),
+            action_id = %action_id.into_uuid(),
+            rows = prediction_result.rows_affected(),
+            "evidence readiness: resolved dispatch prediction row(s)"
+        );
+    }
     Ok(())
 }
 
