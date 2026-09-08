@@ -425,6 +425,14 @@ impl RedditDiscoveryWorker {
                 // a scrape trigger or falling back to a likely-403 direct path.
                 return Err(DiscoveryError::Status(status));
             }
+            if status == 401 || status == 403 {
+                // Auth failure — the token is wrong or the agents service
+                // rejected it. Do not treat as "no results yet" and do not
+                // fall back to direct Reddit. Propagate as an error so the
+                // caller skips this query.
+                tracing::warn!(status, body = %body, "agents scrape-results auth rejected");
+                return Err(DiscoveryError::Status(status));
+            }
             // 404 or other 4xx — no results for this query yet.
             tracing::warn!(status, body = %body, "agents scrape-results read failed");
             return Ok(None);
@@ -434,14 +442,17 @@ impl RedditDiscoveryWorker {
     }
 
     /// Asks the agents service to scrape this query through its logged-in
-    /// browser. Returns false when the scrape could not run (service down,
-    /// no credentials) — the caller then falls back to the direct path.
+    /// browser. Returns `Err` when the service is unreachable (network error)
+    /// so the caller does NOT fall back to the direct-Reddit path — an
+    /// unauthenticated request that Reddit 403s. Returns `Ok(false)` when
+    /// the service rejected the request (e.g. 401/403/429), which is a
+    /// transient state the caller can retry on the next sweep.
     async fn trigger_agents_scrape(
         &self,
         client: &reqwest::Client,
         auth_key: &str,
         query: &str,
-    ) -> bool {
+    ) -> Result<bool, DiscoveryError> {
         let ws = self.workspace_id.into_uuid();
         let url = format!("{}/reddit/scrape", self.agent_service_url);
         let payload = serde_json::json!({
@@ -460,16 +471,16 @@ impl RedditDiscoveryWorker {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(error = %error, "agents scrape trigger failed");
-                return false;
+                return Err(DiscoveryError::Network(error));
             }
         };
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(status = status.as_u16(), body = %body, "agents scrape trigger rejected");
-            return false;
+            return Ok(false);
         }
-        true
+        Ok(true)
     }
 
     /// Subreddit search through the agents service: read stored browser
@@ -493,8 +504,17 @@ impl RedditDiscoveryWorker {
             Ok(Some(rows)) if !rows.is_empty() => rows,
             Ok(_) => {
                 // Nothing stored yet — scrape this query through the browser.
-                if !self.trigger_agents_scrape(client, &token, query).await {
-                    return Ok(None);
+                match self.trigger_agents_scrape(client, &token, query).await {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(None),
+                    Err(error) => {
+                        // Agents service unreachable — do NOT fall back to
+                        // the direct Reddit path (it 403s unauthenticated
+                        // requests). Propagate the error so the caller skips
+                        // this query and retries on the next sweep.
+                        tracing::warn!(error = %error, "agents scrape trigger failed, skipping query");
+                        return Err(error);
+                    }
                 }
                 match self.fetch_scrape_results(client, &token, query).await {
                     Ok(Some(rows)) if !rows.is_empty() => rows,

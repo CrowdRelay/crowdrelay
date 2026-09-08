@@ -151,10 +151,20 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             // resolves the control arm also carries it. Averaging it in twice
             // would not change the mean, but it would change the count, so
             // keep the identity check rather than relying on that.
-            extra.experiment_assignment_id.is_none()
-                || !evidence
+            //
+            // When `experiment_assignment_id` is `None` (legacy rows), the
+            // identity check falls back to `action_id` to avoid double-counting
+            // the same row. Two rows with `None` assignment IDs and the same
+            // action_id are the same row.
+            if extra.experiment_assignment_id.is_some() {
+                !evidence
                     .iter()
                     .any(|seen| seen.experiment_assignment_id == extra.experiment_assignment_id)
+            } else {
+                !evidence.iter().any(|seen| {
+                    seen.experiment_assignment_id.is_none() && seen.action_id == extra.action_id
+                })
+            }
         })));
 
     for ev in evidence {

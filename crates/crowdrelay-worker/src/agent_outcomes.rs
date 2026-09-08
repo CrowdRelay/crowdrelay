@@ -203,9 +203,14 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
                 return Err(OutcomeRejection::MissingTargetIdentity);
             }
             let evidence = item.get("evidence_urls").cloned().unwrap_or(json!([]));
-            let has_evidence = evidence
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| !item.is_null()));
+            let has_evidence = evidence.as_array().is_some_and(|items| {
+                items.iter().any(|item| {
+                    // Evidence must be a non-empty string — not just a
+                    // non-null JSON value. A fabricated number or boolean
+                    // must not count as evidence.
+                    item.as_str().is_some_and(|s| !s.trim().is_empty())
+                })
+            });
             if !has_evidence {
                 return Err(OutcomeRejection::InsufficientEvidence {
                     reason: "no evidence URLs provided".to_owned(),
@@ -254,9 +259,11 @@ fn community_snapshot(
     evidence: &Value,
     place: Option<&CommunityPlace>,
 ) -> CommunityCandidateSnapshot {
-    let has_evidence = evidence
-        .as_array()
-        .is_some_and(|items| items.iter().any(|item| !item.is_null()));
+    let has_evidence = evidence.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|s| !s.trim().is_empty()))
+    });
     let mut snapshot = CommunityCandidateSnapshot {
         has_evidence,
         ..CommunityCandidateSnapshot::default()
