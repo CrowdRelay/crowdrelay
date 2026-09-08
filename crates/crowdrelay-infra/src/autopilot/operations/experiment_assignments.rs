@@ -786,6 +786,58 @@ pub(in crate::autopilot) async fn resolve_control_evidence(
     Ok(())
 }
 
+/// Marks experiment designs as `completed` once every assignment has
+/// resolved evidence and the measurement window has fully elapsed.
+///
+/// A design is eligible for closure when:
+/// - Its status is `active` or `insufficient_power` (not already `completed`).
+/// - The measurement window (44 days from `designed_at`) has elapsed.
+/// - No assignment in the design has unresolved evidence.
+///
+/// This is a lifecycle signal, not a correctness gate — the learner
+/// already skips unresolved evidence. Without it, designs accumulate
+/// as `active` indefinitely and there is no explicit signal that a
+/// design is closed.
+pub(in crate::autopilot) async fn close_completed_experiments(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    now: time::OffsetDateTime,
+) -> Result<u64, RepositoryError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE viryaos_experiment_designs AS design
+        SET experiment_status = 'completed'
+        WHERE design.workspace_id = $1
+          AND design.experiment_status IN ('active', 'insufficient_power')
+          AND design.designed_at + INTERVAL '44 days' <= $2
+          AND NOT EXISTS (
+              SELECT 1
+              FROM viryaos_experiment_assignments AS assignment
+              JOIN viryaos_growth_evidence AS evidence
+                ON evidence.workspace_id = assignment.workspace_id
+               AND evidence.experiment_assignment_id = assignment.id
+              WHERE assignment.workspace_id = design.workspace_id
+                AND assignment.experiment_uuid = design.experiment_uuid
+                AND evidence.resolved_at IS NULL
+          )
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let closed = result.rows_affected();
+    if closed > 0 {
+        tracing::info!(
+            workspace_id = %workspace_id.into_uuid(),
+            designs_closed = closed,
+            "experiment lifecycle: closed completed experiment design(s)"
+        );
+    }
+    Ok(closed)
+}
+
 /// Records a fan provenance event — an append-only exposure/
 /// interaction/conversion/durability event.
 ///

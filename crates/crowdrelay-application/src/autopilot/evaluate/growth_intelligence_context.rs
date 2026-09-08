@@ -387,7 +387,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         crowdrelay_brain::TreatmentAssignment::Control,
                         prediction,
                         None,
-                    );
+                    )
+                    .with_assigned_at(now);
                     match self
                         .repository
                         .record_experiment_assignment(
@@ -540,7 +541,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             crowdrelay_brain::TreatmentAssignment::Treatment,
                             prediction,
                             None,
-                        );
+                        )
+                        .with_assigned_at(now);
                     let mut candidate = candidate.clone();
                     attach_decision_provenance(&mut candidate, &decision_provenance);
                     let persisted = match self
@@ -619,7 +621,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             crowdrelay_brain::TreatmentAssignment::Treatment,
                             prediction,
                             None, // action_id=None — not dispatched
-                        );
+                        )
+                        .with_assigned_at(now);
                     match self
                         .repository
                         .record_experiment_assignment(

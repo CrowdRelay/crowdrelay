@@ -1045,6 +1045,16 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             refresh_evidence_readiness(&mut transaction, workspace_id, measurement.action_id, now)
                 .await?;
             transaction.commit().await.map_err(map_sqlx)?;
+            // Close any experiment designs whose measurement windows have
+            // elapsed and whose evidence is fully resolved. This is the
+            // lifecycle signal that a design is done — without it, designs
+            // accumulate as `active` indefinitely.
+            super::operations::experiment_assignments::close_completed_experiments(
+                &self.pool,
+                workspace_id,
+                now,
+            )
+            .await?;
             Ok(())
         })
         .await

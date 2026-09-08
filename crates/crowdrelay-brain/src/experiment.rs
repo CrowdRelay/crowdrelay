@@ -771,7 +771,16 @@ impl ExperimentAssignment {
             unit_kind: design.unit_kind,
             arm,
             assigned_at: design.assigned_at,
-            propensity: 1.0 - design.holdout_probability,
+            // Propensity is the probability of being assigned to the arm this
+            // unit actually received. For treatment, that is 1 - holdout. For
+            // control, it is the holdout itself. Using the same value for both
+            // arms would make the control arm's propensity wrong — it would
+            // record "probability of treatment" for a unit that was not
+            // treated, corrupting inverse-probability weighting.
+            propensity: match arm {
+                TreatmentAssignment::Treatment => 1.0 - design.holdout_probability,
+                TreatmentAssignment::Control => design.holdout_probability,
+            },
             // P1-c: Preserve the design's holdout as the intended policy.
             // The caller may zero design.holdout_probability for insufficient
             // power AFTER calling from_design, which changes the realized
@@ -790,6 +799,25 @@ impl ExperimentAssignment {
             experiment_status: design.experiment_status,
             execution_status,
         }
+    }
+
+    /// Returns a copy of this assignment with `assigned_at` set to the actual
+    /// dispatch time.
+    ///
+    /// `from_design` inherits `design.assigned_at` (the design creation
+    /// timestamp) because the design is created before any unit is assigned.
+    /// But the actual assignment happens later — when the evaluator decides
+    /// to dispatch or withhold. Using the design timestamp as `assigned_at`
+    /// skews the measurement window: the 44-day control-evidence horizon
+    /// starts ticking from design creation, not from when the unit was
+    /// actually assigned.
+    ///
+    /// This method corrects that by stamping the real dispatch time. It
+    /// must be called in the production path after `from_design`.
+    #[must_use]
+    pub fn with_assigned_at(mut self, now: time::OffsetDateTime) -> Self {
+        self.assigned_at = now;
+        self
     }
 }
 
@@ -1296,9 +1324,11 @@ mod tests {
         assert_ne!(treatment.arm, control.arm);
         // Same interference policy (derived from the same intervention).
         assert_eq!(treatment.interference_policy, control.interference_policy);
-        // Propensity is the same (1 - holdout_probability).
-        assert!((treatment.propensity - control.propensity).abs() < 1e-10);
+        // Propensity is arm-specific: treatment gets 1 - holdout, control
+        // gets holdout. Using the same value for both would corrupt
+        // inverse-probability weighting.
         assert!((treatment.propensity - 0.95).abs() < 1e-10);
+        assert!((control.propensity - 0.05).abs() < 1e-10);
     }
 
     #[test]

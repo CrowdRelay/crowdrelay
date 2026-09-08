@@ -761,8 +761,10 @@ fn m_same_experiment_both_arms() {
     assert!(control.action_id.is_none());
     assert!(treatment2.action_id.is_some());
 
-    // Same propensity (1 - holdout_probability).
-    assert!((treatment.propensity - control.propensity).abs() < 1e-10);
+    // Propensity is arm-specific: treatment gets 1 - holdout, control
+    // gets holdout.
+    assert!((treatment.propensity - (1.0 - 0.05)).abs() < 1e-10);
+    assert!((control.propensity - 0.05).abs() < 1e-10);
 }
 
 // ── N: Same unit across rounds ──
