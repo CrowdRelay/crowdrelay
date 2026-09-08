@@ -54,8 +54,8 @@ class DeployRuntimePermissionsContract(unittest.TestCase):
 
     def test_fcm_mount_is_install_dir_agnostic_and_preflighted(self):
         compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
-        self.assertIn("${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./deploy/secrets/firebase-service-account.json}", compose)
-        self.assertNotIn("/opt/crowdrelay/deploy/secrets/firebase-service-account.json", compose)
+        self.assertIn("${CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE:-./secrets/virya-signal-firebase-service-account.json}", compose)
+        self.assertNotIn("/opt/crowdrelay/secrets/virya-signal-firebase-service-account.json", compose)
         compose_fn = CTL[CTL.index("compose() {"):CTL.index("\nruntime_owner_uid()")]
         self.assertIn("CROWDRELAY_FCM_SERVICE_ACCOUNT_HOST_FILE", compose_fn)
         deploy = CTL[CTL.index("deploy() {"):CTL.index("\npackage_deploy()")]

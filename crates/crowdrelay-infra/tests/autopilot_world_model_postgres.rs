@@ -106,7 +106,6 @@ async fn connected_platforms_reach_the_brain_as_audience_and_north_star()
             .fetch_one(&pool)
             .await?;
     let before_month = month_start - time::Duration::days(2);
-    let in_month = month_start + time::Duration::hours(1);
 
     // YouTube: 1000 at the month boundary, 1100 now. North star +100.
     seed_series(
@@ -124,12 +123,17 @@ async fn connected_platforms_reach_the_brain_as_audience_and_north_star()
     // Bandcamp: first observed *this* month at 250. Its whole audience must
     // not be reported as won this month — its own first reading is the
     // baseline, so it contributes 0 growth, not 250.
+    //
+    // The timestamp must be within the 7-day freshness window (now - 7 days)
+    // AND within this month. Using `in_month` (month_start + 1h) breaks near
+    // the end of the first week of the month, when `now - 7 days` lands after
+    // `month_start + 1h` and Bandcamp silently drops from `fresh_platforms`.
     seed_series(
         &pool,
         workspace_id,
         "bandcamp",
         "supporters",
-        &[(in_month, 250)],
+        &[(now - time::Duration::hours(2), 250)],
     )
     .await?;
 
