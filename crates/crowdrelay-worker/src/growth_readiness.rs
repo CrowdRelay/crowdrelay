@@ -191,6 +191,278 @@ impl GrowthReadiness {
     }
 }
 
+// ── Growth readiness health: producing evidence in last 24h ────────────
+
+/// Evidence of recent activity for each fan-growth component. "Active" means
+/// the component is wired; "producing" means it actually did something in the
+/// last 24 hours. A component that is active but not producing is the gap
+/// between "the system is configured" and "the system is growing fans" —
+/// which is the gap this struct exists to surface.
+///
+/// Each field is `true` if the component produced evidence in the last 24h,
+/// `false` if it did not, and the query is best-effort: a database error
+/// leaves the field `false` rather than panicking, because the boot log is
+/// not the place to fail.
+pub struct GrowthReadinessHealth {
+    /// Did the autopilot run a cycle in the last 24h?
+    pub autopilot_producing: bool,
+    /// Were any agent outcomes consumed in the last 24h?
+    pub agent_outcomes_producing: bool,
+    /// Were any push deliveries sent in the last 24h?
+    pub push_delivery_producing: bool,
+    /// Were any community posts posted in the last 24h?
+    pub community_executor_producing: bool,
+    /// Were any Telegram posts sent in the last 24h?
+    pub telegram_executor_producing: bool,
+    /// Were any Discord posts sent in the last 24h?
+    pub discord_executor_producing: bool,
+    /// Were any social posts drafted in the last 24h?
+    pub social_post_executor_producing: bool,
+    /// Were any community joins attempted in the last 24h?
+    pub community_join_executor_producing: bool,
+    /// Were any Reddit discovery runs completed in the last 24h?
+    pub reddit_discovery_producing: bool,
+    /// Were any X discovery runs completed in the last 24h?
+    pub x_discovery_producing: bool,
+    /// Were any ad conversion events recorded in the last 24h?
+    pub ad_conversion_producing: bool,
+    /// Were any random draws executed in the last 24h?
+    pub random_draws_producing: bool,
+}
+
+impl GrowthReadinessHealth {
+    /// Queries the database for evidence of recent activity (last 24h) for
+    /// each fan-growth component. Best-effort: a query failure for any
+    /// component leaves it `false`, because the boot log is not the place
+    /// to fail.
+    ///
+    /// Each query is a cheap `SELECT EXISTS(...)` with a time filter on an
+    /// indexed column. The total cost is 12 cheap queries, run once at boot.
+    pub async fn query(pool: &sqlx::PgPool) -> Self {
+        let cutoff = time::OffsetDateTime::now_utc() - time::Duration::hours(24);
+
+        // Each query is independent — a failure in one does not affect the
+        // others. The `unwrap_or(false)` ensures a query error is logged by
+        // sqlx but does not propagate.
+        let autopilot_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM viryaos_autopilot_cycle_runs WHERE started_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let agent_outcomes_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM agent_outcomes WHERE created_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let push_delivery_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM fan_push_deliveries WHERE created_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let community_executor_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM community_posts WHERE posted_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let telegram_executor_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM telegram_posts WHERE posted_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let discord_executor_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM discord_posts WHERE posted_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let social_post_executor_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM social_posts WHERE status IN ('posting', 'posted') AND created_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let community_join_executor_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM discovery_places WHERE status = 'active' AND updated_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let reddit_discovery_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM discovery_places WHERE place_kind = 'subreddit' AND created_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let x_discovery_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM discovery_places WHERE place_kind IN ('instagram', 'tiktok', 'youtube') AND created_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let ad_conversion_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM ad_conversion_deliveries WHERE sent_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        let random_draws_producing = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM reward_draws WHERE created_at >= $1)",
+        )
+        .bind(cutoff)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        Self {
+            autopilot_producing,
+            agent_outcomes_producing,
+            push_delivery_producing,
+            community_executor_producing,
+            telegram_executor_producing,
+            discord_executor_producing,
+            social_post_executor_producing,
+            community_join_executor_producing,
+            reddit_discovery_producing,
+            x_discovery_producing,
+            ad_conversion_producing,
+            random_draws_producing,
+        }
+    }
+
+    /// Returns the producing components as (name, producing) pairs, in a
+    /// stable order matching `GrowthReadiness::components()`.
+    #[must_use]
+    pub fn producing_components(&self) -> [(&'static str, bool); 12] {
+        let Self {
+            autopilot_producing,
+            agent_outcomes_producing,
+            push_delivery_producing,
+            community_executor_producing,
+            telegram_executor_producing,
+            discord_executor_producing,
+            social_post_executor_producing,
+            community_join_executor_producing,
+            reddit_discovery_producing,
+            x_discovery_producing,
+            ad_conversion_producing,
+            random_draws_producing,
+        } = *self;
+        [
+            ("autopilot", autopilot_producing),
+            ("agent_outcomes", agent_outcomes_producing),
+            ("push_delivery", push_delivery_producing),
+            ("community_executor", community_executor_producing),
+            ("telegram_executor", telegram_executor_producing),
+            ("discord_executor", discord_executor_producing),
+            ("social_post_executor", social_post_executor_producing),
+            ("community_join_executor", community_join_executor_producing),
+            ("reddit_discovery", reddit_discovery_producing),
+            ("x_discovery", x_discovery_producing),
+            ("ad_conversion", ad_conversion_producing),
+            ("random_draws", random_draws_producing),
+        ]
+    }
+
+    /// Names of the components that are NOT producing evidence, in order.
+    #[must_use]
+    pub fn not_producing(&self) -> Vec<&'static str> {
+        self.producing_components()
+            .into_iter()
+            .filter_map(|(name, producing)| (!producing).then_some(name))
+            .collect()
+    }
+
+    /// Logs a structured growth readiness health summary. This complements
+    /// `GrowthReadiness::log` — that one says what's *configured*, this one
+    /// says what's *actually producing*. A component that is active but
+    /// not producing is the silent gap between configuration and growth.
+    pub fn log(&self) {
+        let components = self.producing_components();
+        let total = components.len();
+        let producing = components.iter().filter(|(_, value)| *value).count();
+        let not_producing = self.not_producing().join(",");
+
+        tracing::info!(
+            producing_components = producing,
+            total_components = total,
+            not_producing = %not_producing,
+            "growth health: {producing}/{total} fan-growth components produced evidence in last 24h",
+        );
+
+        if !self.autopilot_producing {
+            tracing::warn!(
+                "growth health: autopilot has NOT run a cycle in 24h — the brain is not making decisions"
+            );
+        }
+        if !self.agent_outcomes_producing {
+            tracing::warn!(
+                "growth health: no agent outcomes in 24h — LLM workers are not feeding intelligence to the brain"
+            );
+        }
+        if !self.community_executor_producing {
+            tracing::warn!(
+                "growth health: no community posts in 24h — community engagement is not reaching platforms"
+            );
+        }
+        if !self.reddit_discovery_producing {
+            tracing::warn!(
+                "growth health: no reddit discovery outcomes in 24h — the brain is not finding new communities"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

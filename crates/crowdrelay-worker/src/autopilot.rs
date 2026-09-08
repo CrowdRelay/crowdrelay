@@ -154,6 +154,7 @@ impl AutopilotWorker {
         // measurements. The flag lives on the growth envelope row, set by the
         // Control Plane on park and cleared on resume. A read failure must not
         // gate the cycle: the agent stays live if the park check itself breaks.
+        let mut park_check_failed = false;
         let parked = match AutopilotDecisionRepository::load_growth_envelope(
             &self.repository,
             self.workspace_id,
@@ -163,8 +164,12 @@ impl AutopilotWorker {
         {
             Ok((envelope, _)) => envelope.parked,
             Err(error) => {
-                tracing::warn!(error = %error, "park check failed; cycle continues");
-                false
+                // Fail closed: if we cannot determine the park state, treat
+                // the tenant as parked so autonomous actions are not taken
+                // while an operator may believe growth is paused.
+                tracing::warn!(error = %error, "park check failed; treating tenant as parked (fail closed)");
+                park_check_failed = true;
+                true
             }
         };
         if parked {
@@ -181,7 +186,7 @@ impl AutopilotWorker {
                     self.repository.pool(),
                     self.workspace_id,
                     cycle_id,
-                    false,
+                    park_check_failed,
                     OffsetDateTime::now_utc(),
                     None,
                 )
@@ -365,7 +370,15 @@ impl AutopilotWorker {
                                 retryable,
                                 OffsetDateTime::now_utc(),
                             )
-                            .await;
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    action_id = %action.id,
+                                    error = %e,
+                                    "failed to mark ViryaOS action as failed — action may remain in-flight"
+                                );
+                            })
+                            .ok();
                     }
                 }
             }
@@ -430,7 +443,15 @@ impl AutopilotWorker {
                                     retryable,
                                     OffsetDateTime::now_utc(),
                                 )
-                                .await;
+                                .await
+                                .inspect_err(|e| {
+                                    tracing::error!(
+                                        measurement_id = %measurement.id,
+                                        error = %e,
+                                        "failed to mark ViryaOS measurement as failed — measurement may remain in-flight"
+                                    );
+                                })
+                                .ok();
                         }
                     }
                 }
@@ -499,7 +520,15 @@ impl AutopilotWorker {
                                 retryable,
                                 OffsetDateTime::now_utc(),
                             )
-                            .await;
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    play_id = %outcome.play_id,
+                                    error = %e,
+                                    "failed to mark ViryaOS play outcome as failed — outcome may remain in-flight"
+                                );
+                            })
+                            .ok();
                     }
                 }
             }
@@ -557,7 +586,15 @@ impl AutopilotWorker {
                                 retryable,
                                 OffsetDateTime::now_utc(),
                             )
-                            .await;
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    wave_id = %outcome.wave_id,
+                                    error = %e,
+                                    "failed to mark ViryaOS wave outcome as failed — outcome may remain in-flight"
+                                );
+                            })
+                            .ok();
                     }
                 }
             }
@@ -733,7 +770,15 @@ impl TeamEmailDispatchWorker {
                                 retryable,
                                 OffsetDateTime::now_utc(),
                             )
-                            .await;
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    action_id = %action.id,
+                                    error = %e,
+                                    "failed to mark ViryaOS team-email action as failed — action may remain in-flight"
+                                );
+                            })
+                            .ok();
                     }
                 }
             }

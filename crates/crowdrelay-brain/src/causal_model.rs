@@ -68,6 +68,13 @@ pub struct DispatchContext {
     /// How novel this dispatch context is compared to past dispatches
     /// (0–10_000). Higher = more novel.
     pub community_novelty_bps: u16,
+    /// Average upvote ratio across active communities (0–10_000 basis points).
+    /// When high, community-engager dispatches are more likely to produce
+    /// fan growth; when low, they are less likely. The causal model learns
+    /// from this as a context feature, and the EFE scorer applies it as a
+    /// multiplier on expected_fans for community-engager templates.
+    #[serde(default)]
+    pub avg_community_engagement_bps: u16,
 }
 
 /// The brain's prediction before a dispatch. Records what the brain

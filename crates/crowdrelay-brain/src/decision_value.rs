@@ -63,8 +63,8 @@ use crate::resource_cost::ResourceCost;
 /// What is true: [`DecisionValue::total`] is `pragmatic_value + risk_penalty +
 /// opportunity_cost`, `risk_penalty` is `None`, and `opportunity_cost` is set
 /// by the optimizer — so **intrinsic** value is the posterior mean alone, and
-/// `uncertainty`, `evidence_quality`, `sample_size`, `contamination` and
-/// `calibration_bias` do not enter it.
+/// `uncertainty`, `evidence_quality`, `sample_size` and `contamination` do
+/// not enter it.
 ///
 /// But `bridge_is_reliable` is read, one layer out.
 /// [`crate::portfolio::PortfolioOptimizer`] multiplies a `Y14Bridged`
@@ -166,26 +166,6 @@ pub struct DecisionValue {
     /// contamination downgrades evidence quality.
     #[serde(default)]
     pub contamination: f64,
-    /// Calibration bias for this template — the running mean of
-    /// (predicted - observed) Y30. Positive = overestimating,
-    /// negative = underestimating.
-    ///
-    /// **Always 0.0.** There is no producer: `from_stats` writes zero, the
-    /// setter that used to write it is gone, and the port method behind it —
-    /// `load_calibration_bias` — was a stub that returned 0.0 regardless of
-    /// workspace or template while sitting on the trait as though it were a
-    /// capability. It is deleted rather than left, because the trap is
-    /// specific: the next caller wires it up, gets 0.0 everywhere, and
-    /// concludes the brain is perfectly calibrated.
-    ///
-    /// Calibration itself is not dead. `CalibrationTracker` records residuals
-    /// per regime and `correct_prediction_by_regime` shifts the outcome model's
-    /// prediction with them — upstream of any value, which is where a
-    /// correction belongs. This field is the *provenance* copy, and it is not
-    /// wired. It must never become an additive term: see
-    /// `prediction_error_does_not_change_the_economic_value`.
-    #[serde(default)]
-    pub calibration_bias: f64,
 
     // ── Resource economics ──
     /// The resource cost of this candidate.
@@ -304,13 +284,7 @@ impl DecisionValue {
             uses_y30: stats.uses_y30,
             bridge_confidence: stats.bridge_confidence,
             bridge_is_reliable: stats.bridge_is_reliable,
-            // Still zero, and "Step 7" has not happened: `load_calibration_bias`
-            // is implemented in infra, declared on the port and called by
-            // nobody. Populating them would change no decision — neither
-            // enters `total()` — so the honest state is zero and a note,
-            // rather than a value that looks consulted.
             contamination: 0.0,
-            calibration_bias: 0.0,
             resource_cost,
             pragmatic_value: expected_y30,
             risk_penalty: None,    // Phase 1: NotModeled. NOT "risk = 0".
@@ -368,7 +342,6 @@ mod tests {
             bridge_confidence: 5,
             bridge_is_reliable: false,
             contamination: 0.0,
-            calibration_bias: 0.0,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.2),
@@ -392,7 +365,6 @@ mod tests {
             bridge_confidence: 5,
             bridge_is_reliable: false,
             contamination: 0.0,
-            calibration_bias: 0.0,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: 5.0,
             risk_penalty: None, // NotModeled
@@ -477,16 +449,21 @@ mod tests {
     /// model's* prediction with it. That is calibration doing its job — it
     /// changes what the brain expects, upstream of any value.
     ///
-    /// `calibration_bias` on `DecisionValue` is a different thing: a
-    /// per-template residual carried for provenance. If it ever reached
-    /// `total()`, a template the brain has been wrong about would rank
-    /// differently from an identical one it has been right about, at the same
-    /// expected fans — turning "how well did I predict" into "how much is this
-    /// worth". Two candidates whose economics are identical must score
-    /// identically no matter what the brain's track record on them is.
+    /// `calibration_bias` on `DecisionValue` was a per-template residual
+    /// carried for provenance. It has been removed: the field was always 0.0,
+    /// the setter was gone, and the port method was a stub. Calibration
+    /// itself is not dead — `CalibrationTracker` records residuals per
+    /// regime and `correct_prediction_by_regime` shifts the outcome model's
+    /// prediction upstream of any value. But carrying a dead field that
+    /// always reads 0.0 is noise. If it ever reached `total()`, a template
+    /// the brain has been wrong about would rank differently from an
+    /// identical one it has been right about, at the same expected fans —
+    /// turning "how well did I predict" into "how much is this worth". Two
+    /// candidates whose economics are identical must score identically no
+    /// matter what the brain's track record on them is.
     #[test]
-    fn prediction_error_does_not_change_the_economic_value() {
-        let candidate = |calibration_bias: f64, contamination: f64| DecisionValue {
+    fn contamination_does_not_change_the_economic_value() {
+        let candidate = |contamination: f64| DecisionValue {
             expected_incremental_y30: 5.0,
             uncertainty: 2.0,
             p_meaningful_effect: 0.8,
@@ -497,7 +474,6 @@ mod tests {
             bridge_confidence: 5,
             bridge_is_reliable: false,
             contamination,
-            calibration_bias,
             resource_cost: ResourceCost::configured(1.0),
             pragmatic_value: 5.0,
             risk_penalty: None,
@@ -505,30 +481,15 @@ mod tests {
             decision_mode: DecisionMode::Exploit,
         };
 
-        let well_predicted = candidate(0.0, 0.0);
-        let badly_overpredicted = candidate(4.0, 0.0);
-        let badly_underpredicted = candidate(-4.0, 0.0);
-
-        assert!(
-            (well_predicted.total() - badly_overpredicted.total()).abs() < f64::EPSILON,
-            "a template the brain overestimated must not be worth less at the \
-             same expected fans: {} vs {}",
-            well_predicted.total(),
-            badly_overpredicted.total()
-        );
-        assert!(
-            (well_predicted.total() - badly_underpredicted.total()).abs() < f64::EPSILON,
-            "nor more when it underestimated: {} vs {}",
-            well_predicted.total(),
-            badly_underpredicted.total()
-        );
+        let well_predicted = candidate(0.0);
+        let contaminated = candidate(0.9);
 
         // Contamination is the same kind of claim from the other direction: it
         // says how much a measurement can be trusted, which belongs to evidence
         // quality and to the variance the posterior is updated with — not to a
         // number subtracted from what an action is worth.
         assert!(
-            (well_predicted.total() - candidate(0.0, 0.9).total()).abs() < f64::EPSILON,
+            (well_predicted.total() - contaminated.total()).abs() < f64::EPSILON,
             "contamination must qualify the evidence, not tax the economics"
         );
     }
@@ -554,7 +515,6 @@ mod tests {
             bridge_confidence: 0,
             bridge_is_reliable: false,
             contamination: 0.7,
-            calibration_bias: 2.5,
             resource_cost: ResourceCost::configured(9.0),
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.25),
@@ -603,7 +563,6 @@ mod tests {
             bridge_confidence: 5,
             bridge_is_reliable: false,
             contamination: 0.1,
-            calibration_bias: -0.3,
             resource_cost: ResourceCost::configured(2.0),
             pragmatic_value: 5.0,
             risk_penalty: Some(-0.5),
@@ -618,7 +577,6 @@ mod tests {
         assert_eq!(back.decision_mode, DecisionMode::Exploit);
         assert!(!back.bridge_is_reliable);
         assert!((back.contamination - 0.1).abs() < 0.001);
-        assert!((back.calibration_bias - (-0.3)).abs() < 0.001);
         assert_eq!(back.risk_penalty, Some(-0.5));
     }
 
@@ -650,7 +608,7 @@ mod tests {
     #[test]
     fn serde_handles_missing_new_fields() {
         // Brain state checkpoints from before this sprint won't have
-        // contamination or calibration_bias. #[serde(default)] handles this.
+        // contamination. #[serde(default)] handles this.
         let old_json = r#"{
             "expected_incremental_y30": 5.0,
             "uncertainty": 2.0,
@@ -668,7 +626,6 @@ mod tests {
         }"#;
         let back: DecisionValue = serde_json::from_str(old_json).unwrap();
         assert!((back.contamination - 0.0).abs() < 0.001);
-        assert!((back.calibration_bias - 0.0).abs() < 0.001);
         assert!(back.risk_penalty.is_none());
     }
 }

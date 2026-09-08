@@ -535,16 +535,20 @@ impl PushDeliveryRepository {
     }
 
     pub async fn retry_later(&self, delivery_id: Uuid, error_code: &str) -> Result<()> {
-        let delay_seconds = 30_i64;
+        // Bounded exponential backoff: 30s, 60s, 120s, ... capped at 1h.
+        // attempt_count was already incremented at claim time, so it is the
+        // 1-based number of the attempt that just failed. The delay for the
+        // next retry is 30 * 2^(attempt-1), capped at 3600 seconds.
         self.with_timeout(
             sqlx::query(
                 r#"
                 UPDATE fan_push_deliveries
-                SET status = CASE WHEN attempt_count >= $4 THEN 'failed' ELSE 'retry_wait' END,
-                    available_at = CASE WHEN attempt_count >= $4
-                        THEN available_at ELSE now() + ($3::bigint * interval '1 second') END,
-                    completed_at = CASE WHEN attempt_count >= $4 THEN now() ELSE NULL END,
-                    error_code = $5, claim_token = NULL, claimed_at = NULL,
+                SET status = CASE WHEN attempt_count >= $3 THEN 'failed' ELSE 'retry_wait' END,
+                    available_at = CASE WHEN attempt_count >= $3
+                        THEN available_at
+                        ELSE now() + (LEAST(30 * (1 << LEAST(GREATEST(attempt_count - 1, 0), 7)), 3600)::bigint * interval '1 second') END,
+                    completed_at = CASE WHEN attempt_count >= $3 THEN now() ELSE NULL END,
+                    error_code = $4, claim_token = NULL, claimed_at = NULL,
                     provider_started_at = NULL, ack_token_hash = NULL, ack_deadline = NULL,
                     updated_at = now()
                 WHERE workspace_id = $1 AND id = $2 AND status = 'provider_started'
@@ -552,7 +556,6 @@ impl PushDeliveryRepository {
             )
             .bind(self.workspace_id)
             .bind(delivery_id)
-            .bind(delay_seconds)
             .bind(MAX_ATTEMPTS)
             .bind(error_code)
             .execute(&self.database),

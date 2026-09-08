@@ -280,6 +280,15 @@ impl PushProviders {
             .json(&message)
             .send()
             .await;
+        // If FCM returns 401, the cached token is stale (revoked, expired, or
+        // the service account changed). Clear it so the next attempt fetches a
+        // fresh OAuth token instead of reusing the bad one.
+        if let Ok(ref response) = result
+            && response.status() == StatusCode::UNAUTHORIZED
+        {
+            tracing::warn!("FCM returned 401 — invalidating cached OAuth token");
+            provider.invalidate_token().await;
+        }
         classify_fcm_response(result).await
     }
 
@@ -435,6 +444,13 @@ impl FcmProvider {
         });
         Ok(token.access_token)
     }
+
+    /// Clears the cached OAuth token so the next `access_token` call fetches a
+    /// fresh one. Called when FCM returns 401, which means the cached token is
+    /// stale (revoked, expired, or the service account changed).
+    async fn invalidate_token(&self) {
+        self.cached_token.lock().await.take();
+    }
 }
 
 async fn read_limited_provider_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
@@ -583,11 +599,7 @@ fn classify_web_push_response(
 }
 
 fn valid_push_origin(endpoint: &Url) -> bool {
-    if endpoint.scheme() != "https"
-        || endpoint.username() != ""
-        || endpoint.password().is_some()
-        || endpoint.port().is_some()
-    {
+    if endpoint.scheme() != "https" || endpoint.username() != "" || endpoint.password().is_some() {
         return false;
     }
     let Some(host) = endpoint.host_str().map(|value| value.to_ascii_lowercase()) else {
@@ -646,5 +658,15 @@ mod tests {
         let local = Url::parse("https://127.0.0.1/push").ok();
         assert!(mozilla.as_ref().is_some_and(valid_push_origin));
         assert!(!local.as_ref().is_some_and(valid_push_origin));
+    }
+
+    #[test]
+    fn push_provider_accepts_custom_ports() {
+        // HTTPS endpoints on non-default ports are valid push origins.
+        // The scheme must still be HTTPS and the host must be allowlisted.
+        let custom_port = Url::parse("https://fcm.googleapis.com:8443/fcm/send").ok();
+        assert!(custom_port.as_ref().is_some_and(valid_push_origin));
+        let http_custom = Url::parse("http://fcm.googleapis.com:8443/fcm/send").ok();
+        assert!(!http_custom.as_ref().is_some_and(valid_push_origin));
     }
 }

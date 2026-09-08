@@ -109,6 +109,7 @@ pub(super) fn community_engager_candidates(
             post_format: post_format.clone(),
             time_of_day_bps,
             community_novelty_bps,
+            avg_community_engagement_bps: snapshot.world_model.avg_community_engagement_bps,
         };
         // Treatment-aware stats for this specific community. The target key
         // is what makes two communities in the same genre bucket predict

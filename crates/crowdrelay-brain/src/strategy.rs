@@ -39,6 +39,45 @@ impl GrowthStrategy {
         {
             return Self::EventDriven;
         }
+        // No communities discovered yet: the brain has nowhere to engage, so
+        // discovery is the only lever. This fires regardless of whether the
+        // tenant is behind, because without communities the growth pipeline
+        // has no input. Previously `discovered_communities` was computed but
+        // read by nothing — the brain sat on ContentFirst with no communities
+        // to publish to.
+        //
+        // Guard: only fires when the tenant has connected platforms to
+        // discover through. A tenant with no feeds connected needs the
+        // existing logic (which may also return AggressiveDiscovery, but for
+        // different reasons).
+        if world.discovered_communities == 0
+            && world.connected_platforms > 0
+            && !Self::discovery_channels_are_silent(world)
+        {
+            return Self::AggressiveDiscovery;
+        }
+        // Communities were discovered but none are active (no posts in 30 days).
+        // The brain is engaging in dead rooms. Finding new active ones is the
+        // plan, not posting into silence.
+        if world.discovered_communities > 0
+            && world.active_communities == 0
+            && !Self::discovery_channels_are_silent(world)
+        {
+            return Self::AggressiveDiscovery;
+        }
+        // Targets proposed but none engaged: the brain has outreach targets
+        // but hasn't turned any into community posts. Finding more targets
+        // does not fix that; engaging the ones it has does.
+        if world.pending_outreach_targets > 0 && world.engaged_outreach_targets == 0 {
+            return Self::ContentFirst;
+        }
+        // Communities are engaged but average engagement is low (below 10%).
+        // The brain has a foothold but the communities aren't converting
+        // attention into fans. Pushing Signal conversion on the existing
+        // audience is a better lever than more discovery or more content.
+        if world.engaged_outreach_targets > 0 && world.avg_community_engagement_bps < 1_000 {
+            return Self::SignalConversion;
+        }
         // Audience already gathered, but almost none of it has become a fan we
         // can address directly. Finding more communities does not fix that;
         // publishing to the audience that already exists does. This is the
@@ -631,6 +670,97 @@ mod tests {
         assert_eq!(
             GrowthStrategy::SignalConversion.as_str(),
             "signal_conversion"
+        );
+    }
+
+    // ── Dormant-field wiring tests ──
+
+    #[test]
+    fn no_communities_discovered_triggers_aggressive_discovery() {
+        // The brain has nowhere to engage — discovery is the only lever.
+        let world = WorldModel {
+            discovered_communities: 0,
+            connected_platforms: 3,
+            fresh_platforms: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::AggressiveDiscovery
+        );
+    }
+
+    #[test]
+    fn all_discovered_communities_inactive_triggers_discovery() {
+        // Communities were found but none are active. Posting into dead rooms
+        // is not a plan; finding new active ones is.
+        let world = WorldModel {
+            discovered_communities: 5,
+            active_communities: 0,
+            connected_platforms: 3,
+            fresh_platforms: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::AggressiveDiscovery
+        );
+    }
+
+    #[test]
+    fn pending_targets_unengaged_triggers_content_first() {
+        // Targets proposed but none engaged — the brain needs to act on what
+        // it has, not find more.
+        let world = WorldModel {
+            discovered_communities: 5,
+            active_communities: 3,
+            pending_outreach_targets: 10,
+            engaged_outreach_targets: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst
+        );
+    }
+
+    #[test]
+    fn low_engagement_with_engaged_targets_triggers_signal_conversion() {
+        // Communities are engaged but average engagement is below 10%. The
+        // foothold exists but isn't converting — push Signal on the existing
+        // audience.
+        let world = WorldModel {
+            discovered_communities: 5,
+            active_communities: 3,
+            pending_outreach_targets: 0,
+            engaged_outreach_targets: 5,
+            avg_community_engagement_bps: 500,
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::SignalConversion
+        );
+    }
+
+    #[test]
+    fn high_engagement_with_engaged_targets_does_not_force_signal() {
+        // Communities are engaged and engagement is healthy (>10%). The brain
+        // should not be forced into SignalConversion — it can continue its
+        // normal strategy.
+        let world = WorldModel {
+            discovered_communities: 5,
+            active_communities: 3,
+            pending_outreach_targets: 0,
+            engaged_outreach_targets: 5,
+            avg_community_engagement_bps: 1500,
+            total_fans: 100,
+            signal_conversion_rate_bps: 800,
+            ..Default::default()
+        };
+        assert_eq!(
+            GrowthStrategy::from_world_model(&world),
+            GrowthStrategy::ContentFirst
         );
     }
 }

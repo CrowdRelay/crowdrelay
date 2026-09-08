@@ -135,6 +135,7 @@ pub(super) fn build_dispatch_context(
         post_format,
         time_of_day_bps,
         community_novelty_bps,
+        avg_community_engagement_bps: snapshot.world_model.avg_community_engagement_bps,
     }
 }
 
@@ -205,6 +206,34 @@ pub fn evaluate_growth_intelligence(
     // Predict expected Signal installs using the learned Signal model.
     let expected_signal_installs =
         causal_model.predict_signal(&snapshot.template_id, &dispatch_context);
+
+    // ── Community engagement multiplier ──
+    // For community-engager dispatches, the average upvote ratio across
+    // active communities is direct evidence of how well the brain's
+    // community engagement is working. High engagement (high bps) means
+    // a dispatch is more likely to produce fan growth; low engagement
+    // means it is less likely.
+    //
+    // This is a MULTIPLIER on expected_fans, not an additive EFE term.
+    // It respects the DecisionValue invariant: every term in total() must
+    // have a defined fan-equivalent conversion. The multiplier adjusts the
+    // predicted fan count, not the value formula. The causal model also
+    // receives avg_community_engagement_bps as a context feature, so over
+    // time it learns the relationship directly.
+    //
+    // The multiplier is centered at 1.0 (no adjustment) when engagement is
+    // at the 10% threshold (1000 bps). Above 10%, the multiplier increases
+    // (up to 1.5× at 50%+ engagement). Below 10%, it decreases (down to 0.5×
+    // at 0% engagement). This is a soft bias, not a hard gate.
+    let engagement_bps = f64::from(snapshot.world_model.avg_community_engagement_bps);
+    let engagement_multiplier = if snapshot.template_id == "community-engager" {
+        // 1.0 at 1000 bps (10%), 1.5 at 5000 bps (50%), 0.5 at 0 bps.
+        // Linear interpolation: 1.0 + (engagement_bps - 1000) / 8000
+        (1.0 + (engagement_bps - 1000.0) / 8000.0).clamp(0.5, 1.5)
+    } else {
+        1.0
+    };
+    let expected_new_fans = expected_new_fans * engagement_multiplier;
 
     // ── EFE scoring with uncertainty ──
     // The full EFE formula:

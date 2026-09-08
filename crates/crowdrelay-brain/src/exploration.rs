@@ -331,6 +331,7 @@ mod tests {
         let with = |novelty: u16| {
             context_hash(&DispatchContext {
                 community_novelty_bps: novelty,
+                avg_community_engagement_bps: 0,
                 ..Default::default()
             })
         };
@@ -344,12 +345,14 @@ mod tests {
         let mut mem = ExplorationMemory::default();
         let first = DispatchContext {
             community_novelty_bps: 10_000,
+            avg_community_engagement_bps: 0,
             time_of_day_bps: 4_200,
             ..Default::default()
         };
         mem.record_visit("community-engager", &context_hash(&first));
         let later = DispatchContext {
             community_novelty_bps: 9_000,
+            avg_community_engagement_bps: 0,
             time_of_day_bps: 4_500,
             ..Default::default()
         };

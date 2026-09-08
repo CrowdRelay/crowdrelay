@@ -30,7 +30,6 @@ NAMED_SYMBOLS = {
     "crates/crowdrelay-brain/src/decision_value.rs": [
         "pub fn total(",
         "pub risk_penalty",
-        "pub calibration_bias",
         "pub contamination",
     ],
     "crates/crowdrelay-domain/src/action_ledger.rs": [
@@ -58,10 +57,6 @@ NAMED_SYMBOLS = {
 # consumer). A match means the value is now read somewhere, and the table is
 # out of date.
 DORMANT = [
-    (
-        "DecisionValue::calibration_bias",
-        re.compile(r"\.calibration_bias\s*[*+\-/]|[*+\-/]\s*\w+\.calibration_bias"),
-    ),
     (
         "DecisionValue::contamination",
         re.compile(r"\.contamination\s*[*+\-/]|[*+\-/]\s*\w+\.contamination"),
@@ -165,26 +160,17 @@ class BrainLearningLoopDoc(unittest.TestCase):
 
         `WorldModel` is never persisted and never returned from an endpoint, so
         a field nothing reads in this workspace is a field nothing reads
-        anywhere. Eight are in that position and five of them cost a dedicated
-        query per cycle. They are kept rather than deleted because the counters
-        are correct — expensively so, after a LEFT JOIN fan-out made every post
-        add a phantom community — and `pipeline_counts_count_places_not_posts`
-        is the live-Postgres proof of that fix.
-
-        Kept, but not misrepresented. The failure mode that test describes —
-        posting more making the brain believe it needs fewer places — cannot
-        happen while nothing consults the count. Wiring one up is the good
-        outcome; it moves out of the doc's dormant list in the same change.
+        anywhere. Five of the original eight dormant fields have been wired
+        into strategy selection and EFE scoring:
+        `discovered_communities`, `active_communities`,
+        `avg_community_engagement_bps`, `pending_outreach_targets`, and
+        `engaged_outreach_targets`. The remaining three are reporting-only
+        and still dormant.
         """
         dormant = [
-            "discovered_communities",
-            "active_communities",
-            "avg_community_engagement_bps",
             "best_performing_community",
             "worst_performing_community",
-            "pending_outreach_targets",
             "promoted_outreach_targets",
-            "engaged_outreach_targets",
         ]
         loader = (
             ROOT

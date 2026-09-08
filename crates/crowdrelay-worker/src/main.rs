@@ -44,7 +44,7 @@ use crowdrelay_worker::{
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
     event_sync::{EventSyncWorker, EventSyncWorkerConfig},
     growth_metric_sync::GrowthMetricSyncWorker,
-    growth_readiness::GrowthReadiness,
+    growth_readiness::{GrowthReadiness, GrowthReadinessHealth},
     leadership::acquire_leadership,
     nearby_gigs::{DEFAULT_POLL_INTERVAL as NEARBY_GIG_POLL_INTERVAL, NearbyGigScheduler},
     ops_watchdog::OpsWatchdogWorker,
@@ -786,6 +786,14 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         random_draws_enabled: weighted_draw_worker.is_some(),
     };
     growth_readiness.log();
+
+    // Query the database for evidence of recent activity (last 24h) from
+    // each fan-growth component. This complements the readiness log above:
+    // that says what's *configured*, this says what's *producing*. A
+    // component that is active but not producing is the silent gap between
+    // configuration and growth.
+    let health = GrowthReadinessHealth::query(&database).await;
+    health.log();
 
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {

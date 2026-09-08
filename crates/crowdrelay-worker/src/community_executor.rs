@@ -66,6 +66,25 @@ const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(1800);
 const AGENTS_SUBMIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Browser metrics read through the agents service.
 const AGENTS_METRICS_TIMEOUT: Duration = Duration::from_secs(90);
+/// Maximum response body size for HTTP calls to the agents service and
+/// Reddit's public JSON endpoint. 64 KiB is generous for the JSON payloads
+/// these endpoints return (post submissions, metrics, comment listings)
+/// while preventing a runaway response from spiking memory.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
+
+/// Checks the Content-Length header and returns an error if the response
+/// exceeds [`MAX_RESPONSE_BYTES`]. For responses without Content-Length
+/// (chunked), the caller must use a bounded read.
+fn check_response_size(response: &reqwest::Response) -> Result<(), CommunityExecutorError> {
+    if let Some(length) = response.content_length()
+        && length > MAX_RESPONSE_BYTES
+    {
+        return Err(CommunityExecutorError::RedditApi(format!(
+            "response exceeds size limit: {length} bytes (max {MAX_RESPONSE_BYTES})"
+        )));
+    }
+    Ok(())
+}
 
 /// Builds a reqwest client with an optional proxy. Shared between the
 /// constructor and the run-loop proxy refresh.
@@ -466,6 +485,26 @@ impl CommunityExecutorWorker {
         let ws = self.workspace_id.into_uuid();
         let mut tx = self.pool.begin().await?;
 
+        // Guardrail 1: 24h post limit. If the workspace has already posted
+        // MAX_POSTS_PER_24H posts in the last 24 hours, don't claim any more.
+        // Checking this inside the transaction prevents the "posting → failed"
+        // transition that would otherwise briefly make an action look active.
+        let recent_posts: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*) FROM community_posts
+            WHERE workspace_id = $1
+              AND status = 'posted'
+              AND posted_at > now() - INTERVAL '24 hours'
+            "#,
+        )
+        .bind(ws)
+        .fetch_one(&mut *tx)
+        .await?;
+        if recent_posts >= MAX_POSTS_PER_24H {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+
         // Step 1: Insert pending rows for unprocessed succeeded actions.
         sqlx::query(
             r#"
@@ -496,6 +535,8 @@ impl CommunityExecutorWorker {
 
         // Step 2: Claim pending and rate_limited (past backoff) rows.
         // Transition them to `posting` atomically.
+        // Guardrail 2: exclude rows whose subreddit is on cooldown (a post
+        // to that subreddit was made in the last SUBREDDIT_COOLDOWN_DAYS days).
         let rows = sqlx::query_as::<_, ClaimedAction>(
             r#"
             WITH claimed AS (
@@ -504,14 +545,21 @@ impl CommunityExecutorWorker {
                     attempts = attempts + 1,
                     updated_at = now()
                 WHERE id IN (
-                    SELECT id FROM community_posts
-                    WHERE workspace_id = $1
+                    SELECT cp.id FROM community_posts cp
+                    WHERE cp.workspace_id = $1
                       AND (
-                          status = 'pending'
-                          OR (status = 'rate_limited' AND rate_limited_until IS NOT NULL
-                              AND rate_limited_until < now())
+                          cp.status = 'pending'
+                          OR (cp.status = 'rate_limited' AND cp.rate_limited_until IS NOT NULL
+                              AND cp.rate_limited_until < now())
                       )
-                    ORDER BY created_at
+                      AND NOT EXISTS (
+                          SELECT 1 FROM community_posts recent
+                          WHERE recent.workspace_id = $1
+                            AND recent.subreddit = cp.subreddit
+                            AND recent.status = 'posted'
+                            AND recent.posted_at > now() - make_interval(days => $2)
+                      )
+                    ORDER BY cp.created_at
                     LIMIT 5
                     FOR UPDATE SKIP LOCKED
                 )
@@ -524,6 +572,7 @@ impl CommunityExecutorWorker {
             "#,
         )
         .bind(ws)
+        .bind(SUBREDDIT_COOLDOWN_DAYS)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -703,6 +752,7 @@ impl CommunityExecutorWorker {
                 "agents /reddit/post HTTP {status}: {body}"
             )));
         }
+        check_response_size(&response)?;
         response.json().await.map_err(CommunityExecutorError::Http)
     }
 
@@ -952,6 +1002,7 @@ impl CommunityExecutorWorker {
                 "agents /reddit/metrics HTTP {status}: {body}"
             )));
         }
+        check_response_size(&response)?;
         response.json().await.map_err(CommunityExecutorError::Http)
     }
 
@@ -1002,6 +1053,7 @@ impl CommunityExecutorWorker {
                 "HTTP {status}: {body}"
             )));
         }
+        check_response_size(&response)?;
 
         // Public comments endpoint returns [post_listing, comments_listing].
         let listings: Vec<RedditListingResponse> = response.json().await?;

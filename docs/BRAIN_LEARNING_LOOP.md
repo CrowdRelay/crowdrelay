@@ -111,7 +111,7 @@ NEXT DECISION
   opportunity_cost`. Every term is in expected incremental Y30 fan-equivalents.
 - `risk_penalty` is `None` — **not modelled**, not zero, and never derived from
   `uncertainty`.
-- `uncertainty`, `contamination`, `calibration_bias`, `evidence_quality`,
+- `uncertainty`, `contamination`, `evidence_quality`,
   `bridge_is_reliable` are **provenance**. None enters `total()`. That is a
   real gap, taken deliberately: penalising uncertain candidates in a system
   that has resolved almost no outcomes is how a young learner stops learning.
@@ -221,10 +221,9 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 | Value | Written by | Read by |
 |---|---|---|
 | `StateConditionedStrategyPosterior` | `apply_evidence_to_stored_strategy_posterior` (sole writer) | nothing — threaded through candidate generation and discarded |
-| `DecisionValue::calibration_bias` | never populated | never read; `load_calibration_bias` exists on the port and has no caller |
 | `DecisionValue::contamination` | `with_contamination`, brain tests only | never read |
 | `GrowthEvidence::creative_family` | dispatch | nothing decides on it |
-| `WorldModel`: `discovered_communities`, `active_communities`, `avg_community_engagement_bps`, `best_performing_community`, `worst_performing_community`, `pending_outreach_targets`, `promoted_outreach_targets`, `engaged_outreach_targets` | the snapshot loader, two dedicated queries per cycle | nothing — and `WorldModel` is neither persisted nor served, so unread here is unread everywhere |
+| `WorldModel`: `best_performing_community`, `worst_performing_community`, `promoted_outreach_targets` | the snapshot loader, two dedicated queries per cycle | nothing — and `WorldModel` is neither persisted nor served, so unread here is unread everywhere |
 | `SelfAssessment` verdict | `/v1/control-plane/ops/attention` | operator only; changes no ranking, by design |
 
 ---
