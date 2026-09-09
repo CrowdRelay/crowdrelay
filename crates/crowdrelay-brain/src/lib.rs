@@ -40,11 +40,13 @@
 //! LLM blindly — it aggregates intelligence, applies deterministic rules,
 //! and decides.
 
+pub mod attribution;
 pub mod bayesian;
 pub mod beta;
 pub mod bridge;
 pub mod calibration;
 pub mod causal_model;
+pub mod change_point;
 pub mod context_effect;
 pub mod credit_ledger;
 pub mod decision_value;

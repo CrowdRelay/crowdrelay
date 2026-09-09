@@ -86,7 +86,7 @@ pub(super) fn apply_evidence_to_model(
     model: &mut crowdrelay_brain::CausalModel,
     evidence: &[crowdrelay_brain::GrowthEvidence],
 ) {
-    apply_evidence_to_model_with_contrast(model, evidence, &[]);
+    apply_evidence_to_model_with_contrast(model, evidence, &[], None);
 }
 
 /// Replays `evidence`, contrasting it against the control arm in `evidence`
@@ -96,6 +96,11 @@ pub(super) fn apply_evidence_to_model(
 /// from: the outcome model updates from every row, control ones included.
 /// `extra_contrast` is only ever read for its control means — those rows were
 /// learned from in an earlier batch and replaying them would count them twice.
+///
+/// `checkpoint` is the delta cursor timestamp. When `Some`, only horizons
+/// newer than the checkpoint are replayed — the 3d/14d/30d per-horizon
+/// cursors prevent double-counting. When `None` (full replay), all
+/// available outcomes are learned from.
 ///
 /// This exists because the learning cursor and the randomisation do not agree
 /// about batches. The cursor is `resolved_at`, and an experiment's treated
@@ -109,6 +114,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     model: &mut crowdrelay_brain::CausalModel,
     evidence: &[crowdrelay_brain::GrowthEvidence],
     extra_contrast: &[crowdrelay_brain::GrowthEvidence],
+    checkpoint: Option<OffsetDateTime>,
 ) {
     use crowdrelay_brain::{
         CausalEstimand, DispatchPrediction, EstimationRegime, ExecutionStatus, PredictionOutcome,
@@ -130,6 +136,23 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     let mut y14_treatment_updates = 0u32;
     let mut y30_treatment_updates = 0u32;
     let mut bridge_updates = 0u32;
+
+    // Per-horizon gating: in delta replay, only update the posteriors for
+    // horizons that are new since the checkpoint. This prevents
+    // double-counting — the 30d measurement stamps its own cursor without
+    // changing observed_fans, so the outcome model must not be updated
+    // again for it.
+    //
+    // A horizon is "new" when its replay timestamp is newer than the
+    // checkpoint, or when there is no checkpoint (full replay). A NULL
+    // timestamp means the measurement hasn't completed yet — never new.
+    let horizon_is_new = |ts: Option<OffsetDateTime>| -> bool {
+        match (checkpoint, ts) {
+            (None, _) => true,          // full replay — learn from everything
+            (Some(_cp), None) => false, // measurement not completed yet
+            (Some(cp), Some(ts)) => ts > cp,
+        }
+    };
 
     // Intent-to-treat compares the arms. The control rows in this batch are
     // that comparison, so they are gathered first and the treated rows are
@@ -224,7 +247,18 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // incremental estimate is available (legacy evidence rows), we
         // skip the outcome model update rather than feeding it a DiD
         // estimate that would be clamped to 0 on negative values.
-        if let Some(raw_fans) = ev.observed_fans {
+        //
+        // Per-horizon gating: the outcome model updates when the 14d
+        // horizon is new (the 14d value is the final `observed_fans`),
+        // or when the 3d horizon is new and the 14d hasn't landed yet
+        // (the 3d value is the only observation so far). The 30d
+        // measurement does NOT change `observed_fans`, so it must not
+        // trigger an outcome model update.
+        let outcome_is_new = horizon_is_new(ev.replayed_14d_at)
+            || (horizon_is_new(ev.replayed_3d_at) && ev.replayed_14d_at.is_none());
+        if outcome_is_new
+            && let Some(raw_fans) = ev.observed_fans
+        {
             let prediction = DispatchPrediction {
                 template_id: template.clone(),
                 expected_new_fans: ev.predicted_fans,
@@ -300,7 +334,14 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         //
         // Y14 treatment-effect calibration is recorded to the Y14Bridged
         // regime tracker — separate from Y30Direct and OutcomeModel.
-        if let Some(outcome_y14) = ev.observed_incremental_fans {
+        //
+        // Per-horizon gating: the Y14 posterior updates only when the 14d
+        // horizon is new. The 3d measurement does not produce an
+        // incremental estimate, and the 30d measurement updates the Y30
+        // posterior, not Y14.
+        if horizon_is_new(ev.replayed_14d_at)
+            && let Some(outcome_y14) = ev.observed_incremental_fans
+        {
             let earned_quality = earned_quality_for(y14_contrast);
             let tau_y14 = outcome_y14 - y14_contrast.unwrap_or(0.0);
             let obs_var = 2.0 * tau_y14.abs().max(1.0) * earned_quality.variance_multiplier();
@@ -330,7 +371,13 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // When Y30 (durable) is available, update the Y30 treatment-effect
         // posterior, the Y30Direct calibration tracker, and the Y14→Y30
         // bridge.
-        if let Some(outcome_y30) = ev.y30_outcome() {
+        //
+        // Per-horizon gating: the Y30 posterior updates only when the 30d
+        // horizon is new. The 3d and 14d measurements do not produce a
+        // durable-fans observation.
+        if horizon_is_new(ev.replayed_30d_at)
+            && let Some(outcome_y30) = ev.y30_outcome()
+        {
             // Y30 treatment-effect update (North Star). Scaled by evidence
             // quality — same rationale as Y14, and earned against the Y30
             // control mean specifically. Y30 is the horizon that stays pending
@@ -377,7 +424,12 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             // forbids. A pair we cannot define consistently is not weak
             // evidence for the slope, it is evidence for a different slope, so
             // it is skipped rather than downweighted.
-            if let Some(outcome_y14) = ev.observed_incremental_fans
+            // Per-horizon gating: the bridge updates only when both the
+            // 14d and 30d horizons are new in this batch. A bridge update
+            // from a stale Y14 and a new Y30 (or vice versa) would fit a
+            // slope from two differently-timed observations.
+            if horizon_is_new(ev.replayed_14d_at)
+                && let Some(outcome_y14) = ev.observed_incremental_fans
                 && y14_contrast.is_some() == y30_contrast.is_some()
             {
                 let paired_y14 = outcome_y14 - y14_contrast.unwrap_or(0.0);

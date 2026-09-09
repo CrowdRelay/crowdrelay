@@ -98,52 +98,79 @@ pub(super) async fn observable_community(
 /// must not hold the evidence open forever; the column stays NULL and the
 /// learner skips it, which is the honest reading of "we tried and could not
 /// find out".
+///
+/// When `measurement_kind` is `Some`, stamps the per-horizon replay cursor
+/// for the horizon that just completed. When `None`, skips per-horizon
+/// stamping and only checks for full resolution — used by the experiment
+/// readiness sweep, which re-checks treated rows after the control arm
+/// resolves but must not stamp cursors for horizons whose measurements
+/// haven't completed yet.
 pub(super) async fn refresh_evidence_readiness(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: WorkspaceId,
     action_id: AutopilotActionId,
+    measurement_kind: Option<super::AutopilotMeasurementKind>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
-    // ── Partial resolution ──
+    // ── Per-horizon replay cursor ──
     //
-    // A measurement just completed. Even if other measurements (longer
-    // horizons) are still pending, the evidence row now carries a real
-    // intermediate observation the causal model can learn from. We
-    // increment partial_resolution_count and stamp
-    // last_partial_resolution_at so the loader can select these rows
-    // for delta replay with downweighted evidence quality.
+    // Each measurement horizon (3d, 14d, 30d) is an independent observation.
+    // We stamp the per-horizon replay cursor for the horizon that just
+    // completed, so the delta loader can pick up this row and the replay
+    // logic can gate which posteriors to update. This replaces the single
+    // partial_resolution_count increment, which double-counted: the 30d
+    // measurement incremented it without changing observed_fans, so the
+    // 14d observation was replayed again as a no-op for the outcome model
+    // but a full update for the Y14 treatment-effect posterior.
     //
-    // This mirrors Kern's multi-checkpoint settling: 1-day, 7-day, and
-    // final checkpoints each independently update the posterior, so the
-    // brain gets next-day feedback instead of waiting 30 days for the
-    // final outcome.
+    // We still increment partial_resolution_count and stamp
+    // last_partial_resolution_at for backward compatibility and display —
+    // they are no longer the delta cursor.
     //
-    // We do NOT set resolved_at here — that still requires ALL
-    // measurements to be terminal AND the control arm to be resolved.
-    // The partial count is a separate signal the loader reads.
-    let partial_result = sqlx::query(
-        r#"
-        UPDATE viryaos_growth_evidence AS evidence
-        SET partial_resolution_count = evidence.partial_resolution_count + 1,
-            last_partial_resolution_at = $3
-        WHERE evidence.workspace_id = $1
-          AND evidence.action_id = $2
-          AND evidence.resolved_at IS NULL
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id.into_uuid())
-    .bind(now)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    if partial_result.rows_affected() > 0 {
-        tracing::info!(
-            workspace_id = %workspace_id.into_uuid(),
-            action_id = %action_id.into_uuid(),
-            rows = partial_result.rows_affected(),
-            "evidence readiness: partial resolution — intermediate checkpoint available for learning"
-        );
+    // When `measurement_kind` is `None` (experiment readiness sweep), we
+    // skip per-horizon stamping entirely — the treated rows' own
+    // measurements already stamped their cursors, and rows whose
+    // measurements haven't completed yet must not get a cursor stamped
+    // by a control-arm resolution.
+    if let Some(kind) = measurement_kind {
+        let horizon_column = match kind {
+            super::AutopilotMeasurementKind::AgentRunFanGrowth3d => "replayed_3d_at",
+            super::AutopilotMeasurementKind::AgentRunFanGrowth14d
+            | super::AutopilotMeasurementKind::IncrementalFanGrowth14d => "replayed_14d_at",
+            super::AutopilotMeasurementKind::DurableFanGrowth30d => "replayed_30d_at",
+            // Signal installs and other measurements don't have a
+            // per-horizon cursor — they update the legacy
+            // partial_resolution_count only. The delta loader still
+            // picks them up via last_partial_resolution_at as a fallback.
+            _ => "last_partial_resolution_at",
+        };
+        let partial_result = sqlx::query(&format!(
+            r#"
+            UPDATE viryaos_growth_evidence AS evidence
+            SET {horizon_column} = $3,
+                partial_resolution_count = evidence.partial_resolution_count + 1,
+                last_partial_resolution_at = $3
+            WHERE evidence.workspace_id = $1
+              AND evidence.action_id = $2
+              AND evidence.resolved_at IS NULL
+              AND {horizon_column} IS NULL
+            "#,
+        ))
+        .bind(workspace_id.into_uuid())
+        .bind(action_id.into_uuid())
+        .bind(now)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        if partial_result.rows_affected() > 0 {
+            tracing::info!(
+                workspace_id = %workspace_id.into_uuid(),
+                action_id = %action_id.into_uuid(),
+                rows = partial_result.rows_affected(),
+                horizon = horizon_column,
+                "evidence readiness: per-horizon replay cursor stamped — intermediate checkpoint available for learning"
+            );
+        }
     }
 
     // ── Full resolution ──
@@ -326,6 +353,7 @@ pub(super) async fn refresh_experiment_readiness(
             transaction,
             workspace_id,
             AutopilotActionId::from(action_id),
+            None,
             now,
         )
         .await?;

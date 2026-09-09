@@ -280,6 +280,9 @@ async fn load_evidence(
         experiment_uuid: Option<uuid::Uuid>,
         final_contamination: Option<f64>,
         partial_resolution_count: i32,
+        replayed_3d_at: Option<OffsetDateTime>,
+        replayed_14d_at: Option<OffsetDateTime>,
+        replayed_30d_at: Option<OffsetDateTime>,
     }
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
@@ -295,7 +298,8 @@ async fn load_evidence(
                ge.sample_size, ge.contamination, ge.measurement_delay_days,
                ge.episode_id, ge.resolved_at,
                ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
-               COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count
+               COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
+               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at
         FROM viryaos_growth_evidence ge
         -- Belt-and-suspenders fallback: if the 3d measurement wrote to
         -- dispatch_predictions.observed_new_fans but not to
@@ -355,18 +359,15 @@ async fn load_evidence(
           -- SQL filter. SQL provides eligible observations; the causal
           -- layer chooses the estimand.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
-          -- The cursor is `resolved_at` for fully resolved rows, or
-          -- `last_partial_resolution_at` for partially resolved ones.
-          -- The checkpoint advances every cycle, so by the time a
-          -- fourteen- or forty-four-day measurement landed, its dispatch
-          -- timestamp was long behind the cursor and the delta skipped it. The
-          -- brain was replaying an empty set and saving a checkpoint of it.
-          --
-          -- For partially resolved rows, the cursor is the partial
-          -- resolution timestamp — the moment the intermediate
-          -- observation became available. This lets the brain learn
-          -- from 7-day and 14-day checkpoints without waiting for the
-          -- full 30-day outcome.
+          -- The cursor is the MAX of the per-horizon replay timestamps
+          -- (3d, 14d, 30d), or resolved_at for fully resolved rows. Each
+          -- horizon is an independent observation — the delta picks up a
+          -- row when any horizon's timestamp is newer than the checkpoint.
+          -- This replaces the single last_partial_resolution_at cursor,
+          -- which double-counted: the 30d measurement stamped it without
+          -- changing observed_fans, so the 14d observation was replayed
+          -- again as a no-op for the outcome model but a full update for
+          -- the Y14 treatment-effect posterior.
           --
           -- The control-arm mode ignores the cursor entirely. It is not
           -- advancing the learner — it is fetching the comparison for rows the
@@ -374,11 +375,23 @@ async fn load_evidence(
           -- whenever it resolved.
           AND CASE WHEN $3::uuid[] IS NULL
                    THEN ($2::timestamptz IS NULL
-                        OR COALESCE(ge.resolved_at, ge.last_partial_resolution_at) > $2)
+                        OR COALESCE(
+                            ge.resolved_at,
+                            ge.replayed_3d_at,
+                            ge.replayed_14d_at,
+                            ge.replayed_30d_at,
+                            ge.last_partial_resolution_at
+                        ) > $2)
                    ELSE ge.treatment = 'control'
                         AND ea.experiment_uuid = ANY($3)
               END
-        ORDER BY COALESCE(ge.resolved_at, ge.last_partial_resolution_at) ASC,
+        ORDER BY COALESCE(
+                    ge.resolved_at,
+                    ge.replayed_3d_at,
+                    ge.replayed_14d_at,
+                    ge.replayed_30d_at,
+                    ge.last_partial_resolution_at
+                 ) ASC,
                  ge.timestamp ASC
         "#,
     )
@@ -499,6 +512,9 @@ async fn load_evidence(
                 episode_id: row.episode_id,
                 resolved_at: row.resolved_at,
                 partial_resolution_count: row.partial_resolution_count as u32,
+                replayed_3d_at: row.replayed_3d_at,
+                replayed_14d_at: row.replayed_14d_at,
+                replayed_30d_at: row.replayed_30d_at,
             }
         })
         .collect();

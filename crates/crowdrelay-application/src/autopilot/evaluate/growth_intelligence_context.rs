@@ -192,6 +192,31 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             )?;
             scored_candidates.extend(candidates);
         }
+        // ── Idle exploration: explore new horizons when all templates are on cooldown ──
+        //
+        // Kern's brain never idles — it always has event generators scanning for
+        // new data. CrowdRelay's brain waits for cooldowns to expire, which means
+        // it cycles every 5 minutes producing nothing when all templates are on
+        // cooldown. This is the "idling" problem.
+        //
+        // When all templates returned no candidates (all on cooldown) AND the
+        // brain's self-assessment says it needs to explore (Stagnant,
+        // Regressing, or Initializing), dispatch a growth-strategist "explore
+        // new horizons" run. This run asks the LLM to identify NEW platforms,
+        // communities, and audiences the brain has not yet investigated —
+        // Spotify playlists, Bandsintown, Facebook groups, Instagram, TikTok,
+        // YouTube, podcast communities, local event listings.
+        //
+        // This has its own 24-hour cooldown (separate from the growth-
+        // strategist's normal 12-hour cooldown) so it fires at most once per
+        // day when the brain is idle. The idempotency key uses a 24-hour
+        // window so the same dispatch does not recur within the window.
+        if scored_candidates.is_empty()
+            && let Some(candidate) =
+                idle_exploration_candidate(&snapshots, policy, self.workspace_id, now)?
+        {
+            scored_candidates.push(candidate);
+        }
         // Sort by EFE score (lower EFE = better) for candidate POOL
         // ORDERING only. This determines which candidates enter the
         // portfolio pool first — it does NOT determine which candidates
@@ -839,4 +864,141 @@ pub(crate) fn policy_content_identity(policy_snapshot: &serde_json::Value) -> St
         identity.push_str(&format!("{byte:02x}"));
     }
     identity
+}
+
+/// The cooldown for the "explore new horizons" idle-exploration dispatch.
+///
+/// Separate from the growth-strategist's normal cooldown so the brain can
+/// dispatch a normal strategist run (analyze existing data) and an idle
+/// exploration run (find new platforms/communities) independently. The
+/// idle exploration fires at most once per day when all templates are on
+/// cooldown and the brain needs to explore.
+const IDLE_EXPLORATION_COOLDOWN_HOURS: u32 = 24;
+
+/// Builds an "explore new horizons" candidate when all templates are on
+/// cooldown and the brain's self-assessment says it needs to explore.
+///
+/// This is the brain's proactive intelligence gathering — Kern's event
+/// generators scan for new data; CrowdRelay's brain waits for cooldowns.
+/// When every template is on cooldown, the brain would cycle producing
+/// nothing. Instead, it dispatches a growth-strategist run that asks the
+/// LLM to identify NEW platforms, communities, and audiences the brain
+/// has not yet investigated — Spotify playlists, Bandsintown, Facebook
+/// groups, Instagram, TikTok, YouTube, podcast communities, local event
+/// listings.
+///
+/// The candidate carries `reason: "exploring new horizons — current
+/// channels exhausted"` so the operator can see why the brain chose to
+/// explore. The idempotency key uses a 24-hour window so the same
+/// dispatch does not recur within the window.
+fn idle_exploration_candidate(
+    snapshots: &[crowdrelay_brain::GrowthIntelligenceSnapshot],
+    policy: &AutopilotPolicy,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Option<ScoredCandidate>, serde_json::Error> {
+    use crowdrelay_brain::self_assessment::BrainState;
+
+    // The brain's self-assessment is brain-wide (one state per tenant).
+    // Take it from the first snapshot.
+    let Some(first) = snapshots.first() else {
+        return Ok(None);
+    };
+    let brain_state = first.metacognition.state;
+    // Only explore when the brain needs to — Stagnant, Regressing, or
+    // Initializing. Improving means the current channels are working.
+    if !matches!(
+        brain_state,
+        BrainState::Stagnant | BrainState::Regressing | BrainState::Initializing
+    ) {
+        return Ok(None);
+    }
+    // Find the growth-strategist snapshot to check its cooldown.
+    let strategist = snapshots
+        .iter()
+        .find(|s| s.template_id == "growth-strategist");
+    let Some(strategist) = strategist else {
+        return Ok(None);
+    };
+    // The idle exploration has its own cooldown, separate from the
+    // growth-strategist's normal cooldown. Use `hours_since_last_run`
+    // (any run, not just effective) so a failed run still counts.
+    let hours_since = strategist.hours_since_last_run.unwrap_or(u32::MAX);
+    if hours_since < IDLE_EXPLORATION_COOLDOWN_HOURS {
+        return Ok(None);
+    }
+    // Build the "explore new horizons" prompt. The prompt asks the LLM
+    // to identify NEW platforms and communities the brain has not yet
+    // investigated. The brain validates the output against available
+    // templates and does not blindly dispatch to unsupported platforms.
+    let prompt = "The brain's current channels (Reddit, Telegram, Discord, Bandcamp, Metal Archives) are exhausted — fan growth is stagnant or regressing. Identify NEW platforms, communities, and audiences the band has not yet investigated. Consider: Spotify playlists, Bandsintown, Facebook groups, Instagram, TikTok, YouTube, podcast communities, local event listings, genre-specific forums. For each, report: platform name, audience size estimate, relevance to the band's genre, and how the brain could reach that audience. Prioritize platforms with the highest potential fan yield and lowest engagement friction. Write in Polish for the primary audience.";
+    let prediction = DispatchPrediction {
+        template_id: "growth-strategist".to_owned(),
+        expected_new_fans: 0.0,
+        expected_signal_installs: 0.0,
+        context: crowdrelay_brain::DispatchContext::default(),
+        target_key: None,
+        creative_family: None,
+    };
+    let AutopilotPolicyConfig::GrowthIntelligence(ref domain_policy) = policy.config else {
+        return Ok(None);
+    };
+    let action = AutopilotActionPayload::RequestAgentRun {
+        template_id: "growth-strategist".to_owned(),
+        prompt: prompt.to_owned(),
+        priority: 5,
+        tier: crowdrelay_brain::AgentTier::Basic,
+    };
+    let cooldown_bucket = (now.unix_timestamp() / 3600 / i64::from(IDLE_EXPLORATION_COOLDOWN_HOURS))
+        * i64::from(IDLE_EXPLORATION_COOLDOWN_HOURS);
+    Ok(Some(ScoredCandidate {
+        candidate: DecisionCandidate {
+            context: policy.context,
+            subject: ActionSubject::Workspace(workspace_id),
+            decision_kind: "request_agent_run",
+            confidence: Confidence::MAX,
+            disposition: disposition(
+                policy.autonomy_level,
+                Confidence::MAX,
+                policy.minimum_confidence,
+            ),
+            reason: "exploring new horizons — current channels exhausted",
+            input_snapshot: serde_json::json!({
+                "brain_state": brain_state.as_str(),
+                "idle_exploration": true,
+                "hours_since_last_strategist_run": hours_since,
+            }),
+            policy_snapshot: policy_evidence(policy, domain_policy)?,
+            action,
+            decision_key: format!(
+                "decision:growth-intelligence:v{v}:growth-strategist:idle-exploration:{cooldown_bucket}",
+                v = policy.version
+            ),
+            action_idempotency_key: format!(
+                "action:agent-run:growth-strategist:idle-exploration:{cooldown_bucket}"
+            ),
+        },
+        prediction,
+        efe_score: 0.0,
+        strategy_rank: usize::MAX,
+        treatment_stats: crowdrelay_brain::TreatmentAwareStats {
+            expected_fans: 0.0,
+            treatment_effect: 0.0,
+            treatment_std: 1.0,
+            predict_std: 1.0,
+            confidence: 0,
+            treatment_confidence: 0,
+            use_treatment_effect: false,
+            treatment_effect_y30: 0.0,
+            treatment_std_y30: 1.0,
+            treatment_confidence_y30: 0,
+            uses_y30: false,
+            p_meaningful_effect: 0.0,
+            bridge_confidence: 0,
+            bridge_is_reliable: false,
+            evidence_quality: crowdrelay_brain::EvidenceQuality::Observational,
+        },
+        information_gain: 0.0,
+        novelty: 1.0,
+    }))
 }

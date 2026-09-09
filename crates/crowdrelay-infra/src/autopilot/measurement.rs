@@ -1175,7 +1175,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // fourteen- or forty-four-day window does not. Runs after the
             // control sweep so a treated row released by it is not held for
             // another cycle.
-            refresh_evidence_readiness(&mut transaction, workspace_id, measurement.action_id, now)
+            refresh_evidence_readiness(&mut transaction, workspace_id, measurement.action_id, Some(measurement.kind), now)
                 .await?;
             transaction.commit().await.map_err(map_sqlx)?;
             // Close any experiment designs whose measurement windows have
@@ -1203,7 +1203,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            let action_id: Option<uuid::Uuid> = sqlx::query_scalar::<_, uuid::Uuid>(
+            let row: Option<(uuid::Uuid, String)> = sqlx::query_as::<_, (uuid::Uuid, String)>(
                 r#"
                 UPDATE viryaos_autopilot_measurements
                 SET status = CASE WHEN $4 AND attempt_count < 3 THEN 'pending' ELSE 'failed' END,
@@ -1215,7 +1215,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     finished_at = CASE WHEN $4 AND attempt_count < 3 THEN NULL ELSE $3 END,
                     last_error_kind = $5
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
-                RETURNING action_id
+                RETURNING action_id, measurement_kind
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -1230,11 +1230,14 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // open forever. Readiness re-checks the queue: if this was the
             // last thing outstanding, the row closes with that outcome's
             // column still NULL, and the learner skips what it never learned.
-            if let Some(action_id) = action_id {
+            if let Some((action_id, kind_str)) = row {
+                let measurement_kind = super::parse_measurement_kind(&kind_str)
+                    .unwrap_or(super::AutopilotMeasurementKind::AgentRunFanGrowth14d);
                 refresh_evidence_readiness(
                     &mut transaction,
                     workspace_id,
                     AutopilotActionId::from(action_id),
+                    Some(measurement_kind),
                     now,
                 )
                 .await?;

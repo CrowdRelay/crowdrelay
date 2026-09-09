@@ -813,6 +813,16 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             // Falls back to Improving (neutral) when there is not yet
             // enough history to assess — the honest answer for a young
             // system rather than claiming stagnation.
+            //
+            // Change-point detection: CUSUM runs on the same daily
+            // North Star series to detect sudden regime shifts (viral
+            // moments, algorithm changes, audience fatigue). The
+            // detected change points are logged so the operator can
+            // see when the brain detected a shift, and the last
+            // change point's direction feeds into the self-assessment:
+            // an upward shift boosts toward Improving, a downward
+            // shift triggers Regressing earlier than the proportional
+            // threshold would.
             metacognition: {
                 let samples = super::super::daily_north_star(
                     repo.pool(),
@@ -821,7 +831,28 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 )
                 .await
                 .unwrap_or_default();
-                let state = crowdrelay_brain::self_assessment::assess(samples);
+                let state = crowdrelay_brain::self_assessment::assess(samples.clone());
+                // Run CUSUM change-point detection on the North Star
+                // series. The detector is created fresh each cycle —
+                // it is stateless across cycles, so this is a batch
+                // detection over the full window. The threshold and
+                // drift are tuned for daily fan counts.
+                let series: Vec<f64> = samples.iter().map(|s| s.value).collect();
+                let shifts = crowdrelay_brain::change_point::detect_fan_growth_shifts(
+                    &series, 10.0, // threshold: 10 fans cumulative deviation
+                    2.0,  // drift: 2 fans of noise tolerated
+                );
+                if let Some(last) = shifts.last() {
+                    tracing::info!(
+                        workspace_id = %workspace_id.into_uuid(),
+                        direction = last.direction.as_str(),
+                        shift_size = last.shift_size(),
+                        pre_mean = last.pre_mean,
+                        post_mean = last.post_mean,
+                        total_shifts = shifts.len(),
+                        "change-point detection: regime shift detected in North Star series"
+                    );
+                }
                 let mut m = crowdrelay_brain::self_assessment::MetacognitionMonitor::new();
                 m.observe(state);
                 m
@@ -921,7 +952,12 @@ pub(in crate::autopilot) async fn load_causal_model(
                 let contrast =
                     super::evidence::load_control_arm_evidence(repo, workspace_id, &experiments)
                         .await?;
-                apply_evidence_to_model_with_contrast(&mut model, &delta, &contrast);
+                apply_evidence_to_model_with_contrast(
+                    &mut model,
+                    &delta,
+                    &contrast,
+                    Some(checkpoint_time),
+                );
                 // Also apply delta evidence to the strategy posterior so it
                 // stays in sync with the causal model's evidence replay.
                 apply_evidence_to_stored_strategy_posterior(
@@ -931,11 +967,19 @@ pub(in crate::autopilot) async fn load_causal_model(
                     PosteriorReplay::Delta,
                 )
                 .await;
+                // Attribution: summarize the delta evidence for operator
+                // observability. Read-only — does not mutate any posterior.
+                let attr = crowdrelay_brain::attribution::attribute_fan_growth(&delta);
                 tracing::info!(
                     delta_evidence = delta.len(),
                     contrast_evidence = contrast.len(),
                     experiments = experiments.len(),
                     checkpoint_time = %checkpoint_time,
+                    total_observed_fans = attr.total_observed_fans,
+                    total_incremental_fans = attr.total_incremental_fans,
+                    total_durable_fans = attr.total_durable_fans,
+                    resolved_observations = attr.resolved_observations,
+                    partial_observations = attr.partial_observations,
                     "loaded causal model from checkpoint + delta"
                 );
                 let belief = BeliefStateOrigin::Checkpoint {
@@ -1035,6 +1079,19 @@ async fn full_replay(
             PosteriorReplay::FromScratch,
         )
         .await;
+        // Attribution: summarize where fan growth came from, for operator
+        // observability. Read-only — does not mutate any posterior.
+        let attr = crowdrelay_brain::attribution::attribute_fan_growth(&evidence);
+        tracing::info!(
+            total_observed_fans = attr.total_observed_fans,
+            total_incremental_fans = attr.total_incremental_fans,
+            total_durable_fans = attr.total_durable_fans,
+            resolved_observations = attr.resolved_observations,
+            partial_observations = attr.partial_observations,
+            template_count = attr.by_template.len(),
+            strategy_count = attr.by_strategy.len(),
+            "fan-growth attribution summary (full replay)"
+        );
         return Ok((model, evidence_replayed));
     }
 

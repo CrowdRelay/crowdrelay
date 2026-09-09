@@ -67,7 +67,7 @@ fn a_control_arm_from_an_earlier_batch_still_contrasts_and_is_not_relearned() {
 
     let stats_after = |batch: &[GrowthEvidence], contrast: &[GrowthEvidence]| {
         let mut model = CausalModel::new();
-        apply_evidence_to_model_with_contrast(&mut model, batch, contrast);
+        apply_evidence_to_model_with_contrast(&mut model, batch, contrast, None);
         model.predict_stats_with_treatment_for_target(template, Some(target), &ctx)
     };
 

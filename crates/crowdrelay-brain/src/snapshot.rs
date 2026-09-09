@@ -242,17 +242,17 @@ fn default_template_costs() -> HashMap<String, f64> {
 impl Default for GrowthIntelligencePolicy {
     fn default() -> Self {
         Self {
-            reddit_scanner_cooldown_hours: 168,
-            telegram_scanner_cooldown_hours: 168,
-            metal_archives_scanner_cooldown_hours: 336,
-            bandcamp_scanner_cooldown_hours: 336,
-            community_engager_cooldown_hours: 120,
+            reddit_scanner_cooldown_hours: 72,
+            telegram_scanner_cooldown_hours: 72,
+            metal_archives_scanner_cooldown_hours: 168,
+            bandcamp_scanner_cooldown_hours: 168,
+            community_engager_cooldown_hours: 72,
             press_pitch_cooldown_hours: 72,
             social_post_cooldown_hours: 48,
             telegram_poster_cooldown_hours: 48,
             discord_poster_cooldown_hours: 48,
             signal_inviter_cooldown_hours: 48,
-            growth_strategist_cooldown_hours: 24,
+            growth_strategist_cooldown_hours: 12,
             press_pitch_event_lead_days: 30,
             fan_growth_stagnant_days: 14,
             failed_run_retry_hours: 1,

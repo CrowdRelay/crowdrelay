@@ -59,7 +59,7 @@ use crate::reach::ReachChannel;
 /// The weights are applied by scaling the observation variance in the
 /// treatment-effect posterior update: higher quality → lower variance →
 /// the observation moves the posterior more.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceQuality {
     /// True A/B: action was withheld for a control group. Full causal
@@ -179,6 +179,20 @@ impl EvidenceQuality {
     #[must_use]
     pub const fn min_observational(self) -> Self {
         Self::Observational
+    }
+
+    /// Returns a numeric rank for sorting — higher is better quality.
+    /// Used by attribution sorting where PartialOrd is not available.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::RandomizedHoldout => 6,
+            Self::MatchedQuasiExperiment => 5,
+            Self::DeterministicAttribution => 4,
+            Self::ModeledAttribution => 3,
+            Self::PrePost => 2,
+            Self::Observational => 1,
+        }
     }
 
     /// Returns the string representation for DB storage.
@@ -347,6 +361,24 @@ pub struct GrowthEvidence {
     /// and final checkpoints each independently update the posterior.
     #[serde(default)]
     pub partial_resolution_count: u32,
+
+    // ── Per-horizon replay cursors ──
+    //
+    // Each measurement horizon (3d, 14d, 30d) is an independent observation.
+    // The delta cursor is the MAX of these timestamps. A row is eligible for
+    // delta replay when any horizon's timestamp is newer than the checkpoint.
+    // The replay logic gates outcome model and treatment-effect updates per
+    // horizon, so each horizon is learned from exactly once — no
+    // double-counting.
+    //
+    // `None` means "never replayed under the per-horizon scheme" (a row written
+    // before migration 0250, or a row whose measurement has not landed yet).
+    #[serde(default)]
+    pub replayed_3d_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub replayed_14d_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub replayed_30d_at: Option<OffsetDateTime>,
 }
 
 /// Contamination at or above which a randomised assignment is no longer a
@@ -394,6 +426,9 @@ impl Default for GrowthEvidence {
             episode_id: None,
             resolved_at: None,
             partial_resolution_count: 0,
+            replayed_3d_at: None,
+            replayed_14d_at: None,
+            replayed_30d_at: None,
         }
     }
 }
@@ -454,6 +489,9 @@ impl GrowthEvidence {
             episode_id: None,
             resolved_at: None,
             partial_resolution_count: 0,
+            replayed_3d_at: None,
+            replayed_14d_at: None,
+            replayed_30d_at: None,
         }
     }
 
