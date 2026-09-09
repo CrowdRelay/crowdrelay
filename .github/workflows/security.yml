@@ -23,6 +23,9 @@ jobs:
           echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=/home/ubuntu/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=/home/ubuntu/.cargo" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.98.0
       - name: Generate deterministic lock SBOM
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: python3 scripts/generate_lock_sbom.py Cargo.lock artifacts/crowdrelay-sbom.cdx.json
