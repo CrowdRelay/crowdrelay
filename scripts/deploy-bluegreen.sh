@@ -177,11 +177,16 @@ printf 'EDGE_PREFLIGHT=PASS config=synchronized cutover=graceful-reload\n'
 # allowlist silently 404s new control-plane routes. Sync before the app
 # cutover so new routes are reachable the moment the edge switches.
 # deploy.sh scp's the current Caddyfile to /tmp; fall back to the repo copy.
+# If the area-management-proxy container was removed (consolidated into the
+# edge Caddy), skip the sync — the edge Caddy already handles those routes.
 AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
 AREA_CADDYFILE="/tmp/crowdrelay-area-management.Caddyfile"
 [[ -f "$AREA_CADDYFILE" ]] || AREA_CADDYFILE="$(absolute_path deploy/area-management.Caddyfile)"
 [[ -f "$AREA_CADDYFILE" ]] || fail "missing area-management Caddyfile"
-if ! cmp -s "$AREA_CADDYFILE" <(docker exec "$AREA_PROXY_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null); then
+area_proxy_status="$(docker inspect "$AREA_PROXY_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || true)"
+if [[ -z "$area_proxy_status" ]]; then
+  printf 'AREA_CADDYFILE=NOOP container=removed\n'
+elif ! cmp -s "$AREA_CADDYFILE" <(docker exec "$AREA_PROXY_CONTAINER" cat /etc/caddy/Caddyfile 2>/dev/null); then
   cp "$AREA_CADDYFILE" "$(absolute_path deploy/area-management.Caddyfile)"
   docker exec "$AREA_PROXY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null \
     || fail 'area-management Caddyfile is invalid after sync'
