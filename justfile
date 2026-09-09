@@ -308,3 +308,7 @@ deploy-ecosystem-check *ARGS:
 # Roll the stack back to a previously deployed 40-char SHA.
 deploy-ecosystem-rollback sha:
     bash scripts/deploy-ecosystem.sh --rollback {{sha}}
+
+# Deploy all active tenants with a runtime from the Mac. Fails fast on first error.
+ship-fleet *ARGS:
+    bash scripts/ship-fleet.sh {{ARGS}}

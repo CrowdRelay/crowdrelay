@@ -33,6 +33,18 @@ fail() {
   exit 1
 }
 
+# Deploy lock: tells FakApp a deploy is in progress so it doesn't remediate
+# mid-deploy. Acquired on the server before any mutation, released on exit.
+LOCK_SCRIPT="$ROOT_DIR/scripts/deploy-lock.sh"
+deploy_lock_acquire() {
+  scp -q "$LOCK_SCRIPT" "$ORACLE:/usr/local/bin/crowdrelay-deploy-lock.sh" 2>/dev/null || true
+  ssh -T "$ORACLE" 'sudo bash /usr/local/bin/crowdrelay-deploy-lock.sh acquire crowdrelay-ship' 2>/dev/null || true
+}
+deploy_lock_release() {
+  ssh -T "$ORACLE" 'sudo bash /usr/local/bin/crowdrelay-deploy-lock.sh release' 2>/dev/null || true
+}
+trap deploy_lock_release EXIT
+
 require() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
@@ -419,6 +431,7 @@ REMOTE_CHECK
 
 if [[ "$blue_green_eligible" == "eligible" ]]; then
   printf '\n==> Blue-green deploy (zero-downtime Caddy cutover)\n'
+  deploy_lock_acquire
   # Run cross-system source contracts before the blue-green cutover
   python3 scripts/test_area_deploy_contract.py
   python3 scripts/test_control_plane_management_contract.py
@@ -440,6 +453,7 @@ if [[ "$blue_green_eligible" == "eligible" ]]; then
   deploy_status=$?
 else
   printf '\n==> Bootstrap/recovery deploy (force-recreate — no blue/green container running)\n'
+  deploy_lock_acquire
   set +e
   bash "$CANONICAL" "$TARGET"
   deploy_status=$?
