@@ -284,21 +284,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "${DEPLOY_DIR}"
           # Record previous tag for rollback
-          PREV_TAG="$(grep '^CROWDRELAY_IMAGE_TAG=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "")"
+          PREV_TAG="$(sudo grep '^CROWDRELAY_IMAGE_TAG=' "${DEPLOY_DIR}/${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "")"
           echo "PREV_TAG=${PREV_TAG}" >> "$GITHUB_ENV"
           # Update the image tag in the env file
-          sudo sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=${IMAGE_TAG}|" "${ENV_FILE}"
-          grep -q "CROWDRELAY_IMAGE_TAG=${IMAGE_TAG}" "${ENV_FILE}" || {
+          sudo sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=${IMAGE_TAG}|" "${DEPLOY_DIR}/${ENV_FILE}"
+          sudo grep -q "CROWDRELAY_IMAGE_TAG=${IMAGE_TAG}" "${DEPLOY_DIR}/${ENV_FILE}" || {
             echo "ERROR: failed to update CROWDRELAY_IMAGE_TAG" >&2; exit 1; }
           echo "ENV=PASS tag=${IMAGE_TAG}"
 
           # Run migrations with the new worker image, then restart API and worker.
           # Migrations are idempotent and run in a one-shot container.
-          sudo docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm migrate || true
+          sudo docker compose --env-file "${DEPLOY_DIR}/${ENV_FILE}" -f "${DEPLOY_DIR}/${COMPOSE_FILE}" run --rm migrate || true
           # Recreate API and worker containers with the new image
-          sudo docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-deps api worker
+          sudo docker compose --env-file "${DEPLOY_DIR}/${ENV_FILE}" -f "${DEPLOY_DIR}/${COMPOSE_FILE}" up -d --no-deps api worker
           echo "COMPOSE_UP=PASS"
 
       - name: Health check — wait for API readiness
@@ -317,9 +316,8 @@ jobs:
           # Rollback: restore previous tag and restart
           if [[ -n "${PREV_TAG:-}" ]]; then
             echo "Rolling back to ${PREV_TAG}..."
-            cd "${DEPLOY_DIR}"
-            sudo sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=${PREV_TAG}|" "${ENV_FILE}"
-            sudo docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-deps api worker
+            sudo sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=${PREV_TAG}|" "${DEPLOY_DIR}/${ENV_FILE}"
+            sudo docker compose --env-file "${DEPLOY_DIR}/${ENV_FILE}" -f "${DEPLOY_DIR}/${COMPOSE_FILE}" up -d --no-deps api worker
           fi
           exit 1
 
