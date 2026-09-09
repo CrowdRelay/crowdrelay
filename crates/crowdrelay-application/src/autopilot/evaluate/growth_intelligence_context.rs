@@ -147,10 +147,31 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         crowdrelay_brain::StateConditionedStrategyPosterior,
                     >(state.clone())
                     {
-                        Ok(posterior) => GrowthStrategy::from_world_model_with_posterior(
-                            &first.world_model,
-                            &posterior,
-                        ),
+                        Ok(posterior) => {
+                            let posterior_strategy = GrowthStrategy::from_world_model_with_posterior(
+                                &first.world_model,
+                                &posterior,
+                            );
+                            // The proof that learning changed behavior, not
+                            // just belief. `hysteresis_strategy` is what the
+                            // operator's rules alone would have picked this
+                            // cycle; `posterior_strategy` is what the brain
+                            // actually acts on. Silent when they agree —
+                            // which is most cycles, and correctly
+                            // unremarkable — so this only fires the moment
+                            // learned evidence overrides the prior. Recorded
+                            // on the cycle report (this crate carries no
+                            // tracing dependency) so the worker's existing
+                            // "autopilot cycle report" line surfaces it.
+                            if posterior_strategy != hysteresis_strategy {
+                                report.gi_dispatch_log.push(format!(
+                                    "brain decision influenced by learning: strategy changed prior={} posterior={}",
+                                    hysteresis_strategy.as_str(),
+                                    posterior_strategy.as_str(),
+                                ));
+                            }
+                            posterior_strategy
+                        }
                         Err(_) => hysteresis_strategy,
                     }
                 }

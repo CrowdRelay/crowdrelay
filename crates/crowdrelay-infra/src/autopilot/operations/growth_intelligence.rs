@@ -988,6 +988,24 @@ pub(in crate::autopilot) async fn load_causal_model(
                     partial_observations = attr.partial_observations,
                     "loaded causal model from checkpoint + delta"
                 );
+                // Distinct from the load-summary line above: that one fires
+                // every cycle, empty or not, and reading it for "did the
+                // brain learn anything" means diffing evidence counts across
+                // log lines by hand. This one fires only when the model's
+                // posteriors actually moved, so grepping for it answers the
+                // question directly — the proof-of-learning line the North
+                // Star audit needed and the load summary alone could not
+                // give.
+                if !delta.is_empty() {
+                    tracing::info!(
+                        prior_checkpoint_hash = %checkpoint_content_hash,
+                        evidence_applied = delta.len(),
+                        contrast_evidence = contrast.len(),
+                        total_incremental_fans = attr.total_incremental_fans,
+                        total_durable_fans = attr.total_durable_fans,
+                        "brain learned: posterior updated"
+                    );
+                }
                 let belief = BeliefStateOrigin::Checkpoint {
                     checkpoint_content_hash,
                     checkpoint_updated_at: checkpoint_time,
