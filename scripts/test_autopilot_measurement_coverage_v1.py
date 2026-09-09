@@ -55,7 +55,6 @@ KNOWN_UNMEASURED = {
     "RequestBeaconOutreach",
     "RequestBookingTargetDiscovery",
     "RequestContentArtifact",
-    "RequestFanLifecycleMessage",
     "RequestMerchBundle",
     "RequestMerchReorder",
     "RequestOutreachDiscovery",
@@ -75,6 +74,7 @@ MUST_BE_MEASURED = {
     "RequestAgentContent",
     "RequestAudienceCampaign",
     "RequestCommunityEngagement",
+    "RequestFanLifecycleMessage",
 }
 
 

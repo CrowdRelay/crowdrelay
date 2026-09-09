@@ -224,7 +224,6 @@ pub(super) async fn schedule_effect_measurement(
             }
         }
         AutopilotActionPayload::ChangeTicketCapacity { .. }
-        | AutopilotActionPayload::RequestFanLifecycleMessage { .. }
         | AutopilotActionPayload::RequestMerchReorder { .. }
         | AutopilotActionPayload::RequestMerchBundle { .. }
         | AutopilotActionPayload::RequestContentArtifact { .. }
@@ -263,13 +262,20 @@ pub(super) async fn schedule_effect_measurement(
         // Its measurement is scheduled when that receipt arrives, via
         // `apply_success_side_effects` → `schedule_effect_measurement`.
         //
-        // No measurement is scheduled here because the right measurement —
-        // per-fan engagement or activation in the 7 days after the message —
-        // needs a dedicated `FanLifecycleEngagement7d` kind and observer
-        // that does not exist yet. The existing `AgentRunSignalInstalls7d`
-        // counts workspace-wide Signal installs and is dimensionally wrong
-        // for a per-fan message. Scheduling it would teach the brain from
-        // noise, which is worse than no measurement.
+        // The measurement counts per-fan engagement events (ticket orders,
+        // Signal push endpoint creations, referral redemptions) in the 7-day
+        // window after the message was confirmed delivered. The baseline is 0
+        // — lifecycle messages target new or dormant fans who haven't
+        // engaged yet. This closes the learning loop: the brain learns which
+        // message templates actually move individual fans to action.
+        AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, .. } => {
+            plans.push((
+                AutopilotMeasurementKind::FanLifecycleEngagement7d,
+                fan_id.into_uuid(),
+                0.0,
+                now + time::Duration::days(7),
+            ));
+        }
         // A Signal push exists to put the app in someone's hand, so measure
         // exactly that: installs in the week after it went out.
         //

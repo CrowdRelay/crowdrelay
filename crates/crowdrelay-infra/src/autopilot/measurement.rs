@@ -630,6 +630,71 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                 }
+                // Fan lifecycle engagement: count per-fan engagement events
+                // in the 7-day window after the lifecycle message was
+                // confirmed delivered. The subject_id is the fan_id.
+                //
+                // Engagement is counted as any of:
+                //   - A redeemed admission pass (fan attended a show)
+                //   - A Signal push endpoint creation (fan installed Signal)
+                //   - A referral attribution (fan was referred by someone)
+                //
+                // Each is a distinct signal that the message moved the fan
+                // from passive to active. The baseline is 0 — lifecycle
+                // messages target new or dormant fans. A positive observed
+                // value means the message worked; 0 means it didn't.
+                AutopilotMeasurementKind::FanLifecycleEngagement7d => {
+                    let admission_passes = sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM admission_passes
+                        WHERE workspace_id = $1
+                          AND fan_id = $2
+                          AND status = 'redeemed'
+                          AND redeemed_at >= $3
+                          AND redeemed_at < $3 + INTERVAL '7 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+                    let push_endpoints = sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM fan_push_endpoints
+                        WHERE workspace_id = $1
+                          AND fan_id = $2
+                          AND created_at >= $3
+                          AND created_at < $3 + INTERVAL '7 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+                    let referral_attributions = sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM referral_attributions
+                        WHERE workspace_id = $1
+                          AND referred_fan_id = $2
+                          AND accepted_at >= $3
+                          AND accepted_at < $3 + INTERVAL '7 days'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.subject_id)
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?;
+                    admission_passes + push_endpoints + referral_attributions
+                }
             };
             if observed.is_finite() {
                 Ok(observed)
