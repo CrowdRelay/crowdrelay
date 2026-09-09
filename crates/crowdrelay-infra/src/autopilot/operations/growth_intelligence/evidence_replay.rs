@@ -145,9 +145,13 @@ pub(super) fn apply_evidence_to_model_with_contrast(
     //
     // A horizon is "new" when its replay timestamp is newer than the
     // checkpoint, or when there is no checkpoint (full replay). A NULL
-    // timestamp means the measurement hasn't completed yet — never new.
-    let horizon_is_new = |ts: Option<OffsetDateTime>| -> bool {
-        match (checkpoint, ts) {
+    // per-horizon timestamp falls back to `resolved_at`: a fully resolved
+    // row whose per-horizon columns were never stamped (legacy rows, or
+    // evidence inserted directly by tests) is still new if it resolved
+    // after the checkpoint. Only when both the per-horizon timestamp AND
+    // `resolved_at` are NULL is the horizon genuinely incomplete.
+    let horizon_is_new = |ts: Option<OffsetDateTime>, fallback: Option<OffsetDateTime>| -> bool {
+        match (checkpoint, ts.or(fallback)) {
             (None, _) => true,          // full replay — learn from everything
             (Some(_cp), None) => false, // measurement not completed yet
             (Some(cp), Some(ts)) => ts > cp,
@@ -254,8 +258,8 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // (the 3d value is the only observation so far). The 30d
         // measurement does NOT change `observed_fans`, so it must not
         // trigger an outcome model update.
-        let outcome_is_new = horizon_is_new(ev.replayed_14d_at)
-            || (horizon_is_new(ev.replayed_3d_at) && ev.replayed_14d_at.is_none());
+        let outcome_is_new = horizon_is_new(ev.replayed_14d_at, ev.resolved_at)
+            || (horizon_is_new(ev.replayed_3d_at, ev.resolved_at) && ev.replayed_14d_at.is_none());
         if outcome_is_new && let Some(raw_fans) = ev.observed_fans {
             let prediction = DispatchPrediction {
                 template_id: template.clone(),
@@ -337,7 +341,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // horizon is new. The 3d measurement does not produce an
         // incremental estimate, and the 30d measurement updates the Y30
         // posterior, not Y14.
-        if horizon_is_new(ev.replayed_14d_at)
+        if horizon_is_new(ev.replayed_14d_at, ev.resolved_at)
             && let Some(outcome_y14) = ev.observed_incremental_fans
         {
             let earned_quality = earned_quality_for(y14_contrast);
@@ -373,7 +377,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // Per-horizon gating: the Y30 posterior updates only when the 30d
         // horizon is new. The 3d and 14d measurements do not produce a
         // durable-fans observation.
-        if horizon_is_new(ev.replayed_30d_at)
+        if horizon_is_new(ev.replayed_30d_at, ev.resolved_at)
             && let Some(outcome_y30) = ev.y30_outcome()
         {
             // Y30 treatment-effect update (North Star). Scaled by evidence
@@ -426,7 +430,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             // 14d and 30d horizons are new in this batch. A bridge update
             // from a stale Y14 and a new Y30 (or vice versa) would fit a
             // slope from two differently-timed observations.
-            if horizon_is_new(ev.replayed_14d_at)
+            if horizon_is_new(ev.replayed_14d_at, ev.resolved_at)
                 && let Some(outcome_y14) = ev.observed_incremental_fans
                 && y14_contrast.is_some() == y30_contrast.is_some()
             {
