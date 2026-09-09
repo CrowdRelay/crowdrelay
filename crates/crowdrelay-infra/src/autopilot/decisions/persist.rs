@@ -4,8 +4,6 @@
 enum DecisionActionOutcome {
     /// Quota check throttled — no decision or action created.
     Throttled,
-    /// Decision already existed (ON CONFLICT) — no new rows.
-    DecisionConflict,
     /// Decision created, but disposition doesn't produce an action.
     NoAction,
     /// Action INSERT conflicted on an uncovered unique index (e.g. the
@@ -107,8 +105,31 @@ async fn persist_decision_and_action_tx(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    let Some(decision_id) = inserted_decision else {
-        return Ok(DecisionActionOutcome::DecisionConflict);
+    let decision_id = match inserted_decision {
+        Some(id) => id,
+        None => {
+            // Decision already exists from a prior cycle. This happens when
+            // the decision was created but the action was withheld (e.g.,
+            // treatment assignment was not selected by the portfolio, or
+            // the experiment design conflicted). In that case, the action
+            // may not exist yet — we should proceed to create it.
+            //
+            // Look up the existing decision_id so the action INSERT can
+            // reference it via FK.
+            sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT id
+                FROM viryaos_autopilot_decisions
+                WHERE workspace_id = $1 AND decision_key = $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&candidate.decision_key)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?
+            .ok_or(RepositoryError::NotFound)?
+        }
     };
     // ── Action INSERT ──
     let status = match candidate.disposition {
@@ -410,10 +431,6 @@ macro_rules! decision_persist {
                     quota_throttled: true,
                     action_id: None,
                 },
-                DecisionActionOutcome::DecisionConflict => CandidatePersistence {
-                    action_id: None,
-                    ..Default::default()
-                },
                 DecisionActionOutcome::ActionConflict => CandidatePersistence {
                     decision_created: true,
                     action_created: false,
@@ -481,13 +498,6 @@ macro_rules! decision_persist {
                         action_created: false,
                         quota_throttled: true,
                         action_id: None,
-                    });
-                }
-                DecisionActionOutcome::DecisionConflict => {
-                    transaction.commit().await.map_err(map_sqlx)?;
-                    return Ok(CandidatePersistence {
-                        action_id: None,
-                        ..Default::default()
                     });
                 }
                 DecisionActionOutcome::ActionConflict => {
@@ -657,10 +667,6 @@ macro_rules! decision_persist {
                     action_created: false,
                     quota_throttled: true,
                     action_id: None,
-                },
-                DecisionActionOutcome::DecisionConflict => CandidatePersistence {
-                    action_id: None,
-                    ..Default::default()
                 },
                 DecisionActionOutcome::ActionConflict => CandidatePersistence {
                     decision_created: true,
