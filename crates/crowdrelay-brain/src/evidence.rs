@@ -168,6 +168,19 @@ impl EvidenceQuality {
         }
     }
 
+    /// Caps this quality at Observational — the weakest level.
+    ///
+    /// Used for partially resolved evidence (intermediate checkpoints from
+    /// short-horizon measurements). The long-horizon outcome may contradict
+    /// the short-horizon signal, so the intermediate observation is treated
+    /// as the weakest evidence regardless of the experiment design. This
+    /// mirrors Kern's multi-checkpoint settling where intermediate
+    /// checkpoints use higher observation variance.
+    #[must_use]
+    pub const fn min_observational(self) -> Self {
+        Self::Observational
+    }
+
     /// Returns the string representation for DB storage.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -319,6 +332,21 @@ pub struct GrowthEvidence {
     pub episode_id: Option<String>,
     /// When the evidence was resolved (measurement window closed).
     pub resolved_at: Option<OffsetDateTime>,
+    /// How many intermediate measurement checkpoints have completed.
+    ///
+    /// Zero means no measurement has completed yet — the row is not
+    /// learnable. Positive means at least one short-horizon measurement
+    /// (e.g. 7-day signal installs) has landed, so the row carries a
+    /// real intermediate observation the causal model can learn from
+    /// with downweighted evidence quality. The row is fully resolved
+    /// (`resolved_at IS NOT NULL`) only when ALL measurements —
+    /// including long-horizon 30-day ones — have reached a terminal
+    /// state.
+    ///
+    /// This mirrors Kern's multi-checkpoint settling: 1-day, 7-day,
+    /// and final checkpoints each independently update the posterior.
+    #[serde(default)]
+    pub partial_resolution_count: u32,
 }
 
 /// Contamination at or above which a randomised assignment is no longer a
@@ -365,6 +393,7 @@ impl Default for GrowthEvidence {
             final_contamination: None,
             episode_id: None,
             resolved_at: None,
+            partial_resolution_count: 0,
         }
     }
 }
@@ -424,6 +453,7 @@ impl GrowthEvidence {
             final_contamination: None,
             episode_id: None,
             resolved_at: None,
+            partial_resolution_count: 0,
         }
     }
 
@@ -435,6 +465,17 @@ impl GrowthEvidence {
             || self.observed_incremental_fans.is_some()
             || self.durable_fans_30d.is_some()
             || self.converted
+    }
+
+    /// Returns true if this evidence has at least one intermediate
+    /// measurement checkpoint completed but is not yet fully resolved.
+    ///
+    /// Partially resolved evidence carries a real intermediate observation
+    /// (e.g. 7-day signal installs) that the causal model can learn from
+    /// with downweighted quality. The full 30-day outcome is still pending.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        self.partial_resolution_count > 0 && self.resolved_at.is_none()
     }
 
     /// Returns the Y14 (14-day incremental) outcome for learning.

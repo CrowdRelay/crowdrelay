@@ -87,77 +87,50 @@ class BrainBeliefOwnership(unittest.TestCase):
     def test_the_dormant_posterior_is_not_plumbed_through_the_decision_path(
         self,
     ) -> None:
-        """Learning without a consumer is fine. Plumbing without one is not.
+        """The strategy posterior is now consumed by strategy selection.
 
-        The posterior was loaded by the growth-intelligence cycle, threaded
-        through both candidate producers, and discarded — `let _ = ` in one,
-        `_strategy_posterior` in the other. Nothing read it, and the signature
-        said otherwise, so the comments had to spend a paragraph each retracting
-        what the code shape claimed.
-
-        The write path is untouched and still real. This pins the read path: the
-        cycle must not load the key, so re-introducing the belief is a
-        deliberate change to these signatures rather than the deletion of a
-        discard. When it happens it belongs in exploration allocation or
-        eligibility, never as a multiplier on predicted fan value.
+        It was previously loaded, threaded through the candidate pipeline,
+        and discarded. The posterior is now loaded and consumed by
+        `GrowthStrategy::from_world_model_with_posterior`, which refines
+        the rule-based strategy with learned evidence. This test pins that
+        the load and consumption are both present, so removing either is a
+        deliberate change to these signatures.
         """
         cycle = (
             ROOT
             / "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs"
         ).read_text()
-        self.assertNotIn(
+        self.assertIn(
             'load_brain_state(self.workspace_id, "strategy_posterior")',
             cycle,
-            "the growth-intelligence cycle is loading the strategy posterior "
-            "again. Nothing consumes it, so the load is plumbing that makes it "
-            "read as decision-active",
+            "the growth-intelligence cycle must load the strategy posterior "
+            "to refine the rule-based strategy with learned evidence",
         )
-        for producer in (
-            "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence.rs",
-            "crates/crowdrelay-application/src/autopilot/evaluate/"
-            "growth_intelligence/community_engager.rs",
-        ):
-            source = (ROOT / producer).read_text()
-            self.assertNotIn(
-                "StateConditionedStrategyPosterior",
-                source,
-                f"{producer} takes the strategy posterior as a parameter again. "
-                f"If it is genuinely consumed now, say where in "
-                f"strategy_learning.rs and update this gate in the same change",
-            )
+        self.assertIn(
+            "from_world_model_with_posterior",
+            cycle,
+            "the strategy posterior must be consumed by "
+            "GrowthStrategy::from_world_model_with_posterior",
+        )
 
     def test_the_dormant_posterior_is_labelled_dormant(self) -> None:
-        """A learner nothing reads must say so where a reader will see it.
+        """The strategy posterior is now consumed — docs must say so.
 
-        `StateConditionedStrategyPosterior` is written every cycle and read by
-        no decision. That is defensible — a belief needs history before it can
-        be trusted — but its plumbing (threaded through the whole candidate
-        pipeline) suggests otherwise, and the comments used to assert an
-        influence on eligibility and exploration allocation that no code
-        performed. If it is genuinely wired up later, this assertion is the
-        reminder to correct the docs in the same change.
+        `StateConditionedStrategyPosterior` was previously written every
+        cycle and read by no decision. It is now consumed by
+        `GrowthStrategy::from_world_model_with_posterior`. The module docs
+        must document the consumption so a reader knows the posterior is
+        live, not dormant.
         """
         module = (
             ROOT / "crates/crowdrelay-brain/src/strategy_learning.rs"
         ).read_text()
         self.assertIn(
-            "Dormant, not consumed",
+            "Consumed by strategy selection",
             module,
-            "the strategy posterior's dormancy is no longer documented; either "
-            "it is now consumed (say where) or the label was dropped",
-        )
-        consumers = [
-            p
-            for p in RUST
-            if "crowdrelay-brain" not in str(p)
-            and re.search(r"strategy_posterior\s*\.\s*(predict|confidence)\s*\(", p.read_text())
-        ]
-        self.assertEqual(
-            consumers,
-            [],
-            "the strategy posterior is being read on a decision path. That is "
-            "the intended destination — update the dormancy docs in "
-            "strategy_learning.rs and this gate together",
+            "the strategy posterior is now consumed — the module docs "
+            "must say 'Consumed by strategy selection' so a reader knows "
+            "it is live, not dormant",
         )
 
 

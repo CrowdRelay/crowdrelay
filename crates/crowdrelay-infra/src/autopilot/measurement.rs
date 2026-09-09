@@ -353,6 +353,25 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                 }
+                // Early 3-day checkpoint — same query as the 14-day
+                // measurement but with a 3-day window. This is the
+                // fastest feedback signal for the learning loop.
+                AutopilotMeasurementKind::AgentRunFanGrowth3d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision FROM fans
+                        WHERE workspace_id = $1
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '3 days'
+                          AND status != 'suppressed'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
                 // Incremental fan growth (North Star): difference-in-
                 // differences (DiD) estimate. New fans in the 14-day post-
                 // action window minus the counterfactual (pre-action daily
@@ -839,7 +858,56 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    // Also update the growth evidence table.
+                    // Also update the growth evidence table. The 14d
+                    // observation is the definitive count — it overwrites
+                    // the 3d intermediate value unconditionally.
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET observed_fans = $3
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
+                // Early 3-day checkpoint: writes to BOTH the dispatch
+                // prediction and the growth evidence row. The 3-day value
+                // is an intermediate observation — it undercounts vs the
+                // 14-day count, but it is a real observation the brain can
+                // learn from with downweighted evidence quality.
+                //
+                // The evidence row's observed_fans is set with
+                // COALESCE(observed_fans, $3) so the 14d measurement (which
+                // overwrites unconditionally in its own arm below) replaces
+                // this intermediate value when it arrives.
+                //
+                // The partial resolution count (incremented in
+                // refresh_evidence_readiness) makes the row eligible for
+                // delta replay. Without this write, the replay would load
+                // the row but skip the outcome model update because
+                // observed_fans was NULL — a no-op learning loop.
+                AutopilotMeasurementKind::AgentRunFanGrowth3d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_dispatch_predictions
+                        SET observed_new_fans = $3
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                          AND observed_new_fans IS NULL
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_growth_evidence

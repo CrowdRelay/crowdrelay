@@ -49,9 +49,21 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // to validate meaningfully (OOS observations >= 5). Below
             // that, the default Active state is preserved.
             if result.out_of_sample.observations >= 5 && !result.passed {
-                // Failed validation — degrade to Degraded (quarter budget)
-                snapshot.hypothesis_state =
-                    crowdrelay_brain::hypothesis::HypothesisState::Degraded;
+                // Failed validation — degrade to Degraded (quarter budget).
+                // Persist the transition so the next cycle loads the
+                // degraded state instead of resetting to Active.
+                let new_state = crowdrelay_brain::hypothesis::HypothesisState::Degraded;
+                if snapshot.hypothesis_state != new_state {
+                    snapshot.hypothesis_state = new_state;
+                    let _ = self
+                        .repository
+                        .save_hypothesis_state(
+                            self.workspace_id,
+                            &snapshot.template_id,
+                            new_state,
+                        )
+                        .await;
+                }
             }
             // Passed validation (or insufficient evidence) — keep at Active
         }

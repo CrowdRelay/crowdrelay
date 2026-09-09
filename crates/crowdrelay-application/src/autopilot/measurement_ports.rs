@@ -71,6 +71,14 @@ pub enum AutopilotMeasurementKind {
     /// messaging: the brain learns which message templates actually move
     /// individual fans to action.
     FanLifecycleEngagement7d,
+    /// Early fan-growth checkpoint 3 days after an agent dispatch. This is
+    /// the fastest feedback signal for the learning loop — the brain can
+    /// learn from a 3-day partial observation while waiting for the full
+    /// 14-day and 30-day measurements. Mirrors Kern's 1-day checkpoint
+    /// settling: intermediate observations update the posterior with
+    /// downweighted evidence quality, so the brain gets next-cycle
+    /// feedback instead of waiting weeks for the final outcome.
+    AgentRunFanGrowth3d,
 }
 
 impl AutopilotMeasurementKind {
@@ -95,6 +103,7 @@ impl AutopilotMeasurementKind {
             Self::ScannerDiscoveryQuality14d => "scanner_discovery_quality_14d",
             Self::StrategistInsightQuality14d => "strategist_insight_quality_14d",
             Self::FanLifecycleEngagement7d => "fan_lifecycle_engagement_7d",
+            Self::AgentRunFanGrowth3d => "agent_run_fan_growth_3d",
         }
     }
 

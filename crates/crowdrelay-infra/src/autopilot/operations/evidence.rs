@@ -279,6 +279,7 @@ async fn load_evidence(
         experiment_assignment_id: Option<String>,
         experiment_uuid: Option<uuid::Uuid>,
         final_contamination: Option<f64>,
+        partial_resolution_count: i32,
     }
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
@@ -287,13 +288,25 @@ async fn load_evidence(
                ge.creative_family, ge.recipient_id,
                ge.channel, ge.estimated_reach, ge.actual_reach, ge.treatment, ge.propensity,
                ea.execution_status,
-               ge.observed_fans, ge.observed_incremental_fans, ge.durable_fans_30d,
+               COALESCE(ge.observed_fans, dp.observed_new_fans) AS observed_fans,
+               ge.observed_incremental_fans, ge.durable_fans_30d,
                ge.converted, ge.converted_fan_id, ge.predicted_fans, ge.predicted_signal_installs,
                ge.context, ge.strategy, ge.evidence_quality,
                ge.sample_size, ge.contamination, ge.measurement_delay_days,
                ge.episode_id, ge.resolved_at,
-               ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination
+               ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
+               COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count
         FROM viryaos_growth_evidence ge
+        -- Belt-and-suspenders fallback: if the 3d measurement wrote to
+        -- dispatch_predictions.observed_new_fans but not to
+        -- growth_evidence.observed_fans (legacy rows, or a future code
+        -- path that skips the direct write), the join brings the value
+        -- in. The COALESCE above prefers the evidence row's own value
+        -- when it exists. The join is on (workspace_id, action_id) which
+        -- has a partial unique index — no fan-out risk.
+        LEFT JOIN viryaos_dispatch_predictions dp
+          ON dp.workspace_id = ge.workspace_id
+         AND dp.action_id = ge.action_id
         -- LATERAL subquery: pick at most ONE assignment row per evidence
         -- row to prevent fan-out. A partial UNIQUE INDEX on
         -- (workspace_id, action_id) WHERE action_id IS NOT NULL
@@ -328,7 +341,7 @@ async fn load_evidence(
             LIMIT 1
         ) ea ON true
         WHERE ge.workspace_id = $1
-          AND ge.resolved_at IS NOT NULL
+          AND (ge.resolved_at IS NOT NULL OR COALESCE(ge.partial_resolution_count, 0) > 0)
           -- Exclude unresolved (unknown) executions from the causal
           -- learner. This is an explicit defense at the learning
           -- boundary — do NOT rely on the implicit chain
@@ -342,24 +355,31 @@ async fn load_evidence(
           -- SQL filter. SQL provides eligible observations; the causal
           -- layer chooses the estimand.
           AND (ea.execution_status IS NULL OR ea.execution_status != 'unknown')
-          -- The cursor is `resolved_at`, the moment the row became something
-          -- the model can learn from. It used to be `ge.timestamp`, which is
-          -- when the dispatch went out — days or weeks before its outcome
-          -- exists. The checkpoint advances every cycle, so by the time a
+          -- The cursor is `resolved_at` for fully resolved rows, or
+          -- `last_partial_resolution_at` for partially resolved ones.
+          -- The checkpoint advances every cycle, so by the time a
           -- fourteen- or forty-four-day measurement landed, its dispatch
           -- timestamp was long behind the cursor and the delta skipped it. The
           -- brain was replaying an empty set and saving a checkpoint of it.
+          --
+          -- For partially resolved rows, the cursor is the partial
+          -- resolution timestamp — the moment the intermediate
+          -- observation became available. This lets the brain learn
+          -- from 7-day and 14-day checkpoints without waiting for the
+          -- full 30-day outcome.
           --
           -- The control-arm mode ignores the cursor entirely. It is not
           -- advancing the learner — it is fetching the comparison for rows the
           -- learner is advancing this batch, and that comparison resolved
           -- whenever it resolved.
           AND CASE WHEN $3::uuid[] IS NULL
-                   THEN ($2::timestamptz IS NULL OR ge.resolved_at > $2)
+                   THEN ($2::timestamptz IS NULL
+                        OR COALESCE(ge.resolved_at, ge.last_partial_resolution_at) > $2)
                    ELSE ge.treatment = 'control'
                         AND ea.experiment_uuid = ANY($3)
               END
-        ORDER BY ge.resolved_at ASC, ge.timestamp ASC
+        ORDER BY COALESCE(ge.resolved_at, ge.last_partial_resolution_at) ASC,
+                 ge.timestamp ASC
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -478,6 +498,7 @@ async fn load_evidence(
                 measurement_delay_days: row.measurement_delay_days.map(|v| v as u32),
                 episode_id: row.episode_id,
                 resolved_at: row.resolved_at,
+                partial_resolution_count: row.partial_resolution_count as u32,
             }
         })
         .collect();

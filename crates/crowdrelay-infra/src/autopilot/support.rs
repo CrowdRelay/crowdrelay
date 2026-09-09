@@ -282,6 +282,8 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "strategist_insight_quality_14d" => {
             Ok(AutopilotMeasurementKind::StrategistInsightQuality14d)
         }
+        "fan_lifecycle_engagement_7d" => Ok(AutopilotMeasurementKind::FanLifecycleEngagement7d),
+        "agent_run_fan_growth_3d" => Ok(AutopilotMeasurementKind::AgentRunFanGrowth3d),
         _ => Err(RepositoryError::Unexpected),
     }
 }

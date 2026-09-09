@@ -561,6 +561,21 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         super::operations::evidence::load_growth_evidence(self, workspace_id, since).await
     }
 
+    async fn save_hypothesis_state(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+        state: crowdrelay_brain::hypothesis::HypothesisState,
+    ) -> Result<(), RepositoryError> {
+        super::operations::growth_intelligence::save_hypothesis_state(
+            self,
+            workspace_id,
+            template_id,
+            state,
+        )
+        .await
+    }
+
     async fn count_pending_measurements(
         &self,
         workspace_id: WorkspaceId,

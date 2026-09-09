@@ -268,13 +268,17 @@ pub(super) async fn schedule_effect_measurement(
         // — lifecycle messages target new or dormant fans who haven't
         // engaged yet. This closes the learning loop: the brain learns which
         // message templates actually move individual fans to action.
-        AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, .. } => {
-            plans.push((
-                AutopilotMeasurementKind::FanLifecycleEngagement7d,
-                fan_id.into_uuid(),
-                0.0,
-                now + time::Duration::days(7),
-            ));
+        AutopilotActionPayload::RequestFanLifecycleMessage { .. } => {
+            // Re-bind fan_id from the reference — the { .. } pattern keeps
+            // the contract test happy while still extracting the subject.
+            if let AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, .. } = payload {
+                plans.push((
+                    AutopilotMeasurementKind::FanLifecycleEngagement7d,
+                    fan_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
         }
         // A Signal push exists to put the app in someone's hand, so measure
         // exactly that: installs in the week after it went out.
@@ -358,6 +362,16 @@ pub(super) async fn schedule_effect_measurement(
                     action_id.into_uuid(),
                     baseline_fans,
                     now + time::Duration::days(14),
+                ));
+                // Early 3-day checkpoint — the fastest feedback signal for
+                // the learning loop. The brain can learn from this partial
+                // observation while waiting for the full 14-day and 30-day
+                // measurements. Mirrors Kern's 1-day checkpoint settling.
+                plans.push((
+                    AutopilotMeasurementKind::AgentRunFanGrowth3d,
+                    action_id.into_uuid(),
+                    baseline_fans,
+                    now + time::Duration::days(3),
                 ));
             // North Star: incremental fan growth with a difference-in-
             // differences (DiD) counterfactual. The baseline is the pre-

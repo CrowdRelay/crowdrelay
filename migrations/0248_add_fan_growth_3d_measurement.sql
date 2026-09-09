@@ -1,0 +1,20 @@
+-- Add the agent_run_fan_growth_3d measurement kind.
+--
+-- This is the early checkpoint measurement — the fastest feedback signal
+-- for the learning loop. The brain can learn from a 3-day partial
+-- observation while waiting for the full 14-day and 30-day measurements.
+-- Mirrors Kern's 1-day checkpoint settling: intermediate observations
+-- update the posterior with downweighted evidence quality.
+--
+-- The measurement is scheduled alongside agent_run_fan_growth_14d when
+-- a direct-action worker dispatches. It counts new fans in the 3-day
+-- post-action window. The observation is written to
+-- viryaos_dispatch_predictions.observed_new_fans but NOT to
+-- viryaos_growth_evidence.observed_fans (which holds the full 14-day
+-- count). The partial resolution count (migration 0247) is what makes
+-- the evidence row learnable at this stage.
+
+-- No schema change needed: measurement_kind is a text column. The kind
+-- is registered in the Rust enum and parsed by the support module.
+-- This migration exists to document the addition and maintain the
+-- sequential migration numbering convention.

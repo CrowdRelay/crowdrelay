@@ -104,6 +104,55 @@ pub(super) async fn refresh_evidence_readiness(
     action_id: AutopilotActionId,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // ── Partial resolution ──
+    //
+    // A measurement just completed. Even if other measurements (longer
+    // horizons) are still pending, the evidence row now carries a real
+    // intermediate observation the causal model can learn from. We
+    // increment partial_resolution_count and stamp
+    // last_partial_resolution_at so the loader can select these rows
+    // for delta replay with downweighted evidence quality.
+    //
+    // This mirrors Kern's multi-checkpoint settling: 1-day, 7-day, and
+    // final checkpoints each independently update the posterior, so the
+    // brain gets next-day feedback instead of waiting 30 days for the
+    // final outcome.
+    //
+    // We do NOT set resolved_at here — that still requires ALL
+    // measurements to be terminal AND the control arm to be resolved.
+    // The partial count is a separate signal the loader reads.
+    let partial_result = sqlx::query(
+        r#"
+        UPDATE viryaos_growth_evidence AS evidence
+        SET partial_resolution_count = evidence.partial_resolution_count + 1,
+            last_partial_resolution_at = $3
+        WHERE evidence.workspace_id = $1
+          AND evidence.action_id = $2
+          AND evidence.resolved_at IS NULL
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    if partial_result.rows_affected() > 0 {
+        tracing::info!(
+            workspace_id = %workspace_id.into_uuid(),
+            action_id = %action_id.into_uuid(),
+            rows = partial_result.rows_affected(),
+            "evidence readiness: partial resolution — intermediate checkpoint available for learning"
+        );
+    }
+
+    // ── Full resolution ──
+    //
+    // Only when every measurement has reached a terminal state AND the
+    // control arm has resolved (or its 44-day window has elapsed) do we
+    // stamp resolved_at. The delta cursor moves with resolved_at, so
+    // premature full resolution would skip the long-horizon outcome
+    // entirely.
     let evidence_result = sqlx::query(
         r#"
         UPDATE viryaos_growth_evidence AS evidence
@@ -160,7 +209,7 @@ pub(super) async fn refresh_evidence_readiness(
             workspace_id = %workspace_id.into_uuid(),
             action_id = %action_id.into_uuid(),
             rows = evidence_resolved,
-            "evidence readiness: resolved evidence row(s)"
+            "evidence readiness: fully resolved evidence row(s)"
         );
     }
     let prediction_result = sqlx::query(

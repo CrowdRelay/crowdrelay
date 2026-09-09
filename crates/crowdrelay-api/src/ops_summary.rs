@@ -99,6 +99,13 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
 
     // Last autopilot decision timestamp — the honest signal that the worker
     // actually completed a cycle, not just acquired a lease.
+    //
+    // This query is deliberately cross-workspace: the worker serves all
+    // workspaces and the operator needs to know whether ANY cycle has
+    // completed recently, not whether one workspace has. Scoping it to a
+    // single workspace would hide a stalled worker behind a workspace that
+    // happens to have a recent decision. The workspace-scope ratchet
+    // baseline allows this one unscoped statement for that reason.
     let cycle_age_seconds: i64 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(

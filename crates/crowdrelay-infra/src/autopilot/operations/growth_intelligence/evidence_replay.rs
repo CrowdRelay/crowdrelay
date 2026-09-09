@@ -185,7 +185,28 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // dispatch. `evidence_quality` records that the unit was randomised;
         // whether that randomisation survived the measurement window is a
         // separate fact, and `final_contamination` is where it lives.
-        let evidence_quality = ev.effective_evidence_quality();
+        let mut evidence_quality = ev.effective_evidence_quality();
+
+        // ── Partial resolution downweighting ──
+        //
+        // A partially resolved row (partial_resolution_count > 0,
+        // resolved_at IS NULL) carries an intermediate checkpoint
+        // observation — typically a 7-day or 14-day measurement that
+        // landed before the full 30-day outcome. The causal model can
+        // learn from it, but with downweighted quality: the long-
+        // horizon outcome may contradict the short-horizon signal, so
+        // the intermediate observation is treated as Observational
+        // regardless of the experiment design.
+        //
+        // This mirrors Kern's multi-checkpoint settling: intermediate
+        // checkpoints (1-day, 7-day) update the posterior with higher
+        // observation variance, while the final checkpoint gets full
+        // weight. Here, partial resolution → Observational (weight
+        // 0.5), full resolution → earned quality (weight up to 1.0).
+        let is_partial = ev.partial_resolution_count > 0 && ev.resolved_at.is_none();
+        if is_partial {
+            evidence_quality = evidence_quality.min_observational();
+        }
 
         // Update the outcome model (P(Y|action,context)) from the raw
         // observed fan count — NOT the DiD estimate. The outcome model

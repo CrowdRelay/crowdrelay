@@ -348,85 +348,86 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // community reach, outreach pipeline, and growth target progress.
     // Loaded once and shared across all template snapshots. The recent_fans
     // count (last 14 days) is merged into this query to save a round-trip.
-    let fan_counts: (i64, i64, i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COUNT(*)::bigint AS total_fans,
-            COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS fans_this_month,
-            COUNT(*) FILTER (WHERE created_at > now() - interval '30 days'
-                             AND created_at <= now() - interval '14 days')::bigint AS fans_prev_window,
-            COUNT(*) FILTER (WHERE created_at > now() - interval '14 days')::bigint AS recent_fans
-        FROM fans
-        WHERE workspace_id = $1 AND status != 'suppressed'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)?;
+    //
+    // The five count queries are independent — parallelize them to reduce
+    // cycle latency. Each hits a different table, so they contend on no
+    // shared lock and the pool serves them concurrently.
+    let (fan_counts, signal_counts, community_counts, outreach_counts, north_star_str) =
+        tokio::try_join!(
+            sqlx::query_as::<_, (i64, i64, i64, i64)>(
+                r#"
+                SELECT
+                    COUNT(*)::bigint AS total_fans,
+                    COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS fans_this_month,
+                    COUNT(*) FILTER (WHERE created_at > now() - interval '30 days'
+                                     AND created_at <= now() - interval '14 days')::bigint AS fans_prev_window,
+                    COUNT(*) FILTER (WHERE created_at > now() - interval '14 days')::bigint AS recent_fans
+                FROM fans
+                WHERE workspace_id = $1 AND status != 'suppressed'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(pool),
+            sqlx::query_as::<_, (i64, i64)>(
+                r#"
+                SELECT
+                    COUNT(*)::bigint AS total_installs,
+                    COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS installs_this_month
+                FROM fan_push_endpoints
+                WHERE workspace_id = $1 AND active = true AND invalidated_at IS NULL
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(pool),
+            sqlx::query_as::<_, (i64, i64)>(
+                r#"
+                SELECT
+                    COUNT(DISTINCT dp.id)::bigint AS discovered,
+                    COUNT(DISTINCT cp.subreddit)::bigint AS active
+                FROM discovery_places dp
+                LEFT JOIN community_posts cp ON cp.subreddit = dp.name
+                    AND cp.workspace_id = dp.workspace_id
+                    AND cp.posted_at > now() - interval '30 days'
+                WHERE dp.workspace_id = $1 AND dp.status = 'active'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(pool),
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                r#"
+                SELECT
+                    COUNT(DISTINCT ot.id) FILTER (WHERE ot.status = 'proposed')::bigint AS pending,
+                    COUNT(DISTINCT ot.id) FILTER (WHERE ot.status = 'promoted')::bigint AS promoted,
+                    COUNT(DISTINCT cp.target_id)::bigint AS engaged
+                FROM agent_outreach_targets ot
+                LEFT JOIN community_posts cp ON cp.target_id = ot.id
+                    AND cp.workspace_id = ot.workspace_id
+                    AND cp.status = 'posted'
+                WHERE ot.workspace_id = $1
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_one(pool),
+            // North star metric from tenant_settings — independent of all
+            // count queries, so it runs in parallel with them.
+            sqlx::query_as::<_, (String,)>(
+                r#"SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'north_star_metric'"#,
+            )
+            .bind(workspace_id.into_uuid())
+            .fetch_optional(pool),
+        )
+        .map_err(map_sqlx)?;
 
     let total_fans = u32::try_from(fan_counts.0.max(0)).unwrap_or(0);
     let fans_this_month = u32::try_from(fan_counts.1.max(0)).unwrap_or(0);
     let fans_prev_window = u32::try_from(fan_counts.2.max(0)).unwrap_or(0);
     let fan_growth_stagnant = fan_counts.3 == 0;
 
-    // Signal install counts.
-    let signal_counts: (i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COUNT(*)::bigint AS total_installs,
-            COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS installs_this_month
-        FROM fan_push_endpoints
-        WHERE workspace_id = $1 AND active = true AND invalidated_at IS NULL
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)?;
-
     let total_signal_installs = u32::try_from(signal_counts.0.max(0)).unwrap_or(0);
     let signal_installs_this_month = u32::try_from(signal_counts.1.max(0)).unwrap_or(0);
 
-    // Discovered communities. DISTINCT: the join onto posts counts activity.
-    let community_counts: (i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COUNT(DISTINCT dp.id)::bigint AS discovered,
-            COUNT(DISTINCT cp.subreddit)::bigint AS active
-        FROM discovery_places dp
-        LEFT JOIN community_posts cp ON cp.subreddit = dp.name
-            AND cp.workspace_id = dp.workspace_id
-            AND cp.posted_at > now() - interval '30 days'
-        WHERE dp.workspace_id = $1 AND dp.status = 'active'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)?;
-
     let discovered_communities = u32::try_from(community_counts.0.max(0)).unwrap_or(0);
     let active_communities = u32::try_from(community_counts.1.max(0)).unwrap_or(0);
-
-    // Outreach pipeline counts. DISTINCT for the same reason.
-    let outreach_counts: (i64, i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COUNT(DISTINCT ot.id) FILTER (WHERE ot.status = 'proposed')::bigint AS pending,
-            COUNT(DISTINCT ot.id) FILTER (WHERE ot.status = 'promoted')::bigint AS promoted,
-            COUNT(DISTINCT cp.target_id)::bigint AS engaged
-        FROM agent_outreach_targets ot
-        LEFT JOIN community_posts cp ON cp.target_id = ot.id
-            AND cp.workspace_id = ot.workspace_id
-            AND cp.status = 'posted'
-        WHERE ot.workspace_id = $1
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)?;
 
     let pending_outreach_targets = u32::try_from(outreach_counts.0.max(0)).unwrap_or(0);
     let promoted_outreach_targets = u32::try_from(outreach_counts.1.max(0)).unwrap_or(0);
@@ -487,14 +488,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     let best_performing_community = engagement_history.first().map(|e| e.subreddit.clone());
     let worst_performing_community = engagement_history.last().map(|e| e.subreddit.clone());
 
-    // Load the north star metric from tenant_settings. Default is signal_installs.
-    let north_star_str: Option<(String,)> = sqlx::query_as(
-        r#"SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'north_star_metric'"#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx)?;
+    // North star metric — loaded in parallel with the count queries above.
     let north_star = north_star_str
         .and_then(|(s,)| NorthStarMetric::parse(&s))
         .unwrap_or_default();
@@ -605,54 +599,79 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     growth_platforms.push("signal");
     growth_metric_keys.push("active_fans");
 
-    let audience_row: (i64, i64, i64, i64) = sqlx::query_as(&format!(
-        "{AUDIENCE_WINDOW_CTE}
-        SELECT
-            COALESCE((SELECT SUM(value) FROM latest), 0)::bigint,
-            GREATEST(
-                COALESCE((SELECT SUM(value) FROM latest), 0)
-                    - COALESCE((SELECT SUM(value) FROM baseline), 0),
-                0
-            )::bigint,
-            (SELECT COUNT(DISTINCT platform) FROM latest)::bigint,
-            (SELECT COUNT(DISTINCT platform) FROM latest
-             WHERE captured_at > now() - interval '7 days')::bigint
-        "
-    ))
-    .bind(workspace_id.into_uuid())
-    .bind(&audience_platforms)
-    .bind(&audience_metric_keys)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx)?
-    .unwrap_or((0, 0, 0, 0));
-    // The same audience arithmetic, split by platform instead of summed.
-    //
-    // The aggregate above says whether the audience is growing; this says
-    // where. Nothing read that before, so the strategy's template order stayed
-    // the fixed guess it was written as, however the numbers moved.
-    //
-    // Signal is deliberately included even though it is not an off-platform
-    // feed: an install is the most valuable unit the North Star has, and
-    // leaving it out would rank every platform except the one that matters
-    // most.
-    let platform_growth_rows: Vec<(String, i64, i64)> = sqlx::query_as(&format!(
-        "{AUDIENCE_WINDOW_CTE}
-        SELECT
-            latest.platform,
-            SUM(latest.value)::bigint AS audience,
-            GREATEST(SUM(latest.value) - COALESCE(SUM(baseline.value), 0), 0)::bigint AS gained
-        FROM latest
-        LEFT JOIN baseline ON baseline.series_id = latest.series_id
-        GROUP BY latest.platform
-        "
-    ))
-    .bind(workspace_id.into_uuid())
-    .bind(&growth_platforms)
-    .bind(&growth_metric_keys)
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
+    let audience_row: (i64, i64, i64, i64);
+    let platform_growth_rows: Vec<(String, i64, i64)>;
+    let hypothesis_states: std::collections::HashMap<
+        String,
+        crowdrelay_brain::hypothesis::HypothesisState,
+    >;
+    // The aggregate and per-platform audience queries use the same CTE
+    // shape but different platform lists and SELECT clauses. They are
+    // independent — parallelize them with the hypothesis state load to
+    // halve the audience-query latency.
+    {
+        let audience_sql = format!(
+            "{AUDIENCE_WINDOW_CTE}
+            SELECT
+                COALESCE((SELECT SUM(value) FROM latest), 0)::bigint,
+                GREATEST(
+                    COALESCE((SELECT SUM(value) FROM latest), 0)
+                        - COALESCE((SELECT SUM(value) FROM baseline), 0),
+                    0
+                )::bigint,
+                (SELECT COUNT(DISTINCT platform) FROM latest)::bigint,
+                (SELECT COUNT(DISTINCT platform) FROM latest
+                 WHERE captured_at > now() - interval '7 days')::bigint
+            "
+        );
+        let platform_sql = format!(
+            "{AUDIENCE_WINDOW_CTE}
+            SELECT
+                latest.platform,
+                SUM(latest.value)::bigint AS audience,
+                GREATEST(SUM(latest.value) - COALESCE(SUM(baseline.value), 0), 0)::bigint AS gained
+            FROM latest
+            LEFT JOIN baseline ON baseline.series_id = latest.series_id
+            GROUP BY latest.platform
+            "
+        );
+        let audience_fut = async {
+            sqlx::query_as::<_, (i64, i64, i64, i64)>(&audience_sql)
+                .bind(workspace_id.into_uuid())
+                .bind(&audience_platforms)
+                .bind(&audience_metric_keys)
+                .fetch_optional(pool)
+                .await
+                .map_err(map_sqlx)
+        };
+        // The same audience arithmetic, split by platform instead of summed.
+        //
+        // The aggregate above says whether the audience is growing; this says
+        // where. Nothing read that before, so the strategy's template order stayed
+        // the fixed guess it was written as, however the numbers moved.
+        //
+        // Signal is deliberately included even though it is not an off-platform
+        // feed: an install is the most valuable unit the North Star has, and
+        // leaving it out would rank every platform except the one that matters
+        // most.
+        let platform_fut = async {
+            sqlx::query_as::<_, (String, i64, i64)>(&platform_sql)
+                .bind(workspace_id.into_uuid())
+                .bind(&growth_platforms)
+                .bind(&growth_metric_keys)
+                .fetch_all(pool)
+                .await
+                .map_err(map_sqlx)
+        };
+        let (audience_opt, platform_rows, hyp_states) = tokio::try_join!(
+            audience_fut,
+            platform_fut,
+            load_hypothesis_states(repo, workspace_id)
+        )?;
+        audience_row = audience_opt.unwrap_or((0, 0, 0, 0));
+        platform_growth_rows = platform_rows;
+        hypothesis_states = hyp_states;
+    }
     let platform_growth: Vec<PlatformGrowth> = platform_growth_rows
         .into_iter()
         .map(|(platform, audience, gained)| PlatformGrowth {
@@ -717,6 +736,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
 
     // Build one snapshot per worker template.
     let templates = worker_templates();
+    // hypothesis_states loaded in parallel with the audience queries above.
     let mut snapshots = Vec::with_capacity(templates.len());
     for template_id in &templates {
         let (hours_since_last_run, hours_since_last_effective_run) = last_runs
@@ -775,23 +795,35 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
                 .unwrap_or(Standing::Untested { measured: 0 }),
             world_model: world_model.clone(),
             tenant_preference: tenant_preference.clone(),
-            // Hypothesis lifecycle: defaults to Active for templates
-            // without a persisted lifecycle state, preserving current
-            // behavior (full budget, may_act=true). The evaluator uses
-            // may_act() to gate dispatch and sizing_multiplier() to
-            // scale budget. Persistence will be added in a follow-up
-            // that creates viryaos_growth_hypotheses and loads state
-            // from it; until then all templates act as Active.
-            hypothesis_state: crowdrelay_brain::hypothesis::HypothesisState::Active,
-            // Metacognition: defaults to a monitor in the Improving
-            // state (sizing_multiplier=1.0, exploration_boost=0.0),
-            // preserving current behavior. The cycle trigger will
-            // record daily North Star readings and update the monitor
-            // in a follow-up; until then the monitor stays at Improving
-            // so dispatch budget and EFE weights are unchanged.
+            // Hypothesis lifecycle: loaded from viryaos_growth_hypotheses.
+            // Templates without a persisted state default to Active,
+            // preserving current behavior. The evaluator uses may_act()
+            // to gate dispatch and sizing_multiplier() to scale budget.
+            hypothesis_state: hypothesis_states
+                .get(*template_id)
+                .copied()
+                .unwrap_or(crowdrelay_brain::hypothesis::HypothesisState::Active),
+            // Metacognition: assess the brain's own performance from
+            // the daily North Star series. The assessment feeds
+            // exploration_boost into EFE weights and sizing_multiplier
+            // into dispatch budget — the brain explores harder when
+            // stagnant and sizes down when regressing, mirroring Kern's
+            // metacognition feedback loop.
+            //
+            // Falls back to Improving (neutral) when there is not yet
+            // enough history to assess — the honest answer for a young
+            // system rather than claiming stagnation.
             metacognition: {
+                let samples = super::super::daily_north_star(
+                    repo.pool(),
+                    workspace_id,
+                    super::super::NORTH_STAR_WINDOW_DAYS,
+                )
+                .await
+                .unwrap_or_default();
+                let state = crowdrelay_brain::self_assessment::assess(samples);
                 let mut m = crowdrelay_brain::self_assessment::MetacognitionMonitor::new();
-                m.observe(crowdrelay_brain::self_assessment::BrainState::Improving);
+                m.observe(state);
                 m
             },
         });
@@ -1165,4 +1197,69 @@ pub(in crate::autopilot) async fn load_last_dispatched_template(
     .await
     .map_err(map_sqlx)?;
     Ok(template)
+}
+
+/// Loads hypothesis lifecycle states for all templates in a workspace.
+///
+/// Returns a map from template_id to HypothesisState. Templates not in
+/// the table default to Active (preserving current behavior for existing
+/// templates that haven't been persisted yet).
+pub(in crate::autopilot) async fn load_hypothesis_states(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<
+    std::collections::HashMap<String, crowdrelay_brain::hypothesis::HypothesisState>,
+    RepositoryError,
+> {
+    let pool = &repo.pool;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT template_id, state
+        FROM viryaos_growth_hypotheses
+        WHERE workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let mut states = std::collections::HashMap::new();
+    for (template_id, state_str) in rows {
+        if let Some(state) = crowdrelay_brain::hypothesis::HypothesisState::parse(&state_str) {
+            states.insert(template_id, state);
+        }
+    }
+    Ok(states)
+}
+
+/// Saves a hypothesis lifecycle state, creating or updating the row.
+pub(in crate::autopilot) async fn save_hypothesis_state(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    template_id: &str,
+    state: crowdrelay_brain::hypothesis::HypothesisState,
+) -> Result<(), RepositoryError> {
+    let pool = &repo.pool;
+    sqlx::query(
+        r#"
+        INSERT INTO viryaos_growth_hypotheses (
+            workspace_id, template_id, state, last_transition_at, updated_at
+        ) VALUES ($1, $2, $3, now(), now())
+        ON CONFLICT (workspace_id, template_id)
+            DO UPDATE SET state = $3,
+                          last_transition_at = CASE
+                              WHEN viryaos_growth_hypotheses.state != $3
+                              THEN now()
+                              ELSE viryaos_growth_hypotheses.last_transition_at
+                          END,
+                          updated_at = now()
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(template_id)
+    .bind(state.as_str())
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }

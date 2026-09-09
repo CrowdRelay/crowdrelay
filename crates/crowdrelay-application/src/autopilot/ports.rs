@@ -569,6 +569,17 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         since: Option<OffsetDateTime>,
     ) -> Result<Vec<crowdrelay_brain::GrowthEvidence>, RepositoryError>;
 
+    /// Persists a hypothesis lifecycle state transition for a template.
+    /// Called after walk-forward validation degrades or promotes a
+    /// template. The persisted state is loaded on the next cycle by
+    /// the snapshot loader.
+    async fn save_hypothesis_state(
+        &self,
+        workspace_id: WorkspaceId,
+        template_id: &str,
+        state: crowdrelay_brain::hypothesis::HypothesisState,
+    ) -> Result<(), RepositoryError>;
+
     /// Counts unresolved growth evidence rows — dispatches whose outcomes
     /// haven't been observed yet (resolved_at IS NULL). Used by the WAIT
     /// candidate's value-of-information computation: pending measurements
