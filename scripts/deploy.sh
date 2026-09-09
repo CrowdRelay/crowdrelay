@@ -495,10 +495,20 @@ printf 'CONTROL_PLANE_TUNNEL_FINAL=PASS unchanged=true\n'
 # (blue stopped) or crowdrelay-api-1 (non-blue-green). Try both.
 # Use sh -c (not bash) because the control-plane container is distroless/minimal.
 if ssh -T "$ORACLE" docker inspect crowdrelay-control-plane-app-1 >/dev/null 2>&1; then
-  cp_sha="$(ssh -T "$ORACLE" docker exec crowdrelay-control-plane-app-1 \
-    sh -c 'wget -qO- --timeout=5 http://crowdrelay-api-green-1:8080/v1/meta 2>/dev/null \
-             || wget -qO- --timeout=5 http://crowdrelay-api-1:8080/v1/meta 2>/dev/null' \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
+  # Retry up to 3 times with 5-second gaps. The blue-green cutover stops the old
+  # API and starts the new one; the new container's DNS alias may take a few
+  # seconds to propagate on the shared bridge network. A single-shot check
+  # races the DNS cache and reports "unreachable" for an API that is actually
+  # healthy — a false negative that blocks the deploy receipt.
+  cp_sha=""
+  for _ in 1 2 3; do
+    cp_sha="$(ssh -T "$ORACLE" docker exec crowdrelay-control-plane-app-1 \
+      sh -c 'wget -qO- --timeout=5 http://crowdrelay-api-green-1:8080/v1/meta 2>/dev/null \
+               || wget -qO- --timeout=5 http://crowdrelay-api-1:8080/v1/meta 2>/dev/null' \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
+    [[ "$cp_sha" == "$TARGET" ]] && break
+    sleep 5
+  done
   [[ "$cp_sha" == "$TARGET" ]] || \
     fail "post-deploy cross-service check failed: control plane sees API SHA=${cp_sha:-unreachable} expected=$TARGET — API may not be on crowdrelay-shared network"
   printf 'CROSS_SERVICE_FINAL=PASS control_plane_reaches_api=true sha=%s\n' "$cp_sha"
