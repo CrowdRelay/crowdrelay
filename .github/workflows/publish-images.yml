@@ -306,7 +306,7 @@ jobs:
           set -euo pipefail
           echo "Waiting for CrowdRelay API readiness..."
           for i in $(seq 1 40); do
-            if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8080/v1/health/ready >/dev/null 2>&1; then
+            if docker exec crowdrelay-api-1 wget -qO- --timeout=3 http://127.0.0.1:8080/v1/health/ready >/dev/null 2>&1; then
               echo "HEALTH=PASS ready after ${i} attempt(s)"
               exit 0
             fi
