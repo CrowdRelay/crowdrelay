@@ -312,6 +312,7 @@ fn different_audiences_have_no_overlap_penalty() {
 fn negative_marginal_value_triggers_do_nothing() {
     let config = PortfolioConfig {
         min_marginal_value: 1.0,
+        min_dispatches: 0, // disable min_dispatches to test the threshold gate
         ..Default::default()
     };
     let optimizer = PortfolioOptimizer::new(config);

@@ -183,6 +183,21 @@ pub struct PortfolioConfig {
     /// safety/value gates. Default 0 (disabled).
     #[serde(default)]
     pub experimental_dispatch_budget: u32,
+    /// Minimum dispatches per cycle when candidates with positive value
+    /// exist. This breaks the WAIT deadlock: when the brain has many
+    /// pending measurements, VOI can exceed the best action's value, making
+    /// WAIT win every cycle. But measurements only resolve after the brain
+    /// acts and the measurement window elapses — so WAIT creates a
+    /// cold-start deadlock. `min_dispatches=1` guarantees the brain always
+    /// tries at least one candidate with positive value, even if WAIT's
+    /// net utility is positive. WAIT still blocks candidates whose
+    /// individual value is below the WAIT threshold.
+    #[serde(default = "default_min_dispatches")]
+    pub min_dispatches: u32,
+}
+
+fn default_min_dispatches() -> u32 {
+    1
 }
 
 impl Default for PortfolioConfig {
@@ -194,6 +209,7 @@ impl Default for PortfolioConfig {
             fatigue_decay: 0.9,
             min_marginal_value: 0.1,
             experimental_dispatch_budget: 0,
+            min_dispatches: 1,
         }
     }
 }
@@ -356,20 +372,29 @@ impl PortfolioOptimizer {
                 break;
             }
             if best_marginal < self.config.min_marginal_value {
-                // All remaining candidates have negative or low marginal value.
-                // Reject the rest and stop.
-                for candidate in remaining.drain(..) {
-                    rejected.push(PortfolioRejection {
-                        opportunity_key: candidate.opportunity_id.to_string(),
-                        reason: if best_marginal < 0.0 {
-                            RejectionReason::NegativeMarginalValue
-                        } else {
-                            RejectionReason::BelowThreshold
-                        },
-                        intrinsic_y30: candidate.decision_value.total(),
-                    });
+                // min_dispatches: if we haven't selected enough yet and the
+                // best remaining candidate has positive value, select it
+                // anyway. This breaks the WAIT deadlock by ensuring the
+                // brain always tries at least one action.
+                if (selected.len() as u32) < self.config.min_dispatches && best_marginal > 0.0 {
+                    // Fall through — select this candidate even though
+                    // it's below min_marginal_value.
+                } else {
+                    // All remaining candidates have negative or low marginal
+                    // value. Reject the rest and stop.
+                    for candidate in remaining.drain(..) {
+                        rejected.push(PortfolioRejection {
+                            opportunity_key: candidate.opportunity_id.to_string(),
+                            reason: if best_marginal < 0.0 {
+                                RejectionReason::NegativeMarginalValue
+                            } else {
+                                RejectionReason::BelowThreshold
+                            },
+                            intrinsic_y30: candidate.decision_value.total(),
+                        });
+                    }
+                    break;
                 }
-                break;
             }
             // Select the best candidate. swap_remove is O(1) — the
             // remaining order doesn't matter because we rescan each
@@ -484,7 +509,27 @@ impl PortfolioOptimizer {
         //
         // The old code compared wait_total > best_y30, which double-counted
         // the opportunity cost. This is the corrected math.
-        if wait_total > 0.0 && wait_total > self.config.min_marginal_value {
+        //
+        // min_dispatches breaks the cold-start deadlock: when the brain has
+        // many pending measurements, VOI can exceed the best action's value,
+        // making WAIT win every cycle. But measurements only resolve after
+        // the brain acts and the measurement window elapses — so WAIT
+        // creates a deadlock where the brain never acts. min_dispatches=1
+        // guarantees the brain dispatches at least one candidate with
+        // positive value, even if WAIT's net utility is positive. WAIT
+        // still blocks candidates whose value is below the WAIT threshold.
+        let has_positive_candidates = candidates.iter().any(|c| c.decision_value.total() > 0.0);
+        // min_dispatches breaks the cold-start deadlock: when min_dispatches > 0
+        // and candidates with positive value exist, WAIT cannot block the entire
+        // portfolio. This ensures the brain always tries at least one action,
+        // even when VOI from pending measurements exceeds the best action's value.
+        // When min_dispatches=0, WAIT can still block all candidates.
+        let min_dispatches_overrides_wait =
+            self.config.min_dispatches > 0 && has_positive_candidates;
+        if wait_total > 0.0
+            && wait_total > self.config.min_marginal_value
+            && !min_dispatches_overrides_wait
+        {
             let reason = format!(
                 "WAIT wins: VOI={:.2}, fatigue_recovery={:.2}, option_value={:.2}, \
                  opportunity_cost={:.2}, net_utility={:.2} > 0 (best_action_value={:.2})",
@@ -514,7 +559,33 @@ impl PortfolioOptimizer {
             };
         }
         // WAIT doesn't win — proceed with normal selection.
-        self.select(candidates)
+        let mut selection = self.select(candidates);
+        // If WAIT would have won but min_dispatches forced action, annotate
+        // the selection so the operator can see why the brain acted despite
+        // WAIT having positive net utility.
+        if wait_total > 0.0 && selection.selected.is_empty() && min_dispatches_overrides_wait {
+            // This shouldn't happen — select() should return at least
+            // min_dispatches candidates when has_positive_candidates is
+            // true. But if it does, log the override.
+            selection.wait_reason = Some(format!(
+                "WAIT overridden by min_dispatches: VOI={:.2}, net_utility={:.2} > 0 \
+                 but min_dispatches={} forced action",
+                wait.value_of_information, wait_total, self.config.min_dispatches,
+            ));
+        } else if wait_total > 0.0
+            && !selection.selected.is_empty()
+            && min_dispatches_overrides_wait
+        {
+            selection.wait_reason = Some(format!(
+                "WAIT overridden by min_dispatches={}: VOI={:.2}, net_utility={:.2} > 0, \
+                 dispatched {} candidate(s) with positive value",
+                self.config.min_dispatches,
+                wait.value_of_information,
+                wait_total,
+                selection.selected.len(),
+            ));
+        }
+        selection
     }
 }
 #[cfg(test)]

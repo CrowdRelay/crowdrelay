@@ -315,13 +315,41 @@ fn scenario_f_wait_beats_low_value_action() {
     let candidate = make_candidate_with_dv("community.engage", "djent", "audience_a", dv);
     // WAIT with high VOI: 20 pending measurements, high avg std
     let wait = WaitCandidateValue::compute(0.5, 20, 3.0, 0.0);
-    let optimizer = PortfolioOptimizer::default();
+    // Disable min_dispatches to test WAIT in isolation
+    let optimizer = PortfolioOptimizer::new(PortfolioConfig {
+        min_dispatches: 0,
+        ..Default::default()
+    });
     let selection = optimizer.select_with_wait(vec![candidate], wait);
-    // WAIT should win (do_nothing = true)
+    // WAIT should win (do_nothing = true) when min_dispatches is disabled
     assert!(
         selection.do_nothing,
         "WAIT should win when VOI exceeds action value"
     );
+}
+
+#[test]
+fn scenario_f_min_dispatches_breaks_wait_deadlock() {
+    // Same scenario as above, but with min_dispatches=1 (default).
+    // The brain should act even when WAIT's VOI exceeds the action value,
+    // because the brain needs to act to generate the measurements it's
+    // waiting for. This breaks the cold-start deadlock.
+    let dv = make_dv(
+        0.5,
+        3.0,
+        EstimationRegime::Y30Direct,
+        EvidenceQuality::RandomizedHoldout,
+        1.0,
+    );
+    let candidate = make_candidate_with_dv("community.engage", "djent", "audience_a", dv);
+    let wait = WaitCandidateValue::compute(0.5, 20, 3.0, 0.0);
+    let optimizer = PortfolioOptimizer::default(); // min_dispatches=1
+    let selection = optimizer.select_with_wait(vec![candidate], wait);
+    assert!(
+        !selection.do_nothing,
+        "min_dispatches should break WAIT deadlock when candidates have positive value"
+    );
+    assert_eq!(selection.selected.len(), 1);
 }
 
 #[test]
