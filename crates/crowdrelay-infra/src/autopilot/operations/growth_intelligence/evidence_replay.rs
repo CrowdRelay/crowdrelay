@@ -256,9 +256,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
         // trigger an outcome model update.
         let outcome_is_new = horizon_is_new(ev.replayed_14d_at)
             || (horizon_is_new(ev.replayed_3d_at) && ev.replayed_14d_at.is_none());
-        if outcome_is_new
-            && let Some(raw_fans) = ev.observed_fans
-        {
+        if outcome_is_new && let Some(raw_fans) = ev.observed_fans {
             let prediction = DispatchPrediction {
                 template_id: template.clone(),
                 expected_new_fans: ev.predicted_fans,
