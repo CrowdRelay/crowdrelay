@@ -12,6 +12,18 @@ ORACLE_REPO="${CROWDRELAY_DEPLOY_REMOTE_REPO:-/opt/crowdrelay}"
 BLUEGREEN="$ROOT_DIR/scripts/deploy-bluegreen.sh"
 # Fallback for bootstrap/recovery when no blue container is running
 CANONICAL="$ROOT_DIR/scripts/deploy-production-safe.sh"
+# Where the release images come from.
+#   actions — wait for CI and the Publish workflow, then deploy their digests.
+#   local   — run the gates here, build natively, push, deploy those digests.
+# The build host is this Mac: same linux/arm64 as production, an order of
+# magnitude more cores than the 2-vCPU production box, and nothing to queue
+# behind. `local` is what `just ship` uses.
+IMAGE_SOURCE="${CROWDRELAY_DEPLOY_IMAGE_SOURCE:-actions}"
+LOCAL_BUILDER="${CROWDRELAY_LOCAL_BUILDER:-crowdrelay}"
+LOCAL_BUILD_CACHE="${CROWDRELAY_LOCAL_BUILD_CACHE:-$HOME/.cache/crowdrelay-buildx}"
+# The gates `local` runs in place of waiting for CI. Override to narrow them,
+# but note that nothing else checks this revision before it reaches production.
+LOCAL_GATES="${CROWDRELAY_LOCAL_GATES:-just ci}"
 IMAGE_RUN_ID=""
 CROWDRELAY_API_DIGEST=""
 CROWDRELAY_WORKER_DIGEST=""
@@ -157,6 +169,92 @@ download_image_manifest() {
   printf 'IMAGE_MANIFEST=PASS sha=%s api=%s worker=%s\n' "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST"
 }
 
+run_local_gates() {
+  printf '\n==> Gates for %s\n' "$TARGET"
+  # shellcheck disable=SC2086 # LOCAL_GATES is a command line, not one word.
+  $LOCAL_GATES || fail 'local gates failed; nothing was built or deployed'
+  printf 'GATES=PASS sha=%s command=%s\n' "$TARGET" "$LOCAL_GATES"
+}
+
+build_and_push_locally() {
+  local owner_lower api_ref worker_ref build_timestamp metadata builder_memory
+  local -a cache_from
+
+  require docker
+  require python3
+
+  # The Rust release build links inside the Docker VM. Below ~12 GB the linker
+  # gets OOM-killed partway through, which surfaces as an opaque exit 137.
+  builder_memory="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
+  if [[ "$builder_memory" =~ ^[0-9]+$ ]] && (( builder_memory > 0 && builder_memory < 12000000000 )); then
+    printf 'WARNING: Docker has %s GB; a release build may be OOM-killed. Raise it in Docker Desktop settings.\n' \
+      "$(( builder_memory / 1000000000 ))" >&2
+  fi
+
+  owner_lower="$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')"
+  api_ref="ghcr.io/${owner_lower}/crowdrelay-api:sha-${TARGET}"
+  worker_ref="ghcr.io/${owner_lower}/crowdrelay-worker:sha-${TARGET}"
+  build_timestamp="$(git show -s --format=%cI "$TARGET")"
+  [[ -n "$build_timestamp" ]] || fail "missing commit timestamp for $TARGET"
+
+  # Provenance and SBOM attestations require the docker-container driver; the
+  # default `docker` driver silently cannot export them.
+  if ! docker buildx inspect "$LOCAL_BUILDER" >/dev/null 2>&1; then
+    docker buildx create --name "$LOCAL_BUILDER" --driver docker-container --bootstrap >/dev/null \
+      || fail "cannot create buildx builder: $LOCAL_BUILDER"
+  fi
+
+  # Cache lives on this machine rather than in GHCR. The registry cache exists
+  # because CI runners are ephemeral; this one is not, and a local mode=max
+  # export costs a disk write instead of a round trip.
+  mkdir -p "$LOCAL_BUILD_CACHE"
+  cache_from=()
+  [[ -f "$LOCAL_BUILD_CACHE/index.json" ]] \
+    && cache_from=(--set "*.cache-from=type=local,src=$LOCAL_BUILD_CACHE")
+
+  printf '\n==> Building linux/arm64 images for %s\n' "$TARGET"
+  metadata="$(mktemp)"
+  if ! API_IMAGE="$api_ref" WORKER_IMAGE="$worker_ref" \
+       CROWDRELAY_GIT_SHA="$TARGET" CROWDRELAY_BUILD_TIMESTAMP="$build_timestamp" \
+       docker buildx bake \
+         --builder "$LOCAL_BUILDER" \
+         --file "$ROOT_DIR/docker-bake.hcl" \
+         --set '*.platform=linux/arm64' \
+         "${cache_from[@]}" \
+         --set "*.cache-to=type=local,dest=$LOCAL_BUILD_CACHE,mode=max" \
+         --provenance=mode=max \
+         --sbom=true \
+         --metadata-file "$metadata" \
+         --push \
+         api worker
+  then
+    rm -f -- "$metadata"
+    fail 'local image build failed'
+  fi
+
+  CROWDRELAY_API_DIGEST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["api"]["containerimage.digest"])' "$metadata" 2>/dev/null || true)"
+  CROWDRELAY_WORKER_DIGEST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker"]["containerimage.digest"])' "$metadata" 2>/dev/null || true)"
+  rm -f -- "$metadata"
+
+  [[ "$CROWDRELAY_API_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'local build produced no API digest'
+  [[ "$CROWDRELAY_WORKER_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'local build produced no worker digest'
+
+  # The deploy pins digests, but the tag has to resolve too: deploy-bluegreen.sh
+  # and the compose files address images by sha-<TARGET>.
+  verify_pushed_tag "$api_ref" "$CROWDRELAY_API_DIGEST"
+  verify_pushed_tag "$worker_ref" "$CROWDRELAY_WORKER_DIGEST"
+
+  printf 'LOCAL_BUILD=PASS sha=%s api=%s worker=%s\n' \
+    "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST"
+}
+
+verify_pushed_tag() {
+  local reference="$1" expected="$2" actual
+  actual="$(docker buildx imagetools inspect "$reference" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+  [[ "$actual" == "$expected" ]] \
+    || fail "pushed tag does not resolve to the built digest: ref=$reference got=${actual:-none} expected=$expected"
+}
+
 control_plane_tunnel_fingerprint() {
   ssh -T "$CONTROL_PLANE_HOST" sudo bash -s <<'REMOTE'
 # Remote body runs as one brace group with stdin detached. bash reads this
@@ -279,9 +377,20 @@ printf 'RUNTIME_CONVERGENCE_RECOVERY=PASS sha=%s services=api,worker proxy=untou
 REMOTE_RECOVERY
 }
 
-wait_for_workflow "CI" "CI"
-wait_for_image_release
-download_image_manifest
+case "$IMAGE_SOURCE" in
+  actions)
+    wait_for_workflow "CI" "CI"
+    wait_for_image_release
+    download_image_manifest
+    ;;
+  local)
+    run_local_gates
+    build_and_push_locally
+    ;;
+  *)
+    fail "unknown CROWDRELAY_DEPLOY_IMAGE_SOURCE: $IMAGE_SOURCE (expected 'actions' or 'local')"
+    ;;
+esac
 
 [[ "$(git rev-parse HEAD)" == "$TARGET" ]] || fail 'local HEAD moved while waiting for release gates'
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree changed while waiting for release gates'

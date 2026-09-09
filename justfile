@@ -282,6 +282,19 @@ ps:
 deploy:
     bash scripts/deploy.sh
 
+# Does not wait for GitHub Actions — this machine is the build host. Requires a
+# clean worktree on main that is already pushed, because the deployed revision
+# has to be the one anyone else can check out.
+# Gates, native arm64 build, push, digest-pinned blue-green. Deploys production.
+ship *ARGS:
+    CROWDRELAY_DEPLOY_IMAGE_SOURCE=local bash scripts/deploy.sh {{ARGS}}
+
+# For when the gates already passed in this tree a moment ago. Skips them —
+# nothing else validates the revision before it reaches production.
+ship-nogate *ARGS:
+    CROWDRELAY_DEPLOY_IMAGE_SOURCE=local CROWDRELAY_LOCAL_GATES=true \
+        bash scripts/deploy.sh {{ARGS}}
+
 # Every component ships its own origin/main; a stale or dirty checkout aborts
 # before anything mutates.
 # Deploy the whole stack: CrowdRelay, Control Plane, agent service
