@@ -47,7 +47,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CRATES = ROOT / "crates"
-TRIGGER = ROOT / "migrations/0190_action_ledger_trigger_unknown.sql"
+TRIGGER = ROOT / "migrations/0251_add_fan_growth_3d_check_constraint.sql"
 ACTION_CHECK = ROOT / "migrations/0189_autopilot_action_unknown_status.sql"
 ASSIGNMENT_CHECK = ROOT / "migrations/0191_execution_status_unknown.sql"
 TARGET_KIND_CHECK = ROOT / "migrations/0138_agent_outreach_targets_community.sql"

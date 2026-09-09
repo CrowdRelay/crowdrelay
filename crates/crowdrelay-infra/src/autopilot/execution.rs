@@ -367,10 +367,30 @@ pub(super) async fn schedule_effect_measurement(
                 // the learning loop. The brain can learn from this partial
                 // observation while waiting for the full 14-day and 30-day
                 // measurements. Mirrors Kern's 1-day checkpoint settling.
+                //
+                // The baseline must match the observation window length: a
+                // 3-day post-period needs a 3-day pre-period baseline, not
+                // the 14-day baseline used by the 14-day measurement. Using
+                // the 14-day count here would always produce a large negative
+                // delta (3 days of arrivals vs 14 days of arrivals) and
+                // corrupt the early learning signal.
+                let baseline_fans_3d = sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT COUNT(*)::double precision FROM fans
+                    WHERE workspace_id = $1
+                      AND created_at >= $2 - INTERVAL '3 days'
+                      AND created_at < $2
+                    "#,
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?;
                 plans.push((
                     AutopilotMeasurementKind::AgentRunFanGrowth3d,
                     action_id.into_uuid(),
-                    baseline_fans,
+                    baseline_fans_3d,
                     now + time::Duration::days(3),
                 ));
             // North Star: incremental fan growth with a difference-in-

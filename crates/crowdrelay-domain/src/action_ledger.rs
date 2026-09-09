@@ -287,10 +287,14 @@ impl ActionState {
             | (Self::Queued, Self::Cancelled)
             | (Self::Queued, Self::Failed) => true,
 
-            // RUNNING → SUCCEEDED | FAILED | UNKNOWN
+            // RUNNING → SUCCEEDED | FAILED | UNKNOWN | QUEUED
+            // QUEUED is allowed for retryable failures: fail_action requeues
+            // a processing action when retryable and attempts remain. The
+            // SQL ledger trigger (migration 0251) allows this transition.
             (Self::Running, Self::Succeeded)
             | (Self::Running, Self::Failed)
-            | (Self::Running, Self::Unknown) => true,
+            | (Self::Running, Self::Unknown)
+            | (Self::Running, Self::Queued) => true,
 
             // UNKNOWN → RECONCILING | SUCCEEDED | FAILED
             (Self::Unknown, Self::Reconciling)
@@ -711,11 +715,12 @@ mod tests {
         assert!(ActionState::Running.can_transition_to(ActionState::Succeeded));
         assert!(ActionState::Running.can_transition_to(ActionState::Failed));
         assert!(ActionState::Running.can_transition_to(ActionState::Unknown));
+        // Retryable failures requeue: RUNNING → QUEUED (migration 0251)
+        assert!(ActionState::Running.can_transition_to(ActionState::Queued));
     }
 
     #[test]
     fn backward_transitions_are_rejected() {
-        assert!(!ActionState::Running.can_transition_to(ActionState::Queued));
         assert!(!ActionState::Queued.can_transition_to(ActionState::Authorized));
         assert!(!ActionState::Authorized.can_transition_to(ActionState::Planned));
         assert!(!ActionState::Succeeded.can_transition_to(ActionState::Running));
