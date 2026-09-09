@@ -710,9 +710,12 @@ impl GrowthMetricSyncWorker {
             .await
             .map_err(|error| GrowthMetricSyncError::Http(error.without_url()))?;
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let detail = extract_graph_api_error(&body)
+                .unwrap_or_else(|| truncate_body(&body));
             return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "Facebook Graph API returned HTTP {} for page {page_id}",
-                response.status()
+                "Facebook Graph API returned HTTP {status} for page {page_id}: {detail}"
             )));
         }
         let body: FacebookPageResponse = response.json().await?;
@@ -765,9 +768,12 @@ impl GrowthMetricSyncWorker {
             .await
             .map_err(|error| GrowthMetricSyncError::Http(error.without_url()))?;
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let detail = extract_graph_api_error(&body)
+                .unwrap_or_else(|| truncate_body(&body));
             return Err(GrowthMetricSyncError::ProviderApi(format!(
-                "Instagram Graph API returned HTTP {} for ig_user {ig_user_id}",
-                response.status()
+                "Instagram Graph API returned HTTP {status} for ig_user {ig_user_id}: {detail}"
             )));
         }
         let body: InstagramUserResponse = response.json().await?;
@@ -1350,6 +1356,26 @@ struct InstagramUserResponse {
     username: Option<String>,
     #[serde(default)]
     followers_count: i64,
+}
+
+/// Extract the human-readable message from a Graph API error body.
+/// Facebook returns `{"error":{"message":"…","type":"OAuthException","code":190,…}}`.
+/// We surface only the message so the operator sees "Session has expired"
+/// instead of a bare "HTTP 400".
+fn extract_graph_api_error(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = value.get("error")?.get("message")?.as_str()?;
+    Some(message.to_owned())
+}
+
+/// Truncate a response body for inclusion in an error message so a
+/// large HTML error page doesn't blow up the log line.
+fn truncate_body(body: &str) -> String {
+    const MAX: usize = 200;
+    if body.len() <= MAX {
+        return body.to_owned();
+    }
+    format!("{}…", &body[..MAX])
 }
 
 // --- TikTok helpers ---
