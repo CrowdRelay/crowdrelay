@@ -557,6 +557,15 @@ impl RedditDiscoveryWorker {
             return Ok(subreddits);
         }
 
+        // When the agents service is configured (auth key present) but returned
+        // no results, do NOT fall through to the direct Reddit path — it 403s
+        // unauthenticated requests from datacenter IPs, and a 200 with a
+        // non-listing body (JS challenge page) produces a misleading payload
+        // error. Skipping saves a wasted request and a noisy warning per query.
+        if self.agent_service_auth_key.is_some() {
+            return Ok(Vec::new());
+        }
+
         // Legacy direct path — kept as fallback for deployments without the
         // agents service. Reddit 403s unauthenticated requests, so this is
         // effectively dark in production, but it must not regress for anyone
