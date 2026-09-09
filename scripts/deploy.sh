@@ -276,6 +276,13 @@ control_plane_tunnel_fingerprint() {
 set -Eeuo pipefail
 tunnel="crowdrelay-control-plane-virya-area-tunnel-1"
 status="$(docker inspect "$tunnel" --format '{{.State.Status}}' 2>/dev/null || true)"
+# The virya-area-tunnel Caddy container was intentionally removed from the
+# control plane (it was a pure pass-through proxy). When the container does
+# not exist, return a stable sentinel so the preservation checks still pass.
+if [[ -z "$status" ]]; then
+  echo "tunnel-removed"
+  exit 0
+fi
 [[ "$status" == "running" ]] || { echo "ERROR: Control Plane tunnel is not running: $status" >&2; exit 1; }
 docker inspect "$tunnel" --format '{{.Id}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.State.Status}}'
 } </dev/null
