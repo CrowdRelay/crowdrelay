@@ -276,6 +276,7 @@ impl AutopilotWorker {
                     north_star = ?report.north_star_observed,
                     gi_candidates = report.gi_candidates,
                     gi_wait_reason = ?report.gi_wait_reason,
+                    gi_dispatch_log = ?report.gi_dispatch_log,
                     "autopilot cycle report"
                 );
             }

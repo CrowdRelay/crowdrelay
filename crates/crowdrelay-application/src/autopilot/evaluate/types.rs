@@ -65,6 +65,8 @@ pub struct AutopilotCycleReport {
     pub gi_candidates: u32,
     /// Diagnostic: WAIT reason if the portfolio selected nothing.
     pub gi_wait_reason: Option<String>,
+    /// Diagnostic: GI dispatch details for operator visibility.
+    pub gi_dispatch_log: Vec<String>,
 }
 
 #[derive(Debug, Error)]

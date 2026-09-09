@@ -345,7 +345,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         //
         // Maps decision_key → (arm, design, unit_id) for later use
         // during dispatch and withheld-treatment recording.
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         enum ArmAssignment {
             Control,
             Treatment,
@@ -410,11 +410,28 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 )
                 .await
             {
-                Ok(d) => d,
+                Ok(d) => {
+                    report.gi_dispatch_log.push(format!(
+                        "experiment_design_loaded: template={} status={:?} holdout={} units={}",
+                        template_id, d.experiment_status, d.holdout_probability, d.eligible_units.len()
+                    ));
+                    d
+                }
                 // Experiment design conflict — skip this group. The design
                 // already exists from a prior cycle; the next cycle will
                 // SELECT it successfully.
+                //
+                // Mark all candidates in this group as control so they're
+                // excluded from the portfolio pool. Without this, the
+                // candidate passes the control_indices filter, gets
+                // selected by the portfolio, but falls through both
+                // dispatch loops (non-experiment doesn't handle it,
+                // treatment can't find it in arm_map) — the portfolio
+                // reports "dispatched N" but nothing actually dispatches.
                 Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                    for (idx, _, _) in group_candidates {
+                        control_indices.insert(*idx);
+                    }
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -546,7 +563,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             let Some(scored) = scored_candidates.get(*i) else {
                 continue;
             };
-            if selection.do_nothing || !selected_keys.contains(&scored.candidate.decision_key) {
+            let is_selected = !selection.do_nothing && selected_keys.contains(&scored.candidate.decision_key);
+            report.gi_dispatch_log.push(format!(
+                "non_experiment_check: idx={} key={} selected={} do_nothing={}",
+                *i, scored.candidate.decision_key, is_selected, selection.do_nothing
+            ));
+            if !is_selected {
                 continue;
             }
             // P1: persist candidate + prediction + initial evidence
@@ -604,6 +626,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 }
                 let is_selected =
                     !selection.do_nothing && selected_keys.contains(&candidate.decision_key);
+                report.gi_dispatch_log.push(format!(
+                    "treatment_check: template={} key={} selected={} do_nothing={} selected_count={} arm={:?}",
+                    template_id, candidate.decision_key, is_selected, selection.do_nothing, selection.selected.len(), arm
+                ));
                 if is_selected {
                     // Treatment selected by portfolio → dispatch.
                     let treatment_assignment =
@@ -631,10 +657,20 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         )
                         .await
                     {
-                        Ok(p) => p,
+                        Ok(p) => {
+                            report.gi_dispatch_log.push(format!(
+                                "treatment_persist: template={} decision_created={} action_created={} throttled={} has_action_id={}",
+                                template_id, p.decision_created, p.action_created, p.quota_throttled, p.action_id.is_some()
+                            ));
+                            p
+                        }
                         // Conflict = action or assignment already exists. Skip
                         // this candidate and continue dispatching the rest.
                         Err(RepositoryError::Conflict | RepositoryError::ConflictBecause(_)) => {
+                            report.gi_dispatch_log.push(format!(
+                                "treatment_conflict: template={} key={}",
+                                template_id, candidate.decision_key
+                            ));
                             continue;
                         }
                         Err(e) => return Err(e.into()),
