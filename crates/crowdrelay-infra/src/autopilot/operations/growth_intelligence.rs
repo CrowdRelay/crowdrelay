@@ -860,6 +860,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         });
     }
 
+    tracing::info!(
+        snapshot_count = snapshots.len(),
+        templates = ?snapshots.iter().map(|s| (s.template_id.clone(), s.hours_since_last_effective_run, s.hours_since_last_run, s.standing.is_retired())).collect::<Vec<_>>(),
+        "GI snapshots loaded"
+    );
+
     Ok(snapshots)
 }
 

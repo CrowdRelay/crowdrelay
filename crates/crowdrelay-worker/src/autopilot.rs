@@ -265,31 +265,17 @@ impl AutopilotWorker {
         let evaluator = EvaluateAutopilot::new(&self.repository, self.workspace_id);
         match evaluator.execute(now).await {
             Ok(report) => {
-                // The reading is taken whether or not the cycle went on to do
-                // anything, because a cycle that decided nothing is exactly the
-                // one whose North Star an operator needs to see.
                 north_star_observed = report.north_star_observed;
-                // A cycle that only started a campaign or only settled a step it
-                // will never send has still done something an operator should be
-                // able to see. Reading the play counters here is what keeps a
-                // recorded omission from being a silent one.
-                if report.decisions > 0
-                    || report.actions_enqueued > 0
-                    || report.actions_throttled > 0
-                    || report.plays_started > 0
-                    || report.play_steps_skipped > 0
-                    || report.plays_completed > 0
-                {
-                    tracing::info!(
-                        decisions = report.decisions,
-                        actions_enqueued = report.actions_enqueued,
-                        actions_throttled = report.actions_throttled,
-                        plays_started = report.plays_started,
-                        play_steps_skipped = report.play_steps_skipped,
-                        plays_completed = report.plays_completed,
-                        "ViryaOS Autopilot evaluated bounded contexts"
-                    );
-                }
+                tracing::info!(
+                    decisions = report.decisions,
+                    actions_enqueued = report.actions_enqueued,
+                    actions_throttled = report.actions_throttled,
+                    plays_started = report.plays_started,
+                    play_steps_skipped = report.play_steps_skipped,
+                    plays_completed = report.plays_completed,
+                    north_star = ?report.north_star_observed,
+                    "autopilot cycle report"
+                );
             }
             Err(error) => {
                 phase_failed = true;
