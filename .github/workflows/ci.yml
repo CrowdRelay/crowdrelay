@@ -64,15 +64,14 @@ jobs:
 
       - name: Activate repository-pinned Rust toolchain
         run: |
-          # Source rustup env and export to GITHUB_PATH so all subsequent
-          # steps in this job can find rustc/cargo. The self-hosted runner's
-          # .path file is not reliably applied across all jobs.
-          source "/home/ubuntu/.cargo/env"
+          # Export absolute paths to GITHUB_PATH/GITHUB_ENV so all subsequent
+          # steps in this job can find rustc/cargo. Don't source the cargo
+          # env file — it uses $HOME internally, which actions/checkout
+          # overrides to a temp dir. Don't call rustc --version here either;
+          # dtolnay/rust-toolchain installs/repairs the toolchain next.
           echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=/home/ubuntu/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=/home/ubuntu/.cargo" >> "$GITHUB_ENV"
-          rustc --version --verbose
-          cargo --version
 
       - name: Purge stale Rust cache entries
         # Swatinem/rust-cache keys on Cargo.lock hash; each lock change leaves
@@ -172,15 +171,9 @@ jobs:
 
       - name: Activate repository-pinned Rust toolchain
         run: |
-          # Source rustup env and export to GITHUB_PATH so all subsequent
-          # steps in this job can find rustc/cargo. The self-hosted runner's
-          # .path file is not reliably applied across all jobs.
-          source "/home/ubuntu/.cargo/env"
           echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=/home/ubuntu/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=/home/ubuntu/.cargo" >> "$GITHUB_ENV"
-          rustc --version --verbose
-          cargo --version
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -251,15 +244,9 @@ jobs:
 
       - name: Activate repository-pinned Rust toolchain
         run: |
-          # Source rustup env and export to GITHUB_PATH so all subsequent
-          # steps in this job can find rustc/cargo. The self-hosted runner's
-          # .path file is not reliably applied across all jobs.
-          source "/home/ubuntu/.cargo/env"
           echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=/home/ubuntu/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=/home/ubuntu/.cargo" >> "$GITHUB_ENV"
-          rustc --version --verbose
-          cargo --version
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
