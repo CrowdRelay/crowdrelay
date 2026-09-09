@@ -275,7 +275,25 @@ pub async fn preview_autopilot_cycle(
         return Err(RepositoryError::Unexpected);
     };
     let world = &first.world_model;
-    let strategy = GrowthStrategy::from_world_model(world);
+    // Use the learned strategy posterior when available, so the preview
+    // reflects what the cycle will actually do rather than just the prior.
+    let strategy = match crate::autopilot::operations::evidence::load_brain_state(
+        repo,
+        workspace_id,
+        "strategy_posterior",
+    )
+    .await?
+    {
+        Some((state, _)) => {
+            match serde_json::from_value::<crowdrelay_brain::StateConditionedStrategyPosterior>(
+                state,
+            ) {
+                Ok(posterior) => GrowthStrategy::from_world_model_with_posterior(world, &posterior),
+                Err(_) => GrowthStrategy::from_world_model(world),
+            }
+        }
+        None => GrowthStrategy::from_world_model(world),
+    };
 
     Ok(CyclePreview {
         strategy: strategy.as_str().to_owned(),

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::world_model::{TargetStatus, WorldModel};
+use crate::world_model::{EventProximity, GrowthTrend, TargetStatus, WorldModel};
 
 /// A growth strategy — the brain's high-level approach to fan acquisition.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -208,6 +208,72 @@ impl GrowthStrategy {
             Self::ContentFirst => {}
         }
         candidate
+    }
+
+    /// Derives the strategy from the world model, refined by the learned
+    /// strategy posterior when there is enough evidence.
+    ///
+    /// The rule-based `from_world_model` remains the prior — it encodes the
+    /// operator's domain knowledge and handles states the posterior has never
+    /// seen. The posterior overrides the prior only when it has enough
+    /// confidence (≥5 observations) and the expected fan yield difference
+    /// between the best and the prior's choice is large enough to justify
+    /// switching (≥1 expected incremental fan).
+    ///
+    /// This is the consumer the `StateConditionedStrategyPosterior` has been
+    /// waiting for. It transforms strategy selection from a static rule engine
+    /// into a learning system: the brain starts with the operator's rules and
+    /// refines them with observed evidence.
+    #[must_use]
+    pub fn from_world_model_with_posterior(
+        world: &WorldModel,
+        posterior: &crate::strategy_learning::StateConditionedStrategyPosterior,
+    ) -> Self {
+        let prior = Self::from_world_model(world);
+        let trend = Self::trend_key(world.fan_growth_trend);
+        let proximity = Self::proximity_key(world);
+        let (prior_mean, _) = posterior.predict(prior.as_str(), trend, proximity);
+        let prior_confidence = posterior.confidence(prior.as_str(), trend, proximity);
+        let mut best = prior;
+        let mut best_mean = prior_mean;
+        let mut best_confidence = prior_confidence;
+        for candidate in Self::all() {
+            if candidate == prior {
+                continue;
+            }
+            let (mean, _) = posterior.predict(candidate.as_str(), trend, proximity);
+            let confidence = posterior.confidence(candidate.as_str(), trend, proximity);
+            if confidence < 5 {
+                continue;
+            }
+            if mean > best_mean + 1.0 && confidence >= best_confidence {
+                best = candidate;
+                best_mean = mean;
+                best_confidence = confidence;
+            }
+        }
+        best
+    }
+
+    /// Maps the world model's growth trend to the posterior's string key.
+    fn trend_key(trend: GrowthTrend) -> &'static str {
+        match trend {
+            GrowthTrend::Stagnant => "stagnant",
+            GrowthTrend::Decelerating => "decelerating",
+            GrowthTrend::Steady => "steady",
+            GrowthTrend::Accelerating => "accelerating",
+        }
+    }
+
+    /// Maps the world model's event proximity to the posterior's string key.
+    fn proximity_key(world: &WorldModel) -> &'static str {
+        let proximity = EventProximity::from_days(world.days_to_next_event.map(|d| d as i64));
+        match proximity {
+            EventProximity::None => "far",
+            EventProximity::Far => "far",
+            EventProximity::Near => "near",
+            EventProximity::Close => "close",
+        }
     }
 
     /// Returns the strategy's recommended template priority order.
@@ -761,6 +827,85 @@ mod tests {
         assert_eq!(
             GrowthStrategy::from_world_model(&world),
             GrowthStrategy::ContentFirst
+        );
+    }
+
+    // ── Posterior-informed strategy selection tests ──
+
+    #[test]
+    fn posterior_with_no_evidence_returns_prior() {
+        // An empty posterior should not override the rule-based strategy.
+        let world = WorldModel {
+            total_fans: 100,
+            signal_conversion_rate_bps: 800,
+            ..Default::default()
+        };
+        let posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::ContentFirst
+        );
+    }
+
+    #[test]
+    fn posterior_with_low_confidence_does_not_override() {
+        // A single observation is not enough confidence to override the prior.
+        let world = WorldModel {
+            total_fans: 100,
+            signal_conversion_rate_bps: 800,
+            ..Default::default()
+        };
+        let mut posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
+        // One observation of AggressiveDiscovery doing well
+        posterior.update("aggressive_discovery", "steady", "far", 20.0, 4.0);
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::ContentFirst,
+            "low confidence (1 observation) should not override the prior"
+        );
+    }
+
+    #[test]
+    fn posterior_overrides_when_evidence_is_strong() {
+        // With ≥5 observations and a large enough yield difference, the
+        // posterior should override the prior.
+        let world = WorldModel {
+            total_fans: 100,
+            signal_conversion_rate_bps: 800,
+            fan_growth_trend: GrowthTrend::Steady,
+            ..Default::default()
+        };
+        let mut posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
+        // AggressiveDiscovery consistently produces 10+ fans in this state
+        for _ in 0..10 {
+            posterior.update("aggressive_discovery", "steady", "far", 10.0, 4.0);
+        }
+        // ContentFirst (the prior) has no evidence, so its mean is 0
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::AggressiveDiscovery,
+            "strong evidence should override the prior"
+        );
+    }
+
+    #[test]
+    fn posterior_does_not_override_for_tiny_yield_difference() {
+        // A yield difference below 1.0 expected fan should not override.
+        let world = WorldModel {
+            total_fans: 100,
+            signal_conversion_rate_bps: 800,
+            fan_growth_trend: GrowthTrend::Steady,
+            ..Default::default()
+        };
+        let mut posterior = crate::strategy_learning::StateConditionedStrategyPosterior::new();
+        // AggressiveDiscovery produces 0.5 fans on average — not enough
+        for _ in 0..10 {
+            posterior.update("aggressive_discovery", "steady", "far", 0.5, 4.0);
+        }
+        assert_eq!(
+            GrowthStrategy::from_world_model_with_posterior(&world, &posterior),
+            GrowthStrategy::ContentFirst,
+            "tiny yield difference should not override the prior"
         );
     }
 }

@@ -111,11 +111,39 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let previous_strategy = last_template
             .as_deref()
             .map(GrowthStrategy::infer_from_template);
+        // Load the learned strategy posterior. This is the consumer the
+        // posterior has been waiting for: the brain starts with the
+        // operator's rules (from_world_model_with_hysteresis) and refines
+        // them with observed evidence when there is enough confidence.
+        let strategy_posterior = self
+            .repository
+            .load_brain_state(self.workspace_id, "strategy_posterior")
+            .await?;
         let strategy = if let Some(first) = snapshots.first() {
-            GrowthStrategy::from_world_model_with_hysteresis(
+            let hysteresis_strategy = GrowthStrategy::from_world_model_with_hysteresis(
                 &first.world_model,
                 previous_strategy,
-            )
+            );
+            // Refine the hysteresis strategy with the learned posterior.
+            // The posterior overrides the prior only when it has ≥5
+            // observations and the expected fan yield difference is large
+            // enough (≥1 expected incremental fan). With no posterior or
+            // insufficient evidence, the hysteresis strategy stands.
+            match &strategy_posterior {
+                Some((state, _)) => {
+                    match serde_json::from_value::<
+                        crowdrelay_brain::StateConditionedStrategyPosterior,
+                    >(state.clone())
+                    {
+                        Ok(posterior) => GrowthStrategy::from_world_model_with_posterior(
+                            &first.world_model,
+                            &posterior,
+                        ),
+                        Err(_) => hysteresis_strategy,
+                    }
+                }
+                None => hysteresis_strategy,
+            }
         } else {
             GrowthStrategy::default()
         };

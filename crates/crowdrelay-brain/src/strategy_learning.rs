@@ -15,26 +15,14 @@
 //! answers, two of which nothing could ever ask, is not redundancy — it is a
 //! reader having to determine which of them production runs on. They are gone.
 //!
-//! # Dormant, not consumed
+//! # Consumed by strategy selection
 //!
-//! Be precise about what this posterior currently does. It is written — the
-//! infra loader folds resolved evidence into it every cycle, and that write is
-//! real. Nothing reads it: no `predict` or `confidence` call on it exists on
-//! any decision path.
-//!
-//! It used to be threaded through the whole candidate pipeline by shared
-//! reference and discarded — bound with `let _ =` in one producer, taken as
-//! `_strategy_posterior` by the other. That plumbing is gone. Learning without
-//! a consumer is defensible; plumbing without a consumer is the part that made
-//! a reader conclude the belief was live.
-//!
-//! So this is a learner accumulating evidence for a consumer that does not
-//! exist yet. That is a defensible place to be — the belief has to have history
-//! before it can be trusted with a decision — but it must not be described as
-//! influencing one. The strategy that actually orders candidates today is
-//! [`crate::strategy::GrowthStrategy`], derived from the world model with
-//! hysteresis, and template priority within it comes from measured platform
-//! yield. Neither consults this posterior.
+//! The posterior is read by [`crate::strategy::GrowthStrategy::from_world_model_with_posterior`],
+//! which refines the rule-based strategy with learned evidence. The brain
+//! starts with the operator's rules and overrides them only when the
+//! posterior has ≥5 observations and the expected fan yield difference is
+//! ≥1 expected incremental fan. This transforms strategy selection from a
+//! static rule engine into a learning system.
 
 use std::collections::HashMap;
 
