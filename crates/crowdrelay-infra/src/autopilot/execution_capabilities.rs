@@ -37,6 +37,85 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
     }
 }
 
+/// Whether this payload is executed by an external executor that must file
+/// a terminal execution receipt. Public for the worker's receipt
+/// reconciliation sweep, which flags dispatched actions whose receipts
+/// never arrived.
+pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
+    match payload {
+        // CanonicalLinkSetup is a pure first-party DB write (smart_links), so
+        // it must not be gated behind an executor capability. is_first_party
+        // covers both communication campaigns and the canonical-link write.
+        AutopilotActionPayload::RequestShowGrowth { lever, .. } => !lever.is_first_party(),
+        _ => matches!(
+            payload,
+            AutopilotActionPayload::RequestFanLifecycleMessage { .. }
+                | AutopilotActionPayload::RequestMerchReorder { .. }
+                | AutopilotActionPayload::RequestBookingOutreach { .. }
+                | AutopilotActionPayload::RequestMerchBundle { .. }
+                | AutopilotActionPayload::RequestOutreach { .. }
+                | AutopilotActionPayload::RequestBeaconDiscovery { .. }
+                | AutopilotActionPayload::RequestOutreachDiscovery { .. }
+                | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
+                | AutopilotActionPayload::RequestBeaconOutreach { .. }
+                | AutopilotActionPayload::RequestContentArtifact { .. }
+                | AutopilotActionPayload::EscalateShowTask { .. }
+                | AutopilotActionPayload::RequestPromotionBudgetChange { .. }
+                | AutopilotActionPayload::ApplyLiveOpportunity { .. }
+                | AutopilotActionPayload::VerifyPlaylistPlacement { .. }
+                | AutopilotActionPayload::CounterLiveOpportunityTerms { .. }
+                | AutopilotActionPayload::AcceptLiveOpportunityTerms { .. }
+                | AutopilotActionPayload::PrepareFundingPackage { .. }
+                | AutopilotActionPayload::SubmitFundingApplication { .. }
+                | AutopilotActionPayload::RunPlayStep { .. }
+                | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
+                | AutopilotActionPayload::RequestOutreachTarget { .. }
+        ),
+    }
+}
+
+/// The capability an action will need before it is claimed, so work behind a
+/// gated executor can be parked instead of claimed, attempted and burned.
+///
+/// `None` means the action is executed entirely inside CrowdRelay and no
+/// executor is involved. The strings here are the same ones
+/// `executor_capability_for_event` derives at emission time; a contract test
+/// keeps the two from drifting.
+pub(in crate::autopilot) fn executor_capability_for_payload(
+    payload: &AutopilotActionPayload,
+) -> Option<&'static str> {
+    if !payload_requires_executor(payload) {
+        return None;
+    }
+    Some(match payload {
+        AutopilotActionPayload::RequestFanLifecycleMessage { .. } => "fan.lifecycle.message",
+        AutopilotActionPayload::RequestMerchReorder { .. } => "merch.reorder",
+        AutopilotActionPayload::RequestBookingOutreach { .. } => "booking.outreach",
+        AutopilotActionPayload::RequestMerchBundle { .. } => "merch.bundle",
+        AutopilotActionPayload::RequestOutreach { .. } => "outreach.send",
+        AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
+        AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
+        AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",
+        AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
+        AutopilotActionPayload::RequestBeaconInviteBatch { .. } => "beacon.invite_batch",
+        AutopilotActionPayload::RequestShowGrowth { .. } => "show.growth",
+        AutopilotActionPayload::RequestContentArtifact { .. } => "content.artifact",
+        AutopilotActionPayload::EscalateShowTask { .. } => "show.escalation",
+        AutopilotActionPayload::RequestPromotionBudgetChange { .. } => "promotion.budget",
+        AutopilotActionPayload::ApplyLiveOpportunity { .. } => "opportunity.application",
+        AutopilotActionPayload::VerifyPlaylistPlacement { .. } => "playlist.verify",
+        AutopilotActionPayload::CounterLiveOpportunityTerms { .. } => "opportunity.terms",
+        AutopilotActionPayload::AcceptLiveOpportunityTerms { .. } => "opportunity.terms",
+        AutopilotActionPayload::PrepareFundingPackage { .. } => "funding.package",
+        AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
+        AutopilotActionPayload::RunPlayStep { .. } => "play.step",
+        AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
+        // `payload_requires_executor` is the authority on which variants reach
+        // this point; anything else executes without one.
+        _ => return None,
+    })
+}
+
 pub(in crate::autopilot) async fn ensure_executor_capability(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
