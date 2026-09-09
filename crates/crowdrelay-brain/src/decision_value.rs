@@ -28,9 +28,11 @@
 //! Uncertainty = "I don't know how large the effect is" (posterior std).
 //! Risk = "The downside if this action is wrong or harmful."
 //! These are separate concepts. Risk is NEVER derived from uncertainty.
-//! Phase 1: risk is `None` (NotModeled). Future: risk may become hard
-//! constraints (risk > ceiling → candidate ineligible) or explicit
-//! downside utility — but never a function of prediction uncertainty.
+//! Risk IS modeled via `p_meaningful_effect`: when the probability of a
+//! meaningful effect is below 0.5, a fan-equivalent penalty is applied
+//! representing the expected loss from the probability that the effect
+//! is noise. This is a decision-relevant probability, not a measure of
+//! spread.
 //!
 //! # Architecture
 //!
@@ -213,9 +215,10 @@ impl DecisionValue {
     /// This prevents DecisionValue from becoming another arbitrary
     /// weighted soup like the old EFE.
     ///
-    /// `risk_penalty` is `None` (NotModeled) in Phase 1 — treated as
-    /// 0.0. This is semantically "risk not yet modeled", NOT "risk
-    /// is proven zero."
+    /// `risk_penalty` is `None` when `p_meaningful_effect >= 0.5` —
+    /// treated as 0.0. When `p_meaningful_effect < 0.5`, the penalty
+    /// represents the expected fan-equivalent loss from the probability
+    /// that the effect is noise.
     #[must_use]
     pub fn total(&self) -> f64 {
         self.pragmatic_value + self.risk_penalty.unwrap_or(0.0) + self.opportunity_cost
@@ -234,8 +237,16 @@ impl DecisionValue {
     /// The `evidence_quality` is taken from the stats (which carry the
     /// strongest evidence quality available for this template/context).
     ///
-    /// `risk_penalty` is `None` (NotModeled) — Phase 1 does not model
-    /// risk. This is NOT "risk = 0" — it is "risk not yet modeled."
+    /// `risk_penalty` is set when `p_meaningful_effect < 0.5` — the
+    /// probability of a meaningful effect is below coin-flip. The penalty
+    /// represents the expected fan-equivalent loss from the probability
+    /// that the effect is noise: `-(1 - p) * expected_y30`. This is NOT
+    /// derived from uncertainty (posterior std) — it is derived from
+    /// `p_meaningful_effect`, a decision-relevant probability about whether
+    /// the treatment effect exceeds a meaningful threshold. Above 0.5
+    /// confidence, no penalty: the brain should not suppress candidates
+    /// it has moderate confidence in, especially in a young learning
+    /// system where evidence is sparse.
     #[must_use]
     pub fn from_stats(
         stats: &TreatmentAwareStats,
@@ -287,7 +298,16 @@ impl DecisionValue {
             contamination: 0.0,
             resource_cost,
             pragmatic_value: expected_y30,
-            risk_penalty: None,    // Phase 1: NotModeled. NOT "risk = 0".
+            risk_penalty: if stats.p_meaningful_effect < 0.5 {
+                // The probability of a meaningful effect is below coin-flip.
+                // The penalty represents the expected fan-equivalent loss
+                // from the probability that the effect is noise. This is NOT
+                // derived from uncertainty (posterior std) — it is derived
+                // from p_meaningful_effect, a decision-relevant probability.
+                Some(-(1.0 - stats.p_meaningful_effect) * expected_y30)
+            } else {
+                None
+            },
             opportunity_cost: 0.0, // Computed by optimizer relative to next-best
             decision_mode,
         }
@@ -435,10 +455,60 @@ mod tests {
     #[test]
     fn from_stats_risk_is_not_modeled() {
         let stats = make_stats(5.0, 2.0, 10);
+        // p_meaningful_effect is 0.8 (above 0.5), so no risk penalty.
         let dv =
             DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit);
-        // Phase 1: risk is NotModeled (None), NOT zero.
         assert!(dv.risk_penalty.is_none());
+    }
+
+    #[test]
+    fn from_stats_risk_penalty_when_low_confidence() {
+        let mut stats = make_stats(10.0, 8.0, 3);
+        stats.p_meaningful_effect = 0.3;
+        let dv =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit);
+        // risk_penalty = -(1 - 0.3) * 10.0 = -7.0
+        assert!((dv.risk_penalty.unwrap() - (-7.0)).abs() < 0.001);
+        // total = 10.0 + (-7.0) + 0.0 = 3.0
+        assert!((dv.total() - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn from_stats_no_risk_penalty_at_threshold() {
+        let mut stats = make_stats(10.0, 2.0, 10);
+        stats.p_meaningful_effect = 0.5;
+        let dv =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit);
+        // At exactly 0.5, no penalty — the threshold is < 0.5.
+        assert!(dv.risk_penalty.is_none());
+    }
+
+    #[test]
+    fn from_stats_risk_penalty_proportional_to_confidence() {
+        // Lower confidence → larger penalty
+        let mut low_conf = make_stats(10.0, 8.0, 3);
+        low_conf.p_meaningful_effect = 0.2;
+        let dv_low = DecisionValue::from_stats(
+            &low_conf,
+            ResourceCost::configured(1.0),
+            DecisionMode::Exploit,
+        );
+
+        let mut higher_conf = make_stats(10.0, 8.0, 3);
+        higher_conf.p_meaningful_effect = 0.4;
+        let dv_high = DecisionValue::from_stats(
+            &higher_conf,
+            ResourceCost::configured(1.0),
+            DecisionMode::Exploit,
+        );
+
+        // Lower confidence → more negative penalty
+        assert!(dv_low.risk_penalty.unwrap() < dv_high.risk_penalty.unwrap());
+        // Both totals should be positive (the effect is still expected to be positive)
+        assert!(dv_low.total() > 0.0);
+        assert!(dv_high.total() > 0.0);
+        // Lower confidence → lower total
+        assert!(dv_low.total() < dv_high.total());
     }
 
     /// Prediction error must not become a reward term.
