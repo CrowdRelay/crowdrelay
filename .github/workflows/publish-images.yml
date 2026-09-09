@@ -243,3 +243,113 @@ jobs:
               -f visibility=public 2>/dev/null \
               || echo "WARN: could not set ${pkg} visibility (may already be public or token lacks scope)"
           done
+
+  deploy:
+    needs: merge
+    name: Deploy to production
+    runs-on: [self-hosted, arm64]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+
+    env:
+      DEPLOY_DIR: /opt/crowdrelay
+      COMPOSE_FILE: compose.production.yaml
+      ENV_FILE: deploy/.env.production
+
+    steps:
+      - name: Resolve image identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "IMAGE_TAG=sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          owner_lower="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "API_IMAGE=ghcr.io/${owner_lower}/crowdrelay-api:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          echo "WORKER_IMAGE=ghcr.io/${owner_lower}/crowdrelay-worker:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+
+      - name: Pull validated images from GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in "${API_IMAGE}" "${WORKER_IMAGE}"; do
+            echo "Pulling ${img}..."
+            docker pull "$img"
+            architecture="$(docker image inspect "$img" --format '{{.Architecture}}')"
+            [[ "$architecture" == "arm64" ]] || { echo "ERROR: wrong architecture for $img: $architecture" >&2; exit 1; }
+          done
+          echo "PULL=PASS"
+
+      - name: Deploy — update env and restart containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${DEPLOY_DIR}"
+          # Record previous tag for rollback
+          PREV_TAG="$(grep '^CROWDRELAY_IMAGE_TAG=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "")"
+          echo "PREV_TAG=${PREV_TAG}" >> "$GITHUB_ENV"
+          # Update the image tag in the env file
+          sudo sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=${IMAGE_TAG}|" "${ENV_FILE}"
+          grep -q "CROWDRELAY_IMAGE_TAG=${IMAGE_TAG}" "${ENV_FILE}" || {
+            echo "ERROR: failed to update CROWDRELAY_IMAGE_TAG" >&2; exit 1; }
+          echo "ENV=PASS tag=${IMAGE_TAG}"
+
+          # Run migrations with the new worker image, then restart API and worker.
+          # Migrations are idempotent and run in a one-shot container.
+          sudo docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm migrate || true
+          # Recreate API and worker containers with the new image
+          sudo docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-deps api worker
+          echo "COMPOSE_UP=PASS"
+
+      - name: Health check — wait for API readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Waiting for CrowdRelay API readiness..."
+          for i in $(seq 1 40); do
+            if curl -fsS --connect-timeout 3 --max-time 5 http://127.0.0.1:8080/v1/health/ready >/dev/null 2>&1; then
+              echo "HEALTH=PASS ready after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "ERROR: API did not become ready in 120s" >&2
+          # Rollback: restore previous tag and restart
+          if [[ -n "${PREV_TAG:-}" ]]; then
+            echo "Rolling back to ${PREV_TAG}..."
+            cd "${DEPLOY_DIR}"
+            sudo sed -i "s|^CROWDRELAY_IMAGE_TAG=.*|CROWDRELAY_IMAGE_TAG=${PREV_TAG}|" "${ENV_FILE}"
+            sudo docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-deps api worker
+          fi
+          exit 1
+
+      - name: Verify deployed revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          running_tag="$(docker inspect crowdrelay-api-1 --format '{{index .Config.Labels "io.crowdrelay.release.ref"}}' 2>/dev/null || echo "")"
+          [[ "$running_tag" == "${IMAGE_TAG}" ]] || {
+            echo "ERROR: running tag $running_tag != expected ${IMAGE_TAG}" >&2; exit 1; }
+          echo "REVISION=PASS tag=${running_tag}"
+
+      - name: Cleanup — prune old images and build cache
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          docker builder prune --all -f 2>/dev/null || true
+          docker image prune -f 2>/dev/null || true
+          # Keep only the 2 newest images per family (latest + rollback)
+          running_images="$(docker inspect $(docker ps -q) --format '{{.Image}}' 2>/dev/null | sort -u || echo "")"
+          for family in crowdrelay-api crowdrelay-worker crowdrelay-rekor-proof-anchor; do
+            docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}' 2>/dev/null \
+              | grep -E "(^|/)${family}:sha-" \
+              | sort -r \
+              | tail -n +3 \
+              | while IFS=$'\t' read -r repo_tag image_id; do
+                echo "$running_images" | grep -q "$image_id" && continue
+                docker rmi "$image_id" 2>/dev/null && echo "  pruned $repo_tag" || true
+              done
+          done
+          echo "CLEANUP=PASS"
