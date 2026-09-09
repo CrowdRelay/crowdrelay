@@ -346,6 +346,34 @@ pub async fn retry_push(
     retry(&state.ops, &headers, "push", &id).await
 }
 
+/// Lists delivery results — what the brain actually posted, where, and what
+/// engagement it got. This is the proof-of-result surface: community posts
+/// (Reddit), social posts (Instagram/Facebook/X), Telegram posts, and Signal
+/// pushes, each with content, status, and available engagement metrics.
+///
+/// Without this, the operator and the brain see dispatches but never the
+/// outcomes. The brain's learning loop depends on these results being
+/// visible and eventually measured.
+pub async fn list_delivery_results(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let limit = match page_size(query.limit) {
+        Ok(limit) => limit,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    match run_with_timeout(
+        state.ops.operation_timeout,
+        load_delivery_results(&state.ops, limit),
+    )
+    .await
+    {
+        Ok(results) => private_json(StatusCode::OK, DeliveryResults { results }),
+        Err(error) => error.into_response(request_id(&headers)),
+    }
+}
+
 async fn retry(state: &OpsState, headers: &HeaderMap, target: &'static str, id: &str) -> Response {
     let id = match parse_id(id) {
         Ok(id) => id,

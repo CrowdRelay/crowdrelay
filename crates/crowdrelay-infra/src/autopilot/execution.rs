@@ -259,6 +259,18 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
         | AutopilotActionPayload::RequestAgentContent { .. }
         | AutopilotActionPayload::RequestOutreachTarget { .. } => {}
+        // A fan lifecycle message (welcome, re-engagement, referral invite)
+        // is externally dispatched and requires a terminal executor receipt.
+        // Its measurement is scheduled when that receipt arrives, via
+        // `apply_success_side_effects` → `schedule_effect_measurement`.
+        //
+        // No measurement is scheduled here because the right measurement —
+        // per-fan engagement or activation in the 7 days after the message —
+        // needs a dedicated `FanLifecycleEngagement7d` kind and observer
+        // that does not exist yet. The existing `AgentRunSignalInstalls7d`
+        // counts workspace-wide Signal installs and is dimensionally wrong
+        // for a per-fan message. Scheduling it would teach the brain from
+        // noise, which is worse than no measurement.
         // A Signal push exists to put the app in someone's hand, so measure
         // exactly that: installs in the week after it went out.
         //
@@ -268,18 +280,24 @@ pub(super) async fn schedule_effect_measurement(
         // scheduling was missing, so the brain kept pushing and never learned
         // whether any of it worked.
         //
-        // Baseline is the current install count, matching how an agent-run
-        // dispatch schedules the same kind: the observer counts endpoints
-        // created inside the window, so the delta is what moved.
+        // Baseline is the pre-period install rate: new endpoints created in
+        // the 7 days *before* the push. The observer counts new endpoints in
+        // the 7 days *after*. The effect is then a pre/post comparison —
+        // did the push accelerate installs beyond the baseline rate?
         AutopilotActionPayload::RequestSignalPush { .. } => {
             let baseline_installs = sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COUNT(*)::double precision
                 FROM fan_push_endpoints
-                WHERE workspace_id = $1 AND invalidated_at IS NULL
+                WHERE workspace_id = $1
+                  AND active = true
+                  AND invalidated_at IS NULL
+                  AND created_at >= $2 - INTERVAL '7 days'
+                  AND created_at < $2
                 "#,
             )
             .bind(workspace_id.into_uuid())
+            .bind(now)
             .fetch_one(&mut **transaction)
             .await
             .map_err(map_sqlx)?;
@@ -312,13 +330,21 @@ pub(super) async fn schedule_effect_measurement(
                 // Direct-action workers: measure fan growth (the existing
                 // path). These workers (community-engager, social-post,
                 // signal-inviter, press-pitch) can directly acquire fans.
+                // Baseline is the pre-period fan arrival rate: new fans in
+                // the 14 days *before* the dispatch. The observer counts new
+                // fans in the 14 days *after*. The effect is then a pre/post
+                // comparison — did the worker accelerate fan growth beyond
+                // the baseline rate?
                 let baseline_fans = sqlx::query_scalar::<_, f64>(
                     r#"
                     SELECT COUNT(*)::double precision FROM fans
                     WHERE workspace_id = $1
+                      AND created_at >= $2 - INTERVAL '14 days'
+                      AND created_at < $2
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
+                .bind(now)
                 .fetch_one(&mut **transaction)
                 .await
                 .map_err(map_sqlx)?;
@@ -790,7 +816,6 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
                 | AutopilotActionPayload::RequestAgentContent { .. }
                 | AutopilotActionPayload::RequestOutreachTarget { .. }
-                | AutopilotActionPayload::RequestCommunityEngagement { .. }
         ),
     }
 }
@@ -832,7 +857,6 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::RunPlayStep { .. } => "play.step",
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
         AutopilotActionPayload::RequestAgentContent { .. } => "agent.content",
-        AutopilotActionPayload::RequestCommunityEngagement { .. } => "community.engage",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.
         _ => return None,

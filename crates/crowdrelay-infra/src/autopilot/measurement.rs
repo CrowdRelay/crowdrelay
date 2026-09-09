@@ -284,8 +284,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT COALESCE(SUM(attributed_clicks),0)::double precision
                         FROM viryaos_show_growth_surfaces
                         WHERE workspace_id=$1 AND event_id=$2
-                          AND measured_at >= $3
-                          AND measured_at < $3 + INTERVAL '7 days'
+                          AND updated_at >= $3
+                          AND updated_at < $3 + INTERVAL '7 days'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -301,8 +301,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         SELECT COALESCE(SUM(attributed_ticket_orders),0)::double precision
                         FROM viryaos_show_growth_surfaces
                         WHERE workspace_id=$1 AND event_id=$2
-                          AND measured_at >= $3
-                          AND measured_at < $3 + INTERVAL '7 days'
+                          AND updated_at >= $3
+                          AND updated_at < $3 + INTERVAL '7 days'
                         "#,
                     )
                     .bind(workspace_id.into_uuid())

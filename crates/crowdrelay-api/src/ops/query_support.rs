@@ -643,6 +643,128 @@ impl From<sqlx::Error> for OpsError {
     }
 }
 
+/// Loads delivery results — what the brain actually posted, where, and what
+/// engagement it got. Queries community_posts (with latest metrics),
+/// social_posts, telegram_posts, and fan_push_deliveries, and returns a
+/// unified list sorted by created_at DESC.
+///
+/// This is the proof-of-result surface: without it, the operator and the
+/// brain see dispatches but never the outcomes.
+async fn load_delivery_results(
+    state: &OpsState,
+    limit: i64,
+) -> Result<Vec<DeliveryResult>, OpsError> {
+    sqlx::query_as::<_, DeliveryResult>(
+        r#"
+        SELECT * FROM (
+            -- Community posts (Reddit): content, subreddit, status, URL, engagement
+            SELECT
+                'community_post'::text AS kind,
+                cp.id::text AS id,
+                cp.action_id::text AS action_id,
+                COALESCE('r/' || cp.subreddit, '') AS channel,
+                jsonb_build_object(
+                    'title', cp.title,
+                    'body', cp.body,
+                    'smart_link', cp.smart_link
+                ) AS content,
+                cp.status AS status,
+                cp.reddit_post_url AS url,
+                cp.created_at,
+                cp.posted_at,
+                latest.score AS score,
+                latest.upvotes AS upvotes,
+                latest.num_comments AS num_comments,
+                latest.upvote_ratio AS upvote_ratio,
+                cp.error_message AS error_message
+            FROM community_posts cp
+            LEFT JOIN LATERAL (
+                SELECT cpm.score, cpm.upvotes, cpm.num_comments, cpm.upvote_ratio
+                FROM community_post_metrics cpm
+                WHERE cpm.community_post_id = cp.id
+                ORDER BY cpm.measured_at DESC
+                LIMIT 1
+            ) latest ON true
+            WHERE cp.workspace_id = $1
+
+            UNION ALL
+
+            -- Social posts (Instagram/Facebook/X): content, platform, status
+            SELECT
+                'social_post'::text AS kind,
+                sp.id::text AS id,
+                sp.action_id::text AS action_id,
+                sp.platform AS channel,
+                sp.content AS content,
+                sp.status AS status,
+                sp.platform_post_url AS url,
+                sp.created_at,
+                sp.posted_at,
+                NULL::int AS score,
+                NULL::int AS upvotes,
+                NULL::int AS num_comments,
+                NULL::double precision AS upvote_ratio,
+                sp.error_message AS error_message
+            FROM social_posts sp
+            WHERE sp.workspace_id = $1
+
+            UNION ALL
+
+            -- Telegram posts: content, channel, status
+            SELECT
+                'telegram_post'::text AS kind,
+                tp.id::text AS id,
+                tp.action_id::text AS action_id,
+                tp.channel AS channel,
+                jsonb_build_object('message_id', tp.message_id) AS content,
+                tp.status AS status,
+                NULL::text AS url,
+                tp.created_at,
+                tp.posted_at,
+                NULL::int AS score,
+                NULL::int AS upvotes,
+                NULL::int AS num_comments,
+                NULL::double precision AS upvote_ratio,
+                tp.error_message AS error_message
+            FROM telegram_posts tp
+            WHERE tp.workspace_id = $1
+
+            UNION ALL
+
+            -- Signal pushes: content, delivery status
+            SELECT
+                'signal_push'::text AS kind,
+                fpd.id::text AS id,
+                NULL::text AS action_id,
+                'signal'::text AS channel,
+                jsonb_build_object(
+                    'title', fpd.title,
+                    'body', fpd.body,
+                    'target_path', fpd.target_path
+                ) AS content,
+                fpd.status AS status,
+                NULL::text AS url,
+                fpd.created_at,
+                NULL::timestamp with time zone AS posted_at,
+                NULL::int AS score,
+                NULL::int AS upvotes,
+                NULL::int AS num_comments,
+                NULL::double precision AS upvote_ratio,
+                NULL::text AS error_message
+            FROM fan_push_deliveries fpd
+            WHERE fpd.workspace_id = $1
+        ) AS results
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(state.workspace_id.into_uuid())
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(OpsError::from)
+}
+
 #[cfg(test)]
 mod signal_tests {
     use super::{SignalCitySummary, SignalSummaryRow, signal_overview_from_row};

@@ -77,6 +77,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::ops::get_action),
         )
         .route(
+            "/v1/control-plane/ops/delivery-results",
+            get(crate::ops::list_delivery_results),
+        )
+        .route(
             "/v1/control-plane/ecosystem/overview",
             get(crate::ecosystem::overview),
         )

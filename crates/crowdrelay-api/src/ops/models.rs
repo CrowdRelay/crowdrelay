@@ -78,6 +78,50 @@ pub struct HttpRequestSummary {
     p95_ms: u64,
 }
 
+/// Delivery results — what the brain actually posted, where, and what
+/// engagement it got. This is the proof-of-result surface that makes the
+/// brain's work visible to operators.
+#[derive(Debug, Serialize)]
+pub struct DeliveryResults {
+    results: Vec<DeliveryResult>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct DeliveryResult {
+    /// What kind of delivery this is: community_post, social_post,
+    /// telegram_post, or signal_push.
+    kind: String,
+    /// UUID of the delivery row.
+    id: String,
+    /// UUID of the autopilot action that caused this delivery.
+    action_id: Option<String>,
+    /// Where it was posted: subreddit name, platform name, channel name,
+    /// or "signal" for pushes.
+    channel: String,
+    /// The content that was posted: title/body for posts, title/body for
+    /// pushes.
+    content: serde_json::Value,
+    /// Current delivery status: posted, awaiting_manual_post, failed,
+    /// delivered, pending, etc.
+    status: String,
+    /// URL to the published post, when available.
+    url: Option<String>,
+    /// When the delivery was created (drafted).
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+    /// When the delivery was actually published/sent, if it was.
+    #[serde(with = "time::serde::rfc3339::option")]
+    posted_at: Option<OffsetDateTime>,
+    /// Latest engagement metrics for community posts: score, upvotes,
+    /// comments, upvote_ratio. NULL for other kinds.
+    score: Option<i32>,
+    upvotes: Option<i32>,
+    num_comments: Option<i32>,
+    upvote_ratio: Option<f64>,
+    /// Error message, if the delivery failed.
+    error_message: Option<String>,
+}
+
 #[derive(Debug, FromRow)]
 struct OpsSummaryRow {
     outbox_pending: i64,
