@@ -217,8 +217,8 @@ class GrowthEnvelopeContract(unittest.TestCase):
         # another.
         execution = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs")
         execution_caps = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs")
-        by_payload = execution.split("fn executor_capability_for_payload", 1)[1].split(
-            "\nfn executor_capability_for_event", 1
+        by_payload = execution_caps.split("fn executor_capability_for_payload", 1)[1].split(
+            "\npub(in crate::autopilot) async fn ensure_executor_capability", 1
         )[0]
         by_event = execution_caps.split("fn executor_capability_for_event", 1)[1].split("\n}", 1)[0]
         advertised = set(re.findall(r'=> "([a-z][a-z0-9_.]+)"', by_event))

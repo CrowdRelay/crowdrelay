@@ -70,9 +70,11 @@ class BeaconInviteContract(unittest.TestCase):
         self.assertIn('"only_their_own_community": true', emission)
 
     def test_executor_capability_is_advertised_and_mapped(self) -> None:
-        execution = read(EXECUTION)
-        self.assertIn('AutopilotActionPayload::RequestBeaconInviteBatch { .. } => "beacon.invite_batch"', execution)
-        self.assertIn("| AutopilotActionPayload::RequestBeaconInviteBatch { .. }", execution)
+        # The payload→capability mapping lives in execution_capabilities.rs
+        # (moved out of execution.rs to respect the modularity contract).
+        execution_caps = read(ROOT / "crates/crowdrelay-infra/src/autopilot/execution_capabilities.rs")
+        self.assertIn('AutopilotActionPayload::RequestBeaconInviteBatch { .. } => "beacon.invite_batch"', execution_caps)
+        self.assertIn("| AutopilotActionPayload::RequestBeaconInviteBatch { .. }", execution_caps)
         doc = read(CONTRACT_DOC)
         self.assertIn("beacon.invite_batch", doc)
 
