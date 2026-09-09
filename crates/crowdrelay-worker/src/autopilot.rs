@@ -274,6 +274,8 @@ impl AutopilotWorker {
                     play_steps_skipped = report.play_steps_skipped,
                     plays_completed = report.plays_completed,
                     north_star = ?report.north_star_observed,
+                    gi_candidates = report.gi_candidates,
+                    gi_wait_reason = ?report.gi_wait_reason,
                     "autopilot cycle report"
                 );
             }

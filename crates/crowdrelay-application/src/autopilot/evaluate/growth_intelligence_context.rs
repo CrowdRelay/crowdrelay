@@ -529,6 +529,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             sizing_multiplier,
         );
         let selected_keys = portfolio::selected_keys(&selection);
+        _report.gi_candidates = u32::try_from(scored_candidates.len()).unwrap_or(u32::MAX);
+        _report.gi_wait_reason = selection.wait_reason.clone();
         // The decision-time economic and epistemic record, per selected
         // candidate. `DecisionValue` is computed here and dropped, so without
         // this a later reader can only re-derive what the brain *would* decide

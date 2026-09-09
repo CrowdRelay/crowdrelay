@@ -11,7 +11,7 @@ struct CycleLimits<'a> {
     touched_this_cycle: &'a mut std::collections::HashSet<uuid::Uuid>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AutopilotCycleReport {
     pub decisions: u32,
     pub actions_enqueued: u32,
@@ -61,6 +61,10 @@ pub struct AutopilotCycleReport {
     /// reading records no reading, because a zero here is indistinguishable
     /// from having lost the entire audience.
     pub north_star_observed: Option<u32>,
+    /// Diagnostic: how many GI candidates were scored before portfolio selection.
+    pub gi_candidates: u32,
+    /// Diagnostic: WAIT reason if the portfolio selected nothing.
+    pub gi_wait_reason: Option<String>,
 }
 
 #[derive(Debug, Error)]
