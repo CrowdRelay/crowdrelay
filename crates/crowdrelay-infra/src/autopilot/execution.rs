@@ -257,7 +257,6 @@ pub(super) async fn schedule_effect_measurement(
         // is not. Phase 14 measures the play against its own pre-play baseline.
         | AutopilotActionPayload::RunPlayStep { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-        | AutopilotActionPayload::RequestAgentContent { .. }
         | AutopilotActionPayload::RequestOutreachTarget { .. } => {}
         // A fan lifecycle message (welcome, re-engagement, referral invite)
         // is externally dispatched and requires a terminal executor receipt.
@@ -537,6 +536,43 @@ pub(super) async fn schedule_effect_measurement(
                 now + time::Duration::days(7),
             ));
         }
+        // Agent content (social/telegram/discord posts): measure whether the
+        // published content actually grew fans. The baseline is the pre-action
+        // daily fan arrival rate (same counterfactual as RequestAgentRun's
+        // IncrementalFanGrowth14d). The content action materializes the draft
+        // and triggers the post; the measurement closes the learning loop by
+        // observing whether fans actually arrived in the 14-day window after.
+        //
+        // The executors (social_post_executor, telegram_executor,
+        // discord_executor) are internal workers that poll for `succeeded`
+        // actions and create post table rows. They don't file execution
+        // reports — the post tables are their receipts. This measurement is
+        // scheduled at dispatch (first-party path) so the brain learns even
+        // when the post is still awaiting manual publication. When the
+        // operator registers the manual post URL, the measurement window is
+        // re-anchored to the actual publication time.
+        AutopilotActionPayload::RequestAgentContent { .. } => {
+            let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COUNT(*)::double precision / 14.0 FROM fans
+                WHERE workspace_id = $1
+                  AND created_at >= $2 - INTERVAL '14 days'
+                  AND created_at < $2
+                  AND status != 'suppressed'
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth14d,
+                action_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(14),
+            ));
+        }
     }
 
     for (kind, subject_id, baseline_value, due_at) in plans {
@@ -814,7 +850,6 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
                 | AutopilotActionPayload::RunPlayStep { .. }
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-                | AutopilotActionPayload::RequestAgentContent { .. }
                 | AutopilotActionPayload::RequestOutreachTarget { .. }
         ),
     }
@@ -856,7 +891,6 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         AutopilotActionPayload::SubmitFundingApplication { .. } => "funding.submit",
         AutopilotActionPayload::RunPlayStep { .. } => "play.step",
         AutopilotActionPayload::SendTeamAssignmentEmail { .. } => "team.email",
-        AutopilotActionPayload::RequestAgentContent { .. } => "agent.content",
         // `payload_requires_executor` is the authority on which variants reach
         // this point; anything else executes without one.
         _ => return None,

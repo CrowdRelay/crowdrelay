@@ -861,6 +861,203 @@ fn extract_reddit_post_id(url: &str) -> Option<String> {
     None
 }
 
+/// Error type for manual content post registration (social/telegram/discord).
+#[derive(Debug, thiserror::Error)]
+pub enum ManualContentPostError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("content post not found or not in awaiting_manual_post status")]
+    NotFound,
+}
+
+/// Registers a manually-posted social post URL for a social post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+/// Transitions the post to `posted` status so the receipt reconciliation
+/// sweep can resolve the parent autopilot action as provider-confirmed.
+///
+/// # Errors
+/// Returns [`ManualContentPostError::NotFound`] if the post doesn't exist or
+/// isn't in `awaiting_manual_post` status.
+pub async fn register_manual_social_post(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    social_post_id: Uuid,
+    platform_post_url: &str,
+    platform_post_id: Option<&str>,
+) -> Result<(), ManualContentPostError> {
+    let mut transaction = pool.begin().await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE social_posts
+        SET status = 'posted',
+            platform_post_url = $3,
+            platform_post_id = $4,
+            posted_at = now(),
+            updated_at = now(),
+            error_message = NULL
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status = 'awaiting_manual_post'
+        "#,
+    )
+    .bind(social_post_id)
+    .bind(workspace_id)
+    .bind(platform_post_url)
+    .bind(platform_post_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ManualContentPostError::NotFound);
+    }
+    anchor_content_measurements_to_publication(
+        &mut transaction,
+        workspace_id,
+        "social_posts",
+        social_post_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Registers a manually-posted Telegram message for a Telegram post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+/// Transitions the post to `posted` status so the receipt reconciliation
+/// sweep can resolve the parent autopilot action as provider-confirmed.
+///
+/// # Errors
+/// Returns [`ManualContentPostError::NotFound`] if the post doesn't exist or
+/// isn't in `awaiting_manual_post` status.
+pub async fn register_manual_telegram_post(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    telegram_post_id: Uuid,
+    message_id: i64,
+) -> Result<(), ManualContentPostError> {
+    let mut transaction = pool.begin().await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE telegram_posts
+        SET status = 'posted',
+            message_id = $3,
+            posted_at = now(),
+            updated_at = now(),
+            error_message = NULL
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status = 'awaiting_manual_post'
+        "#,
+    )
+    .bind(telegram_post_id)
+    .bind(workspace_id)
+    .bind(message_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ManualContentPostError::NotFound);
+    }
+    anchor_content_measurements_to_publication(
+        &mut transaction,
+        workspace_id,
+        "telegram_posts",
+        telegram_post_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Registers a manually-posted Discord message for a Discord post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+/// Transitions the post to `posted` status so the receipt reconciliation
+/// sweep can resolve the parent autopilot action as provider-confirmed.
+///
+/// # Errors
+/// Returns [`ManualContentPostError::NotFound`] if the post doesn't exist or
+/// isn't in `awaiting_manual_post` status.
+pub async fn register_manual_discord_post(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    discord_post_id: Uuid,
+    message_id: &str,
+) -> Result<(), ManualContentPostError> {
+    let mut transaction = pool.begin().await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE discord_posts
+        SET status = 'posted',
+            message_id = $3,
+            posted_at = now(),
+            updated_at = now(),
+            error_message = NULL
+        WHERE id = $1
+          AND workspace_id = $2
+          AND status = 'awaiting_manual_post'
+        "#,
+    )
+    .bind(discord_post_id)
+    .bind(workspace_id)
+    .bind(message_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ManualContentPostError::NotFound);
+    }
+    anchor_content_measurements_to_publication(
+        &mut transaction,
+        workspace_id,
+        "discord_posts",
+        discord_post_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Moves the measurement windows for a manually published content post so
+/// they start when the post reached the audience. Mirrors
+/// `anchor_measurements_to_publication` for community posts but works for
+/// social_posts, telegram_posts, and discord_posts — all of which carry an
+/// `action_id` column that links back to the autopilot action.
+async fn anchor_content_measurements_to_publication(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    table: &str,
+    post_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    // The table name is a compile-time constant from the caller, not user
+    // input, so interpolation is safe here.
+    let query = format!(
+        r#"
+        WITH published AS (
+            SELECT post.action_id, post.posted_at
+            FROM {table} AS post
+            WHERE post.workspace_id = $1 AND post.id = $2
+        )
+        UPDATE viryaos_autopilot_measurements AS measurement
+        SET action_finished_at = published.posted_at,
+            due_at = published.posted_at
+                     + (measurement.due_at - measurement.action_finished_at),
+            available_at = published.posted_at
+                     + (measurement.due_at - measurement.action_finished_at)
+        FROM published
+        WHERE measurement.workspace_id = $1
+          AND measurement.action_id = published.action_id
+          AND measurement.status = 'pending'
+          AND measurement.action_finished_at < published.posted_at
+        "#,
+    );
+    sqlx::query(&query)
+        .bind(workspace_id)
+        .bind(post_id)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -162,9 +162,10 @@ impl ReceiptReconciliationWorker {
         let gaps = self.detect_receipt_gaps(&mut transaction).await?;
         let by_receipt = self.resolve_from_receipts(&mut transaction).await?;
         let by_community = self.resolve_community_posts(&mut transaction).await?;
+        let by_content = self.resolve_content_posts(&mut transaction).await?;
         let by_outbox = self.resolve_from_outbox(&mut transaction).await?;
         transaction.commit().await?;
-        Ok(gaps + by_receipt + by_community + by_outbox)
+        Ok(gaps + by_receipt + by_community + by_content + by_outbox)
     }
 
     /// Sweep 1: dispatch-confirmed actions whose terminal receipt never
@@ -413,7 +414,87 @@ impl ReceiptReconciliationWorker {
         Ok(resolved)
     }
 
-    /// Sweep 2c: resolve `unknown` actions from their outbox delivery
+    /// Sweep 2c: resolve `agent.content.request` actions from their post
+    /// ledgers (`social_posts`, `telegram_posts`, `discord_posts`). These
+    /// executors are internal workers that don't file execution reports —
+    /// the post tables ARE their receipts. The outbox event is just the
+    /// dispatch notification, not provider-confirmed delivery.
+    ///
+    /// Each post table has the same status lifecycle:
+    ///   `posted` → provider accepted → succeeded
+    ///   `failed` → definitive failure (or crash-marked → confirmation lost)
+    ///   `awaiting_manual_post` / `pending` / `posting` / `rate_limited` → in flight
+    async fn resolve_content_posts(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<usize, ReceiptReconciliationError> {
+        // social_posts, telegram_posts, and discord_posts all have the same
+        // status vocabulary and an `action_id` column. UNION them into one
+        // result set so a single loop resolves all three.
+        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT a.id, post.status, post.error_message
+            FROM viryaos_autopilot_actions a
+            JOIN (
+                SELECT action_id, status, error_message FROM social_posts
+                UNION ALL
+                SELECT action_id, status, error_message FROM telegram_posts
+                UNION ALL
+                SELECT action_id, status, error_message FROM discord_posts
+            ) post ON post.action_id = a.id
+            WHERE a.workspace_id = $1
+              AND a.status = 'unknown'
+              AND a.action_kind = 'agent.content.request'
+            LIMIT $2
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(SWEEP_BATCH_LIMIT)
+        .fetch_all(&mut **transaction)
+        .await?;
+
+        let mut resolved = 0usize;
+        for (action_id, post_status, error_message) in rows {
+            let evidence = content_post_to_evidence(&post_status, error_message.as_deref());
+            match legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ) {
+                LegalTransition::Apply(ActionState::Succeeded) => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Succeeded,
+                    )
+                    .await?;
+                }
+                LegalTransition::Apply(ActionState::Failed) => {
+                    resolved += resolve_action(
+                        self.workspace_id,
+                        transaction,
+                        action_id,
+                        ActionOutcome::Failed,
+                    )
+                    .await?;
+                }
+                LegalTransition::NoChange => continue,
+                LegalTransition::Conflict => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        "CONFLICT: contradictory evidence for content post — \
+                         not changing state. Investigate the contradictory evidence."
+                    );
+                    continue;
+                }
+                LegalTransition::Apply(_) => continue,
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Sweep 2d: resolve `unknown` actions from their outbox delivery
     /// status. This is the authoritative reconciliation for actions that
     /// entered `unknown` because of ambiguous transport failures (timeout
     /// after max attempts — the request may or may not have reached the
@@ -442,7 +523,7 @@ impl ReceiptReconciliationWorker {
                 AND e.action_id = a.id
             WHERE a.workspace_id = $1
               AND a.status = 'unknown'
-              AND a.action_kind <> 'community.engage.request'
+              AND a.action_kind NOT IN ('community.engage.request', 'agent.content.request')
               AND NOT EXISTS (
                   SELECT 1 FROM viryaos_autopilot_execution_reports r
                   WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
@@ -658,6 +739,33 @@ fn community_post_to_evidence(
     }
 }
 
+/// Provider-specific adapter: translates `social_posts`/`telegram_posts`/
+/// `discord_posts` state into canonical [`ResolutionEvidence`] facts. All
+/// three tables share the same status vocabulary, so one adapter serves all.
+///
+/// `posted` → provider confirmed the submission (succeeded).
+/// `failed` with a crash prefix → confirmation lost (the post may have
+/// succeeded but we lost the receipt).
+/// `failed` without a crash prefix → definitive failure.
+/// All other statuses (`pending`, `posting`, `rate_limited`,
+/// `awaiting_manual_post`) are in-flight — they resolve later through their
+/// own paths.
+fn content_post_to_evidence(post_status: &str, error_message: Option<&str>) -> ResolutionEvidence {
+    match post_status {
+        "posted" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed),
+        "failed" => {
+            let crashed = error_message
+                .is_some_and(|message| message.starts_with(CRASH_POSTING_ERROR_PREFIX));
+            if crashed {
+                ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost)
+            } else {
+                ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)
+            }
+        }
+        _ => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::InFlight),
+    }
+}
+
 /// Provider-specific adapter: translates outbox event delivery state into
 /// canonical [`ResolutionEvidence`] facts for the
 /// [`resolve_observation`] + [`legal_transition`] resolver.
@@ -685,6 +793,10 @@ fn outbox_event_to_evidence(
                         || kind.starts_with("endpoint_")
                         || kind == "invalid_signing_secret"
                         || kind == "event_serialization"
+                        || kind == "invalid_endpoint_url"
+                        || kind == "invalid_event_timestamp"
+                        || kind == "materialization_timeout"
+                        || kind == "materialization_database"
             );
             if permanent {
                 // Permanent rejection (provider saw it and rejected)
@@ -704,7 +816,10 @@ fn outbox_event_to_evidence(
 
 #[cfg(test)]
 mod tests {
-    use super::{community_post_to_evidence, outbox_event_to_evidence, requires_terminal_receipt};
+    use super::{
+        community_post_to_evidence, content_post_to_evidence, outbox_event_to_evidence,
+        requires_terminal_receipt,
+    };
     use crowdrelay_application::autopilot::AutopilotActionPayload;
     use crowdrelay_domain::FanId;
     use crowdrelay_domain::action_ledger::{
@@ -860,6 +975,87 @@ mod tests {
         );
     }
 
+    // ── content_post_to_evidence adapter tests ──
+
+    #[test]
+    fn posted_content_post_resolves_succeeded() {
+        let evidence = content_post_to_evidence("posted", None);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::Apply(ActionState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn crash_marked_content_failure_stays_unknown() {
+        let evidence = content_post_to_evidence(
+            "failed",
+            Some("worker crashed during posting — check platform manually"),
+        );
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn definitive_content_failure_resolves_failed() {
+        let evidence = content_post_to_evidence("failed", Some("bot token invalid"));
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::Apply(ActionState::Failed)
+        );
+        let evidence = content_post_to_evidence("failed", None);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::Apply(ActionState::Failed)
+        );
+    }
+
+    #[test]
+    fn in_flight_content_statuses_stay_unknown() {
+        for status in ["pending", "posting", "rate_limited", "awaiting_manual_post"] {
+            let evidence = content_post_to_evidence(status, None);
+            assert_eq!(
+                legal_transition(
+                    ActionState::Unknown,
+                    resolve_observation(evidence),
+                    SuccessEvidence::Premature,
+                ),
+                LegalTransition::NoChange,
+                "status {status} should stay unknown (NoChange from Unknown)"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_content_does_not_require_terminal_receipt() {
+        // Agent content is first-party: the post tables are the receipts,
+        // not execution reports. The gap sweep must not flag these actions.
+        let payload = AutopilotActionPayload::RequestAgentContent {
+            template_id: Some("social-post".to_owned()),
+            task_id: Uuid::nil(),
+            draft: serde_json::json!({}),
+        };
+        assert!(!requires_terminal_receipt(&payload));
+    }
+
     // ── outbox_event_to_evidence adapter tests ──
 
     #[test]
@@ -884,6 +1080,10 @@ mod tests {
             "endpoint_unreachable",
             "invalid_signing_secret",
             "event_serialization",
+            "invalid_endpoint_url",
+            "invalid_event_timestamp",
+            "materialization_timeout",
+            "materialization_database",
         ] {
             let evidence = outbox_event_to_evidence("dead", Some(kind));
             assert_eq!(

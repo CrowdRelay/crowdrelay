@@ -50,7 +50,6 @@ KNOWN_UNMEASURED = {
     "PrepareFundingPackage",
     "RaiseGrowthDebt",
     "RaiseGrowthOpportunity",
-    "RequestAgentContent",
     "RequestBeaconDiscovery",
     "RequestBeaconInviteBatch",
     "RequestBeaconOutreach",
@@ -73,6 +72,7 @@ KNOWN_UNMEASURED = {
 MUST_BE_MEASURED = {
     "RequestSignalPush",
     "RequestAgentRun",
+    "RequestAgentContent",
     "RequestAudienceCampaign",
     "RequestCommunityEngagement",
 }

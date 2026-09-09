@@ -330,3 +330,107 @@ pub async fn register_manual_community_post(
         }
     }
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterManualSocialPostRequest {
+    platform_post_url: String,
+    platform_post_id: Option<String>,
+}
+
+/// Registers a manually-posted social post URL for a social post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+pub async fn register_manual_social_post(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(social_post_id): Path<Uuid>,
+    payload: Result<Json<RegisterManualSocialPostRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(body)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    match crowdrelay_infra::fanbase::register_manual_social_post(
+        &state.database,
+        workspace(&state),
+        social_post_id,
+        &body.platform_post_url,
+        body.platform_post_id.as_deref(),
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to register manual social post");
+            Problem::bad_request(request_id_value).into_response()
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterManualTelegramPostRequest {
+    message_id: i64,
+}
+
+/// Registers a manually-posted Telegram message for a Telegram post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+pub async fn register_manual_telegram_post(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(telegram_post_id): Path<Uuid>,
+    payload: Result<Json<RegisterManualTelegramPostRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(body)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    match crowdrelay_infra::fanbase::register_manual_telegram_post(
+        &state.database,
+        workspace(&state),
+        telegram_post_id,
+        body.message_id,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to register manual telegram post");
+            Problem::bad_request(request_id_value).into_response()
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterManualDiscordPostRequest {
+    message_id: String,
+}
+
+/// Registers a manually-posted Discord message for a Discord post that was
+/// drafted by the system but posted manually by the operator (manual mode).
+pub async fn register_manual_discord_post(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Path(discord_post_id): Path<Uuid>,
+    payload: Result<Json<RegisterManualDiscordPostRequest>, JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(body)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    match crowdrelay_infra::fanbase::register_manual_discord_post(
+        &state.database,
+        workspace(&state),
+        discord_post_id,
+        &body.message_id,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to register manual discord post");
+            Problem::bad_request(request_id_value).into_response()
+        }
+    }
+}

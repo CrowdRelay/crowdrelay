@@ -58,6 +58,9 @@
         /v1/control-plane/audience-graph/places/import \
         /v1/control-plane/community-posts \
         /v1/control-plane/community-posts/* \
+        /v1/control-plane/social-posts/* \
+        /v1/control-plane/telegram-posts/* \
+        /v1/control-plane/discord-posts/* \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready

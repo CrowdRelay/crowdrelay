@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The reconciliation sweeps tell the resolver a state their SQL must guarantee.
 
-`receipt_reconciliation.rs` has three sweeps. Each selects actions with
+`receipt_reconciliation.rs` has four sweeps. Each selects actions with
 `a.status = 'unknown'` and then calls
 
     legal_transition(ActionState::Unknown, resolve_observation(evidence), ..)
@@ -60,8 +60,8 @@ class ReceiptReconciliationScope(unittest.TestCase):
         )
         self.assertEqual(
             len(states),
-            3,
-            f"expected the three reconciliation sweeps, found {len(states)} "
+            4,
+            f"expected the four reconciliation sweeps, found {len(states)} "
             f"resolver call sites: {states}. A new one needs its own scope "
             f"guarantee recorded here",
         )
@@ -117,7 +117,7 @@ class ReceiptReconciliationScope(unittest.TestCase):
 if __name__ == "__main__":
     result = unittest.main(exit=False, verbosity=0).result
     if result.wasSuccessful():
-        print("RECEIPT_RECONCILIATION_SCOPE=PASS sweeps=3")
+        print("RECEIPT_RECONCILIATION_SCOPE=PASS sweeps=4")
     else:
         print("RECEIPT_RECONCILIATION_SCOPE=FAIL")
         sys.exit(1)

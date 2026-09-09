@@ -347,16 +347,14 @@ impl SocialPostExecutorWorker {
                 platform = %action.platform,
                 "platform on 12h cooldown, skipping"
             );
-            self.mark_failed(action.id, "platform on 12h cooldown")
-                .await?;
+            self.mark_rate_limited(action.id).await?;
             return Ok(());
         }
 
         // Anti-spam: check 24h rate limit.
         if self.rate_limit_reached().await? {
             tracing::info!("24h post limit reached, skipping");
-            self.mark_failed(action.id, "24h post limit reached")
-                .await?;
+            self.mark_rate_limited(action.id).await?;
             return Ok(());
         }
 

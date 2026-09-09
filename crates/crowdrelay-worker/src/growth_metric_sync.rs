@@ -712,8 +712,7 @@ impl GrowthMetricSyncWorker {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            let detail = extract_graph_api_error(&body)
-                .unwrap_or_else(|| truncate_body(&body));
+            let detail = extract_graph_api_error(&body).unwrap_or_else(|| truncate_body(&body));
             return Err(GrowthMetricSyncError::ProviderApi(format!(
                 "Facebook Graph API returned HTTP {status} for page {page_id}: {detail}"
             )));
@@ -770,8 +769,7 @@ impl GrowthMetricSyncWorker {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            let detail = extract_graph_api_error(&body)
-                .unwrap_or_else(|| truncate_body(&body));
+            let detail = extract_graph_api_error(&body).unwrap_or_else(|| truncate_body(&body));
             return Err(GrowthMetricSyncError::ProviderApi(format!(
                 "Instagram Graph API returned HTTP {status} for ig_user {ig_user_id}: {detail}"
             )));
@@ -1375,7 +1373,16 @@ fn truncate_body(body: &str) -> String {
     if body.len() <= MAX {
         return body.to_owned();
     }
-    format!("{}…", &body[..MAX])
+    // Collect char-by-char until the next char would exceed MAX bytes,
+    // avoiding a panic on a multi-byte UTF-8 character at the cut point.
+    let mut result = String::new();
+    for c in body.chars() {
+        if result.len() + c.len_utf8() > MAX {
+            break;
+        }
+        result.push(c);
+    }
+    format!("{result}…")
 }
 
 // --- TikTok helpers ---

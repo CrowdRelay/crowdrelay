@@ -101,6 +101,11 @@ FOREIGN_RELATIONS = {
     # to dispatch and never writes to it; the executor writes via action
     # dispatch. Documented at the call site in operations/growth_intelligence.rs.
     "agent_service_tasks",
+    # Owned by the TypeScript agent service. The worker's discovery scanner
+    # reads Reddit session cookies (obtained by the Playwright scraper via
+    # Google OAuth) directly from this table to authenticate Reddit requests.
+    # The agent service creates and maintains it; CrowdRelay only reads.
+    "agent_service_reddit_cookies",
     # Owned by sqlx's migrator, which creates and maintains it. No migration in
     # this repository creates it, and none should: it is the migrator's own
     # bookkeeping.

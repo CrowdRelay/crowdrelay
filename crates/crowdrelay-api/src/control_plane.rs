@@ -262,6 +262,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             post(crate::fanbase::register_manual_community_post),
         )
         .route(
+            "/v1/control-plane/social-posts/{social_post_id}/register-manual",
+            post(crate::fanbase::register_manual_social_post),
+        )
+        .route(
+            "/v1/control-plane/telegram-posts/{telegram_post_id}/register-manual",
+            post(crate::fanbase::register_manual_telegram_post),
+        )
+        .route(
+            "/v1/control-plane/discord-posts/{discord_post_id}/register-manual",
+            post(crate::fanbase::register_manual_discord_post),
+        )
+        .route(
             "/v1/control-plane/webhook-endpoints",
             get(list_webhook_endpoints),
         )
