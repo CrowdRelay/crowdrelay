@@ -6,7 +6,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         policy: &AutopilotPolicy,
         now: OffsetDateTime,
         _limits: &mut CycleLimits<'_>,
-        _report: &mut AutopilotCycleReport,
+        report: &mut AutopilotCycleReport,
     ) -> Result<(), AutopilotError> {
         let mut snapshots = self
             .repository
@@ -15,7 +15,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // Report the North Star the world model actually resolved, so the cycle
         // record trends the metric the brain is optimizing rather than a second
         // figure derived somewhere else under the same name.
-        _report.north_star_observed = snapshots
+        report.north_star_observed = snapshots
             .first()
             .map(|snapshot| snapshot.world_model.north_star_current);
         // Walk-forward validation: load resolved evidence and validate
@@ -529,8 +529,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             sizing_multiplier,
         );
         let selected_keys = portfolio::selected_keys(&selection);
-        _report.gi_candidates = u32::try_from(scored_candidates.len()).unwrap_or(u32::MAX);
-        _report.gi_wait_reason = selection.wait_reason.clone();
+        report.gi_candidates = u32::try_from(scored_candidates.len()).unwrap_or(u32::MAX);
+        report.gi_wait_reason = selection.wait_reason.clone();
         // The decision-time economic and epistemic record, per selected
         // candidate. `DecisionValue` is computed here and dropped, so without
         // this a later reader can only re-derive what the brain *would* decide
@@ -577,6 +577,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             };
             if persisted.action_id.is_some() {
                 dispatched_count += 1;
+                if persisted.decision_created {
+                    report.decisions = report.decisions.saturating_add(1);
+                }
+                if persisted.action_created {
+                    report.actions_enqueued = report.actions_enqueued.saturating_add(1);
+                }
             }
         }
         // Dispatch treatment-assigned candidates that were selected by
@@ -671,6 +677,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         }
                     }
                     dispatched_count += 1;
+                    if persisted.decision_created {
+                        report.decisions = report.decisions.saturating_add(1);
+                    }
+                    if persisted.action_created {
+                        report.actions_enqueued = report.actions_enqueued.saturating_add(1);
+                    }
                 } else {
                     // Treatment NOT selected by portfolio → record
                     // withheld-treatment assignment with action_id=None.
