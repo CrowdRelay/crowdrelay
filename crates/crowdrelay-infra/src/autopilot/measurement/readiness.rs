@@ -144,12 +144,21 @@ pub(super) async fn refresh_evidence_readiness(
             // picks them up via last_partial_resolution_at as a fallback.
             _ => "last_partial_resolution_at",
         };
+        // When the horizon column IS last_partial_resolution_at, setting it
+        // twice in the same SET clause is a PostgreSQL error ("column
+        // specified more than once"). The explicit last_partial_resolution_at
+        // line is only needed for per-horizon columns, to also advance the
+        // legacy cursor alongside the per-horizon one.
+        let legacy_cursor = if horizon_column == "last_partial_resolution_at" {
+            ""
+        } else {
+            ", last_partial_resolution_at = $3"
+        };
         let partial_result = sqlx::query(&format!(
             r#"
             UPDATE viryaos_growth_evidence AS evidence
             SET {horizon_column} = $3,
-                partial_resolution_count = evidence.partial_resolution_count + 1,
-                last_partial_resolution_at = $3
+                partial_resolution_count = evidence.partial_resolution_count + 1{legacy_cursor}
             WHERE evidence.workspace_id = $1
               AND evidence.action_id = $2
               AND evidence.resolved_at IS NULL
