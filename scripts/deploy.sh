@@ -220,7 +220,7 @@ build_and_push_locally() {
          --builder "$LOCAL_BUILDER" \
          --file "$ROOT_DIR/docker-bake.hcl" \
          --set '*.platform=linux/arm64' \
-         "${cache_from[@]}" \
+         ${cache_from[@]+"${cache_from[@]}"} \
          --set "*.cache-to=type=local,dest=$LOCAL_BUILD_CACHE,mode=max" \
          --provenance=mode=max \
          --sbom=true \
