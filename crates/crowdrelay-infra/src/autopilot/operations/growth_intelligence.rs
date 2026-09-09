@@ -936,11 +936,7 @@ async fn full_replay_with_origin(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<(crowdrelay_brain::CausalModel, BeliefStateOrigin), RepositoryError> {
-    let evidence_replayed = super::evidence::load_growth_evidence(repo, workspace_id, None)
-        .await
-        .map(|rows| u32::try_from(rows.len()).unwrap_or(u32::MAX))
-        .unwrap_or(0);
-    let model = full_replay(repo, workspace_id).await?;
+    let (model, evidence_replayed) = full_replay(repo, workspace_id).await?;
     Ok((model, BeliefStateOrigin::FullReplay { evidence_replayed }))
 }
 
@@ -983,14 +979,18 @@ pub(in crate::autopilot) async fn save_causal_model_checkpoint(
 
 /// Full replay from the growth evidence table, falling back to the legacy
 /// brain_evidence view when the table has no data.
+///
+/// Returns the model and the number of evidence rows replayed, so the caller
+/// can report the count without loading the evidence table a second time.
 async fn full_replay(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-) -> Result<crowdrelay_brain::CausalModel, RepositoryError> {
+) -> Result<(crowdrelay_brain::CausalModel, u32), RepositoryError> {
     use crowdrelay_brain::{CausalModel, DispatchPrediction, PredictionOutcome};
 
     // Try the new growth evidence table first.
     let evidence = super::evidence::load_growth_evidence(repo, workspace_id, None).await?;
+    let evidence_replayed = u32::try_from(evidence.len()).unwrap_or(u32::MAX);
     if !evidence.is_empty() {
         let mut model = CausalModel::default();
         apply_evidence_to_model(&mut model, &evidence);
@@ -1003,7 +1003,7 @@ async fn full_replay(
             PosteriorReplay::FromScratch,
         )
         .await;
-        return Ok(model);
+        return Ok((model, evidence_replayed));
     }
 
     // Fall back to the legacy brain_evidence view for backward compatibility.
@@ -1033,6 +1033,7 @@ async fn full_replay(
                OR observed_incremental_fans IS NOT NULL
                OR observed_signal_installs IS NOT NULL)
         ORDER BY predicted_at ASC
+        LIMIT 5000
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -1040,6 +1041,7 @@ async fn full_replay(
     .await
     .map_err(map_sqlx)?;
 
+    let legacy_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
     let mut model = CausalModel::default();
     for (
         template_id,
@@ -1077,7 +1079,7 @@ async fn full_replay(
         model.update(&outcome);
     }
 
-    Ok(model)
+    Ok((model, legacy_count))
 }
 
 /// Loads the exploration memory from past dispatch predictions. Each
@@ -1110,6 +1112,8 @@ pub(in crate::autopilot) async fn load_exploration_memory(
             FROM viryaos_dispatch_predictions
             WHERE workspace_id = $1
               AND predicted_at >= now() - INTERVAL '12 hours'
+            ORDER BY predicted_at DESC
+            LIMIT 500
             "#,
     )
     .bind(workspace_id.into_uuid())
