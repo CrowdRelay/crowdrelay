@@ -82,7 +82,6 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
             sorted(sections),
             [
                 "alerts",
-                "awaiting_approval",
                 "brain",
                 "dead_deliveries",
                 "dead_outbox",

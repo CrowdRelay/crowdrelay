@@ -23,15 +23,6 @@ struct PendingActionSummary {
     approval_expires_at: Option<OffsetDateTime>,
 }
 
-#[derive(Debug, FromRow)]
-struct PendingActionSummaryRow {
-    id: uuid::Uuid,
-    context: String,
-    action_kind: String,
-    subject_kind: String,
-    approval_expires_at: Option<OffsetDateTime>,
-}
-
 #[derive(Debug, Serialize)]
 struct OperatorAttentionSnapshot {
     summary: OpsSummary,
@@ -84,15 +75,14 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let ecosystem = run_with_timeout(timeout_duration, load_attention_ecosystem(&state));
     let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
     let needs_you = run_with_timeout(timeout_duration, load_needs_you(&state.ops));
-    let awaiting_approval = run_with_timeout(timeout_duration, load_awaiting_approval(&state.ops));
     let brain = run_with_timeout(timeout_duration, load_brain_assessment(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
-        ecosystem, findings, needs_you, awaiting_approval, brain,
+        ecosystem, findings, needs_you, brain,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
-        ecosystem, findings, needs_you, awaiting_approval, brain,
+        ecosystem, findings, needs_you, brain,
     );
 
     let request_id_value = request_id(&headers);
@@ -128,14 +118,12 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
-    let awaiting_approval = match awaiting_approval {
-        Ok(value) => value,
-        Err(error) => return error.into_response(request_id(&headers)),
-    };
     let brain = match brain {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+
+    let (needs_you, awaiting_approval) = needs_you;
 
     private_json(
         StatusCode::OK,
@@ -357,50 +345,44 @@ async fn load_open_findings(
 /// as `load_control_overview` branch C, but only the summary fields the
 /// AttentionInbox renders. NOT the full `PendingAutopilotAction` with
 /// payload, briefing, assignee, and executor readiness.
-async fn load_needs_you(state: &OpsState) -> Result<Vec<PendingActionSummary>, OpsError> {
-    sqlx::query_as::<_, PendingActionSummaryRow>(
-        r#"
-        SELECT id, context, action_kind, subject_kind, approval_expires_at
-        FROM viryaos_autopilot_actions
-        WHERE workspace_id = $1
-          AND status = 'awaiting_approval'
-          AND (approval_expires_at IS NULL OR approval_expires_at > now())
-        ORDER BY created_at, id
-        LIMIT 50
-        "#,
-    )
-    .bind(state.workspace_id.into_uuid())
-    .fetch_all(&state.pool)
-    .await
-    .map(|rows| {
-        rows.into_iter()
-            .map(|r| PendingActionSummary {
-                id: r.id,
-                context: r.context,
-                action_kind: r.action_kind,
-                subject_kind: r.subject_kind,
-                approval_expires_at: r.approval_expires_at,
-            })
-            .collect()
-    })
-    .map_err(OpsError::sqlx)
-}
-
-/// Count of actions awaiting approval — derived from authoritative action
-/// state, not from rendered UI items. Same WHERE clause as `load_needs_you`
-/// but returns a count.
-async fn load_awaiting_approval(state: &OpsState) -> Result<i64, OpsError> {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT count(*)::bigint
-        FROM viryaos_autopilot_actions
-        WHERE workspace_id = $1
-          AND status = 'awaiting_approval'
-          AND (approval_expires_at IS NULL OR approval_expires_at > now())
-        "#,
-    )
-    .bind(state.workspace_id.into_uuid())
-    .fetch_one(&state.pool)
-    .await
-    .map_err(OpsError::sqlx)
+///
+/// Returns the page of actions AND the total count in a single query,
+/// instead of two separate scans of the same WHERE clause.
+async fn load_needs_you(
+    state: &OpsState,
+) -> Result<(Vec<PendingActionSummary>, i64), OpsError> {
+    let rows: Vec<(uuid::Uuid, String, String, String, Option<OffsetDateTime>, i64)> =
+        sqlx::query_as(
+            r#"
+            SELECT
+                id,
+                context,
+                action_kind,
+                subject_kind,
+                approval_expires_at,
+                count(*) OVER ()::bigint AS total_count
+            FROM viryaos_autopilot_actions
+            WHERE workspace_id = $1
+              AND status = 'awaiting_approval'
+              AND (approval_expires_at IS NULL OR approval_expires_at > now())
+            ORDER BY created_at, id
+            LIMIT 50
+            "#,
+        )
+        .bind(state.workspace_id.into_uuid())
+        .fetch_all(&state.pool)
+        .await
+        .map_err(OpsError::sqlx)?;
+    let total = rows.first().map_or(0, |r| r.5);
+    let summaries = rows
+        .into_iter()
+        .map(|r| PendingActionSummary {
+            id: r.0,
+            context: r.1,
+            action_kind: r.2,
+            subject_kind: r.3,
+            approval_expires_at: r.4,
+        })
+        .collect();
+    Ok((summaries, total))
 }
