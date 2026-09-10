@@ -9,7 +9,13 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "io_method=worker"
+      # `worker` is the portable default and the only method macOS Docker can
+      # use. On the Linux production host `io_uring` submits reads without the
+      # worker-process hop, which is worth measuring on the scan-heavy cycle
+      # reads. Overridable rather than hardcoded so trying it is an env change
+      # on one host, not an edit to the file every environment shares — and it
+      # stays `worker` everywhere until someone deliberately sets it.
+      - "io_method=${CROWDRELAY_POSTGRES_IO_METHOD:-worker}"
       - "-c"
       - "io_min_workers=${CROWDRELAY_POSTGRES_IO_MIN_WORKERS:-2}"
       - "-c"

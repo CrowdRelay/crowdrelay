@@ -102,7 +102,11 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         ci = CI.read_text()
         self.assertIn("postgres:19beta3-alpine", compose)
         self.assertIn("CROWDRELAY_POSTGRES_IMAGE:-postgres:19beta3-alpine", compose)
-        self.assertIn('io_method=worker', compose)
+        # `worker` stays the default everywhere. It is overridable so the
+        # Linux host can be tried on `io_uring` without editing a file every
+        # environment shares; what is pinned is that nothing else becomes the
+        # default by accident.
+        self.assertIn('io_method=${CROWDRELAY_POSTGRES_IO_METHOD:-worker}', compose)
         self.assertIn('CROWDRELAY_POSTGRES_IO_MIN_WORKERS:-2', compose)
         self.assertIn('CROWDRELAY_POSTGRES_IO_MAX_WORKERS:-8', compose)
         self.assertIn('CROWDRELAY_POSTGRES_EFFECTIVE_IO_CONCURRENCY:-16', compose)
