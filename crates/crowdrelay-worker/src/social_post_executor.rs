@@ -7,16 +7,29 @@
 //! is `social-post` and that don't yet have a `social_posts` row, extracts
 //! the platform and text from the draft, and records the result.
 //!
-//! ## Current mode: manual (default)
-//! Instagram, Facebook, and X do not have simple Bot APIs like Telegram or
-//! Discord. Posting requires either official OAuth APIs (Meta Graph API,
-//! X API v2 — complex app review) or browser automation (Playwright driving
-//! a logged-in session — not yet implemented in the agents service).
+//! ## Modes, per platform
 //!
-//! Until auto-posting is wired, the executor runs in **manual mode**: it
-//! creates `social_posts` rows and marks them `awaiting_manual_post`. The
-//! operator sees the drafted posts in the control panel, posts them manually
-//! to the platform, and registers the post URL via the API.
+//! `CROWDRELAY_SOCIAL_AUTO_POST` off (the default) drafts everything: the
+//! executor creates `social_posts` rows, marks them `awaiting_manual_post`,
+//! and the operator publishes and registers the URL.
+//!
+//! With it on, the platforms diverge, and they diverge for reasons rather
+//! than for want of work on one line:
+//!
+//! - **Facebook Pages publish.** A Business Manager system user token with
+//!   `pages_manage_posts` on a Page the business owns posts to the Page feed
+//!   through the Graph API. That is what system users are for; publishing to
+//!   an owned asset is not the case app review governs. The token either
+//!   carries the grant or the Graph API refuses the call, and a refusal holds
+//!   the post with the platform's own message rather than retrying it.
+//! - **Instagram drafts.** Publishing there needs a media container and an
+//!   image; these drafts are text.
+//! - **X drafts.** Its write API is behind a paid tier this tenant does not
+//!   hold.
+//!
+//! Every automatic post goes through `domain::publish_guard` first — the read
+//! a person was doing before autonomy. A held post lands in the same operator
+//! queue it was in before, carrying the reason.
 //!
 //! This closes the dead-end: previously, social-post drafts were emitted to
 //! the outbox but nothing tracked them. Now the brain sees reach events and
@@ -40,6 +53,9 @@
 use std::time::Duration;
 
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::publish_guard::{
+    PublishChannel, PublishContext, content_hash, review_outbound_post,
+};
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio::{
@@ -67,6 +83,15 @@ const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(120);
 /// Maximum posts to claim in a single cycle.
 const CLAIM_BATCH: i64 = 10;
 
+/// Graph API request timeout. A Page post is a small write; anything slower
+/// than this is the API being unavailable, not the post being large.
+const GRAPH_API_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Pinned Graph API version, matching the one `growth_metric_sync` reads Page
+/// metrics with. Meta deprecates versions on a schedule, so the version is a
+/// thing to review rather than a default to inherit.
+const GRAPH_API_VERSION: &str = "v21.0";
+
 #[derive(Debug, Error)]
 pub enum SocialPostExecutorError {
     #[error("database error: {0}")]
@@ -75,6 +100,15 @@ pub enum SocialPostExecutorError {
     InvalidPlatform(String),
     #[error("rate limited")]
     RateLimited,
+    #[error("HTTP client could not be built: {0}")]
+    ClientBuild(reqwest::Error),
+    #[error("graph api request failed: {0}")]
+    GraphRequest(reqwest::Error),
+    /// The Graph API refused the call. Carries the platform's own message,
+    /// because "posting failed" is not something an operator can act on and
+    /// "(#200) Requires pages_manage_posts permission" is.
+    #[error("graph api refused the post: {0}")]
+    GraphRefused(String),
 }
 
 #[derive(Clone)]
@@ -84,24 +118,61 @@ pub struct SocialPostExecutorWorker {
     poll_interval: Duration,
     /// When true (default), posts are marked `awaiting_manual_post` — the
     /// operator posts manually and registers the post URL via the API.
-    /// When false, the executor would post via platform APIs — but this is
-    /// not yet implemented (requires Meta Graph API / X API integration).
+    ///
+    /// When false, a Facebook Page post publishes through the Graph API.
+    /// Instagram and X stay manual regardless: Instagram publishing needs a
+    /// media container and an image the drafts do not carry, and X's write
+    /// API is behind a paid tier this tenant does not hold. Saying that here
+    /// rather than silently falling through is the difference between "not
+    /// built" and "built and quietly doing nothing".
     manual_mode: bool,
+    /// Page access token for the Graph API, when one is configured.
+    ///
+    /// The same credential `growth_metric_sync` already reads Page metrics
+    /// with — a Business Manager system user token carrying
+    /// `pages_manage_posts` on a Page the business owns. Publishing to an
+    /// owned Page is what a system user is for; the token either has the
+    /// grant or the Graph API refuses the call, and a refusal holds the post
+    /// rather than retrying it.
+    facebook_page_access_token: Option<String>,
+    http_client: reqwest::Client,
+    /// The tenant's own public origin. A link in an automatically published
+    /// post may point here and nowhere else — see `publish_guard`.
+    public_origin: String,
 }
 
 impl SocialPostExecutorWorker {
-    /// Creates a new executor. In the current implementation, `manual_mode`
-    /// is always `true` — auto-posting for Instagram/Facebook/X is not yet
-    /// wired. The parameter exists so the wiring is ready when platform API
-    /// support is added.
-    #[must_use]
-    pub fn new(pool: PgPool, workspace_id: WorkspaceId, manual_mode: bool) -> Self {
-        Self {
+    /// Creates a new executor.
+    ///
+    /// `manual_mode` false enables Facebook Page publishing only, and only
+    /// when `facebook_page_access_token` is present. Everything else drafts
+    /// and waits for an operator.
+    ///
+    /// # Errors
+    /// Returns [`SocialPostExecutorError::ClientBuild`] if the HTTP client
+    /// cannot be initialized.
+    pub fn new(
+        pool: PgPool,
+        workspace_id: WorkspaceId,
+        manual_mode: bool,
+        facebook_page_access_token: Option<String>,
+        public_origin: String,
+    ) -> Result<Self, SocialPostExecutorError> {
+        let http_client = reqwest::Client::builder()
+            .timeout(GRAPH_API_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10))
+            .user_agent("CrowdRelay/1.0 social-post-executor")
+            .build()
+            .map_err(SocialPostExecutorError::ClientBuild)?;
+        Ok(Self {
             pool,
             workspace_id,
             poll_interval: POLL_INTERVAL,
             manual_mode,
-        }
+            facebook_page_access_token,
+            http_client,
+            public_origin,
+        })
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -381,26 +452,238 @@ impl SocialPostExecutorWorker {
             return Ok(());
         }
 
-        // Auto mode: not yet implemented for Instagram/Facebook/X.
-        // When Meta Graph API / X API integration is added, this is where
-        // the API call would go. For now, fall back to manual mode.
+        // Automatic mode. Facebook Pages publish; the rest still draft.
+        if action.platform == "facebook" {
+            return self.publish_to_facebook_page(action).await;
+        }
+
+        // Instagram and X are not "not yet implemented" in the sense of
+        // pending work on this line: Instagram publishing needs a media
+        // container and an image these drafts do not carry, and X's write API
+        // is behind a paid tier. Both are held with the reason so the queue
+        // says why rather than looking like a stuck job.
+        let reason = if action.platform == "instagram" {
+            "instagram publishing needs an image; drafts are text only"
+        } else {
+            "x publishing needs a paid API tier"
+        };
+        self.hold_for_human(action.id, reason).await?;
+        tracing::info!(
+            action_id = %action.action_id,
+            platform = %action.platform,
+            reason,
+            "social post held for an operator: this platform does not publish automatically"
+        );
+        Ok(())
+    }
+
+    /// Publishes a drafted post to the tenant's own Facebook Page.
+    ///
+    /// The Page id is the connection's `provider_account_id` — the same one
+    /// `growth_metric_sync` reads Page metrics from, so publishing and
+    /// measuring cannot drift onto different Pages.
+    ///
+    /// Every refusal path holds the draft rather than failing it: a missing
+    /// token, a missing connection, a guard verdict and a Graph API refusal
+    /// all leave a post a person can still publish, with the reason recorded.
+    async fn publish_to_facebook_page(
+        &self,
+        action: &ClaimedAction,
+    ) -> Result<(), SocialPostExecutorError> {
+        let Some(token) = self.facebook_page_access_token.as_ref() else {
+            self.hold_for_human(action.id, "no facebook page access token is configured")
+                .await?;
+            return Ok(());
+        };
+        let Some(page_id) = self.facebook_page_id().await? else {
+            self.hold_for_human(action.id, "no connected facebook page to post to")
+                .await?;
+            return Ok(());
+        };
+        let body = action.text.as_deref().unwrap_or("").trim();
+        if body.is_empty() {
+            self.hold_for_human(action.id, "the draft has no text")
+                .await?;
+            return Ok(());
+        }
+
+        // The read a person used to do before a post went out under the
+        // band's name. A held post lands in the operator queue with its
+        // reason, so the worst case of automatic mode is the behaviour that
+        // preceded it.
+        let recent = self.recent_content_hashes("facebook").await?;
+        let verdict = review_outbound_post(
+            body,
+            &PublishContext {
+                channel: PublishChannel::Social,
+                approved_origins: &[self.public_origin.as_str()],
+                recent_content_hashes: &recent,
+            },
+        );
+        if let Some(reason) = verdict.hold_reason() {
+            tracing::info!(
+                action_id = %action.action_id,
+                reason = reason.as_str(),
+                "facebook post held for an operator by the publish guard"
+            );
+            self.hold_for_human(action.id, reason.as_str()).await?;
+            return Ok(());
+        }
+
+        match self.submit_to_facebook_page(&page_id, body, token).await {
+            Ok(post_id) => {
+                sqlx::query(
+                    r#"
+                    UPDATE social_posts
+                    SET status = 'posted',
+                        platform_post_url = $3,
+                        posted_at = now(),
+                        updated_at = now(),
+                        error_message = NULL
+                    WHERE workspace_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(self.workspace_id.into_uuid())
+                .bind(action.id)
+                .bind(format!("https://www.facebook.com/{post_id}"))
+                .execute(&self.pool)
+                .await?;
+                tracing::info!(
+                    action_id = %action.action_id,
+                    post_id = %post_id,
+                    "facebook page post published"
+                );
+                Ok(())
+            }
+            // A refusal is a fact about the credential or the content, not a
+            // transient failure, so it holds rather than retries. The most
+            // likely one is the Page token lacking `pages_manage_posts`, and
+            // retrying that forever would bury it.
+            Err(SocialPostExecutorError::GraphRefused(message)) => {
+                tracing::warn!(
+                    action_id = %action.action_id,
+                    error = %message,
+                    "facebook refused the post; holding it for an operator"
+                );
+                self.hold_for_human(action.id, &format!("facebook refused the post: {message}"))
+                    .await?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// POSTs the message to the Page feed and returns the created post id.
+    async fn submit_to_facebook_page(
+        &self,
+        page_id: &str,
+        message: &str,
+        token: &str,
+    ) -> Result<String, SocialPostExecutorError> {
+        #[derive(serde::Deserialize)]
+        struct GraphResponse {
+            id: Option<String>,
+            error: Option<GraphError>,
+        }
+        #[derive(serde::Deserialize)]
+        struct GraphError {
+            message: String,
+        }
+
+        let url = format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{page_id}/feed");
+        // Form body rather than query string: the token is a credential and a
+        // URL is the one part of a request that gets logged by proxies.
+        let response = self
+            .http_client
+            .post(&url)
+            .form(&[("message", message), ("access_token", token)])
+            .send()
+            .await
+            .map_err(SocialPostExecutorError::GraphRequest)?;
+        let parsed: GraphResponse = response
+            .json()
+            .await
+            .map_err(SocialPostExecutorError::GraphRequest)?;
+        if let Some(error) = parsed.error {
+            return Err(SocialPostExecutorError::GraphRefused(error.message));
+        }
+        parsed.id.ok_or_else(|| {
+            SocialPostExecutorError::GraphRefused(
+                "the graph api returned neither a post id nor an error".to_owned(),
+            )
+        })
+    }
+
+    /// The connected Facebook Page's id, if the tenant has one.
+    async fn facebook_page_id(&self) -> Result<Option<String>, SocialPostExecutorError> {
+        let page_id: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT provider_account_id
+            FROM fanbase_connections
+            WHERE workspace_id = $1
+              AND platform = 'facebook'
+              AND status = 'connected'
+              AND provider_account_id IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(page_id)
+    }
+
+    /// Parks a drafted post for an operator, with the reason it was held.
+    ///
+    /// `awaiting_manual_post` rather than `failed`: nothing went wrong with
+    /// the delivery, and a person can still publish this.
+    async fn hold_for_human(
+        &self,
+        post_id: Uuid,
+        reason: &str,
+    ) -> Result<(), SocialPostExecutorError> {
         sqlx::query(
             r#"
             UPDATE social_posts
             SET status = 'awaiting_manual_post',
+                error_message = $3,
                 updated_at = now()
-            WHERE id = $1
+            WHERE workspace_id = $1 AND id = $2
             "#,
         )
-        .bind(action.id)
+        .bind(self.workspace_id.into_uuid())
+        .bind(post_id)
+        .bind(reason)
         .execute(&self.pool)
         .await?;
-        tracing::info!(
-            action_id = %action.action_id,
-            platform = %action.platform,
-            "auto-posting not yet implemented for this platform, marked as awaiting manual post"
-        );
         Ok(())
+    }
+
+    /// Content hashes of what this platform published recently.
+    async fn recent_content_hashes(
+        &self,
+        platform: &str,
+    ) -> Result<std::collections::BTreeSet<String>, SocialPostExecutorError> {
+        let bodies: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT content->>'text'
+            FROM social_posts
+            WHERE workspace_id = $1
+              AND platform = $2
+              AND status = 'posted'
+              AND posted_at > now() - INTERVAL '30 days'
+              AND content->>'text' IS NOT NULL
+            ORDER BY posted_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(platform)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(bodies.iter().map(|body| content_hash(body)).collect())
     }
 
     /// Checks if this platform has been posted to within the cooldown window.

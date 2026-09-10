@@ -580,17 +580,9 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             matches!(value.as_str(), "true" | "1" | "yes" | "on")
         })
         .unwrap_or(false);
-    let social_post_executor =
-        SocialPostExecutorWorker::new(database.clone(), workspace_id, !social_auto_post);
-    if social_auto_post {
-        tracing::info!(
-            "social post executor running in AUTOMATIC MODE — not yet implemented for Instagram/Facebook/X, posts will fall back to awaiting_manual_post"
-        );
-    } else {
-        tracing::info!(
-            "social post executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
-        );
-    }
+    // Constructed below, after the Facebook Page token is read — the executor
+    // needs it, and reading the same environment variable twice is how the two
+    // reads drift.
     // Community join executor: auto-joins (subscribes to) Reddit communities
     // that the discovery worker has found. Calls the agents service's
     // /reddit/join endpoint which drives the logged-in browser session.
@@ -685,6 +677,34 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let facebook_page_access_token = std::env::var("CROWDRELAY_FACEBOOK_PAGE_ACCESS_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    // Social post executor. Facebook Pages publish through the Graph API with
+    // the same Page token the metric sync reads with; Instagram and X draft
+    // and wait, for reasons the executor records on each held post.
+    let social_post_executor = match SocialPostExecutorWorker::new(
+        database.clone(),
+        workspace_id,
+        !social_auto_post,
+        facebook_page_access_token.clone(),
+        config.public_site_base_url.origin().ascii_serialization(),
+    ) {
+        Ok(worker) => {
+            if social_auto_post {
+                tracing::info!(
+                    has_facebook_token = facebook_page_access_token.is_some(),
+                    "social post executor running in AUTOMATIC MODE — Facebook Pages publish; Instagram and X are drafted for an operator"
+                );
+            } else {
+                tracing::info!(
+                    "social post executor running in MANUAL MODE — posts are drafted and wait for an operator to publish them manually"
+                );
+            }
+            Some(worker)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "social post executor disabled: HTTP client build failed");
+            None
+        }
+    };
     let tiktok_client_key = std::env::var("CROWDRELAY_TIKTOK_CLIENT_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty());
@@ -951,12 +971,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             "discord executor"
         });
     }
-    runtime_tasks.spawn(async move {
-        social_post_executor
-            .run(social_post_executor_shutdown)
-            .await;
-        "social post executor"
-    });
+    if let Some(worker) = social_post_executor {
+        runtime_tasks.spawn(async move {
+            worker.run(social_post_executor_shutdown).await;
+            "social post executor"
+        });
+    }
     if let Some(worker) = community_join_executor {
         runtime_tasks.spawn(async move {
             worker.run(community_join_executor_shutdown).await;
