@@ -403,3 +403,112 @@ async fn a_resolved_outcome_moves_a_belief_and_leaves_a_citable_record()
 
     Ok(())
 }
+
+/// A later horizon must reopen the row for the delta loader.
+///
+/// The per-horizon replay cursors exist so the brain can learn from a 3-day
+/// checkpoint without waiting for the 30-day one, and then learn again when
+/// each later horizon lands. The delta predicate collapsed all five timestamp
+/// columns with `COALESCE`, which returns the first non-null in argument
+/// order — the OLDEST stamped horizon, not the newest. A row whose 3d cursor
+/// was stamped therefore reported that same timestamp forever, and the 14d
+/// outcome that landed eleven days later never made it newer than the
+/// checkpoint.
+///
+/// That is the outcome the strategy posterior learns from, and the only thing
+/// that eventually rescued it was full resolution — which waits on the 30-day
+/// measurement. A 14-day signal delivered on day 44.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_later_horizon_reopens_evidence_the_earlier_one_already_advanced()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("horizon-cursor-{suffix}"))
+        .bind("Horizon cursor")
+        .execute(&pool)
+        .await?;
+
+    let dispatch = seed_resolved_dispatch(
+        &pool,
+        workspace_id,
+        "community-engager",
+        "community_first",
+        8.0,
+    )
+    .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let three_days_ago = now - time::Duration::days(3);
+    let one_hour_ago = now - time::Duration::hours(1);
+    // The row is not fully resolved — the 30d measurement is still pending —
+    // and its 3d horizon was stamped three days ago. Then the 14d horizon
+    // lands an hour ago.
+    sqlx::query(
+        "UPDATE viryaos_growth_evidence
+         SET resolved_at = NULL, replayed_3d_at = $3, replayed_14d_at = $4,
+             last_partial_resolution_at = $4, partial_resolution_count = 2
+         WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(dispatch.action_id)
+    .bind(three_days_ago)
+    .bind(one_hour_ago)
+    .execute(&pool)
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    // A checkpoint taken after the 3d horizon and before the 14d one. The
+    // 14d observation is new to the learner; the 3d one is not.
+    let checkpoint = now - time::Duration::days(1);
+    let delta = repository
+        .load_growth_evidence(workspace_id, Some(checkpoint))
+        .await?;
+    assert!(
+        delta
+            .iter()
+            .any(|evidence| evidence.action_id == Some(dispatch.action_id)),
+        "the 14d horizon landed after the checkpoint, so the delta must carry \
+         the row; it reported its 3d timestamp instead and the outcome was \
+         never learned from"
+    );
+
+    // The complement: a checkpoint after every stamped horizon must not
+    // re-deliver the row, or each cycle relearns what it already knows.
+    let after_everything = now + time::Duration::minutes(1);
+    let empty = repository
+        .load_growth_evidence(workspace_id, Some(after_everything))
+        .await?;
+    assert!(
+        !empty
+            .iter()
+            .any(|evidence| evidence.action_id == Some(dispatch.action_id)),
+        "no horizon is newer than this checkpoint, so the row must not be \
+         replayed again"
+    );
+
+    Ok(())
+}

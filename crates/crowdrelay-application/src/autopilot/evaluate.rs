@@ -905,6 +905,7 @@ fn deterministic_roll(key: &str) -> f64 {
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
 include!("evaluate/growth_intelligence_context.rs");
+include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/growth_metrics_tests.rs");
 include!("evaluate/growth_debt_tests.rs");

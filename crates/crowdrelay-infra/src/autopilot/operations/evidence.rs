@@ -369,13 +369,27 @@ async fn load_evidence(
           -- again as a no-op for the outcome model but a full update for
           -- the Y14 treatment-effect posterior.
           --
+          -- GREATEST, not COALESCE. COALESCE returns the first non-null in
+          -- argument order, which is the OLDEST stamped horizon, not the
+          -- newest. Once the 3d horizon stamped its cursor, the row reported
+          -- that same timestamp forever: the 14d outcome landed, stamped its
+          -- own column, and the row still compared as older than the
+          -- checkpoint, so the delta never picked it up again. The Y14
+          -- incremental outcome — the only input the strategy posterior
+          -- learns from — went unseen until full resolution, which waits on
+          -- the 30d measurement. A 14-day signal arriving on day 44, on
+          -- exactly the templates that carry a 3d measurement.
+          --
+          -- GREATEST ignores NULLs in PostgreSQL, so an unstamped horizon
+          -- does not drag the cursor back to NULL.
+          --
           -- The control-arm mode ignores the cursor entirely. It is not
           -- advancing the learner — it is fetching the comparison for rows the
           -- learner is advancing this batch, and that comparison resolved
           -- whenever it resolved.
           AND CASE WHEN $3::uuid[] IS NULL
                    THEN ($2::timestamptz IS NULL
-                        OR COALESCE(
+                        OR GREATEST(
                             ge.resolved_at,
                             ge.replayed_3d_at,
                             ge.replayed_14d_at,
@@ -385,7 +399,7 @@ async fn load_evidence(
                    ELSE ge.treatment = 'control'
                         AND ea.experiment_uuid = ANY($3)
               END
-        ORDER BY COALESCE(
+        ORDER BY GREATEST(
                     ge.resolved_at,
                     ge.replayed_3d_at,
                     ge.replayed_14d_at,

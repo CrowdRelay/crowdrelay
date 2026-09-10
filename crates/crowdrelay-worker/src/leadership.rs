@@ -61,15 +61,47 @@ impl LeadershipLease {
     /// the renewal task. Called during graceful shutdown.
     pub async fn release(&self) {
         self.renewal_handle.abort();
-        // Set expires_at to NOW() so the candidate can immediately acquire.
-        let _ = sqlx::query("UPDATE worker_leadership SET expires_at = NOW() WHERE id = 1")
-            .execute(&self.pool)
-            .await;
-        tracing::info!(
-            worker_id = %self.worker_id,
-            generation = self.generation,
-            "worker leadership released"
-        );
+        // Set expires_at to NOW() so the candidate can immediately acquire —
+        // but only while this worker is still the leader.
+        //
+        // Without the `leader_id` guard this expired whoever held the lease,
+        // not whoever called. During a blue-green deploy the old worker drains
+        // slowly: its renewal can lapse, the new worker acquires, and then the
+        // old worker's shutdown released the *new* leader's lease. The new
+        // worker's own renewal restores it within 15 seconds, so the window is
+        // short and a standby candidate polls every 2 seconds — long enough to
+        // produce the two live generations this lease exists to prevent.
+        //
+        // `worker_id` is a per-process UUID, so this can only ever match the
+        // caller's own lease.
+        let released = sqlx::query(
+            "UPDATE worker_leadership SET expires_at = NOW() WHERE id = 1 AND leader_id = $1",
+        )
+        .bind(&self.worker_id)
+        .execute(&self.pool)
+        .await;
+        // Reported by what happened, not by having tried. The old line claimed
+        // the lease was released even when the write failed, which tells an
+        // operator the next worker can start now when it must wait out the
+        // remaining lease instead.
+        match released {
+            Ok(result) if result.rows_affected() == 1 => tracing::info!(
+                worker_id = %self.worker_id,
+                generation = self.generation,
+                "worker leadership released"
+            ),
+            Ok(_) => tracing::warn!(
+                worker_id = %self.worker_id,
+                generation = self.generation,
+                "worker leadership was already held by another worker; nothing released"
+            ),
+            Err(error) => tracing::warn!(
+                worker_id = %self.worker_id,
+                generation = self.generation,
+                error = %error,
+                "could not release worker leadership; the lease expires on its own"
+            ),
+        }
     }
 }
 
@@ -109,9 +141,13 @@ pub async fn try_acquire(
     }
 }
 
-/// Returns the next generation number. If the current leader is someone else,
-/// increments by 1. If the current leader is us, keeps the same generation
-/// (renewal).
+/// Returns the next generation number: always the stored one plus 1.
+///
+/// The comment here used to claim it kept the generation when the caller was
+/// already the leader. It never did, and nothing wanted it to — renewal goes
+/// through `renew_loop`, which extends `expires_at` and does not touch the
+/// generation at all. `try_acquire` is only reached on a fresh acquisition, so
+/// a bump is the correct answer every time it runs.
 async fn next_generation(pool: &PgPool) -> Result<i64, LeadershipError> {
     let current =
         sqlx::query_scalar::<_, i64>("SELECT generation FROM worker_leadership WHERE id = 1")

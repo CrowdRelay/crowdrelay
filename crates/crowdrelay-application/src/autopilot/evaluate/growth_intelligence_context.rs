@@ -18,69 +18,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         report.north_star_observed = snapshots
             .first()
             .map(|snapshot| snapshot.world_model.north_star_current);
-        // Walk-forward validation: load resolved evidence and validate
-        // each template's out-of-sample performance. Templates that fail
-        // validation are degraded from Active to Degraded, reducing
-        // their dispatch budget. Templates that pass are promoted
-        // toward Active. This is the wiring point between the evidence
-        // persistence layer and the hypothesis lifecycle.
-        //
-        // The validation runs on treatment evidence only (control rows
-        // have no observed outcome). The purge gap is 16 days to account
-        // for Y30 durability overlap.
-        let growth_evidence = self
-            .repository
-            .load_growth_evidence(self.workspace_id, None)
-            .await?;
-        for snapshot in &mut snapshots {
-            let template_evidence: Vec<_> = growth_evidence
-                .iter()
-                .filter(|e| {
-                    e.opportunity_id
-                        .as_ref()
-                        .map(|id| id.starts_with(&snapshot.template_id))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
-            let result =
-                crowdrelay_brain::validation::validate_evidence_for_promotion(&template_evidence);
-            // Only adjust the hypothesis state if we have enough evidence
-            // to validate meaningfully (OOS observations >= 5). Below
-            // that, the default Active state is preserved.
-            if result.out_of_sample.observations >= 5 && !result.passed {
-                // Failed validation — degrade to Degraded (quarter budget).
-                // Persist the transition so the next cycle loads the
-                // degraded state instead of resetting to Active.
-                let new_state = crowdrelay_brain::hypothesis::HypothesisState::Degraded;
-                let previous_state = snapshot.hypothesis_state;
-                if previous_state != new_state {
-                    snapshot.hypothesis_state = new_state;
-                    let saved = self
-                        .repository
-                        .save_hypothesis_state(
-                            self.workspace_id,
-                            &snapshot.template_id,
-                            new_state,
-                        )
-                        .await;
-                    // Only record the revision once the transition is durable.
-                    // A ledger entry for a state the next cycle will not load
-                    // describes learning that did not survive the cycle.
-                    if saved.is_ok() {
-                        self.record_hypothesis_revision(
-                            &snapshot.template_id,
-                            previous_state,
-                            new_state,
-                            &result,
-                            &template_evidence,
-                        )
-                        .await;
-                    }
-                }
-            }
-            // Passed validation (or insufficient evidence) — keep at Active
-        }
+        // Walk-forward validation, then the hypothesis lifecycle transitions
+        // it justifies. Extracted to `evaluate/hypothesis_validation.rs`: it
+        // is one coherent job — judge each template against its own measured
+        // outcomes — and it is the part of this cycle with no bearing on
+        // candidate generation below.
+        self.validate_hypotheses(&mut snapshots).await?;
         // Load the causal model from past predictions + outcomes.
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.
@@ -834,20 +777,44 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // When do_nothing is true, the brain chose not to act —
         // keeping insights unconsumed lets them be re-evaluated
         // next cycle with potentially different context.
-        if !consumed_ids.is_empty() && dispatched_count > 0 {
-            let _ = self
+        if !consumed_ids.is_empty()
+            && dispatched_count > 0
+            && self
                 .repository
                 .mark_insights_consumed(self.workspace_id, &consumed_ids)
-                .await;
+                .await
+                .is_err()
+        {
+            // Not fatal — the dispatch idempotency key blocks a repeat inside
+            // the cooldown window. But an insight that never gets marked is
+            // re-evaluated every cycle forever, and the failure was silent, so
+            // the only symptom was a brain that kept reconsidering the same
+            // insight and nothing saying why.
+            report.gi_dispatch_log.push(format!(
+                "insight consumption failed for {} insight(s); they will be \
+                 re-evaluated next cycle",
+                consumed_ids.len(),
+            ));
         }
         // Save the causal model checkpoint for fast startup
         // with delta replay on the next cycle. This is
         // best-effort — a failed checkpoint just means the
         // next cycle does a full replay.
-        let _ = self
+        //
+        // Best-effort, and no longer silent: a full replay reads every
+        // resolved evidence row the workspace has ever produced, so a
+        // checkpoint that has been failing for weeks is a cycle that has been
+        // getting steadily more expensive with nothing reporting it.
+        if self
             .repository
             .save_brain_state_checkpoint(self.workspace_id, &causal_model)
-            .await;
+            .await
+            .is_err()
+        {
+            report
+                .gi_dispatch_log
+                .push("causal model checkpoint failed; the next cycle replays all evidence".into());
+        }
         // The strategy posterior is deliberately NOT saved here. This cycle
         // holds it by shared reference and never mutates it, so the write was
         // a copy of what the load returned — and the load ends in
@@ -863,39 +830,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         Ok(())
     }
 
-    /// Records a hypothesis lifecycle transition in the belief-revision
-    /// ledger, citing the dispatches whose measured outcomes failed
-    /// validation.
-    ///
-    /// Best-effort by design: the transition is already persisted when this
-    /// runs, so a failure here costs the operator the explanation and costs
-    /// the brain nothing.
-    async fn record_hypothesis_revision(
-        &self,
-        template_id: &str,
-        previous: crowdrelay_brain::hypothesis::HypothesisState,
-        current: crowdrelay_brain::hypothesis::HypothesisState,
-        result: &crowdrelay_brain::validation::WalkForwardResult,
-        template_evidence: &[crowdrelay_brain::GrowthEvidence],
-    ) {
-        let caused_by: Vec<Uuid> = template_evidence
-            .iter()
-            .filter_map(|evidence| evidence.action_id)
-            .collect();
-        let Some(revision) = crate::autopilot::hypothesis_state_revision(
-            template_id,
-            previous,
-            current,
-            result.out_of_sample.observations,
-            &caused_by,
-        ) else {
-            return;
-        };
-        let _ = self
-            .repository
-            .record_belief_revisions(self.workspace_id, std::slice::from_ref(&revision))
-            .await;
-    }
 }
 
 /// The experiment window for direct-action templates (social-post,
