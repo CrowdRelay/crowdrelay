@@ -887,6 +887,7 @@ pub(super) struct ScoredCandidate {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn growth_intelligence_candidate(
+    blocked_on_membership: &mut Vec<(String, u32)>,
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     workspace_id: WorkspaceId,
@@ -913,6 +914,7 @@ pub(super) fn growth_intelligence_candidate(
             causal_model,
             strategy,
             exploration_novelty,
+            blocked_on_membership,
         );
     }
     // All other templates: 0 or 1 workspace-wide candidate.

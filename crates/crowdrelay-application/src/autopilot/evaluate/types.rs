@@ -67,6 +67,19 @@ pub struct AutopilotCycleReport {
     pub gi_wait_reason: Option<String>,
     /// Diagnostic: GI dispatch details for operator visibility.
     pub gi_dispatch_log: Vec<String>,
+    /// Communities the brain wants to post to and cannot, because nobody has
+    /// joined them, ranked by how many posts are waiting behind each.
+    ///
+    /// A prerequisite gate that removes candidates silently is indistinguishable
+    /// from a brain with nothing to say. Production discovered 119 communities,
+    /// joined none of them — the join executor is in manual mode — and every
+    /// community candidate was dropped with no decision row and no operator
+    /// signal. The whole Reddit acquisition channel read as idle when it was
+    /// blocked on one manual step.
+    ///
+    /// Each entry is `(community, posts_waiting)`, most-wanted first. Empty
+    /// when nothing is blocked, which is the healthy case.
+    pub blocked_on_membership: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Error)]

@@ -8,6 +8,9 @@
 //! model.
 
 use super::*;
+use crowdrelay_brain::opportunity_graph::{
+    DependencyKind, OpportunityGraph, community_membership_key, community_post_key,
+};
 use crowdrelay_domain::creative::CreativeFamily;
 
 /// Produces one candidate per unengaged target community for the
@@ -34,6 +37,7 @@ pub(super) fn community_engager_candidates(
     causal_model: &CausalModel,
     strategy: GrowthStrategy,
     exploration_novelty: f64,
+    blocked_on_membership: &mut Vec<(String, u32)>,
 ) -> Result<Vec<ScoredCandidate>, serde_json::Error> {
     // Check cooldown — if the template is not due, no candidates.
     // Apply tenant preference cadence multiplier (see
@@ -79,6 +83,61 @@ pub(super) fn community_engager_candidates(
         .iter()
         .position(|t| *t == "community-engager")
         .unwrap_or(usize::MAX);
+    // Joining a community is a prerequisite of posting to it, expressed as a
+    // graph rather than as an inline condition so the same structure answers
+    // both questions: which posts are held, and which join would release the
+    // most of them.
+    //
+    // `joined == None` satisfies the prerequisite. It means discovery has no
+    // membership record — an older target with no `discovery_places` row — and
+    // those have been posted to successfully before. Treating unknown as
+    // unjoined would retire a working community over a missing column.
+    let mut graph = OpportunityGraph::new();
+    for target in &snapshot.unengaged_targets {
+        let membership = community_membership_key(&target.subreddit);
+        graph.add(
+            membership.clone(),
+            community_post_key(target.target_id),
+            DependencyKind::Prerequisite,
+        );
+        if target.joined != Some(false) {
+            graph.satisfy(membership);
+        }
+    }
+    // What the gate is costing, before anything is filtered out. A prerequisite
+    // that removes candidates silently is indistinguishable from a brain with
+    // nothing to say, and that is exactly how production looked: 119
+    // communities discovered, none joined, every candidate dropped without a
+    // decision row. Ranked by posts waiting, so the operator joins the one that
+    // releases the most work first.
+    let post_keys: Vec<String> = snapshot
+        .unengaged_targets
+        .iter()
+        .map(|target| community_post_key(target.target_id))
+        .collect();
+    let mut demand: Vec<(String, u32)> = graph
+        .blocked(post_keys.iter().map(String::as_str))
+        .into_iter()
+        .fold(
+            std::collections::BTreeMap::<String, u32>::new(),
+            |mut counts, block| {
+                *counts.entry(block.waiting_on).or_default() += 1;
+                counts
+            },
+        )
+        .into_iter()
+        .map(|(key, count)| {
+            // Report the community, not the internal graph key.
+            let community = key
+                .strip_prefix("community_joined:")
+                .unwrap_or(&key)
+                .to_owned();
+            (community, count)
+        })
+        .collect();
+    demand.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    blocked_on_membership.extend(demand);
+
     let mut candidates = Vec::with_capacity(snapshot.unengaged_targets.len());
     for target in &snapshot.unengaged_targets {
         // A community that asks for a longer gap between promotional posts
@@ -107,7 +166,7 @@ pub(super) fn community_engager_candidates(
         // older target with no `discovery_places` row — and those have been
         // posted to successfully before. Treating unknown as unjoined would
         // retire a working community over a missing column.
-        if target.joined == Some(false) {
+        if graph.is_blocked(&community_post_key(target.target_id)) {
             continue;
         }
         // Build a per-community dispatch context. The subreddit_type is
@@ -327,6 +386,54 @@ mod tests {
             days_since_last_engagement: None,
             joined: Some(true),
         }
+    }
+
+    /// The regression that made this worth a graph rather than a condition.
+    ///
+    /// The gate is correct — a post to a community nobody joined gets refused,
+    /// and is the pattern that flags the account the whole discovery loop reads
+    /// through. What was wrong is that it removed candidates and said nothing.
+    /// Production discovered 119 communities, joined none of them, and the
+    /// Reddit channel read as idle rather than as blocked.
+    #[test]
+    fn an_unjoined_community_is_reported_not_only_skipped() {
+        let mut graph = OpportunityGraph::new();
+        let unjoined = target("djent");
+        let membership = community_membership_key(&unjoined.subreddit);
+        let post = community_post_key(unjoined.target_id);
+        graph.add(
+            membership.clone(),
+            post.clone(),
+            DependencyKind::Prerequisite,
+        );
+        // `joined: Some(false)` is the only value that withholds the
+        // prerequisite; see the loop above for why `None` passes.
+        assert!(
+            graph.is_blocked(&post),
+            "a post to an unjoined community must not be dispatched"
+        );
+        let blocked = graph.blocked([post.as_str()]);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(
+            blocked[0].waiting_on, membership,
+            "and the operator has to be told which community to join"
+        );
+    }
+
+    #[test]
+    fn a_joined_community_is_neither_blocked_nor_reported() {
+        let mut graph = OpportunityGraph::new();
+        let joined = target("metal");
+        let membership = community_membership_key(&joined.subreddit);
+        let post = community_post_key(joined.target_id);
+        graph.add(
+            membership.clone(),
+            post.clone(),
+            DependencyKind::Prerequisite,
+        );
+        graph.satisfy(membership);
+        assert!(!graph.is_blocked(&post));
+        assert!(graph.blocked([post.as_str()]).is_empty());
     }
 
     #[test]

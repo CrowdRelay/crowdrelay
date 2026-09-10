@@ -175,6 +175,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // P0-3: community-engager now returns one candidate per
             // target community. Other templates return 0 or 1.
             let candidates = growth_intelligence_candidate(
+                &mut report.blocked_on_membership,
                 snapshot,
                 policy,
                 self.workspace_id,

@@ -279,6 +279,32 @@ impl AutopilotWorker {
                     gi_dispatch_log = ?report.gi_dispatch_log,
                     "autopilot cycle report"
                 );
+                // A prerequisite gate that drops candidates silently reads
+                // exactly like a brain with nothing to say. Production
+                // discovered 119 communities, joined none — the join executor
+                // is in manual mode — and every community candidate was gated
+                // out with no decision row anywhere. The Reddit acquisition
+                // channel looked idle when it was blocked on one manual step.
+                //
+                // WARN, not INFO: this is work waiting on a person.
+                if !report.blocked_on_membership.is_empty() {
+                    let waiting: u32 = report
+                        .blocked_on_membership
+                        .iter()
+                        .map(|(_, count)| *count)
+                        .sum();
+                    tracing::warn!(
+                        communities = report.blocked_on_membership.len(),
+                        posts_waiting = waiting,
+                        join_first = ?report
+                            .blocked_on_membership
+                            .iter()
+                            .take(5)
+                            .collect::<Vec<_>>(),
+                        "growth blocked: posts are waiting on communities nobody has joined — \
+                         join these, or set CROWDRELAY_COMMUNITY_AUTO_JOIN=true"
+                    );
+                }
             }
             Err(error) => {
                 phase_failed = true;

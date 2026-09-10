@@ -126,6 +126,19 @@ impl OpportunityGraph {
         self.satisfied.contains(key)
     }
 
+    /// Whether one candidate is held by an unmet prerequisite.
+    ///
+    /// The single-candidate form of [`Self::blocked`], for a caller walking a
+    /// list and deciding one at a time. Same rule: only prerequisites gate.
+    #[must_use]
+    pub fn is_blocked(&self, candidate: &str) -> bool {
+        self.edges.iter().any(|edge| {
+            edge.kind == DependencyKind::Prerequisite
+                && edge.to == candidate
+                && !self.satisfied.contains(&edge.from)
+        })
+    }
+
     /// The candidates that cannot run, and what each is waiting for.
     ///
     /// Only prerequisites gate. A missing reinforcement costs value and blocks
