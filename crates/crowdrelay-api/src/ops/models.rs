@@ -164,6 +164,27 @@ pub(crate) struct OpsMetricsSnapshot {
     /// The worker renews every 15s; anything much above that means it is gone.
     /// A missing lease row reads as maximally stale, never as healthy.
     pub(crate) worker_lease_age_seconds: i64,
+    /// Cycles the brain started in the last 24 hours, and how many of those
+    /// ended in anything other than `succeeded`.
+    pub(crate) brain_cycles_24h: i64,
+    pub(crate) brain_cycles_degraded_24h: i64,
+    /// Seconds since the last cycle started. The worker lease can look
+    /// healthy while the brain inside it has stopped cycling; this separates
+    /// the two.
+    pub(crate) brain_seconds_since_cycle: i64,
+    pub(crate) brain_decisions_24h: i64,
+    pub(crate) brain_actions_24h: i64,
+    pub(crate) brain_actions_failed_24h: i64,
+    pub(crate) brain_measurements_pending: i64,
+    pub(crate) brain_measurements_resolved: i64,
+    /// Age of the oldest measurement that is due and still unresolved. Zero
+    /// when nothing is overdue: a measurement waiting for its horizon is
+    /// early, not late.
+    pub(crate) brain_measurement_oldest_overdue_seconds: i64,
+    /// The LLM half of the loop: outcomes the data-quality gate accepted and
+    /// refused over the last 24 hours.
+    pub(crate) brain_agent_outcomes_processed_24h: i64,
+    pub(crate) brain_agent_outcomes_rejected_24h: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -183,6 +204,17 @@ struct OpsMetricsRow {
     push_suppressed: i64,
     push_oldest_pending_seconds: i64,
     worker_lease_age_seconds: i64,
+    brain_cycles_24h: i64,
+    brain_cycles_degraded_24h: i64,
+    brain_seconds_since_cycle: i64,
+    brain_decisions_24h: i64,
+    brain_actions_24h: i64,
+    brain_actions_failed_24h: i64,
+    brain_measurements_pending: i64,
+    brain_measurements_resolved: i64,
+    brain_measurement_oldest_overdue_seconds: i64,
+    brain_agent_outcomes_processed_24h: i64,
+    brain_agent_outcomes_rejected_24h: i64,
 }
 
 #[derive(Debug, Deserialize)]

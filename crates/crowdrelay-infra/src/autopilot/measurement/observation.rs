@@ -136,7 +136,7 @@ pub(super) async fn observe(
                     SELECT 1 FROM viryaos_booking_interactions
                     WHERE workspace_id=$1 AND target_id=$2 AND direction='inbound'
                       AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '7 days'
-                ) THEN 1.0 ELSE 0.0 END
+                ) THEN 1.0::double precision ELSE 0.0::double precision END
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -151,7 +151,7 @@ pub(super) async fn observe(
                     SELECT 1 FROM viryaos_outreach_interactions
                     WHERE workspace_id=$1 AND target_id=$2 AND direction='inbound'
                       AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '7 days'
-                ) THEN 1.0 ELSE 0.0 END
+                ) THEN 1.0::double precision ELSE 0.0::double precision END
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -694,6 +694,21 @@ pub(super) async fn observe(
             // whether a worker is producing valid output or failing
             // grounding checks.
             AutopilotMeasurementKind::AgentRunOutcomeQuality1h => {
+                // The casts are load-bearing. Postgres types a bare `1.0`
+                // literal as NUMERIC, and sqlx decodes this column into `f64`,
+                // which is FLOAT8 — so without them every attempt failed with
+                // "mismatched types; Rust type `f64` (as SQL type `FLOAT8`) is
+                // not compatible with SQL type `NUMERIC`". It compiled, linted
+                // and unit-tested clean, because nothing here checks SQL types
+                // until a real server answers.
+                //
+                // In production that meant this measurement could never
+                // resolve: it was retried, failed the same way each time, and
+                // degraded the cycle that attempted it. The one-hour outcome
+                // quality check is the brain's fastest feedback signal on
+                // whether a dispatched worker produced anything usable, so the
+                // fast half of the learning loop was dead while the slow half
+                // looked fine.
                 sqlx::query_scalar::<_, f64>(
                     r#"
                     SELECT CASE WHEN EXISTS (
@@ -703,7 +718,7 @@ pub(super) async fn observe(
                           AND status = 'processed'
                           AND created_at >= $3
                           AND created_at < $3 + INTERVAL '1 hour'
-                    ) THEN 1.0 ELSE 0.0 END
+                    ) THEN 1.0::double precision ELSE 0.0::double precision END
                     "#,
                 )
                 .bind(workspace_id.into_uuid())

@@ -819,6 +819,64 @@ crowdrelay_worker_lease_age_seconds {}\n",
         ops_snapshot.worker_lease_age_seconds,
     ));
 
+    // Brain health, beside queue health and for the same reason.
+    //
+    // Everything else here that can stall silently is already a gauge. The
+    // brain was not, so "is it cycling, deciding, acting and learning" needed
+    // the authenticated control plane to answer — and when a key was wrong,
+    // a database shell on the host. That is a poor way to learn that the part
+    // the product rests on has stopped.
+    //
+    // `seconds_since_cycle` is the one to alert on: the worker lease can be
+    // fresh while the brain inside that same process has stopped cycling, and
+    // no other signal here separates those two failures.
+    body.push_str(&format!(
+        "# HELP crowdrelay_brain_cycles_24h Autopilot cycles started in the last 24 hours.\n\
+# TYPE crowdrelay_brain_cycles_24h gauge\n\
+crowdrelay_brain_cycles_24h {}\n\
+# HELP crowdrelay_brain_cycles_degraded_24h Cycles in the last 24 hours that did not succeed.\n\
+# TYPE crowdrelay_brain_cycles_degraded_24h gauge\n\
+crowdrelay_brain_cycles_degraded_24h {}\n\
+# HELP crowdrelay_brain_seconds_since_cycle Seconds since the last autopilot cycle started.\n\
+# TYPE crowdrelay_brain_seconds_since_cycle gauge\n\
+crowdrelay_brain_seconds_since_cycle {}\n\
+# HELP crowdrelay_brain_decisions_24h Autopilot decisions written in the last 24 hours.\n\
+# TYPE crowdrelay_brain_decisions_24h gauge\n\
+crowdrelay_brain_decisions_24h {}\n\
+# HELP crowdrelay_brain_actions_24h Autopilot actions created in the last 24 hours.\n\
+# TYPE crowdrelay_brain_actions_24h gauge\n\
+crowdrelay_brain_actions_24h {}\n\
+# HELP crowdrelay_brain_actions_failed_24h Autopilot actions created in the last 24 hours that failed.\n\
+# TYPE crowdrelay_brain_actions_failed_24h gauge\n\
+crowdrelay_brain_actions_failed_24h {}\n\
+# HELP crowdrelay_brain_measurements_pending Scheduled measurements that have not resolved.\n\
+# TYPE crowdrelay_brain_measurements_pending gauge\n\
+crowdrelay_brain_measurements_pending {}\n\
+# HELP crowdrelay_brain_measurements_resolved Measurements that resolved successfully.\n\
+# TYPE crowdrelay_brain_measurements_resolved gauge\n\
+crowdrelay_brain_measurements_resolved {}\n\
+# HELP crowdrelay_brain_measurement_oldest_overdue_seconds Age of the oldest due-but-unresolved measurement; zero when none is overdue.\n\
+# TYPE crowdrelay_brain_measurement_oldest_overdue_seconds gauge\n\
+crowdrelay_brain_measurement_oldest_overdue_seconds {}\n\
+# HELP crowdrelay_brain_agent_outcomes_processed_24h LLM worker outcomes accepted by the data-quality gate in the last 24 hours.\n\
+# TYPE crowdrelay_brain_agent_outcomes_processed_24h gauge\n\
+crowdrelay_brain_agent_outcomes_processed_24h {}\n\
+# HELP crowdrelay_brain_agent_outcomes_rejected_24h LLM worker outcomes refused by the data-quality gate in the last 24 hours.\n\
+# TYPE crowdrelay_brain_agent_outcomes_rejected_24h gauge\n\
+crowdrelay_brain_agent_outcomes_rejected_24h {}\n",
+        ops_snapshot.brain_cycles_24h,
+        ops_snapshot.brain_cycles_degraded_24h,
+        ops_snapshot.brain_seconds_since_cycle,
+        ops_snapshot.brain_decisions_24h,
+        ops_snapshot.brain_actions_24h,
+        ops_snapshot.brain_actions_failed_24h,
+        ops_snapshot.brain_measurements_pending,
+        ops_snapshot.brain_measurements_resolved,
+        ops_snapshot.brain_measurement_oldest_overdue_seconds,
+        ops_snapshot.brain_agent_outcomes_processed_24h,
+        ops_snapshot.brain_agent_outcomes_rejected_24h,
+    ));
+
     body.push_str(&http_metrics().route_prometheus());
     let pool = state.ticketing.pool();
     let pool_size = pool.size();
