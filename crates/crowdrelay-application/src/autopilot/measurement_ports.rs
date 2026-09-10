@@ -157,6 +157,52 @@ impl AutopilotMeasurementKind {
         )
     }
 
+    /// Why a measurement was abandoned when its dispatch never reached anyone.
+    ///
+    /// Recorded as the measurement's `last_error_kind`, which is bounded at 96
+    /// characters — so this is a short kind, not a sentence. It lives here
+    /// rather than beside the query that raises it because the worker records
+    /// it and the repository raises it, and neither should own the other's
+    /// vocabulary.
+    pub const NEVER_PUBLISHED: &'static str = "dispatch_never_published";
+
+    /// Whether this kind measures what an outbound post did to an audience.
+    ///
+    /// A dispatch that produced only a draft has no such outcome. Every
+    /// outbound channel drafts and waits for an operator — Reddit is read-only
+    /// by policy, Telegram, Discord and social default to manual — so the
+    /// action succeeds, the measurement comes due on schedule, and it observes
+    /// the fans a post nobody published did not attract. That zero is the
+    /// absence of an outcome, not an outcome of zero, and the brain cannot
+    /// tell them apart: it learns the template does not work and moves the
+    /// dispatch budget away from the channel that would have worked.
+    ///
+    /// The kinds listed here are abandoned rather than recorded when the
+    /// dispatch never reached anyone. Everything else is deliberately absent:
+    ///
+    /// - Ticket, merch and promotion kinds measure a price or budget change
+    ///   that took effect regardless of any post.
+    /// - Reply kinds measure email the outbox actually delivered.
+    /// - Scanner and strategist quality kinds measure work done inside the
+    ///   system — targets discovered, insights written — which is real whether
+    ///   or not anything was ever published.
+    /// - `AgentRunOutcomeQuality1h` asks whether the worker produced usable
+    ///   output at all. A draft is usable output; that question is answered by
+    ///   the dispatch, not by the operator's backlog.
+    #[must_use]
+    pub const fn measures_outbound_reach(self) -> bool {
+        matches!(
+            self,
+            Self::AgentRunFanGrowth3d
+                | Self::AgentRunFanGrowth14d
+                | Self::IncrementalFanGrowth14d
+                | Self::DurableFanGrowth30d
+                | Self::AgentRunSignalInstalls7d
+                | Self::SignalInstalls1d
+                | Self::AgentRunCommunityEngagement7d
+        )
+    }
+
     /// Days of counterfactual the stored `baseline_value` rate covers.
     ///
     /// The observation subtracts `baseline_value × window` and the

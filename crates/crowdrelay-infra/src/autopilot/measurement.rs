@@ -4,8 +4,8 @@ mod readiness;
 
 use super::*;
 use readiness::{
-    measured_evidence_quality, observable_community, refresh_evidence_readiness,
-    refresh_experiment_readiness,
+    dispatch_reached_an_audience, measured_evidence_quality, observable_community,
+    refresh_evidence_readiness, refresh_experiment_readiness,
 };
 
 #[async_trait]
@@ -122,6 +122,27 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<f64, RepositoryError> {
         self.bounded(async {
+            // A dispatch whose post is still a draft has no outcome to
+            // observe. Measuring it anyway records the fans an unpublished
+            // post did not attract as a real zero, and the brain reads that as
+            // the template failing — see
+            // `AutopilotMeasurementKind::measures_outbound_reach`.
+            //
+            // Abandoned rather than postponed. A postponed measurement holds
+            // its evidence row open forever if nobody ever publishes, and
+            // `resolved_at` never stamps; a failed one is terminal, the
+            // horizon stays NULL, and the learner skips it. That is the honest
+            // reading of "we tried and could not find out" — the same rule
+            // `observable_community` already applies to one kind on one
+            // channel.
+            if measurement.kind.measures_outbound_reach()
+                && !dispatch_reached_an_audience(&self.pool, workspace_id, measurement.action_id)
+                    .await?
+            {
+                return Err(RepositoryError::ConflictBecause(
+                    AutopilotMeasurementKind::NEVER_PUBLISHED,
+                ));
+            }
             let observed = match measurement.kind {
                 AutopilotMeasurementKind::TicketRevenue72h => sqlx::query_scalar::<_, f64>(
                     r#"

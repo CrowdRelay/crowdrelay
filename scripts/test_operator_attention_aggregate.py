@@ -90,6 +90,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
                 "findings",
                 "needs_you",
                 "summary",
+                "unpublished_drafts",
             ],
         )
 

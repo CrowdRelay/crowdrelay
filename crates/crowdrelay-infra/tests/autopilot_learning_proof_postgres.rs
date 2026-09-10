@@ -512,3 +512,144 @@ async fn a_later_horizon_reopens_evidence_the_earlier_one_already_advanced()
 
     Ok(())
 }
+
+/// A dispatch nobody published must not teach the brain anything.
+///
+/// Every outbound channel drafts and waits for an operator. The dispatch is
+/// still a succeeded action, so its measurement comes due on schedule and
+/// observes the fans that a post nobody published did not attract — a real
+/// zero, indistinguishable to the brain from a post that ran and failed. The
+/// strategy posterior learns the template does not work and the hypothesis
+/// lifecycle degrades it, on evidence that only says the operator's backlog is
+/// long.
+///
+/// The measurement must be abandoned instead, with a reason an operator can
+/// read, and the evidence row must stay unresolved so the learner skips it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_unpublished_draft_is_not_measured_as_a_zero() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crowdrelay_application::{
+        RepositoryError,
+        autopilot::{
+            AutopilotMeasurementKind, AutopilotMeasurementRepository, ClaimedAutopilotMeasurement,
+        },
+    };
+    use crowdrelay_domain::{AutopilotActionId, AutopilotMeasurementId};
+
+    let database_url =
+        std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").map_err(|error| {
+            format!(
+                "CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL must target a disposable database: {error}"
+            )
+        })?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("unpublished-draft-{suffix}"))
+        .bind("Unpublished draft")
+        .execute(&pool)
+        .await?;
+
+    let drafted = seed_resolved_dispatch(
+        &pool,
+        workspace_id,
+        "community-engager",
+        "community_first",
+        0.0,
+    )
+    .await?;
+    let published = seed_resolved_dispatch(
+        &pool,
+        workspace_id,
+        "community-engager",
+        "community_first",
+        0.0,
+    )
+    .await?;
+
+    // Two dispatches, identical but for one fact: an operator published the
+    // second one.
+    for (action_id, status) in [
+        (drafted.action_id, "awaiting_manual_post"),
+        (published.action_id, "posted"),
+    ] {
+        sqlx::query(
+            "INSERT INTO community_posts
+               (workspace_id, action_id, target_id, subreddit, title, body, status, posted_at)
+             VALUES ($1, $2, NULL, 'testsubreddit', 'title', 'body', $3,
+                     CASE WHEN $3 = 'posted' THEN now() ELSE NULL END)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .bind(status)
+        .execute(&pool)
+        .await?;
+    }
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let now = OffsetDateTime::now_utc();
+
+    let claimed = |action_id: Uuid| ClaimedAutopilotMeasurement {
+        id: AutopilotMeasurementId::from(Uuid::now_v7()),
+        action_id: AutopilotActionId::from(action_id),
+        kind: AutopilotMeasurementKind::AgentRunFanGrowth14d,
+        subject_id: workspace_id.into_uuid(),
+        baseline_value: 0.0,
+        action_finished_at: now - time::Duration::days(14),
+        attempt_number: 1,
+    };
+
+    let refused = repository
+        .observe_measurement(workspace_id, &claimed(drafted.action_id), now)
+        .await;
+    match refused {
+        Err(RepositoryError::ConflictBecause(reason)) => assert_eq!(
+            reason,
+            AutopilotMeasurementKind::NEVER_PUBLISHED,
+            "the refusal must name its cause; 'failed' alone reads as a broken \
+             measurement rather than a post nobody published"
+        ),
+        other => panic!("an unpublished draft must not produce an observation: {other:?}"),
+    }
+
+    // The published one is measured as it always was. The guard must refuse
+    // the draft, not the channel.
+    repository
+        .observe_measurement(workspace_id, &claimed(published.action_id), now)
+        .await
+        .expect("a published post has a real outcome, however small");
+
+    // An action with no post artifact at all — a scanner or strategist run —
+    // is measured too. "There was nothing to publish" is not "it was never
+    // published".
+    let no_artifact = seed_resolved_dispatch(
+        &pool,
+        workspace_id,
+        "reddit-scanner",
+        "community_first",
+        0.0,
+    )
+    .await?;
+    repository
+        .observe_measurement(workspace_id, &claimed(no_artifact.action_id), now)
+        .await
+        .expect("a dispatch that produces no post must still be measurable");
+
+    Ok(())
+}

@@ -6,7 +6,7 @@ use crowdrelay_application::{
     RepositoryError,
     autopilot::{
         AutopilotActionRepository, AutopilotContext, AutopilotDecisionRepository,
-        AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementRepository,
+        AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementKind, AutopilotMeasurementRepository,
         AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotReplyTriageRepository,
         AutopilotWaveOutcomeRepository, EvaluateAutopilot, assess_measurement_effect,
         assess_play_claim, assess_wave_claim,
@@ -792,11 +792,24 @@ const fn repository_error_retryable(error: RepositoryError) -> bool {
     )
 }
 
-const fn repository_error_kind(error: RepositoryError) -> &'static str {
+fn repository_error_kind(error: RepositoryError) -> &'static str {
     match error {
         RepositoryError::Unavailable => "repository_unavailable",
         RepositoryError::NotFound => "subject_not_found",
-        RepositoryError::Conflict | RepositoryError::ConflictBecause(_) => "state_changed",
         RepositoryError::Unexpected => "unexpected",
+        // A named cause worth recording, matched rather than passed through.
+        //
+        // `ConflictBecause` also carries operator-facing sentences for HTTP
+        // problem details, and this value is written to `last_error_kind`,
+        // which is bounded at 96 characters. Forwarding the payload would put
+        // an arbitrary-length string into a constrained column and fail the
+        // write that records the failure. Every other conflict stays the
+        // category it always was.
+        RepositoryError::ConflictBecause(reason)
+            if reason == AutopilotMeasurementKind::NEVER_PUBLISHED =>
+        {
+            AutopilotMeasurementKind::NEVER_PUBLISHED
+        }
+        RepositoryError::Conflict | RepositoryError::ConflictBecause(_) => "state_changed",
     }
 }

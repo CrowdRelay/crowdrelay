@@ -23,6 +23,23 @@ struct PendingActionSummary {
     approval_expires_at: Option<OffsetDateTime>,
 }
 
+/// One channel's backlog of drafted-but-unpublished posts.
+///
+/// Reported per channel because the answer differs by channel: Reddit needs a
+/// human by policy, while Telegram and Discord are one environment variable
+/// away from publishing themselves.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct UnpublishedDraftChannel {
+    /// `reddit`, `telegram`, `discord` or `social`.
+    channel: String,
+    drafts: i64,
+    /// When the oldest draft on this channel was created. The age is the
+    /// point: one draft from this morning is a queue, twelve from last month
+    /// is a channel nobody is running.
+    #[serde(with = "time::serde::rfc3339::option")]
+    oldest_drafted_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Serialize)]
 struct OperatorAttentionSnapshot {
     summary: OpsSummary,
@@ -39,6 +56,16 @@ struct OperatorAttentionSnapshot {
     /// Count of opportunities awaiting approval. Derived from authoritative
     /// action state, not from rendered UI items.
     awaiting_approval: i64,
+    /// Dispatches the brain produced that are still waiting for a person to
+    /// publish them.
+    ///
+    /// This belongs in an exception-first view because it is the one queue
+    /// where the system is blocked on the operator rather than the other way
+    /// round. Every outbound channel drafts and waits: Reddit is read-only by
+    /// policy, Telegram, Discord and social default to manual. A draft nobody
+    /// publishes reaches nobody, so the work the brain did is spent and the
+    /// fan it would have brought does not arrive.
+    unpublished_drafts: Vec<UnpublishedDraftChannel>,
     /// What the brain makes of its own recent performance.
     ///
     /// This view exists to answer "what needs me?", and a fanbase that is
@@ -76,13 +103,14 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
     let needs_you = run_with_timeout(timeout_duration, load_needs_you(&state.ops));
     let brain = run_with_timeout(timeout_duration, load_brain_assessment(&state.ops));
+    let unpublished_drafts = run_with_timeout(timeout_duration, load_unpublished_drafts(&state));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
-        ecosystem, findings, needs_you, brain,
+        ecosystem, findings, needs_you, brain, unpublished_drafts,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
-        ecosystem, findings, needs_you, brain,
+        ecosystem, findings, needs_you, brain, unpublished_drafts,
     );
 
     let request_id_value = request_id(&headers);
@@ -122,6 +150,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let unpublished_drafts = match unpublished_drafts {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -137,9 +169,45 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             findings,
             needs_you,
             awaiting_approval,
+            unpublished_drafts,
             brain,
         },
     )
+}
+
+/// The drafted posts waiting on a person, per channel.
+///
+/// Counts the draft states rather than excluding the published one, so a
+/// status added later is not silently reported as a backlog. `rate_limited`
+/// and `failed` are deliberately absent: those are the system's problem and
+/// already surface as alerts, while `awaiting_manual_post` is the operator's.
+async fn load_unpublished_drafts(
+    state: &crate::AppState,
+) -> Result<Vec<UnpublishedDraftChannel>, OpsError> {
+    sqlx::query_as::<_, UnpublishedDraftChannel>(
+        r#"
+        SELECT channel, count(*)::bigint AS drafts, min(created_at) AS oldest_drafted_at
+        FROM (
+            SELECT 'reddit' AS channel, created_at FROM community_posts
+            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
+            UNION ALL
+            SELECT 'telegram', created_at FROM telegram_posts
+            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
+            UNION ALL
+            SELECT 'discord', created_at FROM discord_posts
+            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
+            UNION ALL
+            SELECT 'social', created_at FROM social_posts
+            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
+        ) AS drafts
+        GROUP BY channel
+        ORDER BY min(created_at)
+        "#,
+    )
+    .bind(state.ticketing.workspace_id().into_uuid())
+    .fetch_all(state.ticketing.pool())
+    .await
+    .map_err(OpsError::sqlx)
 }
 
 /// The brain's verdict on itself, from the same daily series `/ops/cycles`

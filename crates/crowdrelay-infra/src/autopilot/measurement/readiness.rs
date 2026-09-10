@@ -8,6 +8,77 @@
 
 use super::super::*;
 
+/// Whether an outbound dispatch ever reached an audience.
+///
+/// Returns `Ok(true)` when at least one of the action's post artifacts is
+/// published, `Ok(false)` when the action produced artifacts and every one of
+/// them is still a draft, and `Ok(None)`— expressed as `Ok(true)` — is
+/// deliberately not a case: an action with no artifacts at all is reported as
+/// `true`, because "there was nothing to publish" must not be confused with
+/// "it was never published". Scanner and strategist dispatches produce no
+/// post, and their outcomes are real.
+///
+/// # Why this exists
+///
+/// Every outbound channel drafts and waits for an operator: Reddit is
+/// read-only by policy, and Telegram, Discord and social default to manual.
+/// The dispatch is still recorded as a succeeded action, so its measurement
+/// comes due on schedule, observes the fans that a post nobody published did
+/// not attract, and records a real zero.
+///
+/// That zero is not an outcome. It is the absence of one, and the brain cannot
+/// tell the difference: the strategy posterior learns that the template does
+/// not work, the hypothesis lifecycle degrades it toward Retired, and the
+/// dispatch budget moves away from the one channel that would have worked if
+/// anyone had pressed publish. The system teaches itself that its own backlog
+/// is evidence.
+///
+/// `observable_community` already refuses this for one measurement kind on one
+/// channel. This is the same rule for all four channels and every kind.
+pub(in crate::autopilot) async fn dispatch_reached_an_audience(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+) -> Result<bool, RepositoryError> {
+    // One query over the four post tables. `bool_or` is NULL when the action
+    // produced no artifact at all, and COALESCE turns that into `true` — see
+    // the note above on why absence of an artifact is not absence of a post.
+    //
+    // 'posted' is the published state in all four vocabularies; every other
+    // state ('pending', 'posting', 'failed', 'rate_limited',
+    // 'awaiting_manual_post') means no audience saw it. Matching on the
+    // published state rather than excluding the draft one keeps a future
+    // status from silently counting as published.
+    let reached = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT COALESCE(bool_or(published), true)
+        FROM (
+            SELECT status = 'posted' AS published
+            FROM community_posts
+            WHERE workspace_id = $1 AND action_id = $2
+            UNION ALL
+            SELECT status = 'posted' AS published
+            FROM telegram_posts
+            WHERE workspace_id = $1 AND action_id = $2
+            UNION ALL
+            SELECT status = 'posted' AS published
+            FROM discord_posts
+            WHERE workspace_id = $1 AND action_id = $2
+            UNION ALL
+            SELECT status = 'posted' AS published
+            FROM social_posts
+            WHERE workspace_id = $1 AND action_id = $2
+        ) AS artifacts
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(reached)
+}
+
 /// Resolves the community an action's experiment unit refers to, but only
 /// once that community has actually been posted to.
 ///
