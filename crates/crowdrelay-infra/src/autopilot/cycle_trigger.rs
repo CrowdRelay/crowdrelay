@@ -62,6 +62,26 @@ pub struct CyclePreview {
     /// one the growth numbers alone would suggest — and it is the single fact
     /// an operator needs in order to go and fix a credential.
     pub discovery_channels_silent: bool,
+    /// What the causal model expects one dispatch of the top-priority
+    /// template to produce, before any candidate has actually been scored
+    /// or dispatched. Mirrors Kern's `WorldSimulation` — the brain's
+    /// "imagination" made visible ahead of acting, not just a log line
+    /// after the fact. `None` when there is no template to project (an
+    /// empty priority order) or the causal model has no state to project
+    /// from yet.
+    ///
+    /// Uses `DispatchContext::default()` — the same context every template
+    /// gets when nothing more specific is known — because this preview
+    /// runs before the enriched per-snapshot context is built. That makes
+    /// the number a rough expectation, not the exact figure the cycle will
+    /// use once it builds the real dispatch context; the two would only
+    /// coincide when the default context happens to match, e.g. no
+    /// upcoming event and steady growth.
+    pub top_template_projected_incremental_fans: Option<f64>,
+    /// The observation count backing the projection above — a projection
+    /// from zero observations and one from fifty are both numbers, and an
+    /// operator cannot tell which is a guess without this next to it.
+    pub top_template_projected_confidence: Option<u32>,
 }
 
 /// Asks the worker to run a cycle now.
@@ -294,16 +314,48 @@ pub async fn preview_autopilot_cycle(
         }
         None => GrowthStrategy::from_world_model(world),
     };
+    let template_priority: Vec<String> = strategy
+        .template_priority_for(world)
+        .iter()
+        .map(|template| (*template).to_owned())
+        .collect();
+
+    // Project what one dispatch of the top-priority template would
+    // produce, from the causal model as it stands right now. Read-only —
+    // this does not score, select, or persist anything, and a failure to
+    // load the causal model must not fail the preview: the operator still
+    // gets the strategy and priority order, just without the projection.
+    let (top_template_projected_incremental_fans, top_template_projected_confidence) = match (
+        template_priority.first(),
+        repo.load_causal_model(workspace_id).await,
+    ) {
+        (Some(top_template), Ok(loaded)) => {
+            let stats = loaded.model.predict_stats_with_treatment(
+                top_template,
+                &crowdrelay_brain::DispatchContext::default(),
+            );
+            let projected = if stats.use_treatment_effect {
+                stats.treatment_effect
+            } else {
+                stats.expected_fans
+            };
+            let confidence = if stats.use_treatment_effect {
+                stats.treatment_confidence
+            } else {
+                stats.confidence
+            };
+            (Some(projected), Some(confidence))
+        }
+        _ => (None, None),
+    };
 
     Ok(CyclePreview {
         strategy: strategy.as_str().to_owned(),
         // The ranked order, so the preview shows the order the cycle will
         // actually use rather than the list as written.
-        template_priority: strategy
-            .template_priority_for(world)
-            .iter()
-            .map(|template| (*template).to_owned())
-            .collect(),
+        template_priority,
+        top_template_projected_incremental_fans,
+        top_template_projected_confidence,
         templates_considered: snapshots.len(),
         total_fans: world.total_fans,
         off_platform_audience: world.off_platform_audience,
