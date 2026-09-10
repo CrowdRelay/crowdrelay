@@ -40,6 +40,7 @@
 //! LLM blindly — it aggregates intelligence, applies deterministic rules,
 //! and decides.
 
+pub mod agent_health;
 pub mod attribution;
 pub mod bayesian;
 pub mod beta;
@@ -72,6 +73,7 @@ pub mod validation;
 pub mod world_model;
 
 // Re-export the most commonly used types at the crate root.
+pub use agent_health::AgentExecutionHealth;
 pub use bayesian::{
     HierarchicalNegBinPosterior, HierarchicalPosterior, NegBinPosterior, NormalPosterior,
     normal_cdf, normal_pdf,

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crowdrelay_domain::learning::Standing;
 use serde::{Deserialize, Serialize};
 
+use crate::agent_health::AgentExecutionHealth;
 use crate::hypothesis::HypothesisState;
 use crate::self_assessment::MetacognitionMonitor;
 use crate::tenant_preference::{TenantPreferencePolicy, TenantPreferencePosterior};
@@ -56,6 +57,17 @@ pub struct GrowthIntelligenceSnapshot {
     /// (not DecisionValue.total()). `sizing_multiplier` enters
     /// dispatch budget (not value terms). Defaults to Initializing.
     pub metacognition: MetacognitionMonitor,
+    /// Whether the worker layer (the agent service and the LLM providers
+    /// behind it) is currently producing usable outcomes. Distinct from
+    /// `metacognition`, which tracks the North Star trend over days — this
+    /// tracks tool reliability over hours. Its `sizing_multiplier()`
+    /// combines with metacognition's by multiplication: growth trend and
+    /// tool health are independent signals, and either being bad should
+    /// reduce dispatch budget regardless of the other. Defaults to
+    /// `Healthy` for backward compatibility with callers that have not
+    /// wired the query yet.
+    #[serde(default)]
+    pub agent_execution_health: AgentExecutionHealth,
 }
 
 /// One community the brain may engage, with what is known about it.

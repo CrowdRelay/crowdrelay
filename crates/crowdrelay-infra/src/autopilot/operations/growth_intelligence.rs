@@ -127,6 +127,69 @@ fn worker_templates() -> Vec<&'static str> {
         .collect()
 }
 
+/// How far back `load_agent_execution_health` looks. Deliberately short
+/// compared to the 60-day North Star window: a dead provider or exhausted
+/// quota is an hours-scale fact, and averaging it over days would let a
+/// six-hour outage hide inside a mostly-healthy week.
+const AGENT_EXECUTION_HEALTH_WINDOW_HOURS: i64 = 6;
+
+/// Assesses whether the worker layer is currently producing usable
+/// outcomes, from the agent service's own task and outcome tables.
+///
+/// A task counts as bad when it failed outright, or when it completed but
+/// every outcome it produced was rejected by the data-quality gate (most
+/// commonly `NOT_GROUNDING_CHECKED` — the verifier never ran or never
+/// passed). A task that completed and produced zero outcome rows at all
+/// is not counted as bad: an empty/no-op run (a scan that found nothing)
+/// is a valid observation, not a failure, and conflating the two is
+/// exactly the mistake `agent_outcomes.rs`'s own data-quality guard exists
+/// to avoid on the other side of this same boundary.
+async fn load_agent_execution_health(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<crowdrelay_brain::AgentExecutionHealth, RepositoryError> {
+    let since = now - time::Duration::hours(AGENT_EXECUTION_HEALTH_WINDOW_HOURS);
+    let row: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH task_window AS (
+            SELECT id, status
+            FROM agent_service_tasks
+            WHERE workspace_id = $1
+              AND created_at > $2
+              AND status IN ('completed', 'failed')
+        ),
+        task_outcome_summary AS (
+            SELECT task_id,
+                   count(*) FILTER (WHERE status = 'processed') AS accepted,
+                   count(*) FILTER (WHERE status = 'rejected') AS rejected
+            FROM agent_outcomes
+            WHERE workspace_id = $1
+              AND task_id IN (SELECT id FROM task_window)
+            GROUP BY task_id
+        )
+        SELECT
+            count(*) AS attempted,
+            count(*) FILTER (
+                WHERE tw.status = 'failed'
+                   OR (coalesce(tos.accepted, 0) = 0 AND coalesce(tos.rejected, 0) > 0)
+            ) AS bad
+        FROM task_window tw
+        LEFT JOIN task_outcome_summary tos ON tos.task_id = tw.id
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(since)
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let (attempted, bad) = row;
+    Ok(crowdrelay_brain::AgentExecutionHealth::assess(
+        u32::try_from(attempted).unwrap_or(u32::MAX),
+        u32::try_from(bad).unwrap_or(u32::MAX),
+    ))
+}
+
 pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -734,6 +797,24 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         growth_target_progress,
     };
 
+    // Agent execution health: is the worker layer currently producing
+    // usable outcomes? Computed once, workspace-wide — same value on every
+    // snapshot, mirroring how metacognition is one state per tenant, not
+    // per template. Reuses the same existence guard as the other
+    // agent_service_tasks reads above: the table belongs to the TypeScript
+    // agent service and is absent on a fresh deployment.
+    let agent_execution_health = if tasks_table_exists {
+        load_agent_execution_health(pool, workspace_id, now).await?
+    } else {
+        crowdrelay_brain::AgentExecutionHealth::Unknown
+    };
+    if agent_execution_health.needs_attention() {
+        tracing::warn!(
+            health = agent_execution_health.as_str(),
+            "agent execution health degraded — dispatch budget for agent-run templates reduced"
+        );
+    }
+
     // Build one snapshot per worker template.
     let templates = worker_templates();
     // hypothesis_states loaded in parallel with the audience queries above.
@@ -823,6 +904,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             // an upward shift boosts toward Improving, a downward
             // shift triggers Regressing earlier than the proportional
             // threshold would.
+            agent_execution_health,
             metacognition: {
                 let samples = super::super::daily_north_star(
                     repo.pool(),

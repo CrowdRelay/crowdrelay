@@ -554,10 +554,25 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // the brain acts cautiously (fewer dispatches). When Improving,
         // full budget. Taken from the first snapshot because metacognition
         // is brain-wide (one state per tenant), not per-template.
-        let sizing_multiplier = snapshots
-            .first()
-            .map(|s| s.metacognition.sizing_multiplier())
-            .unwrap_or(1.0);
+        //
+        // Multiplied by agent execution health: an independent signal for
+        // "is the worker layer producing usable outcomes right now",
+        // distinct from the North Star trend metacognition tracks. A brain
+        // that is Improving but whose only LLM provider is out of quota
+        // should still size down — the two questions are orthogonal, and a
+        // provider outage does not become growth-trend evidence for days.
+        let sizing_multiplier = snapshots.first().map_or(1.0, |s| {
+            s.metacognition.sizing_multiplier() * s.agent_execution_health.sizing_multiplier()
+        });
+        if let Some(first) = snapshots.first()
+            && first.agent_execution_health.needs_attention()
+        {
+            report.gi_dispatch_log.push(format!(
+                "agent execution health {}: dispatch budget scaled by {:.2}",
+                first.agent_execution_health.as_str(),
+                first.agent_execution_health.sizing_multiplier(),
+            ));
+        }
         let selection = portfolio::select_portfolio(
             &portfolio_candidates,
             &gi_policy,
