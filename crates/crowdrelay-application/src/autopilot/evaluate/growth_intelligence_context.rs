@@ -145,9 +145,18 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         } else {
             GrowthStrategy::default()
         };
-        // Collect all unconsumed insight IDs across all snapshots.
-        // Pre-allocate: each snapshot typically has 0-3 insights.
-        let mut consumed_ids: Vec<Uuid> = Vec::with_capacity(snapshots.len() * 2);
+        // Collect the unconsumed insights across all snapshots, each kept
+        // beside the template whose prompt would carry it.
+        //
+        // The template matters because consumption is not a workspace-wide
+        // fact. An insight is delivered to the LLM only through a dispatch of
+        // its own template, so marking one consumed after a *different*
+        // template dispatched retires it having never been read by anything.
+        // Every template but the one that dispatched silently loses its
+        // accumulated context, which is the opposite of what the feedback
+        // loop is for. Pre-allocate: each snapshot typically has 0-3.
+        let mut pending_insights: Vec<(String, Uuid)> =
+            Vec::with_capacity(snapshots.len() * 2);
         // Collect all eligible candidates with their EFE scores
         // and strategy ranks, then sort by (strategy_rank,
         // efe_score) so the brain dispatches the best
@@ -157,7 +166,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             Vec::with_capacity(snapshots.len());
         for snapshot in &snapshots {
             for insight in &snapshot.recent_insights {
-                consumed_ids.push(insight.outcome_id);
+                pending_insights.push((snapshot.template_id.clone(), insight.outcome_id));
             }
             // Build the enriched dispatch context (same as
             // evaluate_growth_intelligence uses) so the novelty
@@ -564,7 +573,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // world model that has since moved.
         let learning_provenance = learning_provenance(strategy_prior, strategy);
         // ── Dispatch phase ──
-        let mut dispatched_count = 0usize;
+        // Which templates actually reached the agent service this cycle. Only
+        // these carried their insights into a prompt, so only these may retire
+        // them below.
+        let mut dispatched_templates: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         // Dispatch non-experiment candidates (scanner, strategist).
         for i in &non_experiment_indices {
             let Some(scored) = scored_candidates.get(*i) else {
@@ -609,7 +622,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 Err(e) => return Err(e.into()),
             };
             if persisted.action_id.is_some() {
-                dispatched_count += 1;
+                if let AutopilotActionPayload::RequestAgentRun { template_id, .. } =
+                    &scored.candidate.action
+                {
+                    dispatched_templates.insert(template_id.clone());
+                }
                 if persisted.decision_created {
                     report.decisions = report.decisions.saturating_add(1);
                 }
@@ -727,7 +744,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                                 .await;
                         }
                     }
-                    dispatched_count += 1;
+                    dispatched_templates.insert(template_id.clone());
                     if persisted.decision_created {
                         report.decisions = report.decisions.saturating_add(1);
                     }
@@ -772,13 +789,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 }
             }
         }
-        // Only mark insights as consumed when the brain actually
-        // acted on them (at least one dispatch was produced).
-        // When do_nothing is true, the brain chose not to act —
-        // keeping insights unconsumed lets them be re-evaluated
-        // next cycle with potentially different context.
+        // Only mark an insight consumed when the template that would carry it
+        // actually dispatched. A template that produced no candidate this
+        // cycle — on cooldown, retired, or gated by budget — never put its
+        // insights in front of a worker, so retiring them here would drop
+        // context nothing had read. Keeping them unconsumed lets them be
+        // re-evaluated next cycle, which is also what happens when the brain
+        // chooses to do nothing at all.
+        let consumed_ids: Vec<Uuid> = pending_insights
+            .iter()
+            .filter(|(template_id, _)| dispatched_templates.contains(template_id))
+            .map(|(_, outcome_id)| *outcome_id)
+            .collect();
         if !consumed_ids.is_empty()
-            && dispatched_count > 0
             && self
                 .repository
                 .mark_insights_consumed(self.workspace_id, &consumed_ids)

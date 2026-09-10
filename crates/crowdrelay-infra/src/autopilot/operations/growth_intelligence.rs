@@ -286,51 +286,54 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // and marks them consumed after planning. This closes the feedback loop.
     // We join with agent_service_tasks to get the template_id that produced
     // each insight, so the brain can attach insights to the right snapshot.
-    // The join is dropped when that table is absent (see above): the query
-    // already coalesces a missing template_id to 'unknown', which is the right
-    // answer when the service that records them has never run. The two strings
-    // are constants, not interpolated input.
+    //
+    // The template filter belongs in the query, not only downstream. A
+    // snapshot is built per *active* template, and an insight is attached to
+    // the snapshot whose template produced it, so an insight from a disabled
+    // template — or from no identifiable template at all — reaches no snapshot
+    // and no prompt. It is also never marked consumed, because only insights
+    // that reached a snapshot enter the consumed set, and retention deletes
+    // consumed rows only. Such a row is therefore permanent, and it still
+    // occupies one of the 50 slots this query returns. Enough of them and the
+    // window holds nothing the brain can use: the block the LLM receives goes
+    // empty while every part of the code still reports insights loaded.
+    //
+    // Filtering here keeps the window full of rows that can actually be
+    // delivered. The two strings are constants, not interpolated input; the
+    // template list is bound.
     const INSIGHTS_WITH_TEMPLATE: &str = r#"
             SELECT ao.id,
-                   COALESCE(ast.template_id, 'unknown') AS template_id,
+                   ast.template_id,
                    ao.kind,
                    COALESCE(ao.payload->'item'->>'headline', ao.payload->'item'->>'subject', '(no headline)') AS headline,
                    COALESCE(ao.payload->'item'->>'detail', ao.payload->'item'->>'body', '') AS detail,
                    ao.payload->'item'->>'recommended_action' AS recommended_action
             FROM agent_outcomes ao
-            LEFT JOIN agent_service_tasks ast ON ast.id = ao.task_id
+            JOIN agent_service_tasks ast ON ast.id = ao.task_id
             WHERE ao.workspace_id = $1
               AND ao.status = 'processed'
               AND ao.consumed_at IS NULL
               AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
+              AND ast.template_id = ANY($2)
             ORDER BY ao.created_at DESC
             LIMIT 50
             "#;
-    const INSIGHTS_WITHOUT_TEMPLATE: &str = r#"
-            SELECT ao.id,
-                   'unknown'::text AS template_id,
-                   ao.kind,
-                   COALESCE(ao.payload->'item'->>'headline', ao.payload->'item'->>'subject', '(no headline)') AS headline,
-                   COALESCE(ao.payload->'item'->>'detail', ao.payload->'item'->>'body', '') AS detail,
-                   ao.payload->'item'->>'recommended_action' AS recommended_action
-            FROM agent_outcomes ao
-            WHERE ao.workspace_id = $1
-              AND ao.status = 'processed'
-              AND ao.consumed_at IS NULL
-              AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
-            ORDER BY ao.created_at DESC
-            LIMIT 50
-            "#;
+    // Without the agent service's task table there is no way to tell which
+    // template produced an insight, so none of them can be routed to a
+    // snapshot. Skipping the read is what the old query already amounted to —
+    // it labelled every row 'unknown', which matches no template and was
+    // discarded in full a few hundred lines later.
     let insights: Vec<(uuid::Uuid, String, String, String, String, Option<String>)> =
-        sqlx::query_as(if tasks_table_exists {
-            INSIGHTS_WITH_TEMPLATE
+        if tasks_table_exists {
+            sqlx::query_as(INSIGHTS_WITH_TEMPLATE)
+                .bind(workspace_id.into_uuid())
+                .bind(worker_templates())
+                .fetch_all(pool)
+                .await
+                .map_err(map_sqlx)?
         } else {
-            INSIGHTS_WITHOUT_TEMPLATE
-        })
-        .bind(workspace_id.into_uuid())
-        .fetch_all(pool)
-        .await
-        .map_err(map_sqlx)?;
+            Vec::new()
+        };
 
     let recent_insights: Vec<RecentInsight> = insights
         .into_iter()

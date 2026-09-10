@@ -72,12 +72,6 @@ pub struct IntelligenceRequest {
     pub novelty: f64,
 }
 
-/// Formats the unengaged outreach targets into a context block for the
-/// community-engager dispatch prompt. The LLM needs the concrete
-/// `target_id` and `subreddit` to produce `social_post` outcomes that
-/// result in `community.engage.request` actions — without this list the
-/// LLM can only produce generic content, which falls through to the
-/// `agent.content.request` path and never reaches Reddit.
 /// Formats recent insights into a context block for the dispatch prompt.
 /// This closes the feedback loop: the worker sees what previous runs already
 /// discovered and can focus on new ground instead of repeating itself.
