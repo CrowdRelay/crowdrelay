@@ -633,6 +633,55 @@ async fn f_manual_publication_moves_the_measurement_window() {
         time::Duration::days(7),
         "each measurement keeps its own offset; only the origin moves"
     );
+
+    // A manually published post reached the community exactly as an
+    // automatically published one would have. Reddit is manual by policy, so
+    // this is the path every real Reddit post takes — and it wrote neither of
+    // the two rows the automatic path writes on publication.
+    let (reach_rows, estimated_reach) = sqlx::query_as::<_, (i64, Option<i32>)>(
+        "SELECT count(*), max(estimated_reach) FROM viryaos_reach_events \
+         WHERE workspace_id = $1 AND action_id = $2 AND channel = 'reddit_post'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("reach events");
+    assert_eq!(
+        reach_rows, 1,
+        "the reach ledger is the denominator credit allocation divides by; a \
+         published post with no reach row cannot be credited for the fans it \
+         brought"
+    );
+    assert_eq!(
+        estimated_reach,
+        Some(100),
+        "the same estimate the automatic path uses — who pressed publish must \
+         not change what the post is worth"
+    );
+
+    // Re-registering the same URL must not double-count the reach.
+    let _ = crowdrelay_infra::fanbase::register_manual_reddit_post(
+        &f.pool,
+        f.workspace_id.into_uuid(),
+        post_id,
+        "https://www.reddit.com/r/spinetest/comments/abc123/title/",
+    )
+    .await;
+    let reach_rows_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM viryaos_reach_events \
+         WHERE workspace_id = $1 AND action_id = $2 AND channel = 'reddit_post'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await
+    .expect("reach events after a second registration");
+    assert_eq!(
+        reach_rows_after, 1,
+        "a second registration of the same post must not add reach the post \
+         did not have"
+    );
 }
 
 /// G: resolution is idempotent and local.

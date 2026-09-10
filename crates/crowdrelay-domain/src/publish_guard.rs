@@ -289,16 +289,63 @@ pub fn content_hash(body: &str) -> String {
     hash
 }
 
-/// Every URL-looking token in the body.
+/// Every URL in the body, wherever it appears inside a token.
+///
+/// Scans for the scheme anywhere rather than only at a whitespace boundary.
+/// The first version split on whitespace and kept tokens that *started* with a
+/// scheme, which meant three ordinary ways of writing a link went unseen:
+///
+/// - `[listen](https://elsewhere.example)` — markdown, which Telegram and
+///   Discord both render, and which is what a model writes when asked for a
+///   post with a link
+/// - `<a href="https://elsewhere.example">` — HTML, same
+/// - `Listen:https://elsewhere.example` — a missing space
+///
+/// Each of those published an unapproved destination under the tenant's name
+/// while the guard reported the post carried no link at all. The whole point
+/// of the check is that a hallucinated URL never goes out, so the extractor
+/// has to be at least as good at finding links as the renderer is.
 fn extract_links(body: &str) -> Vec<&str> {
-    body.split_whitespace()
-        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/'))
-        .filter(|token| {
-            token.starts_with("http://")
-                || token.starts_with("https://")
-                || token.starts_with("www.")
-        })
-        .collect()
+    /// Where a URL stops. Whitespace ends it, and so do the delimiters a link
+    /// is wrapped in — otherwise `(https://example.com/x)` keeps the closing
+    /// bracket and no longer matches the origin it should have matched.
+    fn is_terminator(c: char) -> bool {
+        c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\'' | '`' | ',' | ';')
+    }
+
+    // `get` rather than indexing throughout: a post carries emoji and Polish
+    // text, and a byte index that is not a character boundary panics. The
+    // indices here come from `find` on ASCII needles and are boundaries in
+    // practice, but a guard that panics on a post is worse than one that
+    // misses a link, and `get` makes that impossible rather than unlikely.
+    let mut links = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rest) = body.get(cursor..) {
+        let Some(offset) = ["https://", "http://", "www."]
+            .iter()
+            .filter_map(|scheme| rest.find(scheme))
+            .min()
+        else {
+            break;
+        };
+        let start = cursor + offset;
+        let Some(from_start) = body.get(start..) else {
+            break;
+        };
+        let end = from_start
+            .find(is_terminator)
+            .map_or(body.len(), |length| start + length);
+        // Trailing sentence punctuation is not part of the URL.
+        let link = body
+            .get(start..end)
+            .unwrap_or_default()
+            .trim_end_matches(['.', '!', '?', ':']);
+        if !link.is_empty() {
+            links.push(link);
+        }
+        cursor = end.max(start + 1);
+    }
+    links
 }
 
 /// Whether the body carries an email address or a phone-shaped run of digits.
@@ -421,6 +468,69 @@ mod tests {
         assert_eq!(
             review_outbound_post(&body, &context(PublishChannel::Telegram)),
             PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink)
+        );
+    }
+
+    /// The ways a link is written that are not "scheme at a word boundary".
+    ///
+    /// Telegram and Discord render markdown, so `[text](url)` is not an exotic
+    /// input — it is what a model produces when asked for a post with a link.
+    /// An extractor that misses these reports "no link in this post" about a
+    /// post that publishes someone else's URL under the tenant's name.
+    #[test]
+    fn a_link_hidden_inside_a_token_is_still_a_link() {
+        let disguises = [
+            "New single out Friday, recorded live in one take. \
+             Listen: [right here](https://elsewhere.example/track)",
+            "New single out Friday, recorded live in one take. \
+             Listen:https://elsewhere.example/track",
+            "New single out Friday, recorded live in one take. \
+             <a href=\"https://elsewhere.example/track\">listen</a>",
+            "New single out Friday, recorded live in one take. \
+             Listen at www.elsewhere.example/track",
+        ];
+        for body in disguises {
+            assert_eq!(
+                review_outbound_post(body, &context(PublishChannel::Telegram)),
+                PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink),
+                "this link went unseen: {body}"
+            );
+        }
+    }
+
+    /// A post is Polish, and Polish has multi-byte characters.
+    ///
+    /// The extractor walks byte offsets from `find`. Slicing a byte index that
+    /// falls inside a character panics, and a guard that panics on a post is
+    /// worse than one that misses a link — it takes the executor down instead
+    /// of holding one draft.
+    #[test]
+    fn a_post_with_multibyte_text_does_not_panic() {
+        let body = format!(
+            "Nowy singiel w piątek — nagraliśmy go na żywo w starym kinie we \
+             Wrocławiu. Posłuchaj tutaj: {LINK} 🎸"
+        );
+        assert_eq!(
+            review_outbound_post(&body, &context(PublishChannel::Telegram)),
+            PublishVerdict::Publish
+        );
+        let with_foreign_link = body.replace(LINK, "https://gdzieś-indziej.example/utwór");
+        assert_eq!(
+            review_outbound_post(&with_foreign_link, &context(PublishChannel::Telegram)),
+            PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink)
+        );
+    }
+
+    #[test]
+    fn an_approved_link_in_markdown_still_publishes() {
+        let body = format!(
+            "New single out this Friday, recorded live in one take at the old \
+             cinema. Listen: [right here]({LINK})"
+        );
+        assert_eq!(
+            review_outbound_post(&body, &context(PublishChannel::Telegram)),
+            PublishVerdict::Publish,
+            "the closing bracket must not be read as part of the URL"
         );
     }
 
