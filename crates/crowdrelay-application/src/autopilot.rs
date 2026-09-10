@@ -5,6 +5,7 @@
 //! control surface. Splitting concerns here keeps SQL/HTTP/provider details out
 //! of business decisions without adding another crate to the compile graph.
 
+mod belief_revision;
 mod control;
 mod evaluate;
 mod growth_posture;
@@ -12,6 +13,7 @@ mod measurement_ports;
 mod model;
 mod ports;
 
+pub use belief_revision::*;
 pub use control::*;
 pub use evaluate::*;
 pub use growth_posture::*;

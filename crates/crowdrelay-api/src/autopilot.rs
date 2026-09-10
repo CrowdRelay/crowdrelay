@@ -166,5 +166,6 @@ include!("autopilot/booking_discovery.rs");
 include!("autopilot/scorecard.rs");
 include!("autopilot/reply_triage.rs");
 include!("autopilot/decision_evidence.rs");
+include!("autopilot/learning_proof.rs");
 include!("autopilot/cycle.rs");
 include!("autopilot/validation.rs");

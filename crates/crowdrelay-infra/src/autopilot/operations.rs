@@ -32,6 +32,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 
 mod acquisition_channels;
 pub(in crate::autopilot) mod attribution;
+pub(in crate::autopilot) mod belief_revisions;
 mod chief;
 mod discovery;
 pub(in crate::autopilot) mod evidence;

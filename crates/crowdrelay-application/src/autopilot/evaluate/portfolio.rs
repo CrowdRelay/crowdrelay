@@ -485,7 +485,11 @@ mod tests {
         };
         let provenance = decision_provenance(&selection, 7, &belief);
         let mut subject = candidate("decision:a");
-        crate::autopilot::evaluate::attach_decision_provenance(&mut subject, &provenance);
+        crate::autopilot::evaluate::attach_decision_provenance(
+            &mut subject,
+            &provenance,
+            &serde_json::json!({}),
+        );
 
         // Everything below is read from the decision, not recomputed.
         let record = subject
@@ -609,7 +613,11 @@ mod tests {
         let provenance = decision_provenance(&selection, 7, &belief);
 
         let mut subject = candidate(decision_key);
-        crate::autopilot::evaluate::attach_decision_provenance(&mut subject, &provenance);
+        crate::autopilot::evaluate::attach_decision_provenance(
+            &mut subject,
+            &provenance,
+            &serde_json::json!({}),
+        );
 
         let record = subject
             .input_snapshot

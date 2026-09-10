@@ -580,6 +580,18 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         state: crowdrelay_brain::hypothesis::HypothesisState,
     ) -> Result<(), RepositoryError>;
 
+    /// Appends belief revisions to the operator's learning record.
+    ///
+    /// Called after the belief itself has been saved, and never before: the
+    /// ledger describes a change that already happened, so a failed write here
+    /// costs the explanation and not the learning. Nothing in the brain reads
+    /// these rows back.
+    async fn record_belief_revisions(
+        &self,
+        workspace_id: WorkspaceId,
+        revisions: &[super::BeliefRevision],
+    ) -> Result<(), RepositoryError>;
+
     /// Counts unresolved growth evidence rows — dispatches whose outcomes
     /// haven't been observed yet (resolved_at IS NULL). Used by the WAIT
     /// candidate's value-of-information computation: pending measurements

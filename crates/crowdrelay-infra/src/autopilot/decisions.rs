@@ -576,6 +576,15 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn record_belief_revisions(
+        &self,
+        workspace_id: WorkspaceId,
+        revisions: &[crowdrelay_application::autopilot::BeliefRevision],
+    ) -> Result<(), RepositoryError> {
+        super::operations::belief_revisions::record_belief_revisions(self, workspace_id, revisions)
+            .await
+    }
+
     async fn count_pending_measurements(
         &self,
         workspace_id: WorkspaceId,

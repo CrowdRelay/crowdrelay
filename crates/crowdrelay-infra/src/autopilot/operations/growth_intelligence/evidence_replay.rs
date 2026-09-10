@@ -578,6 +578,10 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
         }
     };
 
+    // Kept so the ledger can say what this batch of outcomes moved. The
+    // posterior is updated in place in `viryaos_brain_state`, so once the save
+    // below lands there is nothing left to compare against.
+    let before = posterior.clone();
     apply_evidence_to_strategy_posterior(&mut posterior, evidence);
 
     match serde_json::to_value(&posterior) {
@@ -586,6 +590,9 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
                 super::evidence::save_brain_state(repo, workspace_id, "strategy_posterior", &state)
                     .await
             {
+                // The ledger describes a change that happened. If the save
+                // failed, it did not happen — recording it here would tell an
+                // operator the brain learned something it then discarded.
                 // Best-effort, but not silent: the next cycle will re-derive
                 // this from a checkpoint that has already moved past the
                 // evidence, so a dropped save is lost learning, not a retry.
@@ -595,12 +602,53 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
                     "failed to save the strategy posterior; this cycle's strategy \
                      learning is lost"
                 );
+                return;
             }
+            record_strategy_posterior_revisions(repo, workspace_id, &before, &posterior, evidence)
+                .await;
         }
         Err(error) => tracing::warn!(
             error = %error,
             "failed to serialize the strategy posterior"
         ),
+    }
+}
+
+/// Records what this batch of outcomes moved in the strategy posterior.
+///
+/// Runs after the posterior has been saved, so the ledger can only ever
+/// describe a change that survived. Best-effort in the same sense the
+/// checkpoint is: the operator loses an explanation, the brain loses nothing.
+async fn record_strategy_posterior_revisions(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    before: &crowdrelay_brain::StateConditionedStrategyPosterior,
+    after: &crowdrelay_brain::StateConditionedStrategyPosterior,
+    evidence: &[crowdrelay_brain::GrowthEvidence],
+) {
+    // Only the rows that actually updated a cell. `apply_evidence_to_strategy_posterior`
+    // skips evidence without an incremental outcome, so citing every row in the
+    // batch would attribute the change to dispatches that contributed nothing.
+    let caused_by: Vec<uuid::Uuid> = evidence
+        .iter()
+        .filter(|ev| ev.observed_incremental_fans.is_some())
+        .filter_map(|ev| ev.action_id)
+        .collect();
+    let revisions =
+        crowdrelay_application::autopilot::strategy_posterior_revisions(before, after, &caused_by);
+    if revisions.is_empty() {
+        return;
+    }
+    if let Err(error) =
+        super::super::belief_revisions::record_belief_revisions(repo, workspace_id, &revisions)
+            .await
+    {
+        tracing::warn!(
+            error = %error,
+            workspace_id = %workspace_id.into_uuid(),
+            "failed to record strategy posterior belief revisions; the learning \
+             stands, the operator's record of it does not"
+        );
     }
 }
 

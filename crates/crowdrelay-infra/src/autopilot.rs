@@ -611,6 +611,7 @@ struct ExistingOperatorActionRow {
 include!("autopilot/mapping.rs");
 
 include!("autopilot/execution.rs");
+include!("autopilot/execution_outcomes.rs");
 include!("autopilot/execution_preflight.rs");
 include!("autopilot/execution_capabilities.rs");
 include!("autopilot/execution_mutations.rs");

@@ -162,6 +162,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/learning-loop",
             get(crate::autopilot::learning_loop),
         )
+        // Learning proof: the belief revisions themselves — what the brain
+        // changed, what changed it, and which later decisions acted on the
+        // change. The link `learning-loop` cannot show.
+        .route(
+            "/v1/control-plane/autopilot/learning-proof",
+            get(crate::autopilot::learning_proof),
+        )
         // Label portfolio: roster KPIs and the consent-edge decisions. Same
         // handlers as the admin surface, so the control plane grows no
         // authority path of its own.

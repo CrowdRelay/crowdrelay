@@ -53,9 +53,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 // Persist the transition so the next cycle loads the
                 // degraded state instead of resetting to Active.
                 let new_state = crowdrelay_brain::hypothesis::HypothesisState::Degraded;
-                if snapshot.hypothesis_state != new_state {
+                let previous_state = snapshot.hypothesis_state;
+                if previous_state != new_state {
                     snapshot.hypothesis_state = new_state;
-                    let _ = self
+                    let saved = self
                         .repository
                         .save_hypothesis_state(
                             self.workspace_id,
@@ -63,6 +64,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             new_state,
                         )
                         .await;
+                    // Only record the revision once the transition is durable.
+                    // A ledger entry for a state the next cycle will not load
+                    // describes learning that did not survive the cycle.
+                    if saved.is_ok() {
+                        self.record_hypothesis_revision(
+                            &snapshot.template_id,
+                            previous_state,
+                            new_state,
+                            &result,
+                            &template_evidence,
+                        )
+                        .await;
+                    }
                 }
             }
             // Passed validation (or insufficient evidence) — keep at Active
@@ -131,11 +145,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .repository
             .load_brain_state(self.workspace_id, "strategy_posterior")
             .await?;
+        // What the operator's rules alone would have chosen, kept beside what
+        // the brain actually chose. Both go on every decision this cycle
+        // writes: the pair is the difference between "the brain picked
+        // community_first" and "the brain picked community_first because
+        // measured outcomes overrode the rule that said otherwise", and only
+        // the second is evidence that the loop closed.
+        let mut strategy_prior: Option<GrowthStrategy> = None;
         let strategy = if let Some(first) = snapshots.first() {
             let hysteresis_strategy = GrowthStrategy::from_world_model_with_hysteresis(
                 &first.world_model,
                 previous_strategy,
             );
+            strategy_prior = Some(hysteresis_strategy);
             // Refine the hysteresis strategy with the learned posterior.
             // The posterior overrides the prior only when it has ≥5
             // observations and the expected fan yield difference is large
@@ -592,6 +614,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // `input_snapshot`, so there is no schema change.
         let decision_provenance =
             portfolio::decision_provenance(&selection, policy.version, &belief_origin);
+        // What learning did to this decision, recorded on the decision itself.
+        // Without it the strategy is visible and its provenance is not, so
+        // "the brain changed its mind because of what it measured" could only
+        // be inferred by re-deriving the rule-based strategy later — against a
+        // world model that has since moved.
+        let learning_provenance = learning_provenance(strategy_prior, strategy);
         // ── Dispatch phase ──
         let mut dispatched_count = 0usize;
         // Dispatch non-experiment candidates (scanner, strategist).
@@ -612,7 +640,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // prediction consistency invariant:
             // prediction_at_decision == prediction_persisted_in_initial_evidence.
             let mut candidate = scored.candidate.clone();
-            attach_decision_provenance(&mut candidate, &decision_provenance);
+            attach_decision_provenance(
+                &mut candidate,
+                &decision_provenance,
+                &learning_provenance,
+            );
             let persisted = match self
                 .repository
                 .persist_candidate_with_evidence(
@@ -679,7 +711,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         )
                         .with_assigned_at(now);
                     let mut candidate = candidate.clone();
-                    attach_decision_provenance(&mut candidate, &decision_provenance);
+                    attach_decision_provenance(
+                &mut candidate,
+                &decision_provenance,
+                &learning_provenance,
+            );
                     let persisted = match self
                         .repository
                         .persist_treatment_with_assignment(
@@ -826,6 +862,40 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // when it cannot read what is already there.
         Ok(())
     }
+
+    /// Records a hypothesis lifecycle transition in the belief-revision
+    /// ledger, citing the dispatches whose measured outcomes failed
+    /// validation.
+    ///
+    /// Best-effort by design: the transition is already persisted when this
+    /// runs, so a failure here costs the operator the explanation and costs
+    /// the brain nothing.
+    async fn record_hypothesis_revision(
+        &self,
+        template_id: &str,
+        previous: crowdrelay_brain::hypothesis::HypothesisState,
+        current: crowdrelay_brain::hypothesis::HypothesisState,
+        result: &crowdrelay_brain::validation::WalkForwardResult,
+        template_evidence: &[crowdrelay_brain::GrowthEvidence],
+    ) {
+        let caused_by: Vec<Uuid> = template_evidence
+            .iter()
+            .filter_map(|evidence| evidence.action_id)
+            .collect();
+        let Some(revision) = crate::autopilot::hypothesis_state_revision(
+            template_id,
+            previous,
+            current,
+            result.out_of_sample.observations,
+            &caused_by,
+        ) else {
+            return;
+        };
+        let _ = self
+            .repository
+            .record_belief_revisions(self.workspace_id, std::slice::from_ref(&revision))
+            .await;
+    }
 }
 
 /// The experiment window for direct-action templates (social-post,
@@ -903,23 +973,54 @@ fn key_window_for_template(policy: &GrowthIntelligencePolicy, template_id: &str)
 fn attach_decision_provenance(
     candidate: &mut DecisionCandidate,
     provenance: &std::collections::HashMap<String, serde_json::Value>,
+    learning: &serde_json::Value,
 ) {
+    let identity = policy_content_identity(&candidate.policy_snapshot);
+    let Some(object) = candidate.input_snapshot.as_object_mut() else {
+        return;
+    };
+    // Attached to every candidate, including one the portfolio has no record
+    // for. Which strategy the brain acted on, and whether learning chose it,
+    // is true of the decision regardless of how the candidate reached it.
+    object.insert("learning".to_owned(), learning.clone());
     let Some(record) = provenance.get(&candidate.decision_key) else {
         return;
     };
-    let identity = policy_content_identity(&candidate.policy_snapshot);
-    if let Some(object) = candidate.input_snapshot.as_object_mut() {
-        let mut record = record.clone();
-        if let Some(policy) = record
-            .get_mut("policy")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            policy.insert(
-                "policy_identity".to_owned(),
-                serde_json::Value::String(identity),
-            );
-        }
-        object.insert("decision_value".to_owned(), record);
+    let mut record = record.clone();
+    if let Some(policy) = record
+        .get_mut("policy")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        policy.insert(
+            "policy_identity".to_owned(),
+            serde_json::Value::String(identity),
+        );
+    }
+    object.insert("decision_value".to_owned(), record);
+}
+
+/// What learning did to this cycle's strategy choice.
+///
+/// `strategy_source` is the field that carries the claim: `posterior` means
+/// measured outcomes overrode the rule-based strategy for this world state,
+/// and `prior` means the rules and the evidence agreed — or that there was
+/// not enough evidence to disagree. The two are deliberately not collapsed
+/// into a boolean, because "no snapshots, so no strategy was derived at all"
+/// is a third answer and reporting it as `prior` would be false.
+fn learning_provenance(
+    strategy_prior: Option<GrowthStrategy>,
+    strategy_applied: GrowthStrategy,
+) -> serde_json::Value {
+    match strategy_prior {
+        Some(prior) => serde_json::json!({
+            "strategy_prior": prior.as_str(),
+            "strategy_applied": strategy_applied.as_str(),
+            "strategy_source": if prior == strategy_applied { "prior" } else { "posterior" },
+        }),
+        None => serde_json::json!({
+            "strategy_applied": strategy_applied.as_str(),
+            "strategy_source": "default",
+        }),
     }
 }
 

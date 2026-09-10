@@ -90,6 +90,21 @@ impl StateConditionedStrategyPosterior {
         entry.update_signed(observed_incremental_fans, observation_variance);
     }
 
+    /// Every (strategy, state) cell the posterior holds, as
+    /// `(key, mean, variance, observations)`.
+    ///
+    /// The belief-revision ledger diffs the posterior before and after an
+    /// evidence replay to record what that evidence moved. The cells were
+    /// private, so a diff outside this module had to enumerate every strategy
+    /// and state combination and ask `predict` about each — which cannot
+    /// distinguish a cell holding the prior from a cell that does not exist,
+    /// and would invent revisions for beliefs no evidence has ever touched.
+    pub fn cells(&self) -> impl Iterator<Item = (&str, f64, f64, u32)> {
+        self.posteriors
+            .iter()
+            .map(|(key, post)| (key.as_str(), post.mean, post.variance, post.n))
+    }
+
     /// Returns the confidence (observation count) for a (strategy, state) pair.
     #[must_use]
     pub fn confidence(&self, strategy: &str, growth_trend: &str, event_proximity: &str) -> u32 {
