@@ -284,6 +284,10 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         }
         "fan_lifecycle_engagement_7d" => Ok(AutopilotMeasurementKind::FanLifecycleEngagement7d),
         "agent_run_fan_growth_3d" => Ok(AutopilotMeasurementKind::AgentRunFanGrowth3d),
+        "agent_run_outcome_quality_1h" => Ok(AutopilotMeasurementKind::AgentRunOutcomeQuality1h),
+        "scanner_discovery_quality_1h" => Ok(AutopilotMeasurementKind::ScannerDiscoveryQuality1h),
+        "strategist_insight_quality_1h" => Ok(AutopilotMeasurementKind::StrategistInsightQuality1h),
+        "signal_installs_1d" => Ok(AutopilotMeasurementKind::SignalInstalls1d),
         _ => Err(RepositoryError::Unexpected),
     }
 }

@@ -316,6 +316,19 @@ pub(super) async fn schedule_effect_measurement(
                 baseline_installs,
                 now + time::Duration::days(7),
             ));
+            // Fast checkpoints: 1h outcome quality + 1d signal installs.
+            plans.push((
+                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+                action_id.into_uuid(),
+                0.0,
+                now + time::Duration::hours(1),
+            ));
+            plans.push((
+                AutopilotMeasurementKind::SignalInstalls1d,
+                action_id.into_uuid(),
+                baseline_installs,
+                now + time::Duration::days(1),
+            ));
         }
         // Agent dispatches: measure whether the worker's intelligence
         // gathering actually grew fans. The baseline is the fan count at
@@ -335,6 +348,18 @@ pub(super) async fn schedule_effect_measurement(
                 || template_id == "metal-archives-scanner"
                 || template_id == "bandcamp-scanner";
             let is_strategist = template_id == "growth-strategist";
+            // Fast feedback: 1-hour outcome quality checkpoint for EVERY
+            // agent dispatch. The brain learns whether the worker produced
+            // a valid, grounded, processed outcome within an hour — not days.
+            // This is the fastest possible learning signal: did the worker
+            // do its job at all? Binary: 1 if processed, 0 if rejected or no
+            // outcome. The baseline is 0 because no outcome existed before.
+            plans.push((
+                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+                action_id.into_uuid(),
+                0.0,
+                now + time::Duration::hours(1),
+            ));
             if !is_scanner && !is_strategist {
                 // Direct-action workers: measure fan growth (the existing
                 // path). These workers (community-engager, social-post,
@@ -548,6 +573,16 @@ pub(super) async fn schedule_effect_measurement(
                 baseline_installs,
                 now + time::Duration::days(7),
             ));
+            // Fast checkpoint: 1-day signal installs. The brain gets
+            // next-cycle feedback on whether the worker moved fans toward
+            // Signal within 24 hours, not a week. Same baseline as the 7d
+            // measurement — the pre-action total install count.
+            plans.push((
+                AutopilotMeasurementKind::SignalInstalls1d,
+                action_id.into_uuid(),
+                baseline_installs,
+                now + time::Duration::days(1),
+            ));
             } else {
                 // Scanner/strategist: measure proximal outcome, not fan
                 // growth. The scanner discovers communities, the
@@ -563,6 +598,23 @@ pub(super) async fn schedule_effect_measurement(
                     0.0, // baseline: no targets/insights existed before
                     now + time::Duration::days(14),
                 ));
+                // Fast checkpoint: 1-hour proximal outcome. The scanner
+                // discovers targets and the strategist produces insights
+                // within minutes — waiting 14 days for the proximal count
+                // is absurd. The 14-day measurement stays for downstream
+                // engagement, but this gives the brain next-cycle feedback
+                // on worker quality.
+                let fast_kind = if is_scanner {
+                    AutopilotMeasurementKind::ScannerDiscoveryQuality1h
+                } else {
+                    AutopilotMeasurementKind::StrategistInsightQuality1h
+                };
+                plans.push((
+                    fast_kind,
+                    action_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::hours(1),
+                ));
             }
         }
         // Community engagement: measure whether the posts produced
@@ -574,6 +626,13 @@ pub(super) async fn schedule_effect_measurement(
                 *target_id,
                 0.0,
                 now + time::Duration::days(7),
+            ));
+            // Fast checkpoint: 1h outcome quality.
+            plans.push((
+                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+                action_id.into_uuid(),
+                0.0,
+                now + time::Duration::hours(1),
             ));
         }
         // Agent content (social/telegram/discord posts): measure whether the
@@ -611,6 +670,13 @@ pub(super) async fn schedule_effect_measurement(
                 action_id.into_uuid(),
                 pre_action_daily_rate,
                 now + time::Duration::days(14),
+            ));
+            // Fast checkpoint: 1h outcome quality.
+            plans.push((
+                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
+                action_id.into_uuid(),
+                0.0,
+                now + time::Duration::hours(1),
             ));
         }
     }

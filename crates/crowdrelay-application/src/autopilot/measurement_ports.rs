@@ -79,6 +79,31 @@ pub enum AutopilotMeasurementKind {
     /// downweighted evidence quality, so the brain gets next-cycle
     /// feedback instead of waiting weeks for the final outcome.
     AgentRunFanGrowth3d,
+    /// Worker reliability checkpoint 1 hour after an agent dispatch. The
+    /// fastest feedback signal possible: did the worker produce a valid,
+    /// grounded, processed outcome? Binary — 1 if processed, 0 if rejected
+    /// or no outcome landed. This closes the loop on worker quality within
+    /// an hour, not days. The brain learns which templates produce reliable
+    /// output and which fail grounding checks, before any downstream effect
+    /// is measurable.
+    AgentRunOutcomeQuality1h,
+    /// Scanner discovery checkpoint 1 hour after a scanner dispatch. The
+    /// scanner discovers communities and targets immediately — its proximal
+    /// outcome is available within minutes, not 14 days. This fast checkpoint
+    /// lets the brain learn scanner quality within an hour. The 14-day
+    /// measurement remains for downstream engagement, but the proximal
+    /// discovery count is the fast feedback signal.
+    ScannerDiscoveryQuality1h,
+    /// Strategist insight checkpoint 1 hour after a strategist dispatch. The
+    /// strategist produces campaign insights immediately — its proximal
+    /// outcome is available within minutes, not 14 days. Same reasoning as
+    /// the scanner: the 14-day measurement stays for downstream value, but
+    /// the insight count is the fast feedback signal.
+    StrategistInsightQuality1h,
+    /// Signal install checkpoint 1 day after an agent dispatch. Faster than
+    /// the 7-day window — the brain gets next-cycle feedback on whether the
+    /// worker moved fans toward Signal within 24 hours, not a week.
+    SignalInstalls1d,
 }
 
 impl AutopilotMeasurementKind {
@@ -104,6 +129,10 @@ impl AutopilotMeasurementKind {
             Self::StrategistInsightQuality14d => "strategist_insight_quality_14d",
             Self::FanLifecycleEngagement7d => "fan_lifecycle_engagement_7d",
             Self::AgentRunFanGrowth3d => "agent_run_fan_growth_3d",
+            Self::AgentRunOutcomeQuality1h => "agent_run_outcome_quality_1h",
+            Self::ScannerDiscoveryQuality1h => "scanner_discovery_quality_1h",
+            Self::StrategistInsightQuality1h => "strategist_insight_quality_1h",
+            Self::SignalInstalls1d => "signal_installs_1d",
         }
     }
 

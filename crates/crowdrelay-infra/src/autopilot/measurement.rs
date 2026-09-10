@@ -714,6 +714,98 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .map_err(map_sqlx)?;
                     admission_passes + push_endpoints + referral_attributions
                 }
+                // Fast feedback: 1-hour outcome quality checkpoint. Did the
+                // agent produce a valid, processed (not rejected) outcome?
+                // Binary: 1 if at least one processed outcome exists for
+                // this action, 0 otherwise. The brain learns within an hour
+                // whether a worker is producing valid output or failing
+                // grounding checks.
+                AutopilotMeasurementKind::AgentRunOutcomeQuality1h => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT CASE WHEN EXISTS (
+                            SELECT 1 FROM agent_outcomes
+                            WHERE workspace_id = $1
+                              AND processed_action_id = $2
+                              AND status = 'processed'
+                              AND created_at >= $3
+                              AND created_at < $3 + INTERVAL '1 hour'
+                        ) THEN 1.0 ELSE 0.0 END
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                // Fast checkpoint: scanner discovery count in 1 hour. Same
+                // query as the 14-day measurement but with a 1-hour window.
+                // The scanner discovers targets immediately — this gives
+                // the brain next-cycle feedback on scanner quality.
+                AutopilotMeasurementKind::ScannerDiscoveryQuality1h => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM agent_outreach_targets AS target
+                        JOIN agent_service_tasks AS task
+                          ON task.id = target.source_task_id
+                        WHERE target.workspace_id = $1
+                          AND target.created_at >= $2
+                          AND target.created_at < $2 + INTERVAL '1 hour'
+                          AND task.metadata->>'action_id' = $3
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .bind(measurement.action_id.into_uuid().to_string())
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                // Fast checkpoint: strategist insight count in 1 hour. Same
+                // query as the 14-day measurement but with a 1-hour window.
+                AutopilotMeasurementKind::StrategistInsightQuality1h => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM agent_outcomes AS outcome
+                        JOIN agent_service_tasks AS task ON task.id = outcome.task_id
+                        WHERE outcome.workspace_id = $1
+                          AND outcome.kind = 'campaign_insight'
+                          AND outcome.created_at >= $2
+                          AND outcome.created_at < $2 + INTERVAL '1 hour'
+                          AND task.metadata->>'action_id' = $3
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .bind(measurement.action_id.into_uuid().to_string())
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
+                // Fast checkpoint: signal installs in 1 day. Same query as
+                // the 7-day measurement but with a 1-day window.
+                AutopilotMeasurementKind::SignalInstalls1d => {
+                    sqlx::query_scalar::<_, f64>(
+                        r#"
+                        SELECT COUNT(*)::double precision
+                        FROM fan_push_endpoints
+                        WHERE workspace_id = $1
+                          AND active = true
+                          AND invalidated_at IS NULL
+                          AND created_at >= $2
+                          AND created_at < $2 + INTERVAL '1 day'
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_finished_at)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(map_sqlx)?
+                }
             };
             if observed.is_finite() {
                 Ok(observed)
@@ -955,7 +1047,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                 }
-                AutopilotMeasurementKind::AgentRunSignalInstalls7d => {
+                AutopilotMeasurementKind::AgentRunSignalInstalls7d
+                | AutopilotMeasurementKind::SignalInstalls1d => {
                     let _ = sqlx::query(
                         r#"
                         UPDATE viryaos_dispatch_predictions
@@ -971,9 +1064,11 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
-                    // Nothing else. The seven-day signal measurement has no
+                    // Nothing else. The signal install measurements have no
                     // column on the evidence row and must not close it either
-                    // — Y14 is a week away and Y30 a month past that.
+                    // — Y14 is a week away and Y30 a month past that. The 1d
+                    // checkpoint writes the same column with COALESCE so the
+                    // 7d value replaces it when the longer window closes.
                 }
                 // DurableFanGrowth30d writes the durable fan count to the
                 // growth evidence table's durable_fans_30d column.
