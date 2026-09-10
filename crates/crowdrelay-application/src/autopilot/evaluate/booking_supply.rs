@@ -34,7 +34,10 @@ pub(super) fn booking_supply_candidate(
         decision_kind: "request_booking_target_discovery",
         confidence,
         disposition,
-        reason: "the booking pipeline has fewer contactable targets than the policy floor",
+        // Same leak as `outreach_supply`, same reason it matters: the operator
+        // reads this row and "policy floor" is not what they call the number
+        // they set.
+        reason: "The booking pipeline has fewer contactable venues than the minimum you set",
         input_snapshot: serde_json::to_value(snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestBookingTargetDiscovery { requested_count },

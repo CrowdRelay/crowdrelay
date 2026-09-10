@@ -43,7 +43,12 @@ pub(super) fn outreach_supply_candidate(
         decision_kind: "replenish_outreach_supply",
         confidence,
         disposition,
-        reason: "the pitcher has fewer confirmed submission routes than the policy floor",
+        // Operator-facing. This string is rendered on its own line in the
+        // control plane, so it is read by whoever has to act on it and not by
+        // whoever wrote the module: no "pitcher", which is what this code
+        // calls itself, and no "policy floor", which is what it calls a number
+        // the operator set and knows by a different name.
+        reason: "Press outreach has fewer confirmed ways to submit a pitch than the minimum you set",
         input_snapshot: serde_json::to_value(snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestOutreachDiscovery {
