@@ -57,6 +57,7 @@ pub mod experiment;
 pub mod exploration;
 pub mod hypothesis;
 pub mod opportunity;
+pub mod opportunity_graph;
 pub mod platform_yield;
 pub mod portfolio;
 pub mod reach;

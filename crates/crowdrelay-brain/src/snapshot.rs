@@ -99,6 +99,15 @@ pub struct UnengagedTarget {
     pub cooldown_days: Option<u16>,
     /// Days since the last post to this community, or `None` if never posted.
     pub days_since_last_engagement: Option<u32>,
+    /// Whether the tenant has joined this community.
+    ///
+    /// `None` when discovery has no membership record — an older target, or
+    /// one with no `discovery_places` row. Unknown is not the same as not
+    /// joined: a target that predates membership tracking has been posted to
+    /// successfully before, and treating it as unjoined would retire a
+    /// working community on a missing column.
+    #[serde(default)]
+    pub joined: Option<bool>,
 }
 
 impl UnengagedTarget {

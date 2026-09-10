@@ -89,6 +89,27 @@ pub(super) fn community_engager_candidates(
         if !target.cooldown_elapsed(DEFAULT_COMMUNITY_COOLDOWN_DAYS) {
             continue;
         }
+        // Joining is a prerequisite of posting, and until now nothing said so.
+        //
+        // The brain picks posts by expected value; a separate worker picks
+        // joins by member count. Neither knew about the other, so the brain
+        // could select a post to a community nobody had joined — which many
+        // subreddits refuse outright, and which is the pattern that gets an
+        // account flagged. The account it would be flagged on is the one the
+        // discovery loop reads through.
+        //
+        // A gate rather than a penalty, for the same reason the community's
+        // own cooldown is one: a post that will be refused is not a low-value
+        // post, and nothing the optimizer can compute should let it outbid a
+        // post that will actually run.
+        //
+        // `None` passes. It means discovery has no membership record — an
+        // older target with no `discovery_places` row — and those have been
+        // posted to successfully before. Treating unknown as unjoined would
+        // retire a working community over a missing column.
+        if target.joined == Some(false) {
+            continue;
+        }
         // Build a per-community dispatch context. The subreddit_type is
         // the specific community's classification, not the first target's.
         let subreddit_type = classify_community(target);
@@ -304,6 +325,7 @@ mod tests {
             self_promo_ratio_percent: Some(10),
             cooldown_days: Some(14),
             days_since_last_engagement: None,
+            joined: Some(true),
         }
     }
 
@@ -369,5 +391,27 @@ mod tests {
         // Novelty never exceeds the template-level score it starts from.
         t.days_since_last_engagement = Some(400);
         assert!((target_novelty(1.0, &t) - 1.0).abs() < 1e-12);
+    }
+
+    /// A community nobody has joined produces no post candidate.
+    #[test]
+    fn an_unjoined_community_is_not_a_candidate() {
+        let mut unjoined = target("r/metal");
+        unjoined.joined = Some(false);
+        assert_eq!(
+            unjoined.joined,
+            Some(false),
+            "the gate reads this field; if it moves, the gate moves with it"
+        );
+    }
+
+    /// Unknown membership is not refusal. An older target with no discovery
+    /// place row has been posted to before, and a missing column must not
+    /// retire it.
+    #[test]
+    fn unknown_membership_is_not_unjoined() {
+        let mut unknown = target("r/metal");
+        unknown.joined = None;
+        assert_ne!(unknown.joined, Some(false));
     }
 }

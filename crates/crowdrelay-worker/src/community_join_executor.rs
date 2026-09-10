@@ -262,15 +262,46 @@ impl CommunityJoinExecutorWorker {
                     membership_changed_by = 'community-join-executor',
                     updated_at = now()
                 WHERE id IN (
-                    SELECT id FROM discovery_places
-                    WHERE workspace_id = $1
-                      AND place_kind = 'subreddit'
-                      AND membership_state = 'not_joined'
-                      AND status = 'active'
-                      AND (member_count IS NULL OR member_count >= $2)
-                    ORDER BY member_count DESC NULLS LAST
+                    SELECT place.id FROM discovery_places AS place
+                    -- Does the brain have a post waiting behind this join?
+                    --
+                    -- The reinforcement edge, read backwards. The brain picks
+                    -- posts by value and this worker picked joins by size, so
+                    -- the two chose independently: the biggest community got
+                    -- joined while the one the brain actually wanted to post
+                    -- to stayed unjoined and its candidate stayed gated. A
+                    -- promoted, unrefused target on this place is the brain
+                    -- saying it wants to post here.
+                    --
+                    -- The predicate matches
+                    -- `agent_outreach_targets_community_admitted_idx` exactly,
+                    -- so the lateral is an index scan rather than a table scan
+                    -- per candidate row. `subreddit IS NOT NULL` is in the
+                    -- index predicate and costs nothing semantically: a
+                    -- community target with no subreddit cannot be posted to.
+                    LEFT JOIN LATERAL (
+                        SELECT true AS wanted
+                        FROM agent_outreach_targets AS t
+                        WHERE t.workspace_id = place.workspace_id
+                          AND t.place_id = place.id
+                          AND t.status = 'promoted'
+                          AND t.target_kind = 'community'
+                          AND t.subreddit IS NOT NULL
+                          AND t.screening_verdict IS DISTINCT FROM 'refused'
+                        LIMIT 1
+                    ) AS demand ON true
+                    WHERE place.workspace_id = $1
+                      AND place.place_kind = 'subreddit'
+                      AND place.membership_state = 'not_joined'
+                      AND place.status = 'active'
+                      AND (place.member_count IS NULL OR place.member_count >= $2)
+                    -- Wanted first, then the previous order within each group.
+                    -- Size still decides among communities the brain has no
+                    -- plans for, so this reorders rather than replaces.
+                    ORDER BY demand.wanted IS NOT NULL DESC,
+                             place.member_count DESC NULLS LAST
                     LIMIT $3
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF place SKIP LOCKED
                 )
                 RETURNING id, name, url
             )

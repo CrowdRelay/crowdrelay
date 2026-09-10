@@ -43,6 +43,7 @@ type CommunityTargetRow = (
     Option<i16>,
     Option<i16>,
     Option<i32>,
+    Option<String>,
 );
 
 /// Loads the communities the growth loop may engage this cycle.
@@ -66,7 +67,8 @@ pub(super) async fn load_community_targets(
                COALESCE(place.genres, ARRAY[]::text[]) AS genres,
                rules.self_promo_ratio_percent,
                rules.cooldown_days,
-               last_post.days_since
+               last_post.days_since,
+               place.membership_state
         FROM agent_outreach_targets AS t
         LEFT JOIN discovery_places AS place
                ON place.id = t.place_id
@@ -120,6 +122,7 @@ pub(super) async fn load_community_targets(
                 self_promo_ratio_percent,
                 cooldown_days,
                 days_since_last_engagement,
+                membership_state,
             )| UnengagedTarget {
                 target_id,
                 display_name,
@@ -132,6 +135,11 @@ pub(super) async fn load_community_targets(
                 cooldown_days: cooldown_days.and_then(|v| u16::try_from(v).ok()),
                 days_since_last_engagement: days_since_last_engagement
                     .and_then(|v| u32::try_from(v).ok()),
+                // `None` when there is no place row at all — an older target
+                // that predates membership tracking. Unknown is not the same
+                // as not joined, and the candidate gate treats the two
+                // differently on purpose.
+                joined: membership_state.map(|state| state == "joined"),
             },
         )
         .collect())
