@@ -539,49 +539,61 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
 ) {
     use crowdrelay_brain::StateConditionedStrategyPosterior;
 
-    let mut posterior = match replay {
-        PosteriorReplay::FromScratch => StateConditionedStrategyPosterior::default(),
-        PosteriorReplay::Delta => {
-            match super::evidence::load_brain_state(repo, workspace_id, "strategy_posterior").await
-            {
-                Ok(None) => StateConditionedStrategyPosterior::default(),
-                Ok(Some((state, _ts))) => {
-                    match serde_json::from_value::<StateConditionedStrategyPosterior>(state) {
-                        Ok(posterior) => posterior,
-                        Err(error) => {
-                            // Everything the posterior has learned is in that
-                            // row. Starting from a default here and saving the
-                            // result below would overwrite it with a delta's
-                            // worth of evidence and call that the whole history.
-                            // A row we cannot read is not an empty row.
-                            tracing::error!(
-                                error = %error,
-                                workspace_id = %workspace_id.into_uuid(),
-                                "stored strategy posterior could not be deserialized; \
-                                 skipping the delta rather than overwriting learned \
-                                 state with a default"
-                            );
-                            return;
-                        }
+    // What is stored right now, whichever replay mode this is.
+    //
+    // The delta path starts its arithmetic here. The full-replay path
+    // deliberately does not — it rebuilds from a skeptical prior, and starting
+    // from the stored posterior would count every observation twice. But both
+    // paths must *diff* against what was stored, because that is what the
+    // ledger claims to describe: what changed in the belief the brain was
+    // holding. A full replay diffed against its own empty starting point
+    // reports every cell as new evidence on every replay, and the ledger grows
+    // a duplicate of the same revision forever while nothing was learned.
+    let stored =
+        match super::evidence::load_brain_state(repo, workspace_id, "strategy_posterior").await {
+            Ok(None) => Some(StateConditionedStrategyPosterior::default()),
+            Ok(Some((state, _ts))) => {
+                match serde_json::from_value::<StateConditionedStrategyPosterior>(state) {
+                    Ok(posterior) => Some(posterior),
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            workspace_id = %workspace_id.into_uuid(),
+                            "stored strategy posterior could not be deserialized"
+                        );
+                        None
                     }
                 }
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        workspace_id = %workspace_id.into_uuid(),
-                        "could not read the stored strategy posterior; skipping the \
-                         delta rather than overwriting learned state with a default"
-                    );
-                    return;
-                }
             }
-        }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    workspace_id = %workspace_id.into_uuid(),
+                    "could not read the stored strategy posterior"
+                );
+                None
+            }
+        };
+
+    let mut posterior = match replay {
+        PosteriorReplay::FromScratch => StateConditionedStrategyPosterior::default(),
+        PosteriorReplay::Delta => match stored.clone() {
+            Some(posterior) => posterior,
+            // Everything the posterior has learned is in that row. Starting
+            // from a default here and saving the result below would overwrite
+            // it with a delta's worth of evidence and call that the whole
+            // history. A row we cannot read is not an empty row.
+            None => {
+                tracing::error!(
+                    workspace_id = %workspace_id.into_uuid(),
+                    "skipping the delta rather than overwriting learned state \
+                     with a default"
+                );
+                return;
+            }
+        },
     };
 
-    // Kept so the ledger can say what this batch of outcomes moved. The
-    // posterior is updated in place in `viryaos_brain_state`, so once the save
-    // below lands there is nothing left to compare against.
-    let before = posterior.clone();
     apply_evidence_to_strategy_posterior(&mut posterior, evidence);
 
     match serde_json::to_value(&posterior) {
@@ -604,8 +616,19 @@ pub(super) async fn apply_evidence_to_stored_strategy_posterior(
                 );
                 return;
             }
-            record_strategy_posterior_revisions(repo, workspace_id, &before, &posterior, evidence)
+            // Diffed against what was stored before this call, never against
+            // this call's own starting point — see `stored` above for what a
+            // full replay does otherwise.
+            if let Some(before) = stored.as_ref() {
+                record_strategy_posterior_revisions(
+                    repo,
+                    workspace_id,
+                    before,
+                    &posterior,
+                    evidence,
+                )
                 .await;
+            }
         }
         Err(error) => tracing::warn!(
             error = %error,
