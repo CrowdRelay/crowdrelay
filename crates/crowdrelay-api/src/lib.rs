@@ -863,7 +863,10 @@ crowdrelay_brain_measurement_oldest_overdue_seconds {}\n\
 crowdrelay_brain_agent_outcomes_processed_24h {}\n\
 # HELP crowdrelay_brain_agent_outcomes_rejected_24h LLM worker outcomes refused by the data-quality gate in the last 24 hours.\n\
 # TYPE crowdrelay_brain_agent_outcomes_rejected_24h gauge\n\
-crowdrelay_brain_agent_outcomes_rejected_24h {}\n",
+crowdrelay_brain_agent_outcomes_rejected_24h {}\n\
+# HELP crowdrelay_brain_communities_blocked_on_join Communities with a wanted post that nobody has joined, so the post cannot be dispatched.\n\
+# TYPE crowdrelay_brain_communities_blocked_on_join gauge\n\
+crowdrelay_brain_communities_blocked_on_join {}\n",
         ops_snapshot.brain_cycles_24h,
         ops_snapshot.brain_cycles_degraded_24h,
         ops_snapshot.brain_seconds_since_cycle,
@@ -875,6 +878,7 @@ crowdrelay_brain_agent_outcomes_rejected_24h {}\n",
         ops_snapshot.brain_measurement_oldest_overdue_seconds,
         ops_snapshot.brain_agent_outcomes_processed_24h,
         ops_snapshot.brain_agent_outcomes_rejected_24h,
+        ops_snapshot.brain_communities_blocked_on_join,
     ));
 
     body.push_str(&http_metrics().route_prometheus());

@@ -543,7 +543,33 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 (SELECT count(*) FROM agent_outcomes
                  WHERE workspace_id = $1 AND created_at > now() - INTERVAL '24 hours'
                    AND status = 'rejected'
-                )::bigint AS agent_outcomes_rejected_24h
+                )::bigint AS agent_outcomes_rejected_24h,
+                -- Communities the brain wants to post to and cannot, because
+                -- nobody has joined them. Joining is a prerequisite of posting,
+                -- so an unjoined community with a promoted target on it is a
+                -- post the brain has already decided it wants and cannot
+                -- dispatch. The predicate is the join worker's own definition
+                -- of demand, so both surfaces agree on what "wanted" means.
+                --
+                -- This is the number that explains an idle-looking Reddit
+                -- channel: production carried 119 discovered communities, none
+                -- joined, and every candidate was gated out with nothing said.
+                (SELECT count(*)
+                   FROM discovery_places AS place
+                  WHERE place.workspace_id = $1
+                    AND place.place_kind = 'subreddit'
+                    AND place.membership_state = 'not_joined'
+                    AND place.status = 'active'
+                    AND EXISTS (
+                          SELECT 1 FROM agent_outreach_targets AS t
+                           WHERE t.workspace_id = place.workspace_id
+                             AND t.place_id = place.id
+                             AND t.status = 'promoted'
+                             AND t.target_kind = 'community'
+                             AND t.subreddit IS NOT NULL
+                             AND t.screening_verdict IS DISTINCT FROM 'refused'
+                        )
+                )::bigint AS communities_blocked_on_join
         )
         SELECT
             outbox.pending AS outbox_pending,
@@ -571,7 +597,8 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             brain.measurements_resolved AS brain_measurements_resolved,
             brain.measurement_oldest_overdue_seconds AS brain_measurement_oldest_overdue_seconds,
             brain.agent_outcomes_processed_24h AS brain_agent_outcomes_processed_24h,
-            brain.agent_outcomes_rejected_24h AS brain_agent_outcomes_rejected_24h
+            brain.agent_outcomes_rejected_24h AS brain_agent_outcomes_rejected_24h,
+            brain.communities_blocked_on_join AS brain_communities_blocked_on_join
         FROM outbox CROSS JOIN deliveries CROSS JOIN push CROSS JOIN worker
              CROSS JOIN brain
         "#,
@@ -608,6 +635,7 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         brain_measurement_oldest_overdue_seconds: row.brain_measurement_oldest_overdue_seconds,
         brain_agent_outcomes_processed_24h: row.brain_agent_outcomes_processed_24h,
         brain_agent_outcomes_rejected_24h: row.brain_agent_outcomes_rejected_24h,
+        brain_communities_blocked_on_join: row.brain_communities_blocked_on_join,
     })
 }
 

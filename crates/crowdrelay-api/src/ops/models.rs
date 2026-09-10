@@ -185,6 +185,10 @@ pub(crate) struct OpsMetricsSnapshot {
     /// refused over the last 24 hours.
     pub(crate) brain_agent_outcomes_processed_24h: i64,
     pub(crate) brain_agent_outcomes_rejected_24h: i64,
+    /// Communities the brain wants to post to and cannot, because nobody has
+    /// joined them. The number that tells an idle Reddit channel apart from a
+    /// blocked one.
+    pub(crate) brain_communities_blocked_on_join: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -215,6 +219,7 @@ struct OpsMetricsRow {
     brain_measurement_oldest_overdue_seconds: i64,
     brain_agent_outcomes_processed_24h: i64,
     brain_agent_outcomes_rejected_24h: i64,
+    brain_communities_blocked_on_join: i64,
 }
 
 #[derive(Debug, Deserialize)]
