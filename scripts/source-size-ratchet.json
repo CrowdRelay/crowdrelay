@@ -22,7 +22,7 @@
     "crates/crowdrelay-infra/src/acquisition.rs": 2012,
     "crates/crowdrelay-infra/src/admission.rs": 1451,
     "crates/crowdrelay-infra/src/autopilot.rs": 1498,
-    "crates/crowdrelay-infra/src/autopilot/measurement.rs": 1210,
+    "crates/crowdrelay-infra/src/autopilot/measurement.rs": 1345,
     "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs": 1458,
     "crates/crowdrelay-infra/src/autopilot/operations/ingress.rs": 1451,
     "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs": 1357,
