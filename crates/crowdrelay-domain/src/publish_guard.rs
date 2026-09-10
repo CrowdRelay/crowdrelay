@@ -40,6 +40,13 @@ pub enum PublishChannel {
     Telegram,
     /// The tenant's own Discord server, via a webhook or bot.
     Discord,
+    /// The tenant's own Instagram Professional account.
+    ///
+    /// Separate from `Social` because the limit is: Instagram allows a 2,200
+    /// character caption where X allows 280, and holding every Instagram post
+    /// that ran past a tweet's length would be the guard enforcing the wrong
+    /// platform's rule.
+    Instagram,
     /// A third-party social platform.
     Social,
 }
@@ -52,7 +59,7 @@ impl PublishChannel {
     /// low — the guard refuses emptiness, not brevity.
     const fn minimum_characters(self) -> usize {
         match self {
-            Self::Telegram | Self::Discord => 40,
+            Self::Telegram | Self::Discord | Self::Instagram => 40,
             // A social post is shorter by convention and by platform limit.
             Self::Social => 20,
         }
@@ -69,6 +76,8 @@ impl PublishChannel {
             Self::Telegram => 4_000,
             // Discord's message limit is 2000.
             Self::Discord => 1_900,
+            // Instagram's caption limit is 2200.
+            Self::Instagram => 2_100,
             // The tightest common social limit.
             Self::Social => 280,
         }

@@ -22,8 +22,12 @@
 //!   an owned asset is not the case app review governs. The token either
 //!   carries the grant or the Graph API refuses the call, and a refusal holds
 //!   the post with the platform's own message rather than retrying it.
-//! - **Instagram drafts.** Publishing there needs a media container and an
-//!   image; these drafts are text.
+//! - **Instagram publishes.** Two calls rather than one: a media container
+//!   built from an image URL Meta fetches itself, then the publish. There is
+//!   no text-only post on Instagram, so the image is the post — and the
+//!   system chooses it, never the model. The selector reads the tenant's own
+//!   active photo assets, least recently published first, so a run of posts
+//!   rotates instead of repeating one picture.
 //! - **X drafts.** Its write API is behind a paid tier this tenant does not
 //!   hold.
 //!
@@ -119,21 +123,21 @@ pub struct SocialPostExecutorWorker {
     /// When true (default), posts are marked `awaiting_manual_post` — the
     /// operator posts manually and registers the post URL via the API.
     ///
-    /// When false, a Facebook Page post publishes through the Graph API.
-    /// Instagram and X stay manual regardless: Instagram publishing needs a
-    /// media container and an image the drafts do not carry, and X's write
-    /// API is behind a paid tier this tenant does not hold. Saying that here
-    /// rather than silently falling through is the difference between "not
-    /// built" and "built and quietly doing nothing".
+    /// When false, Facebook Pages and Instagram publish through the Graph
+    /// API. X stays manual regardless: its write API is behind a paid tier
+    /// this tenant does not hold. Saying that here rather than silently
+    /// falling through is the difference between "not built" and "built and
+    /// quietly doing nothing".
     manual_mode: bool,
     /// Page access token for the Graph API, when one is configured.
     ///
     /// The same credential `growth_metric_sync` already reads Page metrics
-    /// with — a Business Manager system user token carrying
-    /// `pages_manage_posts` on a Page the business owns. Publishing to an
-    /// owned Page is what a system user is for; the token either has the
-    /// grant or the Graph API refuses the call, and a refusal holds the post
-    /// rather than retrying it.
+    /// with — a Business Manager system user token on assets the business
+    /// owns. Publishing to an owned Page or Instagram account is what a system
+    /// user is for; the token either carries the grant (`pages_manage_posts`
+    /// for the Page, `instagram_content_publish` for the account) or the Graph
+    /// API refuses the call, and a refusal holds the post rather than retrying
+    /// it.
     facebook_page_access_token: Option<String>,
     http_client: reqwest::Client,
     /// The tenant's own public origin. A link in an automatically published
@@ -144,9 +148,10 @@ pub struct SocialPostExecutorWorker {
 impl SocialPostExecutorWorker {
     /// Creates a new executor.
     ///
-    /// `manual_mode` false enables Facebook Page publishing only, and only
-    /// when `facebook_page_access_token` is present. Everything else drafts
-    /// and waits for an operator.
+    /// `manual_mode` false enables Facebook Page and Instagram publishing,
+    /// and only when `facebook_page_access_token` is present — one Meta
+    /// credential covers both. Everything else drafts and waits for an
+    /// operator.
     ///
     /// # Errors
     /// Returns [`SocialPostExecutorError::ClientBuild`] if the HTTP client
@@ -452,21 +457,18 @@ impl SocialPostExecutorWorker {
             return Ok(());
         }
 
-        // Automatic mode. Facebook Pages publish; the rest still draft.
+        // Automatic mode. Facebook Pages and Instagram publish; X still
+        // drafts, because its write API is behind a paid tier this tenant does
+        // not hold. Held with the reason so the queue says why rather than
+        // looking like a stuck job.
         if action.platform == "facebook" {
             return self.publish_to_facebook_page(action).await;
         }
+        if action.platform == "instagram" {
+            return self.publish_to_instagram(action).await;
+        }
 
-        // Instagram and X are not "not yet implemented" in the sense of
-        // pending work on this line: Instagram publishing needs a media
-        // container and an image these drafts do not carry, and X's write API
-        // is behind a paid tier. Both are held with the reason so the queue
-        // says why rather than looking like a stuck job.
-        let reason = if action.platform == "instagram" {
-            "instagram publishing needs an image; drafts are text only"
-        } else {
-            "x publishing needs a paid API tier"
-        };
+        let reason = "x publishing needs a paid API tier";
         self.hold_for_human(action.id, reason).await?;
         tracing::info!(
             action_id = %action.action_id,
@@ -475,6 +477,209 @@ impl SocialPostExecutorWorker {
             "social post held for an operator: this platform does not publish automatically"
         );
         Ok(())
+    }
+
+    /// Publishes a drafted caption to the tenant's own Instagram account.
+    ///
+    /// Two calls, because Instagram publishing is two steps: build a media
+    /// container from an image URL Meta fetches itself, then publish the
+    /// container. There is no text-only post on Instagram, so an image is not
+    /// decoration here — it is the post.
+    ///
+    /// **The system chooses the image, never the model.** A model naming an
+    /// image URL is the same risk as a model naming a link: it can point
+    /// anywhere, and what publishes under the band's name would be whatever it
+    /// picked. The selector reads the tenant's own asset rows and nothing
+    /// else, so an image that is not already CrowdRelay's cannot be published.
+    async fn publish_to_instagram(
+        &self,
+        action: &ClaimedAction,
+    ) -> Result<(), SocialPostExecutorError> {
+        let Some(token) = self.facebook_page_access_token.as_ref() else {
+            self.hold_for_human(action.id, "no meta access token is configured")
+                .await?;
+            return Ok(());
+        };
+        let Some(account_id) = self.instagram_account_id().await? else {
+            self.hold_for_human(
+                action.id,
+                "no connected instagram professional account to post to",
+            )
+            .await?;
+            return Ok(());
+        };
+        let caption = action.text.as_deref().unwrap_or("").trim();
+        if caption.is_empty() {
+            self.hold_for_human(action.id, "the draft has no caption")
+                .await?;
+            return Ok(());
+        }
+        let Some(image_url) = self.next_instagram_image().await? else {
+            // Not a failure and not a defect: the tenant has published no
+            // photo the system may use. An operator can fix it by adding one,
+            // which is why the reason says what is missing.
+            self.hold_for_human(
+                action.id,
+                "no image available: add an active photo press asset to post on instagram",
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let recent = self.recent_content_hashes("instagram").await?;
+        let verdict = review_outbound_post(
+            caption,
+            &PublishContext {
+                channel: PublishChannel::Instagram,
+                approved_origins: &[self.public_origin.as_str()],
+                recent_content_hashes: &recent,
+            },
+        );
+        if let Some(reason) = verdict.hold_reason() {
+            tracing::info!(
+                action_id = %action.action_id,
+                reason = reason.as_str(),
+                "instagram post held for an operator by the publish guard"
+            );
+            self.hold_for_human(action.id, reason.as_str()).await?;
+            return Ok(());
+        }
+
+        match self
+            .submit_to_instagram(&account_id, caption, &image_url, token)
+            .await
+        {
+            Ok(media_id) => {
+                sqlx::query(
+                    r#"
+                    UPDATE social_posts
+                    SET status = 'posted',
+                        platform_post_id = $3,
+                        image_url = $4,
+                        posted_at = now(),
+                        updated_at = now(),
+                        error_message = NULL
+                    WHERE workspace_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(self.workspace_id.into_uuid())
+                .bind(action.id)
+                .bind(&media_id)
+                .bind(&image_url)
+                .execute(&self.pool)
+                .await?;
+                tracing::info!(
+                    action_id = %action.action_id,
+                    media_id = %media_id,
+                    "instagram post published"
+                );
+                Ok(())
+            }
+            Err(SocialPostExecutorError::GraphRefused(message)) => {
+                tracing::warn!(
+                    action_id = %action.action_id,
+                    error = %message,
+                    "instagram refused the post; holding it for an operator"
+                );
+                self.hold_for_human(action.id, &format!("instagram refused the post: {message}"))
+                    .await?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Creates the media container and publishes it. Returns the media id.
+    ///
+    /// A container that is created and never published is an orphan Meta
+    /// cleans up on its own, so a failure between the two steps costs nothing
+    /// and must not be retried into a duplicate post.
+    async fn submit_to_instagram(
+        &self,
+        account_id: &str,
+        caption: &str,
+        image_url: &str,
+        token: &str,
+    ) -> Result<String, SocialPostExecutorError> {
+        let creation_id = self
+            .graph_post(
+                &format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{account_id}/media"),
+                &[
+                    ("image_url", image_url),
+                    ("caption", caption),
+                    ("access_token", token),
+                ],
+            )
+            .await?;
+        self.graph_post(
+            &format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{account_id}/media_publish"),
+            &[("creation_id", &creation_id), ("access_token", token)],
+        )
+        .await
+    }
+
+    /// The connected Instagram Professional account's id.
+    ///
+    /// Instagram publishing runs against the IG user id, which is a different
+    /// identifier from the Page id even though one token covers both.
+    async fn instagram_account_id(&self) -> Result<Option<String>, SocialPostExecutorError> {
+        let account_id: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT provider_account_id
+            FROM fanbase_connections
+            WHERE workspace_id = $1
+              AND platform = 'instagram'
+              AND status = 'connected'
+              AND provider_account_id IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(account_id)
+    }
+
+    /// The image to publish next: the tenant's own photo assets, least
+    /// recently published first.
+    ///
+    /// Rotation rather than "the newest photo", because posting the same
+    /// picture every time is what a bot looks like — and the publish guard
+    /// cannot catch it, since it compares captions and the caption changes.
+    /// A photo that has never been published sorts first.
+    ///
+    /// Only `photo` and `logo` assets, only active ones, and only from this
+    /// workspace: the point of the selector is that a model cannot introduce
+    /// an image, so it reads rows an operator curated and nothing else.
+    async fn next_instagram_image(&self) -> Result<Option<String>, SocialPostExecutorError> {
+        let image_url: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT asset.url
+            FROM viryaos_beacon_press_assets AS asset
+            LEFT JOIN LATERAL (
+                SELECT max(post.posted_at) AS last_published_at
+                FROM social_posts AS post
+                WHERE post.workspace_id = asset.workspace_id
+                  AND post.platform = 'instagram'
+                  AND post.status = 'posted'
+                  AND post.image_url = asset.url
+            ) AS use ON true
+            WHERE asset.workspace_id = $1
+              AND asset.active
+              AND asset.asset_kind IN ('photo', 'logo')
+              AND asset.url ~* '^https://'
+            ORDER BY use.last_published_at ASC NULLS FIRST,
+                     asset.sort_order,
+                     asset.asset_key
+            LIMIT 1
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(image_url)
     }
 
     /// Publishes a drafted post to the tenant's own Facebook Page.
@@ -580,6 +785,27 @@ impl SocialPostExecutorWorker {
         message: &str,
         token: &str,
     ) -> Result<String, SocialPostExecutorError> {
+        self.graph_post(
+            &format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{page_id}/feed"),
+            &[("message", message), ("access_token", token)],
+        )
+        .await
+    }
+
+    /// One Graph API write, returning the id it created.
+    ///
+    /// Shared by the Page feed and both Instagram steps so there is one place
+    /// that decides what a Graph response means. A refusal carries Meta's own
+    /// message: `(#200) Requires pages_manage_posts permission` is something an
+    /// operator can act on and "posting failed" is not.
+    ///
+    /// Form body rather than query string throughout — the token is a
+    /// credential, and a URL is the one part of a request proxies log.
+    async fn graph_post(
+        &self,
+        url: &str,
+        form: &[(&str, &str)],
+    ) -> Result<String, SocialPostExecutorError> {
         #[derive(serde::Deserialize)]
         struct GraphResponse {
             id: Option<String>,
@@ -590,13 +816,10 @@ impl SocialPostExecutorWorker {
             message: String,
         }
 
-        let url = format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{page_id}/feed");
-        // Form body rather than query string: the token is a credential and a
-        // URL is the one part of a request that gets logged by proxies.
         let response = self
             .http_client
-            .post(&url)
-            .form(&[("message", message), ("access_token", token)])
+            .post(url)
+            .form(form)
             .send()
             .await
             .map_err(SocialPostExecutorError::GraphRequest)?;
@@ -609,7 +832,7 @@ impl SocialPostExecutorWorker {
         }
         parsed.id.ok_or_else(|| {
             SocialPostExecutorError::GraphRefused(
-                "the graph api returned neither a post id nor an error".to_owned(),
+                "the graph api returned neither an id nor an error".to_owned(),
             )
         })
     }
