@@ -387,7 +387,41 @@ doctor() {
   if [[ "$CROWDRELAY_AREA_MANAGEMENT_ENABLED" == "true" ]]; then compose run --rm -T --no-deps --entrypoint caddy area-management-proxy validate --config /etc/caddy/Caddyfile >/dev/null </dev/null; fi
   check_edge_caddyfile_stale_green
   check_heartbeat_config
+  check_api_memory_floor
   echo "Configuration is valid for sha-${CROWDRELAY_IMAGE_SHA}."
+}
+
+# The API process uses ~130 MB RSS at steady state. A mem_limit below 256m
+# causes OOM-kills under load — the kernel kills the process, Docker restarts
+# it, and the control plane gets 502/504 during every restart window. This
+# has happened repeatedly because someone manually lowered the limit in
+# .env.production. The doctor check makes it a hard failure so it can never
+# silently ship again.
+check_api_memory_floor() {
+  local raw min_mib actual_mib
+  raw="$(compose config --format json 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('services',{}).get('api',{}).get('mem_limit',''))" 2>/dev/null || echo "")"
+  [[ -n "$raw" ]] || return 0
+  # Parse values like "256m", "256M", "268435456", "1g"
+  local num unit
+  num="${raw//[!0-9]/}"
+  unit="${raw//[0-9]/}"
+  unit="${unit,,}"
+  case "$unit" in
+    g|gb) actual_mib=$(( num * 1024 )) ;;
+    m|mb) actual_mib="$num" ;;
+    k|kb) actual_mib=$(( num / 1024 )) ;;
+    "")   actual_mib=$(( num / 1048576 )) ;;
+    *)    actual_mib=0 ;;
+  esac
+  min_mib=256
+  if (( actual_mib < min_mib )); then
+    echo "ERROR: CROWDRELAY_API_MEMORY is ${raw} (${actual_mib} MiB)." >&2
+    echo "  The API process uses ~130 MB RSS at steady state." >&2
+    echo "  A limit below ${min_mib}m causes OOM-kills and 502/504 storms." >&2
+    echo "  Set CROWDRELAY_API_MEMORY=${min_mib}m (or higher) in deploy/.env.production." >&2
+    exit 1
+  fi
 }
 
 # Detect dead green upstream references in the edge Caddyfile. A regular
