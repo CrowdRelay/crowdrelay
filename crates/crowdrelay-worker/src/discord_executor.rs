@@ -32,6 +32,9 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::growth_metrics::MetricPlatform;
+use crowdrelay_domain::publish_guard::{
+    PublishChannel, PublishContext, content_hash, review_outbound_post,
+};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -118,6 +121,9 @@ pub struct DiscordExecutorWorker {
     /// Encryption key for decrypting the Discord bot token stored in
     /// `fanbase_connections.encrypted_access_token`.
     encryption_key: SensitiveResponseKey,
+    /// The tenant's own public origin. A link in an automatically published
+    /// post may point here and nowhere else — see `publish_guard`.
+    public_origin: String,
 }
 
 impl DiscordExecutorWorker {
@@ -132,6 +138,7 @@ impl DiscordExecutorWorker {
         workspace_id: WorkspaceId,
         manual_mode: bool,
         encryption_key: SensitiveResponseKey,
+        public_origin: String,
     ) -> Result<Self, DiscordExecutorError> {
         let http_client = reqwest::Client::builder()
             .timeout(BOT_API_TIMEOUT)
@@ -146,6 +153,7 @@ impl DiscordExecutorWorker {
             poll_interval: POLL_INTERVAL,
             manual_mode,
             encryption_key,
+            public_origin,
         })
     }
 
@@ -466,6 +474,29 @@ impl DiscordExecutorWorker {
             return Ok(());
         }
 
+        // The read a person used to do before a post went out under the
+        // band's name. Automatic mode removes the person, not the read. A held
+        // post lands in the operator queue with its reason, so the worst case
+        // of enabling automatic mode is the behaviour that preceded it.
+        let recent = self.recent_content_hashes().await?;
+        let verdict = review_outbound_post(
+            body,
+            &PublishContext {
+                channel: PublishChannel::Discord,
+                approved_origins: &[self.public_origin.as_str()],
+                recent_content_hashes: &recent,
+            },
+        );
+        if let Some(reason) = verdict.hold_reason() {
+            tracing::info!(
+                action_id = %action.action_id,
+                reason = reason.as_str(),
+                "discord post held for an operator by the publish guard"
+            );
+            self.hold_for_human(action.id, reason.as_str()).await?;
+            return Ok(());
+        }
+
         let result = self
             .submit_via_bot_api(target_channel, body, &bot_token)
             .await?;
@@ -743,6 +774,57 @@ impl DiscordExecutorWorker {
         .fetch_one(&self.pool)
         .await?;
         Ok(count >= MAX_POSTS_PER_24H)
+    }
+
+    /// Parks a drafted post for an operator, with the reason it was held.
+    ///
+    /// `awaiting_manual_post` rather than `failed`: nothing went wrong with
+    /// the delivery, and a person can still publish this.
+    async fn hold_for_human(
+        &self,
+        post_id: Uuid,
+        reason: &str,
+    ) -> Result<(), DiscordExecutorError> {
+        sqlx::query(
+            r#"
+            UPDATE discord_posts
+            SET status = 'awaiting_manual_post',
+                error_message = $3,
+                updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(post_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Content hashes of what this server published recently. The body lives
+    /// in the action payload the draft came from, so this joins back to it.
+    async fn recent_content_hashes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, DiscordExecutorError> {
+        let bodies: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT a.payload->'draft'->>'text'
+            FROM discord_posts AS post
+            JOIN viryaos_autopilot_actions AS a
+              ON a.id = post.action_id AND a.workspace_id = $1
+            WHERE post.workspace_id = $1
+              AND post.status = 'posted'
+              AND post.posted_at > now() - INTERVAL '30 days'
+              AND a.payload->'draft'->>'text' IS NOT NULL
+            ORDER BY post.posted_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(bodies.iter().map(|body| content_hash(body)).collect())
     }
 
     async fn mark_failed(&self, post_id: Uuid, reason: &str) -> Result<(), DiscordExecutorError> {

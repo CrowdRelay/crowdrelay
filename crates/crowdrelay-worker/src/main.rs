@@ -510,6 +510,11 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         workspace_id,
         !telegram_auto_post,
         config.response_encryption_key.clone(),
+        // The tenant's own site is the only origin an automatically published
+        // post may link to. Taken from the configured public base URL rather
+        // than a new setting: there is one answer to "where does this tenant
+        // live" and it is already recorded.
+        config.public_site_base_url.origin().ascii_serialization(),
     ) {
         Ok(worker) => {
             if !telegram_auto_post {
@@ -544,6 +549,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         workspace_id,
         !discord_auto_post,
         config.response_encryption_key.clone(),
+        config.public_site_base_url.origin().ascii_serialization(),
     ) {
         Ok(worker) => {
             if !discord_auto_post {

@@ -1,0 +1,63 @@
+name: Artifact Cleanup
+
+on:
+  schedule:
+    # 04:00 UTC daily — after the server prune cron at 03:00
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, arm64]
+    timeout-minutes: 10
+    steps:
+      - name: Clean artifacts and runs across all CrowdRelay repos
+        env:
+          GH_TOKEN: ${{ secrets.CROWDRELAY_PAT }}
+        run: |
+          set -euo pipefail
+          REPOS=(
+            CrowdRelay/crowdrelay
+            CrowdRelay/crowdrelay-control-plane
+            CrowdRelay/crowdrelay-agents
+            CrowdRelay/virya
+            CrowdRelay/virya-signal
+            CrowdRelay/synesthesia
+          )
+          KEEP_RUNS=5
+
+          for repo in "${REPOS[@]}"; do
+            echo "=== $repo ==="
+
+            # Delete all artifacts (keep none — 1-day retention)
+            artifacts=$(gh api "/repos/$repo/actions/artifacts?per_page=100" --jq '.artifacts[].id' 2>/dev/null || true)
+            count=$(echo "$artifacts" | grep -c . || true)
+            echo "  deleting $count artifacts"
+            echo "$artifacts" | while read id; do
+              [ -n "$id" ] && gh api -X DELETE "/repos/$repo/actions/artifacts/$id" 2>/dev/null || true
+            done
+
+            # Delete old completed runs, keep 5 newest
+            runs=$(gh api "/repos/$repo/actions/runs?per_page=100&status=completed" --jq ".workflow_runs[${KEEP_RUNS}:] | .[].id" 2>/dev/null || true)
+            count=$(echo "$runs" | grep -c . || true)
+            echo "  deleting $count old runs (keeping $KEEP_RUNS newest)"
+            echo "$runs" | while read id; do
+              [ -n "$id" ] && gh api -X DELETE "/repos/$repo/actions/runs/$id" 2>/dev/null || true
+            done
+
+            # Clean GHCR image versions (keep 2 newest per package)
+            for pkg in crowdrelay-api crowdrelay-worker crowdrelay-control-plane crowdrelay-agents crowdrelay-rekor-proof-anchor; do
+              # Only clean packages that belong to this repo's org
+              versions=$(gh api "/orgs/CrowdRelay/packages/container/$pkg/versions?per_page=100" --jq '.[].id' 2>/dev/null || true)
+              [ -z "$versions" ] && continue
+              echo "$versions" | tail -n +3 | while read id; do
+                [ -n "$id" ] && gh api -X DELETE "/orgs/CrowdRelay/packages/container/$pkg/versions/$id" 2>/dev/null || true
+              done
+            done
+          done
+
+          echo "=== Cleanup complete ==="

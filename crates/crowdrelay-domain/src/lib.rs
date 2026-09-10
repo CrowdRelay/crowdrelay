@@ -95,6 +95,7 @@ pub mod plays;
 pub mod portfolio;
 pub mod pricing;
 pub mod promotion;
+pub mod publish_guard;
 pub mod referrals;
 pub mod release_autopilot;
 pub mod reply_triage;

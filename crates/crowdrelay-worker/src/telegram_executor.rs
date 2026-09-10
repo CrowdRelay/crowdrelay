@@ -42,6 +42,9 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::growth_metrics::MetricPlatform;
+use crowdrelay_domain::publish_guard::{
+    PublishChannel, PublishContext, content_hash, review_outbound_post,
+};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -117,6 +120,9 @@ pub struct TelegramExecutorWorker {
     /// Encryption key for decrypting the Telegram bot token stored in
     /// `fanbase_connections.encrypted_access_token`.
     encryption_key: SensitiveResponseKey,
+    /// The tenant's own public origin. A link in an automatically published
+    /// post may point here and nowhere else — see `publish_guard`.
+    public_origin: String,
 }
 
 impl TelegramExecutorWorker {
@@ -132,6 +138,7 @@ impl TelegramExecutorWorker {
         workspace_id: WorkspaceId,
         manual_mode: bool,
         encryption_key: SensitiveResponseKey,
+        public_origin: String,
     ) -> Result<Self, TelegramExecutorError> {
         let http_client = reqwest::Client::builder()
             .timeout(BOT_API_TIMEOUT)
@@ -146,6 +153,7 @@ impl TelegramExecutorWorker {
             poll_interval: POLL_INTERVAL,
             manual_mode,
             encryption_key,
+            public_origin,
         })
     }
 
@@ -469,6 +477,32 @@ impl TelegramExecutorWorker {
             return Ok(());
         }
 
+        // The read a person used to do before a post went out under the
+        // band's name. Automatic mode removes the person, not the read.
+        //
+        // A held post is not discarded: it lands in the same queue it was in
+        // before autonomy, carrying the reason, and the operator decides. So
+        // the worst case of enabling automatic mode is the behaviour that
+        // preceded it.
+        let recent = self.recent_content_hashes().await?;
+        let verdict = review_outbound_post(
+            body,
+            &PublishContext {
+                channel: PublishChannel::Telegram,
+                approved_origins: &[self.public_origin.as_str()],
+                recent_content_hashes: &recent,
+            },
+        );
+        if let Some(reason) = verdict.hold_reason() {
+            tracing::info!(
+                action_id = %action.action_id,
+                reason = reason.as_str(),
+                "telegram post held for an operator by the publish guard"
+            );
+            self.hold_for_human(action.id, reason.as_str()).await?;
+            return Ok(());
+        }
+
         let result = self
             .submit_via_bot_api(target_channel, body, &bot_token)
             .await?;
@@ -727,6 +761,62 @@ impl TelegramExecutorWorker {
         .fetch_one(&self.pool)
         .await?;
         Ok(count >= MAX_POSTS_PER_24H)
+    }
+
+    /// Parks a drafted post for an operator, with the reason it was held.
+    ///
+    /// Deliberately `awaiting_manual_post` rather than `failed`: nothing went
+    /// wrong with the delivery, and a person can still publish this. It shows
+    /// up in the same draft queue `/ops/attention` reports.
+    async fn hold_for_human(
+        &self,
+        post_id: Uuid,
+        reason: &str,
+    ) -> Result<(), TelegramExecutorError> {
+        sqlx::query(
+            r#"
+            UPDATE telegram_posts
+            SET status = 'awaiting_manual_post',
+                error_message = $3,
+                updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(post_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Content hashes of what this channel published recently.
+    ///
+    /// The body is not stored on the post row — it lives in the action payload
+    /// the draft came from — so this joins back to it. Bounded by time and
+    /// count: a repeat that is months old is not the failure mode, a model
+    /// re-emitting the same text this week is.
+    async fn recent_content_hashes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, TelegramExecutorError> {
+        let bodies: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT a.payload->'draft'->>'text'
+            FROM telegram_posts AS post
+            JOIN viryaos_autopilot_actions AS a
+              ON a.id = post.action_id AND a.workspace_id = $1
+            WHERE post.workspace_id = $1
+              AND post.status = 'posted'
+              AND post.posted_at > now() - INTERVAL '30 days'
+              AND a.payload->'draft'->>'text' IS NOT NULL
+            ORDER BY post.posted_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(bodies.iter().map(|body| content_hash(body)).collect())
     }
 
     async fn mark_failed(&self, post_id: Uuid, reason: &str) -> Result<(), TelegramExecutorError> {
