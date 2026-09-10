@@ -412,7 +412,8 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         )
         .route(
             "/v1/control-plane/autopilot/beacon-press-assets",
-            get(crate::beacon_signal::admin_press_assets),
+            get(crate::beacon_signal::admin_press_assets)
+                .post(crate::beacon_signal::admin_upsert_press_asset),
         )
         .route(
             "/v1/control-plane/autopilot/beacon-signal-engagements",
