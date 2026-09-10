@@ -32,7 +32,14 @@ class AutopilotMeasurementContract(unittest.TestCase):
 
     def test_show_growth_measurements_have_real_durable_observers(self) -> None:
         execution = text("crates/crowdrelay-infra/src/autopilot/execution.rs")
-        measurement = text("crates/crowdrelay-infra/src/autopilot/measurement.rs")
+        # The observation arms moved into `measurement/observation.rs` when the
+        # adapter crossed the size ratchet. Both files are read for the same
+        # reason the first check follows the vocabulary rather than the
+        # filename: what matters is that a scheduled kind has somewhere that
+        # observes it, not which file that is.
+        measurement = text("crates/crowdrelay-infra/src/autopilot/measurement.rs") + text(
+            "crates/crowdrelay-infra/src/autopilot/measurement/observation.rs"
+        )
         runtime = text("crates/crowdrelay-infra/src/autopilot/runtime.rs")
         migration = text("migrations/0063_viryaos_show_growth_measurement_signals.sql")
         show_growth = text(

@@ -490,12 +490,21 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
             Some(d) if d <= 30 => "near",
             _ => "far",
         };
-        // Use the Y14 incremental outcome as the strategy effectiveness
-        // signal. This is the counterfactual-adjusted estimate of how many
-        // fans the dispatch produced — exactly what we want to learn which
-        // strategies work best.
-        if let Some(incremental_fans) = ev.observed_incremental_fans {
-            let obs_var = 2.0 * incremental_fans.abs().max(1.0);
+        // The counterfactual-adjusted estimate of how many fans the dispatch
+        // produced — exactly what tells us which strategies work.
+        //
+        // Y14 where it exists, and the three-day reading while it does not.
+        // Until that fallback existed this arm ran only on Y14, so no strategy
+        // belief could move until fourteen days after a dispatch: the loop was
+        // real, closed, and slower than the thing it was trying to learn about.
+        //
+        // The early reading carries a variance multiplier rather than a
+        // discount on the value itself. A weaker measurement of the same
+        // quantity should move the posterior less, not report a smaller
+        // number — halving the estimate would teach the brain the effect was
+        // small, when what is actually true is that we are less sure.
+        if let Some((incremental_fans, variance_multiplier)) = ev.incremental_fans_for_learning() {
+            let obs_var = 2.0 * incremental_fans.abs().max(1.0) * variance_multiplier;
             posterior.update(
                 &strategy,
                 growth_trend,

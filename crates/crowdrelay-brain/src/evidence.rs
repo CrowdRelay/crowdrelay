@@ -281,8 +281,20 @@ pub struct GrowthEvidence {
     // ── Outcome ──
     /// Raw observed fan count in the measurement window.
     pub observed_fans: Option<f64>,
+    // (see `incremental_fans_for_learning` for how the two incremental
+    // readings below are chosen between)
     /// Counterfactual-adjusted incremental fans (observed - baseline).
     pub observed_incremental_fans: Option<f64>,
+    /// The same estimate over three days instead of fourteen.
+    ///
+    /// A weaker reading of the same quantity, kept as its own fact rather than
+    /// written into the field above: the fourteen-day number is the better one
+    /// and must never be displaced by an early proxy. Read
+    /// [`GrowthEvidence::incremental_fans_for_learning`] rather than this
+    /// field — it decides which of the two a learner should use, and how much
+    /// to trust it.
+    #[serde(default)]
+    pub observed_incremental_fans_3d: Option<f64>,
     /// Durable fans still active 30 days after the measurement window.
     pub durable_fans_30d: Option<f64>,
     /// Whether this dispatch resulted in a fan conversion.
@@ -390,6 +402,13 @@ pub struct GrowthEvidence {
 /// drift into disagreeing about what "clean" means.
 pub const CONTAMINATION_CEILING: f64 = 0.1;
 
+/// How much less a three-day incremental reading is worth than a fourteen-day
+/// one, expressed as a multiplier on observation variance.
+///
+/// See [`GrowthEvidence::incremental_fans_for_learning`] for the reasoning and
+/// for why this is a stated assumption rather than a fitted constant.
+pub const EARLY_ESTIMATE_VARIANCE_MULTIPLIER: f64 = 4.0;
+
 impl Default for GrowthEvidence {
     fn default() -> Self {
         Self {
@@ -409,6 +428,7 @@ impl Default for GrowthEvidence {
             execution_status: None,
             observed_fans: None,
             observed_incremental_fans: None,
+            observed_incremental_fans_3d: None,
             durable_fans_30d: None,
             converted: false,
             converted_fan_id: None,
@@ -472,6 +492,7 @@ impl GrowthEvidence {
             execution_status: None,
             observed_fans: None,
             observed_incremental_fans: None,
+            observed_incremental_fans_3d: None,
             durable_fans_30d: None,
             converted: false,
             converted_fan_id: None,
@@ -501,8 +522,37 @@ impl GrowthEvidence {
     pub fn is_resolved(&self) -> bool {
         self.observed_fans.is_some()
             || self.observed_incremental_fans.is_some()
+            || self.observed_incremental_fans_3d.is_some()
             || self.durable_fans_30d.is_some()
             || self.converted
+    }
+
+    /// The incremental outcome a learner should use, and how noisy it is.
+    ///
+    /// Returns `(incremental_fans, observation_variance_multiplier)`. The
+    /// fourteen-day estimate wins wherever it exists; the three-day one is the
+    /// fallback while it does not, at four times the observation variance.
+    ///
+    /// Four, and not a fitted number. Three days of arrivals is roughly a
+    /// fifth of the sample fourteen days gives, and the variance of a mean
+    /// scales with the inverse of the sample — so the early reading is worth
+    /// something like a quarter to a fifth of the later one, and four is the
+    /// conservative end of that. It is a stated assumption, not a measurement,
+    /// and it is here rather than at the call site so it is one assumption
+    /// instead of one per learner.
+    ///
+    /// The point of the fallback is that a strategy belief can move at three
+    /// days instead of fourteen. The point of the multiplier is that it moves
+    /// less far, and is overtaken as soon as the real number lands.
+    #[must_use]
+    pub fn incremental_fans_for_learning(&self) -> Option<(f64, f64)> {
+        self.observed_incremental_fans.map_or_else(
+            || {
+                self.observed_incremental_fans_3d
+                    .map(|incremental| (incremental, EARLY_ESTIMATE_VARIANCE_MULTIPLIER))
+            },
+            |incremental| Some((incremental, 1.0)),
+        )
     }
 
     /// Returns true if this evidence has at least one intermediate
@@ -999,6 +1049,76 @@ mod tests {
         assert_eq!(
             evidence.context.subreddit_type,
             prediction.context.subreddit_type
+        );
+    }
+
+    /// The fourteen-day number wins, and the three-day one is a fallback with
+    /// a stated cost — not a replacement and not a discount.
+    #[test]
+    fn the_later_estimate_supersedes_the_early_one() {
+        let early = GrowthEvidence {
+            observed_incremental_fans_3d: Some(2.0),
+            ..GrowthEvidence::default()
+        };
+        assert_eq!(
+            early.incremental_fans_for_learning(),
+            Some((2.0, EARLY_ESTIMATE_VARIANCE_MULTIPLIER)),
+            "with no Y14 yet, the three-day reading is what there is to learn from"
+        );
+
+        let settled = GrowthEvidence {
+            observed_incremental_fans: Some(9.0),
+            observed_incremental_fans_3d: Some(2.0),
+            ..GrowthEvidence::default()
+        };
+        assert_eq!(
+            settled.incremental_fans_for_learning(),
+            Some((9.0, 1.0)),
+            "once the fourteen-day outcome lands it is the estimate, at full weight"
+        );
+
+        assert_eq!(
+            GrowthEvidence::default().incremental_fans_for_learning(),
+            None,
+            "no incremental reading of either width is not an outcome of zero"
+        );
+    }
+
+    /// The early reading must not be reported as a smaller effect.
+    ///
+    /// Halving the value would teach the brain the effect was small. What is
+    /// actually true is that we are less sure, and uncertainty belongs in the
+    /// variance.
+    #[test]
+    fn the_early_estimate_keeps_its_value_and_pays_in_variance() {
+        let early = GrowthEvidence {
+            observed_incremental_fans_3d: Some(6.0),
+            ..GrowthEvidence::default()
+        };
+        let (value, multiplier) = early
+            .incremental_fans_for_learning()
+            .expect("a three-day reading is a reading");
+        assert!(
+            (value - 6.0).abs() < f64::EPSILON,
+            "the observed value is reported as observed"
+        );
+        assert!(
+            multiplier > 1.0,
+            "and it moves the posterior less than a settled one would"
+        );
+    }
+
+    /// A row with only the early reading is resolved enough to learn from.
+    #[test]
+    fn an_early_reading_alone_counts_as_resolved() {
+        let early = GrowthEvidence {
+            observed_incremental_fans_3d: Some(1.0),
+            ..GrowthEvidence::default()
+        };
+        assert!(
+            early.is_resolved(),
+            "a row the learner can use must not read as unresolved, or the \
+             delta loader will not carry it"
         );
     }
 }

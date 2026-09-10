@@ -271,6 +271,7 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         }
         "agent_run_fan_growth_14d" => Ok(AutopilotMeasurementKind::AgentRunFanGrowth14d),
         "incremental_fan_growth_14d" => Ok(AutopilotMeasurementKind::IncrementalFanGrowth14d),
+        "incremental_fan_growth_3d" => Ok(AutopilotMeasurementKind::IncrementalFanGrowth3d),
         "agent_run_signal_installs_7d" => Ok(AutopilotMeasurementKind::AgentRunSignalInstalls7d),
         "agent_run_community_engagement_7d" => {
             Ok(AutopilotMeasurementKind::AgentRunCommunityEngagement7d)

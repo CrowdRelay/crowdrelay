@@ -23,7 +23,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // is one coherent job — judge each template against its own measured
         // outcomes — and it is the part of this cycle with no bearing on
         // candidate generation below.
-        self.validate_hypotheses(&mut snapshots).await?;
+        self.validate_hypotheses(&mut snapshots, now).await?;
         // Load the causal model from past predictions + outcomes.
         // The brain uses this to predict how many fans each
         // dispatch will produce, and learns from prediction errors.

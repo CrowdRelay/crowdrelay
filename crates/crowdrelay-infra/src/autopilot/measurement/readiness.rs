@@ -205,7 +205,11 @@ pub(super) async fn refresh_evidence_readiness(
     // by a control-arm resolution.
     if let Some(kind) = measurement_kind {
         let horizon_column = match kind {
-            super::AutopilotMeasurementKind::AgentRunFanGrowth3d => "replayed_3d_at",
+            // Both three-day kinds stamp the same cursor: they observe the
+            // same window and the cursor is a statement about which horizon
+            // the learner has already seen, not about which query produced it.
+            super::AutopilotMeasurementKind::AgentRunFanGrowth3d
+            | super::AutopilotMeasurementKind::IncrementalFanGrowth3d => "replayed_3d_at",
             super::AutopilotMeasurementKind::AgentRunFanGrowth14d
             | super::AutopilotMeasurementKind::IncrementalFanGrowth14d => "replayed_14d_at",
             super::AutopilotMeasurementKind::DurableFanGrowth30d => "replayed_30d_at",

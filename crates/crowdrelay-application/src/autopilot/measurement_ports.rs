@@ -39,6 +39,21 @@ pub enum AutopilotMeasurementKind {
     /// North Star metric — it measures causal uplift, not just correlation.
     /// The baseline_value stores the pre-action daily fan arrival rate.
     IncrementalFanGrowth14d,
+    /// The same counterfactual estimate over three days instead of fourteen.
+    ///
+    /// The strategy posterior learns from incremental fans and from nothing
+    /// else, and `IncrementalFanGrowth14d` was the only kind that produced
+    /// them — so no strategy belief could move until fourteen days after a
+    /// dispatch, on a brain that had been alive for four. This is the same
+    /// difference-in-differences arithmetic against a matched three-day
+    /// pre-period.
+    ///
+    /// It is a weaker estimate and is treated as one. Three days of arrivals
+    /// is a noisier sample than fourteen, and it cannot see an effect that
+    /// takes a week to appear. It is recorded in its own column so it never
+    /// displaces the fourteen-day number, and the learner prefers the
+    /// fourteen-day one wherever it exists.
+    IncrementalFanGrowth3d,
     /// Signal install delta in the 7 days after an agent dispatch. Measures
     /// whether the worker's output moved fans toward the Signal app (growth).
     AgentRunSignalInstalls7d,
@@ -122,6 +137,7 @@ impl AutopilotMeasurementKind {
             Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
             Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
             Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
+            Self::IncrementalFanGrowth3d => "incremental_fan_growth_3d",
             Self::AgentRunSignalInstalls7d => "agent_run_signal_installs_7d",
             Self::AgentRunCommunityEngagement7d => "agent_run_community_engagement_7d",
             Self::DurableFanGrowth30d => "durable_fan_growth_30d",
@@ -153,7 +169,9 @@ impl AutopilotMeasurementKind {
     pub const fn is_signed_effect(self) -> bool {
         matches!(
             self,
-            Self::IncrementalFanGrowth14d | Self::DurableFanGrowth30d
+            Self::IncrementalFanGrowth14d
+                | Self::IncrementalFanGrowth3d
+                | Self::DurableFanGrowth30d
         )
     }
 
@@ -196,6 +214,7 @@ impl AutopilotMeasurementKind {
             Self::AgentRunFanGrowth3d
                 | Self::AgentRunFanGrowth14d
                 | Self::IncrementalFanGrowth14d
+                | Self::IncrementalFanGrowth3d
                 | Self::DurableFanGrowth30d
                 | Self::AgentRunSignalInstalls7d
                 | Self::SignalInstalls1d
@@ -213,6 +232,7 @@ impl AutopilotMeasurementKind {
     pub const fn counterfactual_window_days(self) -> f64 {
         match self {
             Self::IncrementalFanGrowth14d | Self::DurableFanGrowth30d => 14.0,
+            Self::IncrementalFanGrowth3d => 3.0,
             _ => 0.0,
         }
     }

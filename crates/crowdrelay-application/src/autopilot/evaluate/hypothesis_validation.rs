@@ -1,3 +1,17 @@
+/// How far back walk-forward validation reads.
+///
+/// The question validation asks is whether a template's edge survives out of
+/// sample *now*, and a dispatch from a year ago is not evidence about now: the
+/// audience, the roster of communities and the band's own standing have all
+/// moved. Six months holds many cycles of every template while keeping the
+/// per-cycle read bounded.
+///
+/// It also has to be comfortably wider than what the split needs. Validation
+/// halves the range and purges 16 days across the boundary, so the window must
+/// leave a usable out-of-sample half after that gap — 180 days does, by an
+/// order of magnitude.
+const VALIDATION_LOOKBACK_DAYS: i64 = 180;
+
 // Walk-forward validation and the hypothesis lifecycle — extracted from
 // growth_intelligence_context.rs to keep both inside the source-size ratchet.
 //
@@ -14,6 +28,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
     async fn validate_hypotheses(
         &self,
         snapshots: &mut [crowdrelay_brain::GrowthIntelligenceSnapshot],
+        now: OffsetDateTime,
     ) -> Result<(), AutopilotError> {
         // Walk-forward validation: load resolved evidence and validate
         // each template's out-of-sample performance. Templates that fail
@@ -25,9 +40,20 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // The validation runs on treatment evidence only (control rows
         // have no observed outcome). The purge gap is 16 days to account
         // for Y30 durability overlap.
+        //
+        // Bounded to the last `VALIDATION_LOOKBACK_DAYS`. This ran with no
+        // window at all: every resolved evidence row the workspace had ever
+        // produced, read in full, every five minutes, against a table that
+        // only grows. Free at thirty rows and a sequential scan of the whole
+        // history at thirty thousand — a cycle that gets steadily more
+        // expensive with nothing reporting it, which is the shape of a
+        // problem nobody notices until it is the whole problem.
         let growth_evidence = self
             .repository
-            .load_growth_evidence(self.workspace_id, None)
+            .load_growth_evidence(
+                self.workspace_id,
+                Some(now - time::Duration::days(VALIDATION_LOOKBACK_DAYS)),
+            )
             .await?;
         // Grouped once, by moving each row into the bucket its opportunity
         // names. The loop below used to re-scan the whole batch per template

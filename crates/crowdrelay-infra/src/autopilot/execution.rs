@@ -492,6 +492,17 @@ pub(super) async fn schedule_effect_measurement(
                 pre_action_daily_rate,
                 now + time::Duration::days(14),
             ));
+            // The same counterfactual, eleven days earlier. Shares the
+            // pre-action daily rate: the baseline is a rate, and the window it
+            // is multiplied by lives on the kind, so one reading serves both
+            // widths and the two cannot disagree about what the world looked
+            // like before the dispatch.
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                action_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(3),
+            ));
             // Y30 durable fan growth (North Star): fans created in the
             // 14-day post-action window that are still active 30 days
             // after creation. The measurement window is 44 days (14-day
@@ -670,6 +681,17 @@ pub(super) async fn schedule_effect_measurement(
                 action_id.into_uuid(),
                 pre_action_daily_rate,
                 now + time::Duration::days(14),
+            ));
+            // The same counterfactual, eleven days earlier. Shares the
+            // pre-action daily rate: the baseline is a rate, and the window it
+            // is multiplied by lives on the kind, so one reading serves both
+            // widths and the two cannot disagree about what the world looked
+            // like before the dispatch.
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                action_id.into_uuid(),
+                pre_action_daily_rate,
+                now + time::Duration::days(3),
             ));
             // Fast checkpoint: 1h outcome quality.
             plans.push((
