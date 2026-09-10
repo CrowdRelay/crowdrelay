@@ -500,21 +500,23 @@ if ssh -T "$ORACLE" docker inspect crowdrelay-control-plane-app-1 >/dev/null 2>&
   # seconds to propagate on the shared bridge network. A single-shot check
   # races the DNS cache and reports "unreachable" for an API that is actually
   # healthy — a false negative that blocks the deploy receipt.
-  # 3 retries at 5s (15s total) was observed to be too short at least once:
-  # step 7's finalize (stop/rename the old blue container) can leave the
-  # shared bridge's DNS alias mid-propagation for longer than that on a
-  # busy host. Bumped to 6 retries at 8s (48s total) — still fails the
-  # deploy if the API is genuinely unreachable, just gives real DNS
-  # convergence enough room before doing so.
+  # 3 retries at 5s (15s total), then 6 at 8s (48s total), were both
+  # observed to be too short at least once: control_plane_tunnel_final
+  # reported the target SHA reachable via crowdrelay-api-active seconds
+  # after this check gave up and failed the deploy, which was already
+  # correct and healthy. The shared bridge's embedded DNS took longer than
+  # either budget to settle on this host at least twice. 12 retries at
+  # 10s (120s total) — still fails the deploy if the API is genuinely
+  # unreachable, just stops guessing at how long DNS convergence needs.
   cp_sha=""
-  for _ in 1 2 3 4 5 6; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     cp_sha="$(ssh -T "$ORACLE" docker exec crowdrelay-control-plane-app-1 \
       sh -c 'wget -qO- --timeout=5 http://crowdrelay-api-active:8080/v1/meta 2>/dev/null \
                || wget -qO- --timeout=5 http://crowdrelay-api-green-1:8080/v1/meta 2>/dev/null \
                || wget -qO- --timeout=5 http://crowdrelay-api-1:8080/v1/meta 2>/dev/null' \
       | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
     [[ "$cp_sha" == "$TARGET" ]] && break
-    sleep 8
+    sleep 10
   done
   [[ "$cp_sha" == "$TARGET" ]] || \
     fail "post-deploy cross-service check failed: control plane sees API SHA=${cp_sha:-unreachable} expected=$TARGET — API may not be on crowdrelay-shared network"
