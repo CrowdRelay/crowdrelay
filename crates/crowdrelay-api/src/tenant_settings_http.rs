@@ -117,6 +117,15 @@ pub async fn get_brand_settings(
                 "north_star_metric".to_owned(),
                 effective.north_star_metric.clone(),
             );
+            settings.insert(
+                "social_auto_post".to_owned(),
+                if effective.social_auto_post {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_owned(),
+            );
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -160,7 +169,7 @@ fn validate_value(key: &str, value: &str) -> bool {
         return false;
     }
     // Boolean keys accept only "true" or "false".
-    if key == "signal_enabled" || key == "synesthesia_enabled" {
+    if key == "signal_enabled" || key == "synesthesia_enabled" || key == "social_auto_post" {
         return value == "true" || value == "false";
     }
     // North star metric must be a valid enum value.
@@ -209,6 +218,12 @@ pub async fn upsert_setting(
                         }
                         .to_owned(),
                         "north_star_metric" => effective.north_star_metric.clone(),
+                        "social_auto_post" => if effective.social_auto_post {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                        .to_owned(),
                         _ => effective.synesthesia_campaign_slug.clone(),
                     };
                     serde_json::json!({ "key": key, "value": value })

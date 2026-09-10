@@ -220,6 +220,7 @@ fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
         workspace_id,
         Duration::from_secs(60),
         Duration::from_secs(30),
+        "https://virya.music".to_owned(),
     )
 }
 

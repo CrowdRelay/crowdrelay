@@ -407,6 +407,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             workspace_id,
             AGENT_OUTCOME_POLL_INTERVAL,
             config.database.operation_timeout,
+            config.public_site_base_url.origin().ascii_serialization(),
         ))
     } else {
         tracing::info!("agent outcome ingestion is disabled by process configuration");

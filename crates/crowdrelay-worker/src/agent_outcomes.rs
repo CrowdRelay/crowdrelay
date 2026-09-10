@@ -286,6 +286,13 @@ pub struct AgentOutcomeWorker {
     workspace_id: WorkspaceId,
     poll_interval: Duration,
     operation_timeout: Duration,
+    /// The origins an agent-created smart link may redirect to.
+    ///
+    /// A smart link is a redirect on the tenant's own domain and an agent's
+    /// destination comes out of a language model, so without this the domain
+    /// is an open redirect whose target a model picks. See
+    /// `domain::acquisition::agent_smart_link_destination`.
+    public_origin: String,
 }
 
 impl AgentOutcomeWorker {
@@ -295,12 +302,14 @@ impl AgentOutcomeWorker {
         workspace_id: WorkspaceId,
         poll_interval: Duration,
         operation_timeout: Duration,
+        public_origin: String,
     ) -> Self {
         Self {
             pool,
             workspace_id,
             poll_interval,
             operation_timeout,
+            public_origin,
         }
     }
 
@@ -1041,9 +1050,37 @@ impl AgentOutcomeWorker {
         channel_source: &str,
         channel_community: Option<&str>,
     ) -> Result<Option<String>, AgentOutcomeError> {
-        if !destination.starts_with("http") {
-            return Ok(None);
-        }
+        // The destination came out of a language model. `starts_with("http")`
+        // was the whole of the check, so the tenant's own domain answered a
+        // 302 to wherever the model said — an open redirect under the band's
+        // name, seeded by a model, with the fan's trust in the domain doing
+        // the work.
+        //
+        // It broke attribution too, and quietly: the whole point of the link
+        // is that the far end is a page that captures the visitor. A foreign
+        // destination counts the click, never creates the fan, and the post is
+        // measured as reach that converted nobody.
+        //
+        // Refusing returns `None`, which the caller already handles — the post
+        // goes out untracked rather than not at all. A post with no link is
+        // worth less than a post with one; a post that redirects the audience
+        // somewhere nobody approved is worth less than either.
+        let destination = match crowdrelay_domain::acquisition::agent_smart_link_destination(
+            destination,
+            &[self.public_origin.as_str()],
+        ) {
+            Ok(destination) => destination,
+            Err(refusal) => {
+                tracing::warn!(
+                    outcome_id = %outcome.id,
+                    workspace_id = %workspace_id,
+                    refusal = %refusal,
+                    "refused an agent smart-link destination; the post will go out untracked"
+                );
+                return Ok(None);
+            }
+        };
+        let destination = destination.as_str();
         // The smart_links table enforces UNIQUE(workspace_id, slug) so
         // re-runs of the same outcome won't create duplicates — the ON
         // CONFLICT DO UPDATE handles that. The full simple UUID (32 hex

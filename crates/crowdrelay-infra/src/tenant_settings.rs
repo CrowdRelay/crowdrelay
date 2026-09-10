@@ -27,13 +27,14 @@ pub const DEFAULT_NORTH_STAR_METRIC: &str = "signal_installs";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 6] = [
+pub const EDITABLE_KEYS: [&str; 7] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_SYNESTHESIA_CAMPAIGN_SLUG,
     KEY_SIGNAL_ENABLED,
     KEY_SYNESTHESIA_ENABLED,
     KEY_NORTH_STAR_METRIC,
+    KEY_SOCIAL_AUTO_POST,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -42,6 +43,7 @@ const KEY_SYNESTHESIA_CAMPAIGN_SLUG: &str = "synesthesia_campaign_slug";
 const KEY_SIGNAL_ENABLED: &str = "signal_enabled";
 const KEY_SYNESTHESIA_ENABLED: &str = "synesthesia_enabled";
 const KEY_NORTH_STAR_METRIC: &str = "north_star_metric";
+pub const KEY_SOCIAL_AUTO_POST: &str = "social_auto_post";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -56,6 +58,10 @@ pub struct TenantBrandSettings {
     pub synesthesia_enabled: bool,
     /// Brain north star metric. Default "signal_installs".
     pub north_star_metric: String,
+    /// Social auto-posting: when true, the social post executor publishes to
+    /// platforms that have credentials (Facebook Pages, Instagram) instead of
+    /// drafting for manual review. Default false — the operator turns it on.
+    pub social_auto_post: bool,
 }
 
 impl Default for TenantBrandSettings {
@@ -67,6 +73,7 @@ impl Default for TenantBrandSettings {
             signal_enabled: true,
             synesthesia_enabled: false,
             north_star_metric: DEFAULT_NORTH_STAR_METRIC.to_owned(),
+            social_auto_post: false,
         }
     }
 }
@@ -142,7 +149,7 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4, $5, $6, $7)
+              AND key IN ($2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(workspace_id)
@@ -152,6 +159,7 @@ impl TenantSettingsRepository {
         .bind(KEY_SIGNAL_ENABLED)
         .bind(KEY_SYNESTHESIA_ENABLED)
         .bind(KEY_NORTH_STAR_METRIC)
+        .bind(KEY_SOCIAL_AUTO_POST)
         .fetch_all(&self.pool)
         .await?;
         let mut settings = TenantBrandSettings::default();
@@ -163,6 +171,7 @@ impl TenantSettingsRepository {
                 KEY_SIGNAL_ENABLED => settings.signal_enabled = value == "true",
                 KEY_SYNESTHESIA_ENABLED => settings.synesthesia_enabled = value == "true",
                 KEY_NORTH_STAR_METRIC => settings.north_star_metric = value,
+                KEY_SOCIAL_AUTO_POST => settings.social_auto_post = value == "true",
                 _ => {}
             }
         }
@@ -240,6 +249,7 @@ mod tests {
         assert!(settings.signal_enabled);
         assert!(!settings.synesthesia_enabled);
         assert_eq!(settings.north_star_metric, "signal_installs");
+        assert!(!settings.social_auto_post);
     }
 
     #[test]

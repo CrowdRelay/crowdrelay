@@ -9,6 +9,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
+use url::Url;
 
 use crate::{
     CampaignId, CityId, CitySlug, CountryCode, DestinationUrl, FanId, FanSessionToken,
@@ -597,6 +598,62 @@ pub enum CitySignalError {
     InvalidName,
 }
 
+/// Why an agent-proposed smart-link destination was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum AgentDestinationRefusal {
+    /// Not a usable URL at all.
+    #[error("the destination is not a valid http(s) URL")]
+    NotAUrl,
+    /// A valid URL, pointing somewhere the tenant does not own.
+    #[error("the destination points outside the tenant's own origins")]
+    ForeignOrigin,
+}
+
+/// Validates a smart-link destination an agent proposed.
+///
+/// A smart link is a redirect on the tenant's own domain: `virya.music/l/x`
+/// answers 302 to wherever `destination_url` says. When an agent creates one,
+/// that destination came out of a language model — so without this check the
+/// band's domain is an open redirect whose target a model chooses.
+///
+/// Two things go wrong with that, and the smaller one is the security problem.
+/// A hallucinated or injected destination sends fans off the tenant's domain
+/// under the tenant's name. And the attribution model assumes the far end is a
+/// CrowdRelay page that captures the visitor, so a foreign destination quietly
+/// breaks conversion as well: the click is counted, the fan is never created,
+/// and the post is measured as reach that converted nobody.
+///
+/// The rule is that an agent may only point at origins the tenant owns.
+/// `DestinationUrl::parse` already rejects non-HTTP schemes, embedded
+/// credentials and control characters; what it cannot know is which hosts are
+/// the tenant's. That is the caller's to supply and this function's to
+/// enforce.
+///
+/// **Operator-created links are deliberately not subject to this.** A band
+/// legitimately links its own Bandcamp, Spotify or a festival's ticket page,
+/// and a person choosing that destination is the approval. The restriction is
+/// on the machine, not on the tenant.
+pub fn agent_smart_link_destination(
+    destination: &str,
+    allowed_origins: &[&str],
+) -> Result<DestinationUrl, AgentDestinationRefusal> {
+    let parsed =
+        DestinationUrl::parse(destination).map_err(|_| AgentDestinationRefusal::NotAUrl)?;
+    // Origin comparison, not a prefix match on the whole URL. A prefix test
+    // accepts `https://virya.music.evil.example/x`, which starts with the
+    // tenant's origin and is a different host.
+    let url = Url::parse(parsed.as_str()).map_err(|_| AgentDestinationRefusal::NotAUrl)?;
+    let origin = url.origin().ascii_serialization();
+    if allowed_origins
+        .iter()
+        .any(|allowed| !allowed.is_empty() && origin == *allowed)
+    {
+        Ok(parsed)
+    } else {
+        Err(AgentDestinationRefusal::ForeignOrigin)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,5 +809,71 @@ mod tests {
         assert!(!decoded.email_queued);
         assert_eq!(decoded.retry_after_seconds, None);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod agent_destination_tests {
+    use super::*;
+
+    const OWN: &[&str] = &["https://virya.music"];
+
+    #[test]
+    fn the_tenants_own_origin_is_allowed() {
+        let destination = agent_smart_link_destination("https://virya.music/join", OWN)
+            .expect("the tenant's own page is where an agent link should point");
+        assert_eq!(destination.as_str(), "https://virya.music/join");
+    }
+
+    /// The reason this is an origin comparison and not a prefix test.
+    #[test]
+    fn a_host_that_merely_starts_with_the_tenants_is_refused() {
+        assert_eq!(
+            agent_smart_link_destination("https://virya.music.evil.example/join", OWN),
+            Err(AgentDestinationRefusal::ForeignOrigin),
+            "a prefix match would accept this, and it is a different host"
+        );
+    }
+
+    #[test]
+    fn a_foreign_destination_is_refused() {
+        assert_eq!(
+            agent_smart_link_destination("https://elsewhere.example/track", OWN),
+            Err(AgentDestinationRefusal::ForeignOrigin)
+        );
+    }
+
+    /// A scheme change is a different origin, not a near miss.
+    #[test]
+    fn the_same_host_on_another_scheme_is_refused() {
+        assert_eq!(
+            agent_smart_link_destination("http://virya.music/join", OWN),
+            Err(AgentDestinationRefusal::ForeignOrigin)
+        );
+    }
+
+    #[test]
+    fn something_that_is_not_a_url_is_refused_as_one() {
+        for destination in [
+            "",
+            "not a url",
+            "javascript:alert(1)",
+            "ftp://virya.music/x",
+        ] {
+            assert!(
+                agent_smart_link_destination(destination, OWN).is_err(),
+                "accepted {destination:?}"
+            );
+        }
+    }
+
+    /// With nothing allowlisted, nothing is: an unconfigured tenant must not
+    /// fall open into the behaviour this exists to remove.
+    #[test]
+    fn no_allowed_origin_allows_nothing() {
+        assert_eq!(
+            agent_smart_link_destination("https://virya.music/join", &[]),
+            Err(AgentDestinationRefusal::ForeignOrigin)
+        );
     }
 }

@@ -13,6 +13,11 @@
 //! executor creates `social_posts` rows, marks them `awaiting_manual_post`,
 //! and the operator publishes and registers the URL.
 //!
+//! The live value is read from `tenant_settings.social_auto_post` on each
+//! poll cycle (60s TTL cache), so an operator can flip it from the control
+//! plane without a restart. The env var is the fallback when the database
+//! is unreachable — a DB blip never silently enables publishing.
+//!
 //! With it on, the platforms diverge, and they diverge for reasons rather
 //! than for want of work on one line:
 //!
@@ -128,7 +133,11 @@ pub struct SocialPostExecutorWorker {
     /// this tenant does not hold. Saying that here rather than silently
     /// falling through is the difference between "not built" and "built and
     /// quietly doing nothing".
-    manual_mode: bool,
+    ///
+    /// This is the env-var fallback used at construction time. The live value
+    /// is read from `tenant_settings.social_auto_post` on each poll cycle, so
+    /// an operator can flip it from the control plane without a restart.
+    env_manual_mode: bool,
     /// Page access token for the Graph API, when one is configured.
     ///
     /// The same credential `growth_metric_sync` already reads Page metrics
@@ -173,11 +182,30 @@ impl SocialPostExecutorWorker {
             pool,
             workspace_id,
             poll_interval: POLL_INTERVAL,
-            manual_mode,
+            env_manual_mode: manual_mode,
             facebook_page_access_token,
             http_client,
             public_origin,
         })
+    }
+
+    /// Returns true when the executor should draft (manual mode) rather than
+    /// publish automatically. Reads the live tenant setting from the database
+    /// (60s TTL cache); falls back to the env-var value on any error so a
+    /// database blip never silently enables publishing.
+    async fn is_manual_mode(&self) -> bool {
+        use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
+        let repo = TenantSettingsRepository::new(self.pool.clone());
+        match repo.brand_settings(self.workspace_id.into_uuid()).await {
+            Ok(settings) => !settings.social_auto_post,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to read social_auto_post from tenant settings; falling back to env default"
+                );
+                self.env_manual_mode
+            }
+        }
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -437,7 +465,10 @@ impl SocialPostExecutorWorker {
         // Manual mode (default): mark as awaiting manual post.
         // The operator posts manually to the platform and registers the
         // post URL via the API.
-        if self.manual_mode {
+        //
+        // The live value is read from tenant_settings on each cycle so an
+        // operator can flip it from the control plane without a restart.
+        if self.is_manual_mode().await {
             sqlx::query(
                 r#"
                 UPDATE social_posts
