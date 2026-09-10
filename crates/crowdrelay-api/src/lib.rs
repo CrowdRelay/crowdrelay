@@ -387,6 +387,7 @@ fn is_control_plane_management_path(path: &str) -> bool {
                 | "/v1/control-plane/autopilot/reply-triage"
                 | "/v1/control-plane/autopilot/next-best-actions"
                 | "/v1/control-plane/autopilot/learning-loop"
+                | "/v1/control-plane/autopilot/learning-proof"
                 | "/v1/control-plane/portfolio/overview"
                 | "/v1/control-plane/portfolio/amplification"
                 | "/v1/control-plane/tenant-settings"
