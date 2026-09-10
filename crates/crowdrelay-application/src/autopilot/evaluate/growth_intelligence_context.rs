@@ -145,18 +145,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         } else {
             GrowthStrategy::default()
         };
-        // Collect the unconsumed insights across all snapshots, each kept
-        // beside the template whose prompt would carry it.
+        // The unconsumed insights, deduplicated across snapshots.
         //
-        // The template matters because consumption is not a workspace-wide
-        // fact. An insight is delivered to the LLM only through a dispatch of
-        // its own template, so marking one consumed after a *different*
-        // template dispatched retires it having never been read by anything.
-        // Every template but the one that dispatched silently loses its
-        // accumulated context, which is the opposite of what the feedback
-        // loop is for. Pre-allocate: each snapshot typically has 0-3.
-        let mut pending_insights: Vec<(String, Uuid)> =
-            Vec::with_capacity(snapshots.len() * 2);
+        // Every snapshot now carries the same workspace-wide set, so any
+        // dispatch at all puts all of them in front of a worker and "consumed"
+        // is a workspace-wide fact again. It was not while insights were
+        // routed to their producing template: back then a dispatch of one
+        // template retired every other template's insights unread, which is
+        // why this used to be tracked per template.
+        let mut pending_insights: std::collections::BTreeSet<Uuid> =
+            std::collections::BTreeSet::new();
         // Collect all eligible candidates with their EFE scores
         // and strategy ranks, then sort by (strategy_rank,
         // efe_score) so the brain dispatches the best
@@ -166,7 +164,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             Vec::with_capacity(snapshots.len());
         for snapshot in &snapshots {
             for insight in &snapshot.recent_insights {
-                pending_insights.push((snapshot.template_id.clone(), insight.outcome_id));
+                pending_insights.insert(insight.outcome_id);
             }
             // Build the enriched dispatch context (same as
             // evaluate_growth_intelligence uses) so the novelty
@@ -789,18 +787,17 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 }
             }
         }
-        // Only mark an insight consumed when the template that would carry it
-        // actually dispatched. A template that produced no candidate this
-        // cycle — on cooldown, retired, or gated by budget — never put its
-        // insights in front of a worker, so retiring them here would drop
-        // context nothing had read. Keeping them unconsumed lets them be
-        // re-evaluated next cycle, which is also what happens when the brain
-        // chooses to do nothing at all.
-        let consumed_ids: Vec<Uuid> = pending_insights
-            .iter()
-            .filter(|(template_id, _)| dispatched_templates.contains(template_id))
-            .map(|(_, outcome_id)| *outcome_id)
-            .collect();
+        // Only mark insights consumed once something actually dispatched.
+        // Every dispatched prompt carries all of them, so one dispatch is
+        // enough and which template it was does not matter. A cycle that
+        // dispatched nothing put them in front of nobody, and retiring them
+        // there would drop context nothing had read — so they stay unconsumed
+        // and are re-evaluated next cycle.
+        let consumed_ids: Vec<Uuid> = if dispatched_templates.is_empty() {
+            Vec::new()
+        } else {
+            pending_insights.into_iter().collect()
+        };
         if !consumed_ids.is_empty()
             && self
                 .repository

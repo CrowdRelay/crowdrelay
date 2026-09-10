@@ -127,6 +127,17 @@ fn worker_templates() -> Vec<&'static str> {
         .collect()
 }
 
+/// How many insights ride along in a dispatch prompt.
+///
+/// Every insight now goes to every template rather than only to the one that
+/// produced it, so this is a per-prompt budget and not a per-template one. It
+/// is small on purpose: the insight block is context for the task, and a task
+/// brief that opens with fifty prior findings is a worse brief than one that
+/// opens with eight. The rest are not lost — they are the next eight once
+/// these are consumed, because the query returns the newest unconsumed first
+/// and consumption advances the window.
+const INSIGHT_PROMPT_BUDGET: i64 = 8;
+
 /// How far back `load_agent_execution_health` looks. Deliberately short
 /// compared to the 60-day North Star window: a dead provider or exhausted
 /// quota is an hours-scale fact, and averaging it over days would let a
@@ -284,55 +295,76 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // Load unconsumed insights from agent_outcomes. The brain feeds these
     // into the next worker dispatch prompt ("here's what we already know")
     // and marks them consumed after planning. This closes the feedback loop.
-    // We join with agent_service_tasks to get the template_id that produced
-    // each insight, so the brain can attach insights to the right snapshot.
     //
-    // The template filter belongs in the query, not only downstream. A
-    // snapshot is built per *active* template, and an insight is attached to
-    // the snapshot whose template produced it, so an insight from a disabled
-    // template — or from no identifiable template at all — reaches no snapshot
-    // and no prompt. It is also never marked consumed, because only insights
-    // that reached a snapshot enter the consumed set, and retention deletes
-    // consumed rows only. Such a row is therefore permanent, and it still
-    // occupies one of the 50 slots this query returns. Enough of them and the
-    // window holds nothing the brain can use: the block the LLM receives goes
-    // empty while every part of the code still reports insights loaded.
+    // Routed by kind, not by the template that produced them. All three kinds
+    // read here are statements about the workspace — what a campaign did, what
+    // a release needs, what somebody noticed — and none of them is a fact only
+    // one worker can use. A note about which subreddits answer press angles is
+    // worth as much to the press pitcher as to the scanner that found it.
     //
-    // Filtering here keeps the window full of rows that can actually be
-    // delivered. The two strings are constants, not interpolated input; the
-    // template list is bound.
+    // Routing by producer instead had two failure modes, and the second was
+    // the expensive one. A snapshot exists only for an *active* template, so
+    // an insight from a disabled template reached no snapshot and no prompt;
+    // and because only insights that reach a snapshot are ever marked
+    // consumed, and retention deletes consumed rows only, such a row stayed
+    // forever while still occupying a slot in this window. Past the limit the
+    // window held nothing deliverable at all: the block the worker received
+    // went empty while every log line still said insights were loaded. Routing
+    // by kind removes the class — every row loaded here is deliverable to
+    // whatever dispatches next, so nothing can accumulate undeliverable.
+    //
+    // `template_id` is still selected, as provenance shown to the worker
+    // ("this came from the Reddit scanner"), and the join stays LEFT so an
+    // outcome whose task row is gone keeps its insight instead of losing it.
     const INSIGHTS_WITH_TEMPLATE: &str = r#"
             SELECT ao.id,
-                   ast.template_id,
+                   COALESCE(ast.template_id, 'unknown') AS template_id,
                    ao.kind,
                    COALESCE(ao.payload->'item'->>'headline', ao.payload->'item'->>'subject', '(no headline)') AS headline,
                    COALESCE(ao.payload->'item'->>'detail', ao.payload->'item'->>'body', '') AS detail,
                    ao.payload->'item'->>'recommended_action' AS recommended_action
             FROM agent_outcomes ao
-            JOIN agent_service_tasks ast ON ast.id = ao.task_id
+            LEFT JOIN agent_service_tasks ast ON ast.id = ao.task_id
             WHERE ao.workspace_id = $1
               AND ao.status = 'processed'
               AND ao.consumed_at IS NULL
               AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
-              AND ast.template_id = ANY($2)
             ORDER BY ao.created_at DESC
-            LIMIT 50
+            LIMIT $2
             "#;
-    // Without the agent service's task table there is no way to tell which
-    // template produced an insight, so none of them can be routed to a
-    // snapshot. Skipping the read is what the old query already amounted to —
-    // it labelled every row 'unknown', which matches no template and was
-    // discarded in full a few hundred lines later.
+    // Without the agent service's task table there is no provenance to show,
+    // but the insights themselves are still worth delivering, so the same read
+    // runs without the join.
+    const INSIGHTS_WITHOUT_TEMPLATE: &str = r#"
+            SELECT ao.id,
+                   'unknown'::text AS template_id,
+                   ao.kind,
+                   COALESCE(ao.payload->'item'->>'headline', ao.payload->'item'->>'subject', '(no headline)') AS headline,
+                   COALESCE(ao.payload->'item'->>'detail', ao.payload->'item'->>'body', '') AS detail,
+                   ao.payload->'item'->>'recommended_action' AS recommended_action
+            FROM agent_outcomes ao
+            WHERE ao.workspace_id = $1
+              AND ao.status = 'processed'
+              AND ao.consumed_at IS NULL
+              AND ao.kind IN ('campaign_insight', 'generic_insight', 'release_plan_note')
+            ORDER BY ao.created_at DESC
+            LIMIT $2
+            "#;
     let insights: Vec<(uuid::Uuid, String, String, String, String, Option<String>)> =
         if tasks_table_exists {
             sqlx::query_as(INSIGHTS_WITH_TEMPLATE)
                 .bind(workspace_id.into_uuid())
-                .bind(worker_templates())
+                .bind(INSIGHT_PROMPT_BUDGET)
                 .fetch_all(pool)
                 .await
                 .map_err(map_sqlx)?
         } else {
-            Vec::new()
+            sqlx::query_as(INSIGHTS_WITHOUT_TEMPLATE)
+                .bind(workspace_id.into_uuid())
+                .bind(INSIGHT_PROMPT_BUDGET)
+                .fetch_all(pool)
+                .await
+                .map_err(map_sqlx)?
         };
 
     let recent_insights: Vec<RecentInsight> = insights
@@ -839,12 +871,12 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             })
             .unwrap_or((None, None));
 
-        // Attach insights produced by this template.
-        let template_insights: Vec<RecentInsight> = recent_insights
-            .iter()
-            .filter(|i| i.template_id == *template_id)
-            .cloned()
-            .collect();
+        // Every template gets every insight. The three kinds loaded above are
+        // statements about the workspace rather than about the worker that
+        // happened to notice them, so restricting one to its producer withheld
+        // it from every other worker that could have used it. Already capped
+        // to `INSIGHT_PROMPT_BUDGET` at load, so this clone is bounded.
+        let template_insights = recent_insights.clone();
 
         // Attach engagement history and unengaged targets only to the
         // community-engager snapshot. Other templates don't use them, so

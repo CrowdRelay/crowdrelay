@@ -1,17 +1,18 @@
 //! What the brain hands back to the LLM workers it dispatches.
 //!
-//! An insight produced by one worker run is fed into the next dispatch of the
-//! same template — "here is what your last run already found, do not repeat
-//! it". That routing is by `template_id`, and the brain only builds a snapshot
-//! for a template that is currently active, so an insight attributed to
-//! anything else can never be delivered.
+//! Insights are routed by kind, not by the worker that produced them. The
+//! three kinds fed into prompts — campaign insight, release plan note, generic
+//! insight — are statements about the workspace, and none is a fact only one
+//! worker can use, so each one goes to whichever template dispatches next.
 //!
-//! Undeliverable is not the whole problem. Only insights that reach a snapshot
-//! are ever marked consumed, and retention deletes consumed rows only, so an
-//! undeliverable insight stays `consumed_at IS NULL` permanently — and the
-//! loader takes the 50 newest unconsumed rows. Enough of them and the window
-//! holds nothing that can be delivered: the block the worker receives is
-//! empty while every log line still says insights were loaded.
+//! Routing by producer is what these tests pin against, because it failed in
+//! two ways. A snapshot exists only for an *active* template, so an insight
+//! from a disabled one reached no prompt; and since only insights that reach a
+//! snapshot are ever marked consumed, and retention deletes consumed rows
+//! only, such a row stayed `consumed_at IS NULL` forever while still taking a
+//! slot in the window the loader returns. Past the limit the window held
+//! nothing deliverable at all: the block the worker received went empty while
+//! every log line still said insights were loaded.
 //!
 //! These tests run against a real database because the behavior lives in the
 //! SQL, and because `agent_service_tasks` belongs to the TypeScript agent
@@ -30,7 +31,7 @@ use uuid::Uuid;
 /// A template the brain builds a snapshot for.
 const ACTIVE_TEMPLATE: &str = "community-engager";
 /// A template `WorkerTemplate::is_disabled` excludes, so no snapshot is built
-/// for it and nothing it produced can be routed anywhere.
+/// for it. What it produced is still knowledge, so it still gets delivered.
 const DISABLED_TEMPLATE: &str = "telegram-scanner";
 
 /// The agent service owns this table, so it is absent from a migrated test
@@ -143,8 +144,8 @@ fn headlines(
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn an_insight_reaches_the_template_that_produced_it() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn an_insight_reaches_every_template_not_only_its_producer()
+-> Result<(), Box<dyn std::error::Error>> {
     let (pool, database) = connect().await?;
     let workspace_id = workspace(&pool, "insight-reaches").await?;
     let now = OffsetDateTime::now_utc();
@@ -162,47 +163,81 @@ async fn an_insight_reaches_the_template_that_produced_it() -> Result<(), Box<dy
         .load_growth_intelligence_snapshots(workspace_id, now)
         .await?;
 
+    assert!(
+        !snapshots.is_empty(),
+        "the brain builds a snapshot per active template"
+    );
+    for snapshot in &snapshots {
+        assert_eq!(
+            headlines(&snapshots, &snapshot.template_id),
+            vec!["r/metal responds to tour posts".to_owned()],
+            "what one worker noticed about a community is worth as much to \
+             every other worker, so {} should carry it too",
+            snapshot.template_id
+        );
+    }
+    Ok(())
+}
+
+/// The failure routing-by-producer had, stated as the behavior that replaced
+/// it. A disabled template gets no snapshot of its own, so under the old rule
+/// its insights reached no prompt at all and — never having reached a snapshot
+/// — were never marked consumed either, which is what made them accumulate.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_insight_from_a_disabled_template_is_still_delivered()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database) = connect().await?;
+    let workspace_id = workspace(&pool, "insight-disabled").await?;
+    let now = OffsetDateTime::now_utc();
+    seed_insight(
+        &pool,
+        workspace_id,
+        DISABLED_TEMPLATE,
+        "Polish metal channels cross-promote on Thursdays",
+        now - time::Duration::hours(1),
+    )
+    .await?;
+
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+
+    assert!(
+        snapshots
+            .iter()
+            .all(|snapshot| snapshot.template_id != DISABLED_TEMPLATE),
+        "a disabled template still gets no snapshot — that part is unchanged"
+    );
     assert_eq!(
         headlines(&snapshots, ACTIVE_TEMPLATE),
-        vec!["r/metal responds to tour posts".to_owned()],
-        "an active template's own insight has to reach its snapshot, or the \
-         worker is dispatched with no memory of its last run"
+        vec!["Polish metal channels cross-promote on Thursdays".to_owned()],
+        "and its insight is delivered anyway, because the knowledge does not \
+         stop being true when the worker that found it is switched off"
     );
     Ok(())
 }
 
-/// The starvation this window is vulnerable to.
-///
-/// Insights from a disabled template can never be delivered and are never
-/// marked consumed, so they accumulate without bound. The loader takes the 50
-/// newest unconsumed rows; once more than 50 undeliverable rows are newer than
-/// a deliverable one, the deliverable one falls out of the window and the
-/// active template is dispatched with an empty context block.
+/// The prompt budget. Every template now receives every insight, so the cap
+/// is what keeps a task brief from opening with a hundred prior findings.
+/// Nothing is lost: the newest unconsumed are returned first, and consumption
+/// advances the window.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn undeliverable_insights_do_not_crowd_out_deliverable_ones()
+async fn a_prompt_carries_the_newest_insights_up_to_the_budget()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, database) = connect().await?;
-    let workspace_id = workspace(&pool, "insight-starvation").await?;
+    let workspace_id = workspace(&pool, "insight-budget").await?;
     let now = OffsetDateTime::now_utc();
-
-    // The one insight that can actually be delivered, and the oldest row.
-    seed_insight(
-        &pool,
-        workspace_id,
-        ACTIVE_TEMPLATE,
-        "the deliverable one",
-        now - time::Duration::days(30),
-    )
-    .await?;
-    // Sixty newer rows from a disabled template — more than the window holds.
-    for n in 0..60 {
+    // Twenty insights, newest last by headline number.
+    for n in 0..20 {
         seed_insight(
             &pool,
             workspace_id,
-            DISABLED_TEMPLATE,
-            &format!("undeliverable {n}"),
-            now - time::Duration::hours(i64::from(n) + 1),
+            ACTIVE_TEMPLATE,
+            &format!("insight {n}"),
+            now - time::Duration::hours(20 - i64::from(n)),
         )
         .await?;
     }
@@ -212,18 +247,20 @@ async fn undeliverable_insights_do_not_crowd_out_deliverable_ones()
         .load_growth_intelligence_snapshots(workspace_id, now)
         .await?;
 
+    let delivered = headlines(&snapshots, ACTIVE_TEMPLATE);
     assert_eq!(
-        headlines(&snapshots, ACTIVE_TEMPLATE),
-        vec!["the deliverable one".to_owned()],
-        "sixty undeliverable insights must not push the one deliverable \
-         insight out of the window"
+        delivered.len(),
+        8,
+        "the prompt budget caps what rides along in one dispatch"
+    );
+    assert_eq!(
+        delivered.first().map(String::as_str),
+        Some("insight 19"),
+        "and it is the newest that ride, not an arbitrary eight"
     );
     assert!(
-        snapshots
-            .iter()
-            .all(|snapshot| snapshot.template_id != DISABLED_TEMPLATE),
-        "a disabled template gets no snapshot, which is why its insights can \
-         never be delivered or consumed"
+        !delivered.iter().any(|headline| headline == "insight 0"),
+        "the oldest waits for the next window rather than crowding this one"
     );
     Ok(())
 }
