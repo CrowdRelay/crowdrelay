@@ -81,6 +81,43 @@ impl Default for ShowOperationsPolicy {
     }
 }
 
+/// How many times the escalation interval may double.
+///
+/// Four doublings takes a 12-hour cooldown to eight days, which is far enough
+/// apart to stop being noise and close enough to stay a reminder. Capped
+/// rather than unbounded because a task nobody will ever complete should still
+/// resurface occasionally -- silence would be a different kind of wrong.
+const MAX_ESCALATION_DOUBLINGS: u32 = 4;
+
+/// The gap before an unanswered escalation may repeat.
+///
+/// The interval was a constant, so a task ignored for six days was escalated
+/// at exactly the rate of one ignored for six hours. Production shows what
+/// that costs: one show task escalated 61 times across six days, 73 of 551
+/// decisions in the whole ledger spent re-asking two subjects the same
+/// question. Nobody reads the twelfth reminder more carefully than the first.
+///
+/// So the interval widens with how long the task has been due -- the only
+/// evidence available here, and it needs no escalation counter and no schema
+/// change. Each full base period doubles the gap, up to
+/// [`MAX_ESCALATION_DOUBLINGS`]: 12h, 24h, 48h, 96h, then 8 days.
+#[must_use]
+pub fn escalation_interval(policy: ShowOperationsPolicy, overdue: Duration) -> Duration {
+    let base_hours = i64::from(policy.escalation_cooldown_hours.max(1));
+    let base = Duration::hours(base_hours);
+    // Whole base periods elapsed since the task fell due. Saturating: a clock
+    // skew that makes `overdue` negative is not a reason to escalate faster.
+    let periods = overdue
+        .whole_hours()
+        .max(0)
+        .checked_div(base_hours)
+        .unwrap_or(0);
+    let doublings = u32::try_from(periods)
+        .unwrap_or(MAX_ESCALATION_DOUBLINGS)
+        .min(MAX_ESCALATION_DOUBLINGS);
+    base * 2_i32.saturating_pow(doublings)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShowOperationsDecision {
     Hold(ShowOperationsHoldReason),
@@ -111,16 +148,16 @@ pub fn evaluate_show_task(
         };
     }
 
-    let due = if snapshot.task.is_post_show() {
-        now >= snapshot.starts_at + Duration::hours(i64::from(policy.post_show_escalate_hours))
+    let due_at = if snapshot.task.is_post_show() {
+        snapshot.starts_at + Duration::hours(i64::from(policy.post_show_escalate_hours))
     } else {
-        now >= snapshot.starts_at - Duration::hours(i64::from(policy.escalate_hours_before))
+        snapshot.starts_at - Duration::hours(i64::from(policy.escalate_hours_before))
     };
-    if !due {
+    if now < due_at {
         return ShowOperationsDecision::Hold(ShowOperationsHoldReason::NotDue);
     }
 
-    let cooldown = Duration::hours(i64::from(policy.escalation_cooldown_hours.max(1)));
+    let cooldown = escalation_interval(policy, now - due_at);
     if snapshot
         .last_escalated_at
         .is_some_and(|at| at <= now && now - at < cooldown)
@@ -155,6 +192,55 @@ mod tests {
             evaluate_show_task(snapshot, ShowOperationsPolicy::default(), now()),
             ShowOperationsDecision::AutoComplete { .. }
         ));
+    }
+
+    /// The reminder cadence that made 61 escalations of one task in six days.
+    #[test]
+    fn the_escalation_gap_widens_the_longer_a_task_is_ignored() {
+        let policy = ShowOperationsPolicy::default();
+        let base = Duration::hours(12);
+        assert_eq!(escalation_interval(policy, Duration::ZERO), base);
+        assert_eq!(escalation_interval(policy, Duration::hours(12)), base * 2);
+        assert_eq!(escalation_interval(policy, Duration::hours(24)), base * 4);
+        assert_eq!(escalation_interval(policy, Duration::hours(36)), base * 8);
+    }
+
+    #[test]
+    fn the_escalation_gap_stops_widening_so_a_task_never_goes_silent() {
+        let policy = ShowOperationsPolicy::default();
+        let capped = Duration::hours(12) * 2_i32.pow(MAX_ESCALATION_DOUBLINGS);
+        assert_eq!(escalation_interval(policy, Duration::days(30)), capped);
+        assert_eq!(escalation_interval(policy, Duration::days(365)), capped);
+    }
+
+    /// A clock that runs backwards must not escalate faster than a clock that
+    /// does not.
+    #[test]
+    fn a_negative_overdue_uses_the_base_interval() {
+        let policy = ShowOperationsPolicy::default();
+        assert_eq!(
+            escalation_interval(policy, Duration::hours(-48)),
+            Duration::hours(12)
+        );
+    }
+
+    #[test]
+    fn a_long_ignored_task_is_held_where_a_fresh_one_would_escalate() {
+        let policy = ShowOperationsPolicy::default();
+        // Due four days ago, last escalated a day ago. Under the old fixed
+        // 12-hour cooldown this escalated again; now the gap is 8 days.
+        let snapshot = ShowTaskSnapshot {
+            event_id: EventId::new(),
+            task: ShowTaskKind::GateDeviceCharged,
+            starts_at: now() - Duration::days(4) + Duration::hours(36),
+            already_done: false,
+            verifiable_fact: false,
+            last_escalated_at: Some(now() - Duration::days(1)),
+        };
+        assert_eq!(
+            evaluate_show_task(snapshot, policy, now()),
+            ShowOperationsDecision::Hold(ShowOperationsHoldReason::Cooldown)
+        );
     }
 
     #[test]
