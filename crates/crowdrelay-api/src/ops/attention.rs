@@ -40,6 +40,28 @@ struct UnpublishedDraftChannel {
     oldest_drafted_at: Option<OffsetDateTime>,
 }
 
+/// One community the brain wants to post to and cannot, because nobody has
+/// joined it.
+///
+/// Joining is a prerequisite of posting: many subreddits refuse a post from a
+/// non-member outright, and posting to a community you have not joined is the
+/// pattern that gets an account flagged -- the account the whole discovery
+/// loop reads through. So the gate is correct, and what it costs has to be
+/// visible or it reads as a brain with nothing to say.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct BlockedCommunity {
+    /// The community, as the operator would search for it.
+    community: String,
+    /// Members, when discovery recorded it. The operator's own tiebreak
+    /// between two communities the brain wants equally.
+    member_count: Option<i32>,
+    /// When this community was discovered. A backlog that is weeks old is a
+    /// channel nobody is running, which is a different problem from one that
+    /// filled up this morning.
+    #[serde(with = "time::serde::rfc3339::option")]
+    discovered_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Serialize)]
 struct OperatorAttentionSnapshot {
     summary: OpsSummary,
@@ -66,6 +88,19 @@ struct OperatorAttentionSnapshot {
     /// publishes reaches nobody, so the work the brain did is spent and the
     /// fan it would have brought does not arrive.
     unpublished_drafts: Vec<UnpublishedDraftChannel>,
+    /// Communities the brain has decided it wants to post to and cannot,
+    /// because nobody has joined them.
+    ///
+    /// The sibling of `unpublished_drafts` and the earlier half of the same
+    /// story. A draft is work the brain finished and nobody published; this is
+    /// work the brain cannot even start. Production reached 119 discovered
+    /// communities with none joined, which gated out every community candidate
+    /// -- no decision row, no draft, nothing in any queue. The Reddit channel
+    /// read as idle when it was blocked on one manual step.
+    ///
+    /// Most-recently-discovered first, capped: this is a prompt to go and join
+    /// something, not a directory.
+    blocked_communities: Vec<BlockedCommunity>,
     /// What the brain makes of its own recent performance.
     ///
     /// This view exists to answer "what needs me?", and a fanbase that is
@@ -94,23 +129,33 @@ struct BrainSelfAssessment {
 
 pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let timeout_duration = state.ops.operation_timeout;
-    let summary = run_with_timeout(timeout_duration, load_summary(&state.ops));
-    let alerts = run_with_timeout(timeout_duration, load_alerts(&state.ops));
-    let dead_outbox = run_with_timeout(timeout_duration, load_dead_outbox(&state.ops));
-    let dead_deliveries = run_with_timeout(timeout_duration, load_dead_deliveries(&state.ops));
-    let dead_push = run_with_timeout(timeout_duration, load_dead_push(&state.ops));
-    let ecosystem = run_with_timeout(timeout_duration, load_attention_ecosystem(&state));
-    let findings = run_with_timeout(timeout_duration, load_open_findings(&state));
-    let needs_you = run_with_timeout(timeout_duration, load_needs_you(&state.ops));
-    let brain = run_with_timeout(timeout_duration, load_brain_assessment(&state.ops));
-    let unpublished_drafts = run_with_timeout(timeout_duration, load_unpublished_drafts(&state));
+    // Eleven reads, a pool of eight. Without the limiter this page asks for
+    // more connections than exist and holds every one of them, so any other
+    // request to this API waits behind a single operator refresh.
+    let limiter = tokio::sync::Semaphore::new(OPS_FAN_OUT_LIMIT);
+    let summary = run_limited(&limiter, timeout_duration, load_summary(&state.ops));
+    let alerts = run_limited(&limiter, timeout_duration, load_alerts(&state.ops));
+    let dead_outbox = run_limited(&limiter, timeout_duration, load_dead_outbox(&state.ops));
+    let dead_deliveries =
+        run_limited(&limiter, timeout_duration, load_dead_deliveries(&state.ops));
+    let dead_push = run_limited(&limiter, timeout_duration, load_dead_push(&state.ops));
+    let ecosystem = run_limited(&limiter, timeout_duration, load_attention_ecosystem(&state));
+    let findings = run_limited(&limiter, timeout_duration, load_open_findings(&state));
+    let needs_you = run_limited(&limiter, timeout_duration, load_needs_you(&state.ops));
+    let brain = run_limited(&limiter, timeout_duration, load_brain_assessment(&state.ops));
+    let unpublished_drafts =
+        run_limited(&limiter, timeout_duration, load_unpublished_drafts(&state));
+    let blocked_communities =
+        run_limited(&limiter, timeout_duration, load_blocked_communities(&state.ops));
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
+        blocked_communities,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
+        blocked_communities,
     );
 
     let request_id_value = request_id(&headers);
@@ -154,6 +199,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let blocked_communities = match blocked_communities {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -170,6 +219,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             needs_you,
             awaiting_approval,
             unpublished_drafts,
+            blocked_communities,
             brain,
         },
     )
@@ -206,6 +256,43 @@ async fn load_unpublished_drafts(
     )
     .bind(state.ticketing.workspace_id().into_uuid())
     .fetch_all(state.ticketing.pool())
+    .await
+    .map_err(OpsError::sqlx)
+}
+
+/// Communities with a wanted post and no membership.
+///
+/// The predicate is the join worker's own definition of demand -- an active,
+/// unjoined subreddit carrying a promoted, unrefused community target -- so
+/// this surface, the `crowdrelay_brain_communities_blocked_on_join` gauge and
+/// the worker's own ordering all agree on what "wanted" means instead of
+/// drifting into three different answers.
+async fn load_blocked_communities(state: &OpsState) -> Result<Vec<BlockedCommunity>, OpsError> {
+    sqlx::query_as::<_, BlockedCommunity>(
+        r#"
+        SELECT place.name AS community,
+               place.member_count,
+               place.created_at AS discovered_at
+        FROM discovery_places AS place
+        WHERE place.workspace_id = $1
+          AND place.place_kind = 'subreddit'
+          AND place.membership_state = 'not_joined'
+          AND place.status = 'active'
+          AND EXISTS (
+                SELECT 1 FROM agent_outreach_targets AS t
+                 WHERE t.workspace_id = place.workspace_id
+                   AND t.place_id = place.id
+                   AND t.status = 'promoted'
+                   AND t.target_kind = 'community'
+                   AND t.subreddit IS NOT NULL
+                   AND t.screening_verdict IS DISTINCT FROM 'refused'
+              )
+        ORDER BY place.member_count DESC NULLS LAST, place.name
+        LIMIT 20
+        "#,
+    )
+    .bind(state.workspace_id().into_uuid())
+    .fetch_all(&state.pool)
     .await
     .map_err(OpsError::sqlx)
 }

@@ -722,6 +722,45 @@ where
         .map_err(Into::into)
 }
 
+/// How many of one endpoint's queries may hold a database connection at once.
+///
+/// The attention view fans out eleven independent reads through one
+/// `tokio::join!`. The pool is eight, so without a limit a single page load
+/// asks for more connections than exist, takes every one of them, and every
+/// other request to this API waits behind it. The section that loses the race
+/// then reports its own timeout, which is how identical slowness surfaces as a
+/// different broken section on each refresh.
+///
+/// Half the pool, so a page load cannot starve the rest of the API. The
+/// remaining arms queue on `acquire()` rather than failing -- this bounds
+/// concurrency, it does not drop work.
+const OPS_FAN_OUT_LIMIT: usize = 4;
+
+/// `run_with_timeout`, holding a permit for the duration of the query.
+///
+/// The timeout starts before the permit is acquired on purpose: an arm that
+/// spends its whole budget waiting for a connection has failed to answer in
+/// time, and saying so is more honest than reporting a fast query that never
+/// ran.
+async fn run_limited<T, E>(
+    limiter: &tokio::sync::Semaphore,
+    duration: Duration,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, OpsError>
+where
+    E: Into<OpsError>,
+{
+    timeout(duration, async {
+        let _permit = limiter
+            .acquire()
+            .await
+            .map_err(|_| OpsError::Unavailable)?;
+        future.await.map_err(Into::into)
+    })
+    .await
+    .map_err(|_| OpsError::Unavailable)?
+}
+
 fn private_json<T: Serialize>(status: StatusCode, body: T) -> Response {
     (status, [(CACHE_CONTROL, PRIVATE_NO_STORE)], Json(body)).into_response()
 }
