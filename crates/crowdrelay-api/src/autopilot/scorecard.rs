@@ -26,6 +26,10 @@ pub struct AgentScorecard {
     /// This is not a log — it's results: what the agent did and whether it
     /// worked, in human-readable form.
     pub recent_results: Vec<RecentResult>,
+    /// The brain's learning loop state: metacognition, evidence readiness,
+    /// and measurement horizon breakdown. Lets the operator see whether
+    /// the brain is learning from its actions, not just whether it acted.
+    pub learning: LearningState,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +141,50 @@ pub struct RecentResult {
     pub executor_id: Option<String>,
 }
 
+/// The brain's learning loop state. Surfaces the causal chain
+/// (action → measurement → evidence → learning → changed decision)
+/// so the operator can see whether the brain is getting smarter, not
+/// just whether it is busy.
+#[derive(Debug, Serialize)]
+pub struct LearningState {
+    /// The brain's self-assessment from the most recent cycle:
+    /// improving, learning, stagnant, regressing, or initializing.
+    pub metacognition: Option<String>,
+    /// Total cycles where the posterior was updated with new evidence.
+    pub learning_cycles: i64,
+    /// Total cycles where the brain's state was "improving".
+    pub improving_cycles_total: i64,
+    /// Evidence rows with at least one partial resolution (3d/7d
+    /// checkpoint stamped). The brain can learn from partial evidence
+    /// before all horizons finish.
+    pub evidence_partial: i64,
+    /// Evidence rows fully resolved (all measurements terminal).
+    pub evidence_resolved: i64,
+    /// Evidence rows with action_id, not yet started learning.
+    pub evidence_pending: i64,
+    /// When the last partial resolution was stamped.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_partial_resolution_at: Option<OffsetDateTime>,
+    /// When the last full resolution was stamped.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_full_resolution_at: Option<OffsetDateTime>,
+    /// Measurements pending by horizon, so the operator can see
+    /// when the next learning signal will arrive.
+    pub measurements_by_horizon: Vec<MeasurementHorizon>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MeasurementHorizon {
+    /// e.g. "agent_run_signal_installs_7d", "incremental_fan_growth_14d"
+    pub kind: String,
+    pub pending: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    /// When the next pending measurement becomes due, if any.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub next_due_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, FromRow)]
 struct StatusRow {
     agent_enabled: bool,
@@ -176,6 +224,36 @@ struct TrackRecordRow {
     /// No measurement exists and none is coming. The real gap.
     unmeasured: i64,
     next_measurement_due_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct MetacognitionRow {
+    metacognition: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MetacognitionPayload {
+    state: Option<String>,
+    learning_cycles: Option<i64>,
+    improving_cycles_total: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct EvidenceRow {
+    evidence_partial: i64,
+    evidence_resolved: i64,
+    evidence_pending: i64,
+    last_partial_resolution_at: Option<OffsetDateTime>,
+    last_full_resolution_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct MeasurementHorizonRow {
+    kind: String,
+    pending: i64,
+    succeeded: i64,
+    failed: i64,
+    next_due_at: Option<OffsetDateTime>,
 }
 
 async fn load_agent_scorecard(
@@ -449,6 +527,73 @@ async fn load_agent_scorecard(
     .fetch_all(pool)
     .await?;
 
+    // 6. Learning state: metacognition from the most recent decision that
+    //    carries a snapshot, evidence readiness, and measurement horizon
+    //    breakdown. This is the causal-chain visibility the operator needs
+    //    to answer "is the brain getting smarter?" not just "is it busy?".
+    let meta_row = sqlx::query_as::<_, MetacognitionRow>(
+        r#"
+        SELECT (input_snapshot->'snapshot'->'metacognition')::text AS metacognition
+        FROM viryaos_autopilot_decisions
+        WHERE workspace_id = $1
+          AND input_snapshot ? 'snapshot'
+          AND input_snapshot->'snapshot' ? 'metacognition'
+        ORDER BY evaluated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (metacognition, learning_cycles, improving_cycles_total) = match meta_row {
+        Some(row) => {
+            let p = row.metacognition
+                .and_then(|s| serde_json::from_str::<MetacognitionPayload>(&s).ok());
+            (
+                p.as_ref().and_then(|m| m.state.clone()),
+                p.as_ref().and_then(|m| m.learning_cycles).unwrap_or(0),
+                p.as_ref().and_then(|m| m.improving_cycles_total).unwrap_or(0),
+            )
+        }
+        None => (None, 0, 0),
+    };
+
+    let evidence_row = sqlx::query_as::<_, EvidenceRow>(
+        r#"
+        SELECT
+            count(*) FILTER (WHERE partial_resolution_count > 0 AND resolved_at IS NULL)::bigint AS evidence_partial,
+            count(*) FILTER (WHERE resolved_at IS NOT NULL)::bigint AS evidence_resolved,
+            count(*) FILTER (WHERE resolved_at IS NULL AND partial_resolution_count = 0)::bigint AS evidence_pending,
+            max(last_partial_resolution_at) AS last_partial_resolution_at,
+            max(resolved_at) AS last_full_resolution_at
+        FROM viryaos_growth_evidence
+        WHERE workspace_id = $1
+          AND action_id IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+
+    let horizon_rows = sqlx::query_as::<_, MeasurementHorizonRow>(
+        r#"
+        SELECT
+            measurement_kind AS kind,
+            count(*) FILTER (WHERE status = 'pending')::bigint AS pending,
+            count(*) FILTER (WHERE status = 'succeeded')::bigint AS succeeded,
+            count(*) FILTER (WHERE status = 'failed')::bigint AS failed,
+            min(due_at) FILTER (WHERE status = 'pending') AS next_due_at
+        FROM viryaos_autopilot_measurements
+        WHERE workspace_id = $1
+        GROUP BY measurement_kind
+        ORDER BY min(due_at) FILTER (WHERE status = 'pending') NULLS LAST
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
     Ok(AgentScorecard {
         status: AgentStatus {
             agent_enabled: status_row.agent_enabled,
@@ -479,6 +624,23 @@ async fn load_agent_scorecard(
         },
         by_context: contexts,
         recent_results: recent,
+        learning: LearningState {
+            metacognition,
+            learning_cycles,
+            improving_cycles_total,
+            evidence_partial: evidence_row.evidence_partial,
+            evidence_resolved: evidence_row.evidence_resolved,
+            evidence_pending: evidence_row.evidence_pending,
+            last_partial_resolution_at: evidence_row.last_partial_resolution_at,
+            last_full_resolution_at: evidence_row.last_full_resolution_at,
+            measurements_by_horizon: horizon_rows.into_iter().map(|r| MeasurementHorizon {
+                kind: r.kind,
+                pending: r.pending,
+                succeeded: r.succeeded,
+                failed: r.failed,
+                next_due_at: r.next_due_at,
+            }).collect(),
+        },
     })
 }
 
