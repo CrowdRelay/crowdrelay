@@ -11,7 +11,9 @@
 //! `ORDER BY` that drifts from it.
 
 use super::*;
-use crowdrelay_application::autopilot::{ActionBriefing, AutopilotActionPayload, NextBestAction};
+use crowdrelay_application::autopilot::{
+    ActionBriefing, AutopilotActionPayload, BriefingField, NextBestAction,
+};
 use crowdrelay_domain::plays::PlayKind;
 use crowdrelay_domain::{
     growth_metrics::MetricValueTier,
@@ -203,6 +205,7 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     let mut candidates = Vec::with_capacity(rows.len());
     let mut identity: HashMap<(Uuid, String), (Uuid, Option<Uuid>)> =
         HashMap::with_capacity(rows.len());
+    let mut outreach_targets: Vec<crowdrelay_domain::OutreachTargetId> = Vec::new();
     for row in rows {
         let Some(authority) = AuthorityState::from_disposition(&row.disposition) else {
             continue;
@@ -229,11 +232,22 @@ pub(in crate::autopilot) async fn load_next_best_actions(
         // The briefing is the human-readable rendering of the action payload.
         // A payload this build cannot parse yields `None` rather than a guess:
         // an invented briefing would be worse than none.
-        let briefing = row.payload.as_ref().and_then(|payload| {
-            serde_json::from_value::<AutopilotActionPayload>(payload.clone())
-                .ok()
-                .map(|parsed| parsed.briefing())
+        let parsed_payload = row.payload.as_ref().and_then(|payload| {
+            serde_json::from_value::<AutopilotActionPayload>(payload.clone()).ok()
         });
+        // An outreach briefing names the target and the template but never who
+        // the mail actually goes to, because the outreach domain deliberately
+        // holds no address: it decides whether a touch is allowed, and the
+        // executor resolves the contact at send time. That is the right
+        // boundary and it stays — but it left the operator approving "send a
+        // pitch to Pitchfork" with nothing on screen saying which mailbox that
+        // is. The address is joined here, in infra, where SQL already lives.
+        if let Some(AutopilotActionPayload::RequestOutreach { target_id, .. }) =
+            parsed_payload.as_ref()
+        {
+            outreach_targets.push(*target_id);
+        }
+        let briefing = parsed_payload.map(|parsed| parsed.briefing());
         candidates.push((
             row.due_at,
             briefing,
@@ -261,6 +275,49 @@ pub(in crate::autopilot) async fn load_next_best_actions(
                 ),
             },
         ));
+    }
+
+    // One batched lookup for every outreach contact in this queue, rather than
+    // a query per row. Only verified, contactable targets are returned, which
+    // is the same predicate the executor enforces at send time — so a briefing
+    // never advertises an address the send would refuse to use.
+    let contact_by_target: HashMap<Uuid, String> = if outreach_targets.is_empty() {
+        HashMap::new()
+    } else {
+        let ids: Vec<Uuid> = outreach_targets.iter().map(|id| id.into_uuid()).collect();
+        sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT id, contact_email
+            FROM viryaos_outreach_targets
+            WHERE workspace_id = $1
+              AND id = ANY($2)
+              AND active
+              AND verified
+              AND accepts_outreach
+              AND NOT do_not_contact
+              AND contact_email IS NOT NULL
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&ids)
+        .fetch_all(&repo.pool)
+        .await
+        .map_err(map_sqlx)?
+        .into_iter()
+        .collect()
+    };
+
+    for (_, briefing, candidate) in &mut candidates {
+        let (Some(briefing), Some(email)) = (
+            briefing.as_mut(),
+            contact_by_target.get(&candidate.subject_id),
+        ) else {
+            continue;
+        };
+        briefing.content.push(BriefingField {
+            label: "Sends to".to_owned(),
+            value: email.clone(),
+        });
     }
 
     let due_at_by_subject: HashMap<(Uuid, String), OffsetDateTime> = candidates
