@@ -45,6 +45,32 @@ WHERE membership_state = 'rejected'
       OR membership_note LIKE '%auth key missing%'
   );
 
+-- Admit the new refusal reason before writing it.
+--
+-- `refusal_reason` is constrained to the reasons the screener could produce,
+-- and `previously_refused` is new, so the UPDATE below fails the check without
+-- this. Widening a CHECK is an expand-only change: every value that was legal
+-- before stays legal, so an older binary still writing `poor_fit` is
+-- unaffected and the constraint can be added back without a table rewrite.
+ALTER TABLE agent_outreach_targets
+    DROP CONSTRAINT IF EXISTS agent_outreach_targets_refusal_reason_check;
+ALTER TABLE agent_outreach_targets
+    ADD CONSTRAINT agent_outreach_targets_refusal_reason_check
+    CHECK (
+        refusal_reason IS NULL
+        OR refusal_reason = ANY (ARRAY[
+            'route_inferred',
+            'evidence_missing',
+            'paid_placement',
+            'sells_placement',
+            'implausible_engagement',
+            'indiscriminate_churn',
+            'poor_fit',
+            'too_small',
+            'previously_refused'
+        ])
+    );
+
 -- Release the community targets whose refusal was a consequence of the above.
 --
 -- `community_promotion` screens a place once: its candidate query skips any
