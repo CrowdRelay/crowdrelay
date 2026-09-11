@@ -64,6 +64,69 @@ pub enum CommunityJoinError {
     RateLimited,
     #[error("http client build failed: {0}")]
     ClientBuild(reqwest::Error),
+    #[error("no subreddit slug in place url: {0}")]
+    NotASubreddit(String),
+}
+
+impl CommunityJoinError {
+    /// Whether this failure is Reddit refusing us, as opposed to our own side
+    /// failing before Reddit ever saw the request.
+    ///
+    /// `membership_state = 'rejected'` is terminal: `claim_joinable_places`
+    /// only ever claims `not_joined`, so a rejected row is never retried. It
+    /// therefore has to mean "the community said no", and nothing else.
+    ///
+    /// Every error used to land there. Seventy-one places were marked rejected
+    /// on this tenant and not one of them was a refusal: thirty-seven were our
+    /// agent service answering 503 "no reddit credentials stored", thirty were
+    /// our own 400 on a malformed subreddit, three were the agent service being
+    /// unreachable, and the last was a Reddit login the error itself called
+    /// retryable. A ten-minute credential outage permanently burned every
+    /// community it touched.
+    fn is_refusal(&self) -> bool {
+        match self {
+            // Our own side: database, transport, config, a row we cannot use.
+            Self::Database(_)
+            | Self::Http(_)
+            | Self::NoAuthKey
+            | Self::ClientBuild(_)
+            | Self::RateLimited
+            | Self::NotASubreddit(_) => false,
+            // The agent service answered. Only a 4xx that is not our own
+            // validation error means Reddit itself turned us down; a 5xx is
+            // the service failing, and a 400 is the service rejecting our
+            // request before sending it.
+            Self::AgentsService(message) => {
+                !message.contains("HTTP 5") && !message.contains("HTTP 400")
+            }
+        }
+    }
+}
+
+/// The subreddit slug for a place, from its canonical URL.
+///
+/// Falls back to the name only when it is already slug-shaped, so a title
+/// never reaches the API as a subreddit.
+fn subreddit_slug(url: &str, name: &str) -> Option<String> {
+    let slug_shaped = |value: &str| {
+        let value = value
+            .trim()
+            .trim_start_matches("/r/")
+            .trim_start_matches("r/");
+        (1..=21).contains(&value.chars().count())
+            && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if let Some(rest) = url.split("/r/").nth(1) {
+        let candidate = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+        if slug_shaped(candidate) {
+            return Some(candidate.to_owned());
+        }
+    }
+    let candidate = name
+        .trim()
+        .trim_start_matches("/r/")
+        .trim_start_matches("r/");
+    slug_shaped(candidate).then(|| candidate.to_owned())
 }
 
 #[derive(Clone)]
@@ -178,14 +241,20 @@ impl CommunityJoinExecutorWorker {
                     break;
                 }
                 Err(error) => {
+                    // `rejected` is terminal. It is written only when Reddit
+                    // actually refused; our own failures go back to
+                    // `not_joined` so the next cycle retries them.
+                    let refused = error.is_refusal();
                     tracing::warn!(
                         place_id = %place.place_id,
-                        subreddit = %place.name,
+                        place = %place.name,
                         error = %error,
+                        refused,
                         "failed to join community"
                     );
                     let msg = error.to_string();
-                    self.set_membership(place.place_id, "rejected", Some(&msg))
+                    let state = if refused { "rejected" } else { "not_joined" };
+                    self.set_membership(place.place_id, state, Some(&msg))
                         .await
                         .ok();
                 }
@@ -333,9 +402,18 @@ impl CommunityJoinExecutorWorker {
         );
         let url = format!("{}/reddit/join", self.agent_service_url);
 
-        // Extract the subreddit name from the place name (stored without
-        // the r/ prefix in discovery_places).
-        let subreddit = place.name.trim_start_matches("r/");
+        // `discovery_places.name` is the subreddit's *title*, not its slug —
+        // "Death Metal: death metal bands, death metal music, and death metal
+        // culture", "/r/Metalcore - news, reviews, videos &amp; discussion".
+        // Sending that as a subreddit produced
+        //   HTTP 400 {"error":"subreddit must be 2-21 chars of A-Za-z0-9_"}
+        // thirty times, from our own validator, before the request ever
+        // reached Reddit. The slug was in `url` the whole time, which this
+        // struct already selected and marked `#[allow(dead_code)]`.
+        let Some(subreddit) = subreddit_slug(&place.url, &place.name) else {
+            return Err(CommunityJoinError::NotASubreddit(place.url.clone()));
+        };
+        let subreddit = subreddit.as_str();
 
         let payload = serde_json::json!({
             "subreddit": subreddit,
@@ -403,13 +481,100 @@ impl CommunityJoinExecutorWorker {
 struct ClaimedPlace {
     place_id: Uuid,
     name: String,
-    #[allow(dead_code)]
     url: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_slug_comes_from_the_url_not_the_title() {
+        // Every one of these is a real row that was marked rejected on this
+        // tenant, with its title sent as the subreddit.
+        for (url, title, expected) in [
+            (
+                "https://www.reddit.com/r/death_metal",
+                "Death Metal: death metal bands, death metal music, and death metal culture",
+                "death_metal",
+            ),
+            (
+                "https://www.reddit.com/r/EODM",
+                "Eagles of Death Metal",
+                "EODM",
+            ),
+            (
+                "https://www.reddit.com/r/Metalcore",
+                "/r/Metalcore - news, reviews, videos &amp; discussion",
+                "Metalcore",
+            ),
+            (
+                "https://www.reddit.com/r/guitarcirclejerk",
+                "All Rig... No Gig",
+                "guitarcirclejerk",
+            ),
+            (
+                "https://www.reddit.com/r/melodicdeathmetal/",
+                "Melodic Death Metal - news, reviews, videos and discussion.",
+                "melodicdeathmetal",
+            ),
+        ] {
+            assert_eq!(subreddit_slug(url, title).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_title_is_never_sent_as_a_subreddit() {
+        // No usable URL and a title that is not slug-shaped: the row is
+        // unusable, and saying so beats sending a sentence to the API.
+        assert_eq!(
+            subreddit_slug(
+                "https://example.com/whatever",
+                "Death Metal: bands and culture"
+            ),
+            None
+        );
+        // A name that is already a slug is still accepted when the URL has none.
+        assert_eq!(
+            subreddit_slug("https://example.com/x", "r/Metalcore").as_deref(),
+            Some("Metalcore")
+        );
+    }
+
+    #[test]
+    fn only_reddit_refusing_us_counts_as_a_rejection() {
+        // `rejected` is terminal, so everything that is not Reddit saying no
+        // has to stay retryable. These four messages are the exact ones this
+        // tenant recorded, in the counts it recorded them.
+        let ours = [
+            CommunityJoinError::AgentsService(
+                "agents /reddit/join HTTP 503 Service Unavailable: {\"error\":\"no reddit \
+                 credentials stored — POST /reddit/credentials first\"}"
+                    .to_owned(),
+            ),
+            CommunityJoinError::AgentsService(
+                "agents /reddit/join HTTP 400 Bad Request: {\"error\":\"subreddit must be \
+                 2-21 chars of A-Za-z0-9_\"}"
+                    .to_owned(),
+            ),
+            CommunityJoinError::NoAuthKey,
+            CommunityJoinError::RateLimited,
+            CommunityJoinError::NotASubreddit("https://example.com/x".to_owned()),
+        ];
+        for error in ours {
+            assert!(
+                !error.is_refusal(),
+                "our own failure must stay retryable: {error}"
+            );
+        }
+
+        // Reddit itself turning us down is terminal, and should be.
+        let theirs = CommunityJoinError::AgentsService(
+            "agents /reddit/join HTTP 403 Forbidden: {\"error\":\"subreddit is private\"}"
+                .to_owned(),
+        );
+        assert!(theirs.is_refusal());
+    }
 
     #[test]
     fn max_joins_per_24h_is_bounded() {
