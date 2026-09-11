@@ -569,7 +569,28 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                              AND t.subreddit IS NOT NULL
                              AND t.screening_verdict IS DISTINCT FROM 'refused'
                         )
-                )::bigint AS communities_blocked_on_join
+                )::bigint AS communities_blocked_on_join,
+                -- The two numbers that make the one above readable.
+                --
+                -- `blocked_on_join` reaching zero has two opposite meanings:
+                -- every wanted community was joined, or every wanted community
+                -- was lost. Production hit the second -- 71 places went to
+                -- `rejected` in one hour because our own agent service
+                -- answered /reddit/join with 502 and 503, and `rejected` is
+                -- terminal because the join worker only ever claims
+                -- `not_joined`. The gauge read zero and green while the entire
+                -- Reddit channel was being retired.
+                --
+                -- A gauge that cannot tell "solved" from "given up on" is
+                -- worse than no gauge, so the denominator ships beside it.
+                (SELECT count(*) FROM discovery_places
+                  WHERE workspace_id = $1 AND place_kind = 'subreddit'
+                    AND membership_state = 'joined'
+                )::bigint AS communities_joined,
+                (SELECT count(*) FROM discovery_places
+                  WHERE workspace_id = $1 AND place_kind = 'subreddit'
+                    AND membership_state = 'rejected'
+                )::bigint AS communities_rejected
         )
         SELECT
             outbox.pending AS outbox_pending,
@@ -598,7 +619,9 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             brain.measurement_oldest_overdue_seconds AS brain_measurement_oldest_overdue_seconds,
             brain.agent_outcomes_processed_24h AS brain_agent_outcomes_processed_24h,
             brain.agent_outcomes_rejected_24h AS brain_agent_outcomes_rejected_24h,
-            brain.communities_blocked_on_join AS brain_communities_blocked_on_join
+            brain.communities_blocked_on_join AS brain_communities_blocked_on_join,
+            brain.communities_joined AS brain_communities_joined,
+            brain.communities_rejected AS brain_communities_rejected
         FROM outbox CROSS JOIN deliveries CROSS JOIN push CROSS JOIN worker
              CROSS JOIN brain
         "#,
@@ -636,6 +659,8 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         brain_agent_outcomes_processed_24h: row.brain_agent_outcomes_processed_24h,
         brain_agent_outcomes_rejected_24h: row.brain_agent_outcomes_rejected_24h,
         brain_communities_blocked_on_join: row.brain_communities_blocked_on_join,
+        brain_communities_joined: row.brain_communities_joined,
+        brain_communities_rejected: row.brain_communities_rejected,
     })
 }
 

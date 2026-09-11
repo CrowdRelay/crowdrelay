@@ -866,7 +866,13 @@ crowdrelay_brain_agent_outcomes_processed_24h {}\n\
 crowdrelay_brain_agent_outcomes_rejected_24h {}\n\
 # HELP crowdrelay_brain_communities_blocked_on_join Communities with a wanted post that nobody has joined, so the post cannot be dispatched.\n\
 # TYPE crowdrelay_brain_communities_blocked_on_join gauge\n\
-crowdrelay_brain_communities_blocked_on_join {}\n",
+crowdrelay_brain_communities_blocked_on_join {}\n\
+# HELP crowdrelay_brain_communities_joined Subreddits this workspace has joined and can post to.\n\
+# TYPE crowdrelay_brain_communities_joined gauge\n\
+crowdrelay_brain_communities_joined {}\n\
+# HELP crowdrelay_brain_communities_rejected Subreddits in the terminal rejected state, which the join worker never retries.\n\
+# TYPE crowdrelay_brain_communities_rejected gauge\n\
+crowdrelay_brain_communities_rejected {}\n",
         ops_snapshot.brain_cycles_24h,
         ops_snapshot.brain_cycles_degraded_24h,
         ops_snapshot.brain_seconds_since_cycle,
@@ -879,6 +885,8 @@ crowdrelay_brain_communities_blocked_on_join {}\n",
         ops_snapshot.brain_agent_outcomes_processed_24h,
         ops_snapshot.brain_agent_outcomes_rejected_24h,
         ops_snapshot.brain_communities_blocked_on_join,
+        ops_snapshot.brain_communities_joined,
+        ops_snapshot.brain_communities_rejected,
     ));
 
     body.push_str(&http_metrics().route_prometheus());

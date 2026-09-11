@@ -189,6 +189,11 @@ pub(crate) struct OpsMetricsSnapshot {
     /// joined them. The number that tells an idle Reddit channel apart from a
     /// blocked one.
     pub(crate) brain_communities_blocked_on_join: i64,
+    /// The denominator for the gauge above. Zero blocked means every wanted
+    /// community was joined, or every wanted community was lost; these two
+    /// tell those apart.
+    pub(crate) brain_communities_joined: i64,
+    pub(crate) brain_communities_rejected: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -220,6 +225,8 @@ struct OpsMetricsRow {
     brain_agent_outcomes_processed_24h: i64,
     brain_agent_outcomes_rejected_24h: i64,
     brain_communities_blocked_on_join: i64,
+    brain_communities_joined: i64,
+    brain_communities_rejected: i64,
 }
 
 #[derive(Debug, Deserialize)]
