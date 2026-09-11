@@ -961,6 +961,64 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /public/signal/installations:
+    post:
+      operationId: recordSignalInstallation
+      summary: Record that the Signal app is installed on a device
+      description: >-
+        Public on purpose. An installation has no fan identity yet, and every
+        other Signal figure this API reports is measured below a fan session --
+        which is how a workspace with nineteen installs could see two of them.
+        Recording an install must never depend on the identity the install is
+        meant to produce.
+
+
+        `installationId` is the app's own random, device-scoped identifier,
+        generated locally with no account involved. It identifies a copy of the
+        app rather than a person. The call is idempotent on that identifier, so
+        the app should make it on every launch: the repetition is what keeps
+        "still installed" distinguishable from "installed once in March".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - installation_id
+              - platform
+              properties:
+                installation_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                platform:
+                  type: string
+                  enum: [android, ios, desktop, web]
+                app_version:
+                  type: string
+                  maxLength: 32
+      responses:
+        '200':
+          description: The installation was recorded, or an existing one was refreshed.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - recorded
+                properties:
+                  recorded:
+                    type: boolean
+        '422':
+          description: The identifier or platform is missing, too long, or not a known platform.
+        '503':
+          description: >-
+            The installation could not be written. Deliberately not a rejection:
+            failing to count an install must never read as refusing one.
   /public/cities:
     get:
       operationId: listPublicCities

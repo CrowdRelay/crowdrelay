@@ -151,6 +151,12 @@ pub(super) fn application_routes(state: AppState) -> Router {
             delete(fan_privacy::unpublish_synesthesia_leaderboard),
         )
         .route("/v1/public/push/config", get(push::config))
+        // Public on purpose: an install has no fan identity yet, and making
+        // the record depend on one is what hid seventeen of nineteen.
+        .route(
+            "/v1/public/signal/installations",
+            post(signal_installations::record_installation),
+        )
         .route(
             "/v1/me/push/preferences",
             get(push::fan_preferences).post(push::update_fan_preferences),

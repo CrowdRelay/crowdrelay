@@ -209,7 +209,28 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
                 -- is the input the loop above cannot run without.
                 COALESCE((SELECT EXTRACT(EPOCH FROM (now() - max(posted_at)))::bigint
                    FROM community_posts WHERE workspace_id = $1
-                ), 0) AS seconds_since_publication
+                ), 0) AS seconds_since_publication,
+                -- ── The Signal activation funnel ──
+                --
+                -- Three numbers that only mean something together. Nineteen
+                -- people had the app and CrowdRelay could see two, because
+                -- every Signal number it collected was measured below a fan
+                -- session. The count of installs was not small; it did not
+                -- exist, so nobody could tell "not being installed" from
+                -- "installed and not converting".
+                --
+                -- installs -> identified -> push-enabled. Each stage is a
+                -- different failure with a different fix, and the drop between
+                -- them is the only thing that says which one is happening.
+                (SELECT count(*) FROM signal_installations
+                  WHERE workspace_id = $1
+                )::bigint AS signal_installs,
+                (SELECT count(*) FROM signal_installations
+                  WHERE workspace_id = $1 AND fan_id IS NOT NULL
+                )::bigint AS signal_installs_identified,
+                (SELECT count(DISTINCT fan_id) FROM fan_push_endpoints
+                  WHERE workspace_id = $1 AND active AND invalidated_at IS NULL
+                )::bigint AS signal_fans_push_enabled
         )
         SELECT
             outbox.pending AS outbox_pending,
@@ -243,7 +264,10 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
             brain.communities_rejected AS brain_communities_rejected,
             brain.evidence_resolved AS brain_evidence_resolved,
             brain.seconds_since_evidence_resolved AS brain_seconds_since_evidence_resolved,
-            brain.seconds_since_publication AS brain_seconds_since_publication
+            brain.seconds_since_publication AS brain_seconds_since_publication,
+            brain.signal_installs AS brain_signal_installs,
+            brain.signal_installs_identified AS brain_signal_installs_identified,
+            brain.signal_fans_push_enabled AS brain_signal_fans_push_enabled
         FROM outbox CROSS JOIN deliveries CROSS JOIN push CROSS JOIN worker
              CROSS JOIN brain
         "#,
@@ -286,6 +310,9 @@ async fn load_metrics_snapshot(state: &OpsState) -> Result<OpsMetricsSnapshot, O
         brain_evidence_resolved: row.brain_evidence_resolved,
         brain_seconds_since_evidence_resolved: row.brain_seconds_since_evidence_resolved,
         brain_seconds_since_publication: row.brain_seconds_since_publication,
+        brain_signal_installs: row.brain_signal_installs,
+        brain_signal_installs_identified: row.brain_signal_installs_identified,
+        brain_signal_fans_push_enabled: row.brain_signal_fans_push_enabled,
     })
 }
 

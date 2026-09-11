@@ -48,4 +48,5 @@ pub mod reddit_proxy;
 pub mod referrals;
 pub mod regional;
 pub mod sensitive_response;
+pub mod signal_installations;
 pub mod tenant_settings;

@@ -206,6 +206,12 @@ pub(crate) struct OpsMetricsSnapshot {
     /// Seconds since a community post last reached a platform. The loop above
     /// cannot run without this input.
     pub(crate) brain_seconds_since_publication: i64,
+    /// The Signal activation funnel: installs, then the ones that identified
+    /// themselves, then the ones reachable by push. Each drop is a different
+    /// failure with a different fix, and only the three together say which.
+    pub(crate) brain_signal_installs: i64,
+    pub(crate) brain_signal_installs_identified: i64,
+    pub(crate) brain_signal_fans_push_enabled: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -242,6 +248,9 @@ struct OpsMetricsRow {
     brain_evidence_resolved: i64,
     brain_seconds_since_evidence_resolved: i64,
     brain_seconds_since_publication: i64,
+    brain_signal_installs: i64,
+    brain_signal_installs_identified: i64,
+    brain_signal_fans_push_enabled: i64,
 }
 
 #[derive(Debug, Deserialize)]

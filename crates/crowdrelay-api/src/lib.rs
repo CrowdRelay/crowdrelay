@@ -92,6 +92,7 @@ mod referrals;
 mod releases;
 mod routing;
 mod security;
+mod signal_installations;
 pub use rate_limit::{RateLimitPolicy, RateLimiter};
 mod staff_sessions;
 mod synesthesia;
@@ -881,7 +882,16 @@ crowdrelay_brain_evidence_resolved {}\n\
 crowdrelay_brain_seconds_since_evidence_resolved {}\n\
 # HELP crowdrelay_brain_seconds_since_publication Seconds since a community post last reached a platform; zero when none ever has.\n\
 # TYPE crowdrelay_brain_seconds_since_publication gauge\n\
-crowdrelay_brain_seconds_since_publication {}\n",
+crowdrelay_brain_seconds_since_publication {}\n\
+# HELP crowdrelay_brain_signal_installs Signal app installations recorded, whether or not they have identified themselves.\n\
+# TYPE crowdrelay_brain_signal_installs gauge\n\
+crowdrelay_brain_signal_installs {}\n\
+# HELP crowdrelay_brain_signal_installs_identified Installations that have linked to a fan.\n\
+# TYPE crowdrelay_brain_signal_installs_identified gauge\n\
+crowdrelay_brain_signal_installs_identified {}\n\
+# HELP crowdrelay_brain_signal_fans_push_enabled Fans reachable by push, the bottom of the Signal activation funnel.\n\
+# TYPE crowdrelay_brain_signal_fans_push_enabled gauge\n\
+crowdrelay_brain_signal_fans_push_enabled {}\n",
         ops_snapshot.brain_cycles_24h,
         ops_snapshot.brain_cycles_degraded_24h,
         ops_snapshot.brain_seconds_since_cycle,
@@ -899,6 +909,9 @@ crowdrelay_brain_seconds_since_publication {}\n",
         ops_snapshot.brain_evidence_resolved,
         ops_snapshot.brain_seconds_since_evidence_resolved,
         ops_snapshot.brain_seconds_since_publication,
+        ops_snapshot.brain_signal_installs,
+        ops_snapshot.brain_signal_installs_identified,
+        ops_snapshot.brain_signal_fans_push_enabled,
     ));
 
     body.push_str(&http_metrics().route_prometheus());
