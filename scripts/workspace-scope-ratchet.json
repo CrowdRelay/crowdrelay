@@ -11,7 +11,7 @@
   "crates/crowdrelay-worker/src/growth_metric_sync/simple_platforms.rs": 1,
   "crates/crowdrelay-worker/src/main.rs": 1,
   "crates/crowdrelay-worker/src/outbox/repository.rs": 4,
-  "crates/crowdrelay-worker/src/retention/steps.rs": 6,
+  "crates/crowdrelay-worker/src/retention/steps.rs": 8,
   "crates/crowdrelay-worker/src/social_post_executor.rs": 5,
   "crates/crowdrelay-worker/src/telegram_executor.rs": 5
 }
