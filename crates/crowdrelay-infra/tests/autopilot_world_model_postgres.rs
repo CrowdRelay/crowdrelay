@@ -731,3 +731,94 @@ async fn community_size_never_reaches_the_audience_total() -> Result<(), Box<dyn
     );
     Ok(())
 }
+
+/// The Signal north star counts people, not devices.
+///
+/// It counted rows in `fan_push_endpoints`, and one fan with a phone and two
+/// browsers is three rows. Its target came from the fan count -- `(fans/10)
+/// .max(5)` -- so the measure and the goal were in different units, and
+/// `signal_conversion_rate_bps` divided devices by fans and capped the result
+/// at 100% to hide the overflow. That cap was the fingerprint: a genuine
+/// fraction of fans cannot exceed one.
+///
+/// Production carried 13 endpoint rows from 2 distinct fans, so the brain's
+/// north star read several times the thing it meant to grow.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn one_fan_with_three_devices_is_one_signal_install() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database_url = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("signal-unit-{suffix}"))
+        .bind("Signal unit")
+        .execute(&pool)
+        .await?;
+
+    let fan_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, display_name, status)
+         VALUES ($1, $2, $3, 'Fan', 'active')",
+    )
+    .bind(fan_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("fan-{suffix}@example.test"))
+    .execute(&pool)
+    .await?;
+
+    // One person, three devices.
+    for device in 0..3 {
+        sqlx::query(
+            "INSERT INTO fan_push_endpoints
+               (id, workspace_id, fan_id, installation_id, transport, endpoint_address, active)
+             VALUES ($1, $2, $3, $4, 'android_fcm', $5, true)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(format!("install-{suffix}-{device}"))
+        .bind(format!("token-{suffix}-{device}"))
+        .execute(&pool)
+        .await?;
+    }
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    assert_eq!(
+        world.total_signal_installs, 1,
+        "three devices belonging to one fan are one install, not three"
+    );
+    assert!(
+        world.signal_conversion_rate_bps <= 10_000,
+        "a fraction of fans cannot exceed one"
+    );
+    assert_eq!(
+        world.signal_conversion_rate_bps, 10_000,
+        "the workspace's only fan has Signal, so the rate is 100% -- and it \
+         reaches that honestly rather than by being capped from 300%"
+    );
+    Ok(())
+}

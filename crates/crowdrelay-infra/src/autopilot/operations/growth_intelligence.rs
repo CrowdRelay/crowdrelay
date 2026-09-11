@@ -468,9 +468,23 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             .fetch_one(pool),
             sqlx::query_as::<_, (i64, i64)>(
                 r#"
+                -- People, not devices.
+                --
+                -- This counted endpoint rows, and one fan with a phone and two
+                -- browsers is three rows. The north star read that count while
+                -- its target came from the fan count -- `(total_fans/10).max(5)`
+                -- -- so the measure and the goal were in different units, and
+                -- `signal_conversion_rate_bps` divided devices by fans and
+                -- capped the result at 100% to hide the overflow. That cap is
+                -- the fingerprint of the bug: a genuine fraction of fans cannot
+                -- exceed one.
+                --
+                -- Production carries 13 endpoint rows from 2 distinct fans, so
+                -- the brain was optimizing a number inflated several-fold over
+                -- the thing it means to grow.
                 SELECT
-                    COUNT(*)::bigint AS total_installs,
-                    COUNT(*) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS installs_this_month
+                    COUNT(DISTINCT fan_id)::bigint AS total_installs,
+                    COUNT(DISTINCT fan_id) FILTER (WHERE created_at > date_trunc('month', now()))::bigint AS installs_this_month
                 FROM fan_push_endpoints
                 WHERE workspace_id = $1 AND active = true AND invalidated_at IS NULL
                 "#,
