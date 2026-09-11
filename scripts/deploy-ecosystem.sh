@@ -325,7 +325,28 @@ ECOSYSTEM_CONTRACTS_RAN=true
 # 0f. Snapshot CrowdRelay DB
 printf '\n==> 0f — Snapshot CrowdRelay DB\n'
 if [[ "$DRY_RUN" == false ]]; then
-  ssh -T "$CROWDRELAY_REMOTE" 'cd /opt/crowdrelay && source .crowdrelay.local.sh && crowdrelay_backup' 2>&1
+  # This used to source `.crowdrelay.local.sh` on the host and call a
+  # `crowdrelay_backup` shell function defined in it. That file is untracked
+  # host state: it was rewritten to three environment lines, the function went
+  # with it, and the pre-deploy snapshot then failed with
+  # `crowdrelay_backup: command not found` — blocking every ecosystem deploy on
+  # a safety gate that could no longer run.
+  #
+  # The real backup is not that function. It is the systemd unit the host
+  # already runs on a timer, which writes a dated dump under /srv/crowdrelay-db
+  # and syncs it offsite. Calling the unit means the gate depends on the same
+  # mechanism that produces the nightly backups, rather than on a shell
+  # function that nothing version-controls.
+  ssh -T "$CROWDRELAY_REMOTE" 'sudo systemctl start --wait crowdrelay-db-backup.service' 2>&1 \
+    || fail "pre-deploy DB snapshot failed — refusing to deploy without one"
+  # The unit writes a gzipped dump under /srv/crowdrelay-db/backups and syncs it
+  # offsite. Confirm one landed in the last five minutes rather than trusting
+  # the exit status alone: a unit that succeeds without producing a dump is the
+  # failure mode this gate exists to catch.
+  snapshot_line="$(ssh -T "$CROWDRELAY_REMOTE" \
+    'find /srv/crowdrelay-db/backups -name "*.sql.gz" -mmin -5 -printf "%f\\n" 2>/dev/null | sort | tail -1')"
+  [[ -n "$snapshot_line" ]] || fail "pre-deploy DB snapshot produced no fresh dump"
+  printf 'DB_SNAPSHOT=PASS dump=%s\n' "$snapshot_line"
 else
   printf 'DB_SNAPSHOT=SKIPPED (dry-run)\n'
 fi
