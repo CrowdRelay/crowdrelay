@@ -872,7 +872,16 @@ crowdrelay_brain_communities_blocked_on_join {}\n\
 crowdrelay_brain_communities_joined {}\n\
 # HELP crowdrelay_brain_communities_rejected Subreddits in the terminal rejected state, which the join worker never retries.\n\
 # TYPE crowdrelay_brain_communities_rejected gauge\n\
-crowdrelay_brain_communities_rejected {}\n",
+crowdrelay_brain_communities_rejected {}\n\
+# HELP crowdrelay_brain_evidence_resolved Evidence rows that completed the full loop: predicted, dispatched, executed, measured, observed.\n\
+# TYPE crowdrelay_brain_evidence_resolved gauge\n\
+crowdrelay_brain_evidence_resolved {}\n\
+# HELP crowdrelay_brain_seconds_since_evidence_resolved Seconds since the loop last closed; zero when it never has.\n\
+# TYPE crowdrelay_brain_seconds_since_evidence_resolved gauge\n\
+crowdrelay_brain_seconds_since_evidence_resolved {}\n\
+# HELP crowdrelay_brain_seconds_since_publication Seconds since a community post last reached a platform; zero when none ever has.\n\
+# TYPE crowdrelay_brain_seconds_since_publication gauge\n\
+crowdrelay_brain_seconds_since_publication {}\n",
         ops_snapshot.brain_cycles_24h,
         ops_snapshot.brain_cycles_degraded_24h,
         ops_snapshot.brain_seconds_since_cycle,
@@ -887,6 +896,9 @@ crowdrelay_brain_communities_rejected {}\n",
         ops_snapshot.brain_communities_blocked_on_join,
         ops_snapshot.brain_communities_joined,
         ops_snapshot.brain_communities_rejected,
+        ops_snapshot.brain_evidence_resolved,
+        ops_snapshot.brain_seconds_since_evidence_resolved,
+        ops_snapshot.brain_seconds_since_publication,
     ));
 
     body.push_str(&http_metrics().route_prometheus());

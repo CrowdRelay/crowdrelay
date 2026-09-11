@@ -194,6 +194,18 @@ pub(crate) struct OpsMetricsSnapshot {
     /// tell those apart.
     pub(crate) brain_communities_joined: i64,
     pub(crate) brain_communities_rejected: i64,
+    /// The proof that the loop closed: an evidence row that was predicted,
+    /// dispatched, executed, measured and observed. Everything else on this
+    /// snapshot says the brain is busy; this is the only thing that says it is
+    /// learning.
+    pub(crate) brain_evidence_resolved: i64,
+    /// Seconds since the newest resolved evidence row, and zero when there has
+    /// never been one — the count above tells never from stale, and a
+    /// sentinel age would poison any threshold built on this.
+    pub(crate) brain_seconds_since_evidence_resolved: i64,
+    /// Seconds since a community post last reached a platform. The loop above
+    /// cannot run without this input.
+    pub(crate) brain_seconds_since_publication: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -227,6 +239,9 @@ struct OpsMetricsRow {
     brain_communities_blocked_on_join: i64,
     brain_communities_joined: i64,
     brain_communities_rejected: i64,
+    brain_evidence_resolved: i64,
+    brain_seconds_since_evidence_resolved: i64,
+    brain_seconds_since_publication: i64,
 }
 
 #[derive(Debug, Deserialize)]

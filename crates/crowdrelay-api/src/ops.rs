@@ -44,3 +44,4 @@ include!("ops/attention.rs");
 
 include!("ops/fan_out.rs");
 include!("ops/query_support.rs");
+include!("ops/metrics_snapshot.rs");
