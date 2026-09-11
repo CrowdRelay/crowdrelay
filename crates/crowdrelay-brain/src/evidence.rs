@@ -264,7 +264,24 @@ pub struct GrowthEvidence {
     pub channel: ReachChannel,
     /// Estimated reach (1 for individuals, subscriber count for broadcasts).
     pub estimated_reach: u32,
-    /// Actual observed reach (if measurable — e.g. post views, email opens).
+    /// Actual observed reach, and in practice always `None`.
+    ///
+    /// Nothing assigns it: every constructor sets `None` and there is no
+    /// `actual_reach: Some(..)` anywhere in the workspace, so all 54 evidence
+    /// rows in production carry an estimate and no observation.
+    ///
+    /// That is a property of the channels, not an omission. Reddit does not
+    /// report post views to a non-moderator, and `community_post_metrics`
+    /// records score, upvotes, comments and upvote ratio — engagement, which
+    /// is a different quantity and is already learned through
+    /// `AgentRunCommunityEngagement7d`. Filling this field from upvotes would
+    /// put engagement under a name that means reach, which is worse than
+    /// leaving it empty.
+    ///
+    /// Kept rather than removed because it is exact for a channel that
+    /// reports delivery — a Signal push knows how many devices accepted it.
+    /// Populate it there when that evidence path is wired; do not populate it
+    /// from any channel that can only estimate.
     pub actual_reach: Option<u32>,
 
     // ── Treatment ──
@@ -354,7 +371,17 @@ pub struct GrowthEvidence {
     pub final_contamination: Option<f64>,
 
     // ── Episode linkage ──
-    /// The episode this evidence belongs to (links to the episode model).
+    /// The episode this evidence belongs to.
+    ///
+    /// Always `None` today: nothing assigns it, and the episode model it
+    /// refers to does not exist. No query groups by it, so it partitions
+    /// nothing.
+    ///
+    /// Left in place because the column is inert and dropping it is a
+    /// migration against the evidence contract for no behavioural gain. It is
+    /// documented here instead, because a field named for a model that was
+    /// never built is exactly what makes a reader conclude the grouping is
+    /// live — the same trap as plumbing a belief nothing consults.
     pub episode_id: Option<String>,
     /// When the evidence was resolved (measurement window closed).
     pub resolved_at: Option<OffsetDateTime>,
@@ -719,7 +746,8 @@ pub struct EvidenceEvent {
     pub action_id: Option<uuid::Uuid>,
     /// The opportunity this event relates to (optional).
     pub opportunity_id: Option<String>,
-    /// The episode this event belongs to (optional).
+    /// The episode this event belongs to. Unused — see
+    /// `GrowthEvidence::episode_id` for why it is `None` everywhere.
     pub episode_id: Option<String>,
     /// The event type.
     pub event_type: EvidenceEventType,
