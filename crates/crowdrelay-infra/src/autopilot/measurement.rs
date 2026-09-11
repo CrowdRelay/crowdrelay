@@ -244,6 +244,33 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // provides the join. But updating the prediction row directly
             // is more efficient for the brain's read path.
             match measurement.kind {
+                // Engagement is the fastest signal this product can observe --
+                // upvotes and comments arrive in hours, in tens, per post --
+                // and it resolved into nothing. Only fan-growth and
+                // Signal-install kinds wrote back here, so the one measurement
+                // with enough volume to rank on was measured and discarded.
+                //
+                // It is stored, not learned from. Fitting a model on it today
+                // would mean fitting on zero rows, because nothing has been
+                // published yet. The point is that history starts accruing
+                // with the first post rather than with the decision to build
+                // the model.
+                AutopilotMeasurementKind::AgentRunCommunityEngagement7d => {
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE viryaos_growth_evidence
+                        SET observed_engagement = $3
+                        WHERE workspace_id = $1
+                          AND action_id = $2
+                        "#,
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .bind(measurement.action_id.into_uuid())
+                    .bind(observed_value)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                }
                 AutopilotMeasurementKind::AgentRunFanGrowth14d => {
                     let _ = sqlx::query(
                         r#"
