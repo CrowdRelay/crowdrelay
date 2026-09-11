@@ -277,10 +277,13 @@ impl ModelSelfReportedConfidence {
 /// evidence check found nothing", and binding it here would cancel every
 /// admitted agent proposal for the wrong reason.
 ///
-/// Why the smallest non-zero value: decision confidence is the fifth and last
-/// tiebreaker in `rank_next_best_actions` — never a filter, never an autonomy
-/// gate for these kinds, whose disposition is hardcoded `require_approval` or
-/// `recommend_only`. One basis point places an unmeasured proposal below
+/// Why the smallest non-zero value: decision confidence is the sixth of seven
+/// components in the `rank_next_best_actions` key — after authority, deadline,
+/// objective, value tier and measured effect, and before magnitude. It is
+/// never a filter, and never an autonomy gate for these kinds, whose
+/// disposition is hardcoded `require_approval` or `recommend_only`. (This said
+/// "fifth and last"; it is neither, and the reasoning below is what the
+/// constant actually rests on.) One basis point places an unmeasured proposal below
 /// every measured finding on that tiebreak, which is the correct default, and
 /// makes all agent proposals tie with each other, which is honest: nothing
 /// here distinguishes their evidential strength.

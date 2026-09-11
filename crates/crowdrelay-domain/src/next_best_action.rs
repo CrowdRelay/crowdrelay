@@ -145,13 +145,19 @@ const fn deadline_tier(hours_until_deadline: Option<i64>) -> u8 {
         // A deadline already past cannot be met. It is not urgent, it is over,
         // and ranking it top would put unrecoverable work above recoverable.
         Some(hours) if hours < 0 => 0,
-        Some(hours) if hours <= 24 => 5,
-        Some(hours) if hours <= 72 => 4,
-        Some(hours) if hours <= 168 => 3,
-        Some(hours) if hours <= 336 => 2,
-        Some(_) => 1,
+        Some(hours) if hours <= 24 => 6,
+        Some(hours) if hours <= 72 => 5,
+        Some(hours) if hours <= 168 => 4,
+        Some(hours) if hours <= 336 => 3,
+        Some(_) => 2,
         // No deadline at all sits above an expired one and below every live
         // one: there is nothing to miss, but also nothing forcing the timing.
+        //
+        // This shared tier 1 with the beyond-a-fortnight bucket, so the rule
+        // the comment states was not the rule the code applied: work with a
+        // real deadline three months out ranked level with work that has no
+        // deadline at all, and the tie fell through to the next factor. Every
+        // live tier is now strictly above `None`.
         None => 1,
     }
 }
@@ -358,6 +364,42 @@ mod tests {
         assert_eq!(
             queue.first().map(|entry| entry.ranked_by),
             Some(RankFactor::Objective)
+        );
+    }
+
+    #[test]
+    fn a_distant_deadline_still_outranks_no_deadline_at_all() {
+        // The rule the module states: work with no deadline sits above expired
+        // work and below every live deadline. The far-future bucket shared a
+        // tier with `None`, so a date three months out ranked level with no
+        // date and the tie fell through to whatever factor came next.
+        let mut distant = candidate(AuthorityState::Observed, 1);
+        distant.hours_until_deadline = Some(24 * 90);
+        let undated = candidate(AuthorityState::Observed, 2);
+        let queue = rank_next_best_actions(vec![undated, distant]);
+        assert_eq!(
+            queue.first().map(|entry| entry.candidate.subject_id),
+            Some(Uuid::from_u128(1)),
+            "a live deadline, however distant, outranks having none"
+        );
+        assert_eq!(
+            queue.first().map(|entry| entry.ranked_by),
+            Some(RankFactor::Deadline),
+            "and the deadline is what separated them"
+        );
+    }
+
+    #[test]
+    fn work_whose_deadline_has_passed_sinks_below_work_that_has_none() {
+        // Expired work is not urgent, it is over. Ranking it above recoverable
+        // work would put the unrecoverable first.
+        let mut expired = candidate(AuthorityState::Observed, 1);
+        expired.hours_until_deadline = Some(-1);
+        let undated = candidate(AuthorityState::Observed, 2);
+        let queue = rank_next_best_actions(vec![expired, undated]);
+        assert_eq!(
+            queue.first().map(|entry| entry.candidate.subject_id),
+            Some(Uuid::from_u128(2))
         );
     }
 
