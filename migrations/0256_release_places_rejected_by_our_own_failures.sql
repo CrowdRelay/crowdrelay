@@ -44,3 +44,25 @@ WHERE membership_state = 'rejected'
       OR membership_note LIKE '%rate limited%'
       OR membership_note LIKE '%auth key missing%'
   );
+
+-- Release the community targets whose refusal was a consequence of the above.
+--
+-- `community_promotion` screens a place once: its candidate query skips any
+-- place that already has a target row, so a verdict written while the place
+-- was wrongly marked rejected would never be revisited. The screener has
+-- gained a `previously_refused` reason for exactly this case — distinct from
+-- `poor_fit`, which is a judgement about the community and stays true — and
+-- the sweep now re-screens rows carrying it.
+--
+-- Older rows recorded that same cause as `poor_fit`, which is indistinguishable
+-- from a genuine one. Only rows whose place is being released above are
+-- retagged, so a real poor-fit verdict on a healthy place is untouched.
+UPDATE agent_outreach_targets AS t
+SET refusal_reason = 'previously_refused',
+    updated_at = now()
+FROM discovery_places AS p
+WHERE p.id = t.place_id
+  AND t.target_kind = 'community'
+  AND t.screening_verdict = 'refused'
+  AND t.refusal_reason = 'poor_fit'
+  AND p.membership_changed_by = 'migration:0256';

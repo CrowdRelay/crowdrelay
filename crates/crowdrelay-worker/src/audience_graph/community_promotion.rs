@@ -84,10 +84,21 @@ pub(super) async fn promote_community_places(
           AND place.place_kind = 'subreddit'
           AND place.status = 'active'
           AND substring(place.url from '/r/([^/?#]+)') IS NOT NULL
+          -- A place that already has a target row is screened once and never
+          -- again — which is right for a verdict about the community itself,
+          -- and wrong for one about a past attempt of ours. `previously_refused`
+          -- means we failed to reach it, and that can stop being true: the
+          -- join executor used to write `rejected` for its own outages, so a
+          -- credential blip could refuse a community permanently. Those rows
+          -- come back for re-screening; every other verdict stays put.
           AND NOT EXISTS (
               SELECT 1 FROM agent_outreach_targets AS t
               WHERE t.workspace_id = place.workspace_id
                 AND t.place_id = place.id
+                AND (
+                    t.screening_verdict IS DISTINCT FROM 'refused'
+                    OR t.refusal_reason IS DISTINCT FROM 'previously_refused'
+                )
           )
         ORDER BY place.member_count DESC NULLS LAST
         LIMIT $2

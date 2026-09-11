@@ -163,6 +163,16 @@ pub enum RefusalReason {
     PoorFit,
     /// Real, but too small for a contact the band only gets one of.
     TooSmall,
+    /// We already failed to reach this community, or it turned us away.
+    ///
+    /// Distinct from `PoorFit` on purpose. This collapsed into it, and the two
+    /// are not the same claim: `PoorFit` is a judgement about the community
+    /// that stays true, while this is a fact about a past attempt that can
+    /// stop being true — and did, when a credential outage marked seventy-one
+    /// places as having refused us that never saw a request. A refusal an
+    /// operator cannot tell apart from a permanent one is a refusal nobody
+    /// ever revisits.
+    PreviouslyRefused,
 }
 
 impl RefusalReason {
@@ -177,6 +187,7 @@ impl RefusalReason {
             Self::IndiscriminateChurn => "indiscriminate_churn",
             Self::PoorFit => "poor_fit",
             Self::TooSmall => "too_small",
+            Self::PreviouslyRefused => "previously_refused",
         }
     }
 }
@@ -301,7 +312,7 @@ pub fn screen_community_candidate(
         return ScreeningVerdict::Refuse(RefusalReason::SellsPlacement);
     }
     if snapshot.refused_by_us_or_them {
-        return ScreeningVerdict::Refuse(RefusalReason::PoorFit);
+        return ScreeningVerdict::Refuse(RefusalReason::PreviouslyRefused);
     }
     // A community that bans self-promotion outright is not a growth target at
     // any size. Posting there costs a removal and a moderator who remembers.
@@ -995,6 +1006,12 @@ mod tests {
 
     #[test]
     fn community_we_or_they_refused_is_refused() {
+        // Reported as `previously_refused`, not `poor_fit`. The two were the
+        // same value and are not the same claim: `poor_fit` judges the
+        // community and stays true, while this records a past attempt that can
+        // stop being true. Keeping them apart is what lets the promotion sweep
+        // re-screen a community we merely failed to reach, and lets an operator
+        // see the difference.
         let snapshot = CommunityCandidateSnapshot {
             refused_by_us_or_them: true,
             ..community()
@@ -1004,7 +1021,7 @@ mod tests {
                 &snapshot,
                 TargetDiscoveryPolicy::default()
             )),
-            Some(RefusalReason::PoorFit)
+            Some(RefusalReason::PreviouslyRefused)
         );
     }
 
