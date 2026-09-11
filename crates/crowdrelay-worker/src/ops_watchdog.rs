@@ -210,6 +210,15 @@ struct OpsSnapshot {
     /// currently failing. Zero alongside a non-zero `failing_platforms` is the
     /// state in which the brain can no longer plan any discovery at all.
     working_platforms: i64,
+    /// Cities that fans have requested but that have no coordinates and have
+    /// exhausted their geocode attempts. Every fan sitting in one of these
+    /// cities is unreachable by the nearby-show loop — the geocoder gave up,
+    /// and nothing else supplies coordinates. A human must either fix the
+    /// name or enter the coordinates by hand.
+    ///
+    /// Only cities with `geocode_attempts >= MAX_GEOCODE_ATTEMPTS` count: a
+    /// city still being retried is in progress, not stuck.
+    stuck_ungeocoded_cities: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -278,7 +287,16 @@ async fn load_snapshot(
                 AS failing_platforms,
             (SELECT count(DISTINCT platform) FROM fanbase_connections c
              WHERE c.workspace_id=$1 AND c.health='working')::bigint
-                AS working_platforms
+                AS working_platforms,
+            -- Cities that fans requested but the geocoder gave up on. These
+            -- are permanently unreachable by the nearby-show loop until a
+            -- human fixes the name or enters coordinates by hand. The
+            -- threshold matches `city_geocoding::MAX_GEOCODE_ATTEMPTS` (5).
+            (SELECT count(*) FROM cities
+             WHERE latitude IS NULL
+               AND moderation_status IN ('pending', 'approved')
+               AND geocode_attempts >= 5
+            )::bigint AS stuck_ungeocoded_cities
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -352,6 +370,25 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             active: snapshot.failing_platforms > 0 && snapshot.working_platforms == 0,
             details: json!({
                 "failing_platforms": snapshot.failing_platforms,
+            }),
+        },
+        Condition {
+            // Cities that fans requested but the geocoder gave up on. Every
+            // fan sitting in one is unreachable by the nearby-show loop — the
+            // only automatic reason an installed app reopens itself — and
+            // nothing recovers this on its own. The geocoding worker may be
+            // disabled (missing contact config) or the provider may not
+            // recognize the name; either way a human must fix it.
+            //
+            // Warning, not critical: the nearby-show loop still reaches fans
+            // in geocoded cities, and the stuck cities are a growing gap, not
+            // a total stop.
+            key: "growth.stuck_ungeocoded_cities",
+            severity: "warning",
+            summary: "Fan-requested cities have exhausted geocoding — fans there are unreachable by nearby-show",
+            active: snapshot.stuck_ungeocoded_cities > 0,
+            details: json!({
+                "stuck_ungeocoded_cities": snapshot.stuck_ungeocoded_cities,
             }),
         },
     ]
@@ -454,6 +491,7 @@ mod tests {
             contradicted_actions: 0,
             failing_platforms: 0,
             working_platforms: 2,
+            stuck_ungeocoded_cities: 0,
         }
     }
 
@@ -588,5 +626,25 @@ mod tests {
         let active = active_keys(&snapshot);
         assert!(!active.contains(&"growth.feed_failing"));
         assert!(!active.contains(&"growth.all_feeds_failing"));
+    }
+
+    #[test]
+    fn stuck_ungeocoded_cities_are_detected() {
+        // Cities that fans requested but the geocoder gave up on. Every fan in
+        // one is unreachable by the nearby-show loop until a human fixes the
+        // name or enters coordinates by hand.
+        let mut snapshot = healthy();
+        snapshot.stuck_ungeocoded_cities = 3;
+        let active = active_keys(&snapshot);
+        assert!(active.contains(&"growth.stuck_ungeocoded_cities"));
+    }
+
+    #[test]
+    fn no_stuck_cities_raises_nothing() {
+        // A tenant with no stuck cities (either no requests, or all resolved,
+        // or still being retried) should not trigger the alert.
+        let snapshot = healthy();
+        let active = active_keys(&snapshot);
+        assert!(!active.contains(&"growth.stuck_ungeocoded_cities"));
     }
 }

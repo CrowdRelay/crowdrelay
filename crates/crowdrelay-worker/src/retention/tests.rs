@@ -53,6 +53,10 @@ mod tests {
                 consumed_token_retention: Duration::ZERO,
                 ..defaults
             },
+            RetentionWorkerConfig {
+                terminal_push_retention: Duration::ZERO,
+                ..defaults
+            },
         ] {
             assert_eq!(
                 RetentionWorker::new(lazy_pool()?, config).expect_err("config must be rejected"),
@@ -661,6 +665,20 @@ mod tests {
     #[test]
     fn stats_report_work_only_for_changed_rows() {
         assert!(!RetentionStats::default().did_work());
+        assert!(
+            RetentionStats {
+                terminal_push_deliveries_deleted: 1,
+                ..RetentionStats::default()
+            }
+            .did_work()
+        );
+        assert!(
+            RetentionStats {
+                invalidated_push_endpoints_deleted: 1,
+                ..RetentionStats::default()
+            }
+            .did_work()
+        );
         assert!(
             RetentionStats {
                 outbox_payloads_scrubbed: 1,

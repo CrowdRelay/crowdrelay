@@ -645,3 +645,91 @@ async fn delete_consumed_agent_outcomes(
     .map_err(RetentionRunError::Database)?;
     Ok(result.rows_affected())
 }
+
+/// Terminal push deliveries (`delivered`, `failed`, `ambiguous`) older than
+/// the retention window. The push delivery `maintain()` sweep transitions
+/// queued deliveries into terminal states but never deletes them, so without
+/// this step the `fan_push_deliveries` table grows unboundedly.
+///
+/// The guard `NOT EXISTS` pending deliveries on the same endpoint prevents
+/// deleting a delivery whose endpoint still has work in flight — though
+/// terminal deliveries are by definition not pending, the guard is defensive
+/// against any future status that might reintroduce in-flight work on a
+/// terminal row.
+async fn delete_old_terminal_push_deliveries(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+    terminal_push_retention_ms: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT delivery.id
+            FROM fan_push_deliveries AS delivery
+            WHERE delivery.status IN ('delivered', 'failed', 'ambiguous')
+                AND COALESCE(delivery.completed_at, delivery.updated_at) <=
+                    now() - ($2::bigint * interval '1 millisecond')
+            ORDER BY COALESCE(delivery.completed_at, delivery.updated_at), delivery.id
+            FOR UPDATE OF delivery SKIP LOCKED
+            LIMIT $1
+        )
+        DELETE FROM fan_push_deliveries AS delivery
+        USING candidates
+        WHERE delivery.id = candidates.id
+        "#,
+    )
+    .bind(batch_size)
+    .bind(terminal_push_retention_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}
+
+/// Push endpoints that have been invalidated (active = false AND
+/// invalidated_at IS NOT NULL) older than the retention window. The push
+/// delivery `maintain()` sweep invalidates stale endpoints but never deletes
+/// them, so without this step the `fan_push_endpoints` table grows unboundedly
+/// as fans reinstall apps and register new endpoints.
+///
+/// The guard `NOT EXISTS` active deliveries on the endpoint prevents deleting
+/// an endpoint that still has non-terminal deliveries referencing it — those
+/// deliveries need the endpoint row to exist for their own retention sweep to
+/// find them.
+async fn delete_invalidated_push_endpoints(
+    transaction: &mut Transaction<'_, Postgres>,
+    batch_size: i64,
+    terminal_push_retention_ms: i64,
+) -> Result<u64, RetentionRunError> {
+    let result = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT endpoint.id
+            FROM fan_push_endpoints AS endpoint
+            WHERE endpoint.active = false
+                AND endpoint.invalidated_at IS NOT NULL
+                AND endpoint.invalidated_at <=
+                    now() - ($2::bigint * interval '1 millisecond')
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM fan_push_deliveries AS delivery
+                    WHERE delivery.workspace_id = endpoint.workspace_id
+                        AND delivery.endpoint_id = endpoint.id
+                        AND delivery.status NOT IN ('delivered', 'failed', 'ambiguous')
+                )
+            ORDER BY endpoint.invalidated_at, endpoint.id
+            FOR UPDATE OF endpoint SKIP LOCKED
+            LIMIT $1
+        )
+        DELETE FROM fan_push_endpoints AS endpoint
+        USING candidates
+        WHERE endpoint.id = candidates.id
+        "#,
+    )
+    .bind(batch_size)
+    .bind(terminal_push_retention_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(RetentionRunError::Database)?;
+    Ok(result.rows_affected())
+}

@@ -17,6 +17,10 @@ const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_TERMINAL_OUTBOX_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const DEFAULT_CONSUMED_TOKEN_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+/// Terminal push deliveries and invalidated endpoints are kept for the same
+/// 30-day window as terminal outbox events. They are not reprocessed, but
+/// keeping them longer only grows the tables the push worker scans.
+const DEFAULT_TERMINAL_PUSH_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const DEFAULT_BATCH_SIZE: u32 = 1_000;
 const MAX_BATCH_SIZE: u32 = 1_000;
 
@@ -28,6 +32,7 @@ pub struct RetentionWorkerConfig {
     pub lock_timeout: Duration,
     pub terminal_outbox_retention: Duration,
     pub consumed_token_retention: Duration,
+    pub terminal_push_retention: Duration,
     pub batch_size: u32,
 }
 
@@ -39,6 +44,7 @@ impl Default for RetentionWorkerConfig {
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
             terminal_outbox_retention: DEFAULT_TERMINAL_OUTBOX_RETENTION,
             consumed_token_retention: DEFAULT_CONSUMED_TOKEN_RETENTION,
+            terminal_push_retention: DEFAULT_TERMINAL_PUSH_RETENTION,
             batch_size: DEFAULT_BATCH_SIZE,
         }
     }
@@ -52,6 +58,7 @@ pub struct RetentionWorker {
     operation_timeout: Duration,
     terminal_outbox_retention_ms: i64,
     consumed_token_retention_ms: i64,
+    terminal_push_retention_ms: i64,
     batch_size: i64,
 }
 
@@ -67,6 +74,7 @@ impl RetentionWorker {
             operation_timeout: config.operation_timeout,
             terminal_outbox_retention_ms: duration_milliseconds(config.terminal_outbox_retention)?,
             consumed_token_retention_ms: duration_milliseconds(config.consumed_token_retention)?,
+            terminal_push_retention_ms: duration_milliseconds(config.terminal_push_retention)?,
             batch_size: i64::from(config.batch_size),
         })
     }
@@ -111,6 +119,10 @@ impl RetentionWorker {
                                     stats.terminal_outbox_events_deleted,
                                 beacon_release_delivery_pii_purged =
                                     stats.beacon_release_delivery_pii_purged,
+                                terminal_push_deliveries_deleted =
+                                    stats.terminal_push_deliveries_deleted,
+                                invalidated_push_endpoints_deleted =
+                                    stats.invalidated_push_endpoints_deleted,
                                 "retention cycle completed"
                             );
                         }
@@ -212,6 +224,14 @@ impl RetentionWorker {
             community_observations_deleted,
             RetentionStep::ExpiredCommunityObservations
         );
+        execute_step!(
+            terminal_push_deliveries_deleted,
+            RetentionStep::OldTerminalPushDeliveries
+        );
+        execute_step!(
+            invalidated_push_endpoints_deleted,
+            RetentionStep::InvalidatedPushEndpoints
+        );
 
         if let Some(error) = first_failure {
             return Err(error);
@@ -291,6 +311,22 @@ impl RetentionWorker {
             RetentionStep::ExpiredCommunityObservations => {
                 delete_expired_community_observations(&mut transaction, self.batch_size).await?
             }
+            RetentionStep::OldTerminalPushDeliveries => {
+                delete_old_terminal_push_deliveries(
+                    &mut transaction,
+                    self.batch_size,
+                    self.terminal_push_retention_ms,
+                )
+                .await?
+            }
+            RetentionStep::InvalidatedPushEndpoints => {
+                delete_invalidated_push_endpoints(
+                    &mut transaction,
+                    self.batch_size,
+                    self.terminal_push_retention_ms,
+                )
+                .await?
+            }
         };
 
         transaction
@@ -319,6 +355,8 @@ enum RetentionStep {
     ExpiredGrowthMetricPoints,
     ConsumedAgentOutcomes,
     ExpiredCommunityObservations,
+    OldTerminalPushDeliveries,
+    InvalidatedPushEndpoints,
 }
 
 impl RetentionStep {
@@ -340,6 +378,8 @@ impl RetentionStep {
             Self::ExpiredGrowthMetricPoints => "expired_growth_metric_points",
             Self::ConsumedAgentOutcomes => "consumed_agent_outcomes",
             Self::ExpiredCommunityObservations => "expired_community_observations",
+            Self::OldTerminalPushDeliveries => "old_terminal_push_deliveries",
+            Self::InvalidatedPushEndpoints => "invalidated_push_endpoints",
         }
     }
 }
@@ -363,6 +403,8 @@ pub struct RetentionStats {
     pub growth_metric_points_deleted: u64,
     pub consumed_agent_outcomes_deleted: u64,
     pub community_observations_deleted: u64,
+    pub terminal_push_deliveries_deleted: u64,
+    pub invalidated_push_endpoints_deleted: u64,
 }
 
 impl RetentionStats {
@@ -384,6 +426,8 @@ impl RetentionStats {
             || self.growth_metric_points_deleted > 0
             || self.consumed_agent_outcomes_deleted > 0
             || self.community_observations_deleted > 0
+            || self.terminal_push_deliveries_deleted > 0
+            || self.invalidated_push_endpoints_deleted > 0
     }
 }
 
@@ -393,6 +437,7 @@ fn validate_config(config: RetentionWorkerConfig) -> Result<(), RetentionWorkerB
         || config.lock_timeout.is_zero()
         || config.terminal_outbox_retention.is_zero()
         || config.consumed_token_retention.is_zero()
+        || config.terminal_push_retention.is_zero()
     {
         return Err(RetentionWorkerBuildError::ZeroDuration);
     }
@@ -408,6 +453,7 @@ fn validate_config(config: RetentionWorkerConfig) -> Result<(), RetentionWorkerB
         config.lock_timeout,
         config.terminal_outbox_retention,
         config.consumed_token_retention,
+        config.terminal_push_retention,
     ] {
         duration_milliseconds(value)?;
     }

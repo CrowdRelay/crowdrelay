@@ -343,8 +343,13 @@ if [[ "$DRY_RUN" == false ]]; then
   # offsite. Confirm one landed in the last five minutes rather than trusting
   # the exit status alone: a unit that succeeds without producing a dump is the
   # failure mode this gate exists to catch.
+  #
+  # Under sudo, because that directory is `drwxr-x--- root root` — the backup
+  # runs as root and the dumps are not world-readable. Searching it as the SSH
+  # user returns nothing and the gate then reports a missing snapshot for a
+  # backup that was taken correctly.
   snapshot_line="$(ssh -T "$CROWDRELAY_REMOTE" \
-    'find /srv/crowdrelay-db/backups -name "*.sql.gz" -mmin -5 -printf "%f\\n" 2>/dev/null | sort | tail -1')"
+    'sudo find /srv/crowdrelay-db/backups -name "*.sql.gz" -mmin -5 -printf "%f\\n" 2>/dev/null | sort | tail -1')"
   [[ -n "$snapshot_line" ]] || fail "pre-deploy DB snapshot produced no fresh dump"
   printf 'DB_SNAPSHOT=PASS dump=%s\n' "$snapshot_line"
 else
