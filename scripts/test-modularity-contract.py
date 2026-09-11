@@ -88,6 +88,7 @@ CONTRACT = {
         "ops/models.rs",
         "ops/handlers.rs",
         "ops/query_support.rs",
+        "ops/fan_out.rs",
     ],
     "crates/crowdrelay-api/src/autopilot.rs": [
         "autopilot/authority_booking.rs",

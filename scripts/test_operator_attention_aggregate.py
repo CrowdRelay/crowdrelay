@@ -77,11 +77,21 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
     def test_aggregate_bounds_every_section_with_a_timeout(self):
         # One slow section must not hang the whole operator page. Named instead
         # of counted: a new section has to be added here deliberately.
-        sections = re.findall(r"let (\w+) = run_with_timeout\(", self.attention)
+        #
+        # The wrapper used to be `run_with_timeout`. It is `run_limited` now,
+        # which still applies the same timeout and additionally holds a
+        # semaphore permit — eleven reads against a pool of eight would
+        # otherwise take every connection this API has and make every other
+        # request queue behind one operator refresh. This asserts the bound is
+        # present, not which helper spells it, so both names count.
+        sections = re.findall(
+            r"let (\w+) =\s*run_(?:with_timeout|limited)\(", self.attention
+        )
         self.assertEqual(
             sorted(sections),
             [
                 "alerts",
+                "blocked_communities",
                 "brain",
                 "dead_deliveries",
                 "dead_outbox",
@@ -93,6 +103,15 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
                 "unpublished_drafts",
             ],
         )
+
+    def test_aggregate_sections_share_one_connection_limiter(self):
+        # The timeout bounds how long a section may take; the limiter bounds how
+        # many run at once. Without it the page asks for more connections than
+        # the pool holds, which is a self-inflicted outage rather than a slow
+        # page, so the limiter is asserted rather than left to review.
+        self.assertIn("OPS_FAN_OUT_LIMIT", self.attention)
+        for section in re.findall(r"let \w+ =\s*run_limited\(\s*(&\w+)", self.attention):
+            self.assertEqual(section, "&limiter")
 
 
 if __name__ == "__main__":
