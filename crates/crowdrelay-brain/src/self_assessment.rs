@@ -167,7 +167,20 @@ pub const STAGNATION_AFTER_FLAT_DAYS: usize = 30;
 #[must_use]
 pub fn assess(mut samples: Vec<DailyNorthStar>) -> BrainState {
     samples.sort_by_key(|sample| sample.day);
-    samples.dedup_by_key(|sample| sample.day);
+    // `dedup_by_key` keeps the *first* of each run, which is the opposite of
+    // what this needs: the North Star is a cumulative fan count, so a day is
+    // worth the value it ended on, and keeping the first reading discards
+    // every fan the day gained. Today's only caller collapses per day in SQL
+    // and hides the difference, which is exactly why it is worth not relying
+    // on. The sort is stable, so "last" is last in the caller's order.
+    let mut collapsed: Vec<DailyNorthStar> = Vec::with_capacity(samples.len());
+    for sample in samples {
+        match collapsed.last_mut() {
+            Some(previous) if previous.day == sample.day => *previous = sample,
+            _ => collapsed.push(sample),
+        }
+    }
+    let samples = collapsed;
     if samples.len() < MINIMUM_DAYS {
         return BrainState::Initializing;
     }
@@ -523,5 +536,61 @@ mod tests {
         assert_eq!(monitor.state, BrainState::Initializing);
         assert_eq!(monitor.learning_cycles, 0);
         assert!(monitor.reset_after_halt);
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::{BrainState, DailyNorthStar, assess};
+
+    /// A day is worth the value it ended on.
+    ///
+    /// The North Star is a cumulative fan count, so several readings from one
+    /// day are one observation and the last of them is the day's result.
+    /// Keeping the first instead discarded everything the day gained, which
+    /// against a flat early history is the whole of the signal.
+    #[test]
+    fn several_readings_in_one_day_collapse_to_the_last() {
+        let mut samples = Vec::new();
+        // Six flat days, then one that ends much higher than it started.
+        for day in 0..6 {
+            samples.push(DailyNorthStar { day, value: 100.0 });
+        }
+        samples.push(DailyNorthStar {
+            day: 5,
+            value: 400.0,
+        });
+
+        assert_eq!(
+            assess(samples),
+            BrainState::Improving,
+            "the last reading of the day is the day's value; keeping the first \
+             reports a flat series and calls real growth `learning`"
+        );
+    }
+
+    /// Unsorted input is still one observation per day, in day order.
+    #[test]
+    fn readings_out_of_day_order_still_collapse_per_day() {
+        let samples = vec![
+            DailyNorthStar {
+                day: 3,
+                value: 10.0,
+            },
+            DailyNorthStar {
+                day: 1,
+                value: 10.0,
+            },
+            DailyNorthStar {
+                day: 2,
+                value: 10.0,
+            },
+            DailyNorthStar {
+                day: 1,
+                value: 10.0,
+            },
+        ];
+        // Three distinct days is under the six the assessment needs.
+        assert_eq!(assess(samples), BrainState::Initializing);
     }
 }
