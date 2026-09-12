@@ -905,7 +905,16 @@ impl PostgresAutopilotRepository {
                     template_id,
                     task_id,
                     draft,
+                    recipient_email,
+                    recipient_name,
+                    recipient_target_id,
                 } => {
+                    // The recipient travels with the event. A channel draft has
+                    // none — its executor claims it by template and posts to a
+                    // channel — but a press pitch is an email, and this event
+                    // is the only thing the mailer sees. Emitting a pitch
+                    // without an address published a draft to nobody, which is
+                    // how every press pitch in production ended.
                     emit_external_action(
                         &mut transaction,
                         workspace_id,
@@ -916,6 +925,9 @@ impl PostgresAutopilotRepository {
                             "template_id": template_id,
                             "task_id": task_id,
                             "draft": draft,
+                            "recipient_email": recipient_email,
+                            "recipient_name": recipient_name,
+                            "recipient_target_id": recipient_target_id,
                         }),
                     )
                     .await?;

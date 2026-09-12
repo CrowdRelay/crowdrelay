@@ -1052,6 +1052,10 @@ mod tests {
             template_id: Some("social-post".to_owned()),
             task_id: Uuid::nil(),
             draft: serde_json::json!({}),
+            // A channel draft has no recipient; only a press pitch does.
+            recipient_email: None,
+            recipient_name: None,
+            recipient_target_id: None,
         };
         assert!(!requires_terminal_receipt(&payload));
     }
