@@ -182,7 +182,17 @@ impl TelegramExecutorWorker {
         }
     }
 
-    async fn run_once(&self) -> Result<usize, TelegramExecutorError> {
+    /// Runs one drafting/publishing pass.
+    ///
+    /// Public so an integration test can drive it, matching
+    /// `AgentOutcomeWorker::run_once`. The link it covers — a succeeded
+    /// `agent.content.request` becoming a post artifact — had no test and no
+    /// production row in any of the three post tables, so nothing anywhere
+    /// showed whether it worked.
+    ///
+    /// In manual mode this only drafts: it writes the artifact row and makes
+    /// no network call.
+    pub async fn run_once(&self) -> Result<usize, TelegramExecutorError> {
         // Recover stale `posting` rows from a previous crash.
         // We do NOT re-submit to Telegram (to avoid duplicate posts).
         self.recover_stale_posting().await?;
