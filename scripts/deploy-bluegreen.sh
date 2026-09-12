@@ -575,8 +575,21 @@ python3 "$RECEIPT_HELPER" phase --state-dir "$RELEASE_STATE_DIR" \
 # read-model fan-out fails with 503 AllSectionsFailed. This check catches
 # that regardless of which compose file was used for the deploy.
 printf '\n==> 6/7 — Cross-service connectivity (control plane → API)\n'
-control_plane_container="crowdrelay-control-plane-app-1"
-if docker inspect "$control_plane_container" >/dev/null 2>&1; then
+# The control plane runs blue-green too, so its container is
+# `crowdrelay-control-plane-app-1` or `...-app-green-1` depending on which
+# colour is live. Pinning the blue name meant the check reported SKIP whenever
+# green was active — and it skipped on exactly the deploy that followed a
+# control-plane release, which is when a network mismatch is most likely.
+# A verification that silently opts out is worse than no verification, because
+# the PASS line above it makes the deploy look fully checked.
+control_plane_container=""
+for candidate in crowdrelay-control-plane-app-1 crowdrelay-control-plane-app-green-1; do
+  if docker inspect "$candidate" >/dev/null 2>&1; then
+    control_plane_container="$candidate"
+    break
+  fi
+done
+if [[ -n "$control_plane_container" ]]; then
   cp_meta="$(docker exec "$control_plane_container" wget -qO- \
     --timeout=5 "http://${NEW_API}:8080/v1/meta" 2>/dev/null || true)"
   if [[ -n "$cp_meta" ]]; then
