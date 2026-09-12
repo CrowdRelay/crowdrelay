@@ -219,6 +219,10 @@ struct OpsSnapshot {
     /// Only cities with `geocode_attempts >= MAX_GEOCODE_ATTEMPTS` count: a
     /// city still being retried is in progress, not stuck.
     stuck_ungeocoded_cities: i64,
+    /// Active fans waiting in those cities. The count of cities cannot say
+    /// whether one city is holding thirty people or thirty are holding one
+    /// each, and those need different responses.
+    fans_awaiting_geocoding: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -288,15 +292,46 @@ async fn load_snapshot(
             (SELECT count(DISTINCT platform) FROM fanbase_connections c
              WHERE c.workspace_id=$1 AND c.health='working')::bigint
                 AS working_platforms,
-            -- Cities that fans requested but the geocoder gave up on. These
-            -- are permanently unreachable by the nearby-show loop until a
-            -- human fixes the name or enters coordinates by hand. The
-            -- threshold matches `city_geocoding::MAX_GEOCODE_ATTEMPTS` (5).
-            (SELECT count(*) FROM cities
-             WHERE latitude IS NULL
-               AND moderation_status IN ('pending', 'approved')
-               AND geocode_attempts >= 5
-            )::bigint AS stuck_ungeocoded_cities
+            -- Cities that fans requested but the geocoder gave up on, and
+            -- that an active fan is actually waiting in. These are
+            -- unreachable by the nearby-show loop until a human fixes the
+            -- name or enters coordinates by hand. The attempt threshold
+            -- matches `city_geocoding::MAX_GEOCODE_ATTEMPTS` (5).
+            --
+            -- The fan predicate is what makes the finding mean what it says.
+            -- Without it this counted rows, not people: production raised the
+            -- warning for a day over "Example City, Example Region" and
+            -- "Tes5, Test" -- two test entries the geocoder correctly refused
+            -- five times because neither exists -- while the summary claimed
+            -- fans there were unreachable. No fan had ever selected either.
+            --
+            -- A stuck city nobody is waiting in is a data-quality note, not
+            -- an operator alarm. It starts mattering the moment a fan picks
+            -- it, and that is exactly when this now fires.
+            (SELECT count(*) FROM cities ct
+             WHERE ct.latitude IS NULL
+               AND ct.moderation_status IN ('pending', 'approved')
+               AND ct.geocode_attempts >= 5
+               AND EXISTS (
+                     SELECT 1 FROM fan_location_preferences p
+                     JOIN fans f ON f.id = p.fan_id
+                     WHERE p.city_id = ct.id
+                       AND p.workspace_id = $1
+                       AND f.status = 'active'
+                   )
+            )::bigint AS stuck_ungeocoded_cities,
+            -- How many people are behind that count. One city with thirty
+            -- fans waiting and thirty cities with one each are different
+            -- problems, and the count of cities alone cannot tell them apart.
+            (SELECT count(DISTINCT p.fan_id) FROM fan_location_preferences p
+             JOIN fans f ON f.id = p.fan_id
+             JOIN cities ct ON ct.id = p.city_id
+             WHERE p.workspace_id = $1
+               AND f.status = 'active'
+               AND ct.latitude IS NULL
+               AND ct.moderation_status IN ('pending', 'approved')
+               AND ct.geocode_attempts >= 5
+            )::bigint AS fans_awaiting_geocoding
         FROM viryaos_executor_instances WHERE workspace_id=$1
         "#,
     )
@@ -386,9 +421,13 @@ fn conditions(snapshot: &OpsSnapshot) -> Vec<Condition> {
             key: "growth.stuck_ungeocoded_cities",
             severity: "warning",
             summary: "Fan-requested cities have exhausted geocoding — fans there are unreachable by nearby-show",
+            // Both counts come from the same predicate, so a city only
+            // reaches this finding when a fan is behind it. The summary's
+            // claim is now load-bearing rather than decorative.
             active: snapshot.stuck_ungeocoded_cities > 0,
             details: json!({
                 "stuck_ungeocoded_cities": snapshot.stuck_ungeocoded_cities,
+                "fans_awaiting_geocoding": snapshot.fans_awaiting_geocoding,
             }),
         },
     ]
@@ -492,6 +531,7 @@ mod tests {
             failing_platforms: 0,
             working_platforms: 2,
             stuck_ungeocoded_cities: 0,
+            fans_awaiting_geocoding: 0,
         }
     }
 
@@ -635,8 +675,26 @@ mod tests {
         // name or enters coordinates by hand.
         let mut snapshot = healthy();
         snapshot.stuck_ungeocoded_cities = 3;
+        snapshot.fans_awaiting_geocoding = 7;
         let active = active_keys(&snapshot);
         assert!(active.contains(&"growth.stuck_ungeocoded_cities"));
+    }
+
+    /// The count now comes from a query that requires a waiting fan, so a
+    /// stuck city nobody selected never reaches this snapshot at all.
+    ///
+    /// Production raised this warning for a day over two test rows --
+    /// "Example City, Example Region" and "Tes5, Test" -- which the geocoder
+    /// correctly refused five times because neither place exists, while the
+    /// summary told the operator that fans there were unreachable. Nobody had
+    /// ever selected either. The finding was true about rows and false about
+    /// people, and only the second reading is worth waking anyone for.
+    #[test]
+    fn a_stuck_city_with_nobody_waiting_is_not_an_alarm() {
+        let snapshot = healthy();
+        assert_eq!(snapshot.stuck_ungeocoded_cities, 0);
+        assert_eq!(snapshot.fans_awaiting_geocoding, 0);
+        assert!(!active_keys(&snapshot).contains(&"growth.stuck_ungeocoded_cities"));
     }
 
     #[test]
